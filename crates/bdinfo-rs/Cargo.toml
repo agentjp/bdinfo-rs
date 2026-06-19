@@ -31,6 +31,57 @@ workspace = true
 [package.metadata.cargo-machete]
 ignored = ["clap_complete", "clap_mangen"]
 
+# cargo-binstall: fetch the prebuilt archives this repo already ships (cargo-dist
+# names them `bdinfo-rs-<target-triple>.<ext>`, with NO version in the filename)
+# instead of compiling from source. Each archive wraps its files in a
+# `bdinfo-rs-<triple>/` directory, so `bin-dir` reaches inside it. Windows ships
+# `.zip`; every other target ships `.tar.gz` (the `tgz` default + per-target
+# overrides below).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+# cargo-deb (`.deb` packaging). The `packages.yml` deb job runs `cargo deb
+# --no-build --target <triple>` over the prebuilt musl binary it stages at
+# `target/<triple>/release/bdinfo-rs` — cargo-deb special-cases the `target/release/`
+# asset prefix to that path and derives the Debian arch from `--target`. The
+# completion/man assets are staged under the crate's `release-assets/`. The static
+# musl binary has no shared-library deps, so `depends` is emptied.
+[package.metadata.deb]
+maintainer = "bdinfo-rs contributors <bdinfo-rs@users.noreply.github.com>"
+section = "utils"
+priority = "optional"
+depends = ""
+extended-description = "A memory-safe, statically-linked command-line Blu-ray disc analyzer — a drop-in replacement for the classic BDInfo report tool. Scans BDMV folders and .iso images and renders the classic per-stream video/audio technical report."
+assets = [
+    ["target/release/bdinfo-rs", "usr/bin/", "755"],
+    ["release-assets/bdinfo-rs.1", "usr/share/man/man1/", "644"],
+    ["release-assets/bdinfo-rs.bash", "usr/share/bash-completion/completions/bdinfo-rs", "644"],
+    ["release-assets/_bdinfo-rs", "usr/share/zsh/site-functions/", "644"],
+    ["release-assets/bdinfo-rs.fish", "usr/share/fish/vendor_completions.d/", "644"],
+]
+
+# cargo-generate-rpm (`.rpm` packaging). The `packages.yml` rpm job mirrors the deb
+# job: it rewrites the `target/release/` asset prefix to `target/<triple>/release/`
+# under `--target` and derives the arch from the triple. `auto-req = "no"` because
+# the static musl binary pulls in no shared-library requirements.
+[package.metadata.generate-rpm]
+auto-req = "no"
+assets = [
+    { source = "target/release/bdinfo-rs", dest = "/usr/bin/bdinfo-rs", mode = "755" },
+    { source = "release-assets/bdinfo-rs.1", dest = "/usr/share/man/man1/bdinfo-rs.1", mode = "644" },
+    { source = "release-assets/bdinfo-rs.bash", dest = "/usr/share/bash-completion/completions/bdinfo-rs", mode = "644" },
+    { source = "release-assets/_bdinfo-rs", dest = "/usr/share/zsh/site-functions/_bdinfo-rs", mode = "644" },
+    { source = "release-assets/bdinfo-rs.fish", dest = "/usr/share/fish/vendor_completions.d/bdinfo-rs.fish", mode = "644" },
+]
+
 [dependencies]
 bdinfo-rs-core = { workspace = true }
 clap = { workspace = true }

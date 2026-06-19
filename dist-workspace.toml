@@ -82,8 +82,17 @@ fail-fast = true
 # curl|sh + irm|iex fetching installers, served from the GitHub Release. They
 # reference the dist-generated archive names, so the archives are kept at dist's
 # default `<pkg>-<target-triple>.<ext>` names (no friendly-name rename).
-installers = ["shell", "powershell"]
+installers = ["shell", "powershell", "homebrew"]
 hosting = ["github"]
+
+# Homebrew: publish a BINARY formula (it fetches the prebuilt .tar.gz archives —
+# no source build, no macOS runner) to our own tap on each STABLE release. One
+# formula covers macOS (Intel + Apple Silicon) and Linuxbrew. dist's homebrew
+# publish job pushes to the tap using the `HOMEBREW_TAP_TOKEN` repo secret (a
+# fine-grained PAT scoped to the tap repo, Contents:read/write). The tap repo is
+# named `homebrew-tap`; users tap it as `agentjp/tap`.
+tap = "agentjp/homebrew-tap"
+publish-jobs = ["homebrew"]
 
 # A reusable workflow wired in at the start of CI (before any build): it fails the
 # whole release unless the tagged commit is an ancestor of origin/master. dist

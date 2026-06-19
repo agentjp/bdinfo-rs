@@ -1,0 +1,63 @@
+name: publish-crates
+
+# Publish bdinfo-rs-core then bdinfo-rs to crates.io on a vX.Y.Z tag, using
+# crates.io Trusted Publishing (OIDC): a short-lived, repo/workflow-scoped token is
+# minted at run time and revoked afterwards, so NO long-lived CARGO_REGISTRY_TOKEN
+# is stored. `cargo publish --workspace` (stable since Rust 1.90; the pinned
+# toolchain is 1.96) resolves the dependency order, publishing the library first.
+#
+# Bootstrap: Trusted Publishing requires the crate to already exist, so the FIRST
+# publish of each crate is done by hand; this workflow takes over for every tag
+# afterwards. Configure the trusted publisher on crates.io for BOTH crates ->
+# repository agentjp/bdinfo-rs, workflow `publish-crates.yml`.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: cargo publish --workspace (crates.io)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mint the short-lived crates.io OIDC token
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # cargo publishes whatever version is in Cargo.toml, not the tag — fail fast
+      # if a tag was cut that does not match (mirrors the guard in docker.yml).
+      - name: Verify the tag matches the workspace version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
+          }
+          $base = $Matches['base']
+          $inWp = $false; $crate = $null
+          foreach ($line in (Get-Content Cargo.toml)) {
+            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
+            if ($line -match '^\[') { $inWp = $false; continue }
+            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $crate = $Matches[1]; break }
+          }
+          if (-not $crate) { throw 'No [workspace.package] version found in Cargo.toml' }
+          if ($base -ne $crate) { throw "Tag $tag (base $base) does not match workspace version $crate" }
+
+      - name: Authenticate to crates.io (Trusted Publishing / OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+
+      - name: Publish both crates (core first)
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

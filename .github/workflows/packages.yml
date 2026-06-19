@@ -1,0 +1,161 @@
+name: packages
+
+# Fan-out package publishing, fired AFTER release.yml has published the GitHub
+# Release (the `released` event carries the uploaded archives + checksums, and it
+# does NOT fire for prereleases — stable-only, matching Homebrew's default). Every
+# job runs on a Linux runner; every action is SHA-pinned.
+#
+# Channels handled ELSEWHERE (not here):
+#   - Homebrew  -> release.yml (cargo-dist homebrew publish job)
+#   - crates.io -> publish-crates.yml (OIDC)
+#   - Scoop     -> the agentjp/scoop-bucket repo (Excavator auto-update bot)
+#
+# Secrets required (configure before the first release, or the jobs fail):
+#   WINGET_TOKEN - classic PAT (public_repo) on the bot account that forked winget-pkgs
+#   AUR_SSH_KEY  - private SSH key whose public half is on the aur.archlinux.org account
+#
+# NOTE: the deb/rpm jobs repackage the prebuilt musl binaries and are validated on
+# the first real release; tweak the cargo-deb / cargo-generate-rpm invocation here
+# (not the binary) if a path needs adjusting.
+
+on:
+  release:
+    types: [released]
+
+permissions:
+  contents: read
+
+env:
+  VERSION: ${{ github.event.release.tag_name }}
+
+jobs:
+  # ── Windows: WinGet (Microsoft community repo) ─────────────────────────────
+  winget:
+    name: WinGet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit the new version to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: agentjp.bdinfo-rs
+          # Both windows-msvc .zip archives (x64 + arm64); excludes the .sha256 sidecars.
+          installers-regex: '-pc-windows-msvc\.zip$'
+          # The bot account that holds the fork of microsoft/winget-pkgs.
+          fork-user: agentjp-bot
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  # ── Arch Linux: AUR (-bin, repackages the prebuilt musl binary) ────────────
+  aur:
+    name: AUR (bdinfo-rs-bin)
+    runs-on: ubuntu-latest
+    # ON HOLD (2026-06-19): aur.archlinux.org account registration is currently
+    # disabled, so there is no AUR account/package to push to yet. Re-enable by
+    # setting the repo variable AUR_ENABLED=true (after registering the account and
+    # the AUR_SSH_KEY public key) — no code change needed; the secret is already set.
+    if: ${{ vars.AUR_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Render the PKGBUILD for this version
+        shell: bash
+        run: |
+          ver="${VERSION#v}"
+          mkdir -p build/aur
+          sed "s/__PKGVER__/${ver}/g" packaging/aur/PKGBUILD.template > build/aur/PKGBUILD
+          cat build/aur/PKGBUILD
+
+      - name: Publish to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@da03e160361ce01bf087e790b6ffd196d7dccff7 # v4.1.3
+        with:
+          pkgname: bdinfo-rs-bin
+          pkgbuild: build/aur/PKGBUILD
+          updpkgsums: true # download the release tarballs and write real sha256sums
+          test: true # build the package in an Arch container before pushing
+          commit_username: bdinfo-rs CI
+          commit_email: bdinfo-rs@users.noreply.github.com
+          commit_message: Update to ${{ github.event.release.tag_name }}
+          ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+
+  # ── Debian/Ubuntu: .deb attached to the release (x64 + arm64) ──────────────
+  deb:
+    name: .deb (${{ matrix.triple }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload
+    strategy:
+      fail-fast: false
+      matrix:
+        triple: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        with:
+          tool: cargo-deb
+
+      - name: Stage the prebuilt binary + completion/man assets
+        shell: bash
+        run: |
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.tar.gz" -D dl
+          tar xzf "dl/bdinfo-rs-${{ matrix.triple }}.tar.gz" -C dl
+          d="dl/bdinfo-rs-${{ matrix.triple }}"
+          mkdir -p "target/${{ matrix.triple }}/release" release-assets crates/bdinfo-rs/release-assets
+          cp "$d/bdinfo-rs" "target/${{ matrix.triple }}/release/bdinfo-rs"
+          for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do
+            cp "$d/$f" release-assets/
+            cp "$d/$f" crates/bdinfo-rs/release-assets/
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the .deb
+        run: cargo deb --no-build --no-strip --target ${{ matrix.triple }} -p bdinfo-rs
+
+      - name: Upload the .deb to the release
+        shell: bash
+        run: gh release upload "$VERSION" target/${{ matrix.triple }}/debian/*.deb --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Fedora/RHEL: .rpm attached to the release (x64 + arm64) ────────────────
+  rpm:
+    name: .rpm (${{ matrix.triple }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload
+    strategy:
+      fail-fast: false
+      matrix:
+        triple: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install cargo-generate-rpm
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        with:
+          tool: cargo-generate-rpm
+
+      - name: Stage the prebuilt binary + completion/man assets
+        shell: bash
+        run: |
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.tar.gz" -D dl
+          tar xzf "dl/bdinfo-rs-${{ matrix.triple }}.tar.gz" -C dl
+          d="dl/bdinfo-rs-${{ matrix.triple }}"
+          mkdir -p "target/${{ matrix.triple }}/release" release-assets crates/bdinfo-rs/release-assets
+          cp "$d/bdinfo-rs" "target/${{ matrix.triple }}/release/bdinfo-rs"
+          for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do
+            cp "$d/$f" release-assets/
+            cp "$d/$f" crates/bdinfo-rs/release-assets/
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the .rpm
+        run: cargo generate-rpm -p crates/bdinfo-rs --target ${{ matrix.triple }}
+
+      - name: Upload the .rpm to the release
+        shell: bash
+        run: gh release upload "$VERSION" target/${{ matrix.triple }}/generate-rpm/*.rpm --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
