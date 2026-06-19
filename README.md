@@ -40,11 +40,42 @@ One honest caveat: all of this is best-effort. I've thrown a lot at it, proptest
 
 ## Install
 
-Prebuilt static binaries for Windows, Linux, and macOS (x64 and arm64) are attached
-to every [release](https://github.com/agentjp/bdinfo-rs/releases). Two ways to get
-one — both deliver the same single static binary:
+`bdinfo-rs` is one small static binary — no runtime, no install. Pick whichever
+channel fits your platform; every one delivers the same binary.
 
-**Install script** — downloads the right binary for your platform and puts it on `PATH`:
+### Package managers
+
+```sh
+# Rust — from crates.io (compiles from source)
+cargo install bdinfo-rs
+# …or fetch the prebuilt binary instead of compiling
+cargo binstall bdinfo-rs
+
+# macOS / Linux — Homebrew
+brew install agentjp/tap/bdinfo-rs
+
+# Windows — WinGet
+winget install agentjp.bdinfo-rs
+
+# Windows — Scoop
+scoop bucket add agentjp https://github.com/agentjp/scoop-bucket
+scoop install bdinfo-rs
+
+# Arch Linux (AUR) — with an AUR helper such as paru or yay
+paru -S bdinfo-rs-bin
+```
+
+**Debian/Ubuntu (`.deb`) and Fedora/RHEL (`.rpm`)** packages for x64 and arm64 are
+attached to every [release](https://github.com/agentjp/bdinfo-rs/releases):
+
+```sh
+sudo apt install ./bdinfo-rs_*_amd64.deb     # Debian/Ubuntu
+sudo dnf install ./bdinfo-rs-*.x86_64.rpm    # Fedora/RHEL
+```
+
+### Install script
+
+Downloads the right prebuilt binary for your platform and puts it on `PATH`:
 
 ```sh
 # Linux / macOS
@@ -56,8 +87,10 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/agentjp/bdinfo-rs/relea
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/agentjp/bdinfo-rs/releases/latest/download/bdinfo-rs-installer.ps1 | iex"
 ```
 
-**Manual download** — grab the archive for your platform (named by Rust target triple,
-e.g. `bdinfo-rs-x86_64-unknown-linux-musl.tar.gz` or `bdinfo-rs-aarch64-pc-windows-msvc.zip`),
+### Manual download
+
+Grab the archive for your platform (named by Rust target triple, e.g.
+`bdinfo-rs-x86_64-unknown-linux-musl.tar.gz` or `bdinfo-rs-aarch64-pc-windows-msvc.zip`),
 extract it, and run the binary — no install step. Verify a download against the
 attached aggregate `sha256.sum`, or the per-archive `.sha256` sidecar.
 
@@ -88,8 +121,8 @@ collected into a `WARNING` block and the rest is scanned (exit code 3).
 Every release archive ships ready-to-install shell completion scripts — for **bash**,
 **zsh**, **fish**, and **PowerShell** — and a **`bdinfo-rs.1`** man page, all generated
 from the CLI itself so they always match the binary's flags and help text. Package
-managers (Homebrew, apt, Scoop/Chocolatey, AUR) drop them into the standard locations
-automatically; to install one by hand from an extracted archive:
+managers (Homebrew, the `.deb`/`.rpm` packages, and the AUR package) drop them into the
+standard locations automatically; to install one by hand from an extracted archive:
 
 ```sh
 # bash  — system-wide, or source it from your ~/.bashrc
