@@ -60,9 +60,6 @@ winget install agentjp.bdinfo-rs
 # Windows — Scoop
 scoop bucket add agentjp https://github.com/agentjp/scoop-bucket
 scoop install bdinfo-rs
-
-# Arch Linux (AUR) — with an AUR helper such as paru or yay
-paru -S bdinfo-rs-bin
 ```
 
 **Debian/Ubuntu (`.deb`) and Fedora/RHEL (`.rpm`)** packages for x64 and arm64 are
@@ -121,8 +118,8 @@ collected into a `WARNING` block and the rest is scanned (exit code 3).
 Every release archive ships ready-to-install shell completion scripts — for **bash**,
 **zsh**, **fish**, and **PowerShell** — and a **`bdinfo-rs.1`** man page, all generated
 from the CLI itself so they always match the binary's flags and help text. Package
-managers (Homebrew, the `.deb`/`.rpm` packages, and the AUR package) drop them into the
-standard locations automatically; to install one by hand from an extracted archive:
+managers (Homebrew and the `.deb`/`.rpm` packages) drop them into the standard
+locations automatically; to install one by hand from an extracted archive:
 
 ```sh
 # bash  — system-wide, or source it from your ~/.bashrc

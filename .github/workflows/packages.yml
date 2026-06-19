@@ -48,6 +48,11 @@ jobs:
   aur:
     name: AUR (bdinfo-rs-bin)
     runs-on: ubuntu-latest
+    # ON HOLD (2026-06-19): aur.archlinux.org account registration is currently
+    # disabled, so there is no AUR account/package to push to yet. Re-enable by
+    # setting the repo variable AUR_ENABLED=true (after registering the account and
+    # the AUR_SSH_KEY public key) — no code change needed; the secret is already set.
+    if: ${{ vars.AUR_ENABLED == 'true' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
