@@ -33,10 +33,10 @@ ignored = ["clap_complete", "clap_mangen"]
 
 # cargo-binstall: fetch the prebuilt archives this repo already ships (cargo-dist
 # names them `bdinfo-rs-<target-triple>.<ext>`, with NO version in the filename)
-# instead of compiling from source. Each archive wraps its files in a
-# `bdinfo-rs-<triple>/` directory, so `bin-dir` reaches inside it. Windows ships
-# `.zip`; every other target ships `.tar.gz` (the `tgz` default + per-target
-# overrides below).
+# instead of compiling from source. The unix `.tar.gz` archives wrap their files
+# in a `bdinfo-rs-<triple>/` directory, so the default `bin-dir` reaches inside it;
+# the Windows `.zip` archives are FLAT (binary at the archive root), so the two
+# windows targets override `bin-dir` to just the binary name.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
 bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
@@ -44,9 +44,11 @@ pkg-fmt = "tgz"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
 
 [package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
 pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
 
 # cargo-deb (`.deb` packaging). The `packages.yml` deb job runs `cargo deb
 # --no-build --target <triple>` over the prebuilt musl binary it stages at
