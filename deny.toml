@@ -15,6 +15,10 @@ ignore = []
 
 [licenses]
 version = 2
+# Several allowed licenses below aren't present in our tiny dependency tree today.
+# Keep them pre-approved (so a routine dep bump pulling a common permissive license
+# doesn't fail audit) instead of warning on each currently-unused allow entry.
+unused-allowed-license = "allow"
 # Allowlist — permissive licenses only. A dependency whose SPDX expression
 # isn't satisfied here is a hard error.
 allow = [
