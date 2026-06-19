@@ -109,40 +109,6 @@ install -Dm644 bdinfo-rs.1    /usr/share/man/man1/bdinfo-rs.1
 Building from source regenerates the same files under
 `target/<profile>/build/bdinfo-rs-*/out/assets/`.
 
-## Sample report
-
-The output is the classic BDInfo disc report (abridged):
-
-```text
-DISC INFO:
-
-Disc Title:     FIXTURE: THE MOVIE
-Disc Label:     FIXTURE
-Disc Size:      1,000,000,000 bytes
-Protection:     AACS2
-Extras:         Ultra HD, BD-Java
-BDInfo:         0.8.0.1b
-
-PLAYLIST REPORT:
-
-Name:           00001.MPLS
-Length:         00:02:00.500 (h:m:s.ms)
-Size:           96,000,000 bytes
-Total Bitrate:  6.37 Mbps
-
-VIDEO:
-
-Codec                   Bitrate             Description
----------------         -------------       -----------
-MPEG-H HEVC Video       5,975 kbps          2160p / 23.976 fps / HDR10
-
-AUDIO:
-
-Codec                           Language        Bitrate         Description
----------------                 -------------   -------------   -----------
-* DTS-HD Master Audio           Japanese         2046 kbps      5.1 / 48 kHz /  2046 kbps / 24-bit
-```
-
 ## Performance
 
 bdinfo-rs scans a disc's streams substantially faster than the existing .NET BDInfo
@@ -209,7 +175,7 @@ Same on every platform — no C toolchain, no system libraries, no extra steps:
 ```sh
 git clone https://github.com/agentjp/bdinfo-rs
 cd bdinfo-rs
-cargo build --release      # binary at target/release/bdinfo-rs (.exe on Windows)
+cargo build --release      # binary at target/release/bdinfo-rs
 cargo test                 # run the test suite
 ```
 
