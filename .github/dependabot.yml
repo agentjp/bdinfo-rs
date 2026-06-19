@@ -22,3 +22,15 @@ updates:
       github-actions:
         patterns: ["*"]
     labels: [dependencies, ci]
+
+  # The Dockerfile build base (`rust:<ver>-slim@sha256:...`): Dependabot refreshes
+  # the digest and proposes newer tags. The version-freshness job separately
+  # asserts the tag stays in lockstep with the stable Rust pin.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      docker:
+        patterns: ["*"]
+    labels: [dependencies, ci]
