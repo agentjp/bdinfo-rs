@@ -32,9 +32,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-2025, macos-15]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build
         run: cargo build --workspace --locked
@@ -49,9 +49,9 @@ jobs:
     name: lint workflows (action-validator)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install action-validator
         run: cargo install action-validator --locked
@@ -71,7 +71,7 @@ jobs:
     name: release workflow in sync (dist generate --check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install pinned dist
         shell: bash
@@ -91,17 +91,17 @@ jobs:
     name: lint (clippy, fmt, typos, doc, deps, semver)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0   # semver-checks needs the v* baseline tag
 
       - name: Install pinned nightly rustfmt
         run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install gate tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks,typos
 
@@ -144,15 +144,15 @@ jobs:
     name: coverage (100% lines/regions/functions)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install pinned nightly with llvm-tools
         run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component llvm-tools-preview
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install coverage tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -170,14 +170,14 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0   # need the base branch to diff the PR against
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Install mutation tools
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-mutants,cargo-nextest
 
