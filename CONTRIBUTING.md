@@ -4,6 +4,15 @@ Thanks for your interest in bdinfo-rs — a memory-safe, zero-C-dependency Rust
 Blu-ray disc analyzer. This guide covers how to build, what CI expects, and the
 handful of house rules that keep the project's guarantees intact.
 
+## Reporting issues
+
+- **Bugs and feature requests:** open an issue on the
+  [tracker](https://github.com/agentjp/bdinfo-rs/issues). A disc structure or
+  report excerpt that reproduces the problem helps a lot.
+- **Security vulnerabilities:** report privately via
+  [GitHub Security Advisories](https://github.com/agentjp/bdinfo-rs/security/advisories/new),
+  not a public issue.
+
 ## Building
 
 No C toolchain, no system libraries, no extra steps — the same on Windows,
