@@ -1,0 +1,131 @@
+name: version-freshness
+
+# Several versions in this repo are pinned for reproducibility but rot SILENTLY —
+# nothing else watches them:
+#   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY env in ci.yml),
+#   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
+#     install in ci.yml — the two must stay equal),
+#   - cargo-vet (the `--version` pin in audit.yml),
+#   - the Dockerfile `rust:<ver>-slim` build base (must track the stable pin).
+# (Cargo deps/dev-deps, GitHub Action SHAs, and the Dockerfile digest are already
+# auto-bumped by Dependabot — cargo + github-actions + docker ecosystems — so they
+# are deliberately NOT re-checked here.)
+#
+# This daily ~1-minute job compares each silently-rotting pin to its upstream
+# latest (and cross-checks the pins that must agree); when anything is stale or
+# inconsistent it opens (or refreshes) one tracking issue. The bump itself stays a
+# deliberate, human-reviewed change.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: compare pinned versions to upstream
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Check the pins, file an issue if any is stale or inconsistent
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $problems = @()
+
+          # First pin matched by $regex (group 1) in $path, or $null.
+          function Read-Pin($path, $regex) {
+            foreach ($line in (Get-Content $path)) {
+              if ($line -match $regex) { return $Matches[1] }
+            }
+            return $null
+          }
+
+          # The X.Y.Z embedded in the latest GitHub release tag of $repo, or
+          # $null if the API call fails (tolerates `v`/`name-v` tag prefixes).
+          function Latest-Semver($repo) {
+            $tag = gh api "repos/$repo/releases/latest" --jq '.tag_name' 2>$null
+            if ($LASTEXITCODE -ne 0) { return $null }
+            if ($tag -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+            return $null
+          }
+
+          # --- Rust stable: rust-toolchain.toml vs rust-lang/rust ---------------
+          $stablePin = Read-Pin 'rust-toolchain.toml' '^channel\s*=\s*"([0-9.]+)"'
+          if (-not $stablePin) { throw 'No pinned stable channel in rust-toolchain.toml' }
+          $stableLatest = Latest-Semver 'rust-lang/rust'
+          if (-not $stableLatest) {
+            $problems += '- could not query the latest Rust stable release (rust-lang/rust)'
+          } elseif ([version]$stableLatest -gt [version]$stablePin) {
+            $problems += "- stable Rust pin ``$stablePin`` (rust-toolchain.toml) is behind the latest release ``$stableLatest``"
+          }
+
+          # --- Rust nightly: age of the ci.yml NIGHTLY pin ---------------------
+          $nightlyPin = Read-Pin '.github/workflows/ci.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
+          if (-not $nightlyPin) { throw 'No NIGHTLY pin in ci.yml' }
+          $nightlyAgeDays = [int]((Get-Date) - [datetime]::ParseExact($nightlyPin, 'yyyy-MM-dd', $null)).TotalDays
+          if ($nightlyAgeDays -gt 90) {
+            $problems += "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY + scripts/_common.ps1) is $nightlyAgeDays days old"
+          }
+
+          # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
+          $distCfg = Read-Pin 'dist-workspace.toml' '^\s*cargo-dist-version\s*=\s*"([0-9.]+)"'
+          $distCi  = Read-Pin '.github/workflows/ci.yml' 'cargo-dist@([0-9.]+)'
+          if (-not $distCfg) { throw 'No cargo-dist-version in dist-workspace.toml' }
+          if (-not $distCi)  { throw 'No cargo-dist@<version> install in ci.yml' }
+          if ($distCfg -ne $distCi) {
+            $problems += "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but ci.yml installs ``$distCi`` — they must be identical"
+          }
+          $distLatest = Latest-Semver 'axodotdev/cargo-dist'
+          if (-not $distLatest) {
+            $problems += '- could not query the latest cargo-dist release (axodotdev/cargo-dist)'
+          } elseif ([version]$distLatest -gt [version]$distCfg) {
+            $problems += "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
+          }
+
+          # --- cargo-vet: audit.yml vs mozilla/cargo-vet -----------------------
+          $vetPin = Read-Pin '.github/workflows/audit.yml' 'cargo-vet --version ([0-9.]+)'
+          if (-not $vetPin) { throw 'No cargo-vet --version pin in audit.yml' }
+          $vetLatest = Latest-Semver 'mozilla/cargo-vet'
+          if (-not $vetLatest) {
+            $problems += '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
+          } elseif ([version]$vetLatest -gt [version]$vetPin) {
+            $problems += "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
+          }
+
+          # --- Dockerfile build base must track the stable pin -----------------
+          # (Dependabot's docker ecosystem refreshes the digest + proposes newer
+          # tags; this just asserts the tag stays in lockstep with the toolchain.)
+          $dockerRust = Read-Pin 'Dockerfile' 'FROM rust:([0-9.]+)'
+          if (-not $dockerRust) { throw 'No `FROM rust:<version>` base image in Dockerfile' }
+          $stableMajorMinor = ($stablePin -split '\.')[0..1] -join '.'
+          if ($dockerRust -ne $stableMajorMinor) {
+            $problems += "- Dockerfile base ``rust:$dockerRust-slim`` does not match the stable Rust pin ``$stablePin`` (rust-toolchain.toml) — bump the tag to ``rust:$stableMajorMinor-slim``"
+          }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  docker-rust: $dockerRust"
+          if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
+
+          $title = 'Pinned versions are stale'
+          $body = @(
+            'The daily version-freshness check found:'
+            ''
+            $problems
+            ''
+            'Bump deliberately: update the pin(s), run the full local gate (`pwsh scripts/compliance.ps1 -Full`), keep ci.yml''s NIGHTLY in lockstep with scripts/_common.ps1, and re-run `dist generate` after any cargo-dist bump.'
+          ) -join "`n"
+
+          $existing = gh issue list --state open --search 'Pinned versions are stale in:title' --json number --jq '.[0].number'
+          if ($existing) {
+            gh issue edit $existing --body $body
+            Write-Host "Updated existing issue #$existing"
+          }
+          else {
+            gh issue create --title $title --body $body
+          }
