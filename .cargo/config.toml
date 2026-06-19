@@ -1,0 +1,72 @@
+# Cargo aliases + env for the bdinfo-rs workspace. Picked up by every `cargo`
+# invocation rooted here. The aliases ARE the gate — `scripts/compliance.ps1`
+# runs them in sequence (cargo aliases can't shell-chain, so the script does).
+#
+# Core gate (fast, run every edit):  ck nt lt ft dc mc dn cov
+# Periodic (slow, pre-release):       mt (mutants), sh (shear), vt (vet) + geiger
+# (geiger has no alias — it needs a per-crate absolute --manifest-path that an
+#  alias can't carry; scripts/compliance.ps1 -Full runs it as an advisory step.)
+#
+# All tooling is installed by `scripts/setup.ps1`.
+
+[env]
+# Promote rustdoc warnings (broken intra-doc links, bad code fences) to errors.
+# Only rustdoc reads this; `cargo dc` exercises it.
+RUSTDOCFLAGS = "-D warnings"
+
+[alias]
+# --- Core gate -------------------------------------------------------------
+# Type-check every target (lib, bins, tests, examples). --locked rejects a stale
+# Cargo.lock (reproducibility — matches nt/cov/sh/vt).
+ck = "check --workspace --all-targets --locked"
+# Tests via nextest: --locked rejects stale Cargo.lock; --no-tests=fail makes an
+# empty selection an error. Strict runtime knobs live in .config/nextest.toml.
+nt = "nextest run --workspace --locked --no-tests=fail"
+# Lint with warnings promoted to errors, across all targets (incl. tests). This
+# is what turns the pedantic/nursery/cargo `warn`s into hard failures.
+lt = "clippy --workspace --all-targets --locked -- -D warnings"
+# NOTE: no `ft` alias — formatting uses the PINNED NIGHTLY rustfmt (rustfmt.toml
+# has nightly-only options), which a cargo alias can't select (`+toolchain` must
+# precede the subcommand). Use `pwsh scripts/fmt.ps1` (apply) / `-Check`; the
+# gate (scripts/compliance.ps1) runs `cargo +<nightly> fmt --all --check`.
+# rustdoc with warnings-as-errors (see RUSTDOCFLAGS); private items too.
+dc = "doc --workspace --no-deps --document-private-items --quiet"
+# Unused-dependency sweep (regex pass; --with-metadata resolves renamed crates).
+mc = "machete --with-metadata --skip-target-dir"
+# Supply-chain audit: advisories + bans + licenses + sources.
+dn = "deny check"
+# Coverage via llvm-cov + nextest. Floors are pinned at/just below measured
+# actuals — any regression exits non-zero. Ratchet UP as coverage rises; never
+# relax to dodge a fix. This stable alias covers lines/regions/functions for
+# quick local runs; the GATE (scripts/compliance.ps1) runs the authoritative
+# check on the pinned nightly with the extra `--branch --fail-under-branches`
+# dimension (branch coverage is nightly-only, so an alias — which can't carry
+# `+toolchain` — can't express it).
+cov = "llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
+
+# --- Periodic / pre-release (installed by setup.ps1) -----------------------
+# Mutation testing — validates the SUITE, not the code. Strict+speed policy in
+# .cargo/mutants.toml. Slow: run pre-release or with --in-diff for a PR.
+mt = "mutants"
+# Unused-dependency sweep, AST-based (complementary to machete).
+sh = "shear --locked --deny-warnings --check-test-targets"
+# cargo-vet supply-chain audit trail (--locked = refuse to regenerate imports).
+vt = "vet --locked"
+
+# ── Single static binary (THE prime directive) ─────────────────────────────
+# Pure-Rust deps (no cc/-sys-with-C) mean a fully static binary per platform with
+# no special toolchain. Build via scripts/dist.ps1.
+#
+# Linux: musl = fully static, no glibc — the literal "drop a file, it runs".
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]   # (musl default; explicit)
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+# Windows: statically link the UCRT so the .exe needs no VC++ redist. (System
+# DLLs like kernel32 are still imported — normal, present on every Windows.)
+# Applies to host dev builds too; the coverage step overrides RUSTFLAGS so it's
+# unaffected, and crt-static is ignored for proc-macro/dylib crate types.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

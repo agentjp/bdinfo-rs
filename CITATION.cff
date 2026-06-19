@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use bdinfo-rs in your work, please cite it as below."
+title: bdinfo-rs
+type: software
+abstract: >-
+  A memory-safe, zero-C-dependency Rust Blu-ray disc analyzer (library +
+  CLI) — a drop-in reimplementation of the classic BDInfo disc report.
+authors:
+  - name: bdinfo-rs contributors
+    email: agent@fastmail.jp
+version: 1.0.0
+date-released: "2026-06-19"
+license: LGPL-2.1-only
+repository-code: https://github.com/agentjp/bdinfo-rs
+url: https://github.com/agentjp/bdinfo-rs

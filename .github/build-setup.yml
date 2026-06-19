@@ -1,0 +1,26 @@
+# Steps fragment inlined by dist (github-build-setup in dist-workspace.toml) into
+# every build-local-artifacts job, right after checkout and before `dist build`.
+#
+# It stages the build.rs-generated shell completions + man page into
+# release-assets/, the stable path dist-workspace.toml's `include` list points at,
+# so they land inside every release archive. build.rs writes them into the crate's
+# Cargo OUT_DIR (target/<profile>/build/bdinfo-rs-<hash>/out/assets/) during any
+# build of the bdinfo-rs crate; `cargo check` runs build scripts, so it generates
+# them without a full release build. The OUT_DIR hash is unknown ahead of time,
+# which is why dist's `include` (no globs, literal paths) cannot read it directly
+# and we copy to a fixed location here.
+#
+# NOTE: this file is NOT a workflow (it is a bare list of steps), so it lives in
+# .github/ rather than .github/workflows/ to stay out of the action-validator
+# lint that schema-checks every .github/workflows/*.yml.
+- name: Stage shell completions and man page for archiving
+  shell: bash
+  run: |
+    set -euo pipefail
+    cargo check -p bdinfo-rs --locked
+    mkdir -p release-assets
+    for f in bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish _bdinfo-rs.ps1 bdinfo-rs.1; do
+      src="$(ls target/debug/build/bdinfo-rs-*/out/assets/"$f" | head -n1)"
+      cp "$src" "release-assets/$f"
+    done
+    ls -l release-assets

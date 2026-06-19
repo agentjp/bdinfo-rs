@@ -1,0 +1,91 @@
+[package]
+name = "bdinfo-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# INDEPENDENT workspace — keeps libfuzzer-sys (which uses `unsafe`) and the
+# nightly/Linux fuzz tooling OUT of the main workspace's gate and out of the
+# `forbid(unsafe_code)` posture of crates/bdinfo-rs{-core,}. The root Cargo.toml
+# also `exclude`s this directory.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bdinfo-rs-core = { path = "../crates/bdinfo-rs-core" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "read_be"
+path = "fuzz_targets/read_be.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "discovery"
+path = "fuzz_targets/discovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bitstream"
+path = "fuzz_targets/bitstream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clpi"
+path = "fuzz_targets/clpi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mpls"
+path = "fuzz_targets/mpls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "m2ts"
+path = "fuzz_targets/m2ts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec"
+path = "fuzz_targets/codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udf"
+path = "fuzz_targets/udf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source"
+path = "fuzz_targets/source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_report"
+path = "fuzz_targets/parse_report.rs"
+test = false
+doc = false
+bench = false

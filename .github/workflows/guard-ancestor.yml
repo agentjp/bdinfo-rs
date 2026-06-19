@@ -1,0 +1,37 @@
+name: guard-ancestor
+
+# Reusable workflow wired into release.yml by dist (plan-jobs = ["./guard-ancestor"]
+# in dist-workspace.toml). It runs at the very start of a release — in parallel
+# with dist's `plan` job and BEFORE any build job, which `needs:` it — and fails
+# the whole release unless the tagged commit is an ancestor of origin/master
+# (i.e. it is on master and already passed CI; release.yml does not re-run the
+# gate). dist regenerates only the *call* to this workflow inside release.yml,
+# never this file, so the guard survives `dist generate --check`.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  guard-ancestor:
+    name: tagged commit must be on master
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # ancestry check needs full history
+          persist-credentials: false
+
+      - name: Verify the tagged commit is an ancestor of origin/master
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "OK: $GITHUB_SHA is on master."
+          else
+            echo "::error::Tagged commit $GITHUB_SHA is not on master (not an ancestor of origin/master); refusing to release."
+            exit 1
+          fi

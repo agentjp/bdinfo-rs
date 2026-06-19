@@ -1,0 +1,5 @@
+# cargo-fuzz build output + crash artifacts (regenerated). The seed CORPUS under
+# corpus/ IS committed (it's the regression replay set).
+/target
+/artifacts
+/coverage

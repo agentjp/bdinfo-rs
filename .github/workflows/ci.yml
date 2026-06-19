@@ -1,0 +1,179 @@
+name: CI
+
+# Build and test on every supported OS. The pinned stable toolchain installs
+# itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
+# compile time, so a green build is also the memory-safety guarantee. Every
+# cargo call is --locked for reproducible builds.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The nightly that backs the `fmt` step (rustfmt.toml has nightly-only options).
+  # Keep in lockstep with $script:Nightly in scripts/_common.ps1.
+  NIGHTLY: nightly-2026-06-05
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2025, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # Lint the workflow YAML itself with action-validator (a Rust tool) — catches
+  # schema errors and the invalid-YAML traps (e.g. an unquoted colon in a step
+  # name) that would otherwise only surface when the workflow runs.
+  yaml:
+    name: lint workflows (action-validator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install action-validator
+        run: cargo install action-validator --locked
+
+      - name: Validate GitHub workflow YAML
+        run: |
+          for f in .github/workflows/*.yml; do
+            echo "validating $f"
+            action-validator "$f"
+          done
+
+  # Drift guard: the committed release.yml is generated from dist-workspace.toml by
+  # dist. This regenerates it in-memory and fails if it differs from the on-disk
+  # file, so release.yml can never silently fall out of sync with the dist config.
+  # Pinned to the same dist version (cargo-dist-version) that release.yml installs.
+  release-yaml:
+    name: release workflow in sync (dist generate --check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+
+      - name: Check release.yml is in sync with dist-workspace.toml
+        run: dist generate --check
+
+  # The quality gate mirrored from the local runner. The gate commands are the
+  # tracked cargo aliases in .cargo/config.toml (ck/lt/mc/dc + cov); clippy.toml +
+  # typos.toml are tracked so clippy/typos behave identically. Format uses the
+  # pinned nightly (rustfmt.toml has nightly-only options). Public repo = free
+  # minutes, so the heavy quality checks run here too — incremental mutants run
+  # per-PR (the `mutants` job below) and fuzzing runs in fuzz.yml; only the full
+  # mutants sweep + the Windows-via-Docker local fuzz stay local.
+  lint:
+    name: lint (clippy, fmt, typos, doc, deps, semver)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # semver-checks needs the v* baseline tag
+
+      - name: Install pinned nightly rustfmt
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install gate tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete,cargo-shear,cargo-semver-checks,typos
+
+      - name: Format (nightly rustfmt)
+        run: cargo +${{ env.NIGHTLY }} fmt --all --check
+
+      - name: Clippy (-D warnings, pedantic/nursery/restriction)
+        run: cargo lt
+
+      - name: Typos
+        run: typos
+
+      - name: Unused deps (machete)
+        run: cargo mc
+
+      - name: Docs (warnings = errors)
+        run: cargo dc
+
+      - name: Unused deps (shear)
+        run: cargo sh
+
+      - name: API stability (semver-checks vs latest v* tag)
+        run: |
+          base="$(git tag -l 'v*' --sort=-version:refname | head -1)"
+          if [ -n "$base" ]; then
+            echo "baseline: $base"
+            cargo semver-checks check-release -p bdinfo-rs-core --baseline-rev "$base"
+          else
+            echo "no v* tag yet; skipping"
+          fi
+
+  # 100% line/region/function coverage via the tracked `cov` alias. The branch
+  # floors (nightly-only) stay in the local gate.
+  coverage:
+    name: coverage (100% lines/regions/functions)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install coverage tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Coverage (100% lines/regions/functions)
+        run: cargo cov
+
+  # Incremental mutation testing on the PR diff: every line a pull request
+  # changes must be killed by a test that FAILS when the line is mutated. The
+  # full-tree sweep (~hours) stays local/pre-release; this PR-scoped slice
+  # (cargo mutants --in-diff) is fast. It reads the tracked .cargo/mutants.toml
+  # policy and the `mutants` nextest profile (.config/nextest.toml) — both now
+  # published, so CI mutates exactly as the local gate does.
+  mutants:
+    name: mutation testing (PR diff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # need the base branch to diff the PR against
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install mutation tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutate the PR diff
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
+          cargo mutants --no-shuffle --in-diff pr.diff

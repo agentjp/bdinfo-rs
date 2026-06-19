@@ -1,0 +1,36 @@
+[package]
+name = "bdinfo-rs-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Memory-safe Blu-ray (BDMV/M2TS) disc and stream analyzer."
+readme = "README.md"
+keywords = ["bluray", "bdmv", "m2ts", "parser", "video"]
+categories = ["multimedia::video", "parser-implementations"]
+
+# Never ship this library crate as a release artifact — only the `bdinfo-rs` CLI
+# binary is distributed. Redundant with `packages = ["bdinfo-rs"]` in
+# dist-workspace.toml (and the lib has no [[bin]]), but explicit and deterministic.
+[package.metadata.dist]
+dist = false
+
+# No rustdoc doctests: the doc comments are prose, not runnable ```code``` blocks.
+# Declaring this stops cargo running an empty doctest pass and satisfies
+# `cargo shear --check-test-targets`.
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+roxmltree = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

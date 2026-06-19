@@ -1,0 +1,24 @@
+# Dependabot — grouped + monthly, deliberately frugal: updates arrive as ONE
+# grouped cargo PR and ONE grouped GitHub-Actions PR per month, not a trickle.
+# Security advisories are NOT throttled by this cadence: Dependabot security
+# updates (enabled repo-side) and the audit.yml workflow react to RustSec /
+# GitHub advisories immediately.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      cargo-dependencies:
+        patterns: ["*"]
+    labels: [dependencies]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels: [dependencies, ci]

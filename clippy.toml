@@ -1,0 +1,30 @@
+# clippy configuration — pairs with the `[workspace.lints.clippy]` table in
+# Cargo.toml. See https://doc.rust-lang.org/clippy/lint_configuration.html
+#
+# Match the rust-toolchain.toml pin so clippy never suggests APIs newer than
+# our actual compiler.
+msrv = "1.96.0"
+
+# The restriction lints (`indexing_slicing`, `string_slice`, `panic`,
+# `unwrap_used`, `expect_used`, `arithmetic_side_effects`) stay fully enforced
+# in production code, but in test code the index/unwrap/panic is provably safe
+# and refactoring it would just add noise. These three knobs relax ONLY the
+# unwrap/expect/panic family inside tests; the others remain on everywhere.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+
+# Determinism rule, compiler-enforced. The regex `rules` scanner in
+# compliance.ps1 greps for the literal `HashMap`/`HashSet` names; clippy resolves
+# the actual TYPE, so it also catches uses hidden behind a `use ... as` alias or a
+# type alias the text scan can't see. Both stay on as defense-in-depth: a
+# nondeterministic collection in an output path = nondeterministic report bytes.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "nondeterministic iteration order breaks the locked report bytes; use BTreeMap or a sorted Vec" },
+    { path = "std::collections::HashSet", reason = "nondeterministic iteration order breaks the locked report bytes; use BTreeSet or a sorted Vec" },
+]
+
+# Blu-ray domain vocabulary that `clippy::doc_markdown` would otherwise flag as
+# "missing backticks" (mixed-case / digit-bearing identifiers). `..` keeps
+# clippy's built-in default list in addition to these.
+doc-valid-idents = ["BDMV", "BDAV", "M2TS", "MPLS", "CLPI", "SSIF", "CLIPINF", "HDR10", ".."]

@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a crash, hang, wrong value, or other incorrect behavior.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a report. A panic, hang, or out-of-bounds read on
+        malformed input is a **security issue** — please report those privately
+        instead, via the **Security** tab → **Report a vulnerability** (see
+        [SECURITY.md](https://github.com/agentjp/bdinfo-rs/blob/master/SECURITY.md)).
+
+        > **Do not attach copyrighted disc content.** Describe the on-disc
+        > structure that triggers the issue, or attach a small synthetic /
+        > minimized reproducer — not real movie data.
+  - type: input
+    id: version
+    attributes:
+      label: bdinfo-rs version
+      description: Output of `bdinfo-rs --version`.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: "Windows 11 x64 / Ubuntu 24.04 arm64 / macOS 15 arm64"
+    validations:
+      required: true
+  - type: dropdown
+    id: input-type
+    attributes:
+      label: Input type
+      description: What did you point bdinfo-rs at?
+      options:
+        - BDMV folder
+        - .iso image
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The full command you ran (redact local paths if you like).
+      placeholder: "bdinfo-rs D:\\Rips\\MY_MOVIE --mpls 00800"
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead — panic message, hang, wrong value, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: excerpt
+    attributes:
+      label: Relevant report / stderr excerpt
+      description: >-
+        The relevant lines of the disc report or the stderr output. Structure
+        only — no copyrighted disc content.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report contains no copyrighted disc content.
+          required: true
+        - label: This is not a security issue (panics / hangs / out-of-bounds reads on malformed input go through the Security tab).
+          required: true

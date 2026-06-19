@@ -1,0 +1,46 @@
+# The published tree is the Rust workspace (crates/) + minimal CI/release config.
+# Local development plumbing (the gate, scripts, supply-chain config, fuzzing) is
+# kept on disk but NOT published.
+
+# Rust build output.
+/target/
+
+# dist release staging: the build-setup step copies the generated completions +
+# man page here for archiving; a CI-only dir that may appear after a local
+# `dist build`.
+/release-assets/
+
+# Local development plumbing (kept on disk, not published).
+# NOTE: deny.toml, supply-chain/, clippy.toml, typos.toml, .config/nextest.toml,
+# .cargo/mutants.toml, and fuzz/ ARE tracked — CI reads them (cargo deny + vet +
+# clippy + typos + nextest, plus the incremental-mutants job in ci.yml and the
+# corpus-replay / extended-fuzz jobs in fuzz.yml).
+/scripts/
+/CLAUDE.md
+
+# Mutation / coverage run output (regenerable).
+mutants.out/
+mutants.out.old/
+mutants-*.log
+mutants_*.log
+/covdir/
+/cov_out.txt
+
+# Proptest failing-seed records (regenerated locally as needed).
+proptest-regressions/
+
+# User-supplied test material and local notes.
+discs/
+scratch/
+docs/
+donotread/
+
+# OS / editor cruft.
+.DS_Store
+Thumbs.db
+desktop.ini
+.vs/
+.idea/
+*.user
+*.swp
+*~

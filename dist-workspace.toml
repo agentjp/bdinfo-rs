@@ -1,0 +1,105 @@
+# dist (axodotdev cargo-dist) configuration — the source of truth for the release
+# pipeline. `.github/workflows/release.yml` is GENERATED from this file by
+# `dist generate`; never hand-edit the workflow. CI guards drift with
+# `dist generate --check`. The size-tuned build profile lives in the root
+# Cargo.toml as `[profile.dist]` (dist builds with `--profile dist`).
+
+[workspace]
+members = ["cargo:."]   # pull in the whole Cargo workspace rooted here
+
+[dist]
+# Pin dist itself (reproducibility): the generated CI installs exactly this
+# version. Must be an exact version, never a range.
+cargo-dist-version = "0.32.0"
+ci = "github"
+
+# Tag-only, like the hand-rolled workflow: do not spin a release run on every PR
+# (the `dist generate --check` guard in ci.yml already covers config/workflow
+# drift on PRs).
+pr-run-mode = "skip"
+
+# The six shipped targets, every one a single static binary. musl is fully
+# static (dist forces -Ctarget-feature=+crt-static -Clink-self-contained=yes for
+# every musl target); Windows is crt-static via `msvc-crt-static` below; macOS
+# links only libSystem. aarch64-pc-windows-msvc is NOT a dist default and dist's
+# default strategy for it is a Linux cargo-xwin CROSS build — overridden to a
+# native build on a windows-11-arm runner in [dist.github-custom-runners] below.
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+# Ship ONLY the CLI binary; never the library crate. `packages` is an explicit
+# allowlist that overrides any per-package dist flag (bdinfo-rs-core also sets
+# `dist = false` as belt-and-braces). The library has no [[bin]] so it is
+# auto-excluded anyway — this makes it deterministic.
+packages = ["bdinfo-rs"]
+
+# Windows: statically link the UCRT so the .exe needs no VC++ redist. dist sets
+# RUSTFLAGS as an env var on its cargo invocation, which per Cargo precedence
+# REPLACES (not merges) the per-target rustflags in .cargo/config.toml — so this
+# key, not config.toml, is what preserves crt-static under a dist build. Default
+# is already true; set explicitly so it can never be silently lost.
+msvc-crt-static = true
+
+# Archive format: .zip on Windows (its default), .tar.gz everywhere else
+# (overriding dist's .tar.xz default) — matches the historical asset shape.
+windows-archive = ".zip"
+unix-archive = ".tar.gz"
+
+# LICENSE + README (+ CHANGELOG) are auto-detected and packaged into every
+# archive. The four shell completions + the man page are added via the `include`
+# paths below, staged by the build-setup step (github-build-setup).
+auto-includes = true
+include = [
+    "release-assets/bdinfo-rs.bash",
+    "release-assets/_bdinfo-rs",
+    "release-assets/bdinfo-rs.fish",
+    "release-assets/_bdinfo-rs.ps1",
+    "release-assets/bdinfo-rs.1",
+]
+
+# Before archiving, stage the build.rs-generated shell completions + man page to
+# the stable `release-assets/` path the `include` list points at. See
+# .github/build-setup.yml.
+github-build-setup = "../build-setup.yml"
+
+# Per-archive SHA-256 sidecar (.sha256) PLUS a single aggregate `sha256.sum`
+# (dist's unified-checksum artifact) over every asset.
+checksum = "sha256"
+
+# Sigstore build-provenance attestation on the produced artifacts (public repo
+# only — satisfied). dist 0.32 emits actions/attest@v4.
+github-attestations = true
+
+# Abort the whole run if any single target fails to build.
+fail-fast = true
+
+# curl|sh + irm|iex fetching installers, served from the GitHub Release. They
+# reference the dist-generated archive names, so the archives are kept at dist's
+# default `<pkg>-<target-triple>.<ext>` names (no friendly-name rename).
+installers = ["shell", "powershell"]
+hosting = ["github"]
+
+# A reusable workflow wired in at the start of CI (before any build): it fails the
+# whole release unless the tagged commit is an ancestor of origin/master. dist
+# only generates the WIRING in release.yml, not the referenced file, so the guard
+# survives `dist generate --check`.
+plan-jobs = ["./guard-ancestor"]
+
+[dist.github-custom-job-permissions.guard-ancestor]
+contents = "read"
+
+[dist.github-custom-runners.aarch64-pc-windows-msvc]
+# Build Windows ARM64 NATIVELY on a windows-11-arm runner. Setting host == target
+# makes dist skip its cross-compile wrapper and run a plain
+# `cargo build --target aarch64-pc-windows-msvc`. Cross-compiling this target on
+# an x64 Windows image is broken (no ARM64 v143 toolset); the default Linux xwin
+# cross is also rejected here. windows-11-arm is not in dist's known-runner table,
+# so `host` is set explicitly rather than relying on the fallback.
+runner = "windows-11-arm"
+host = "aarch64-pc-windows-msvc"

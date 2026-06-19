@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/agentjp/bdinfo-rs/security/advisories/new
+    about: >-
+      A panic, hang, or out-of-bounds read on malformed input is a security
+      issue — report it privately here, not as a public issue. See SECURITY.md.

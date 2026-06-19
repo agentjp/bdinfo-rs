@@ -1,0 +1,43 @@
+# typos (typos-cli) configuration — an instant spell-check gated BLOCKING in the
+# core runner (scripts/compliance.ps1). Run directly: `typos`.
+#
+# The allow-list below seeds the Blu-ray domain vocabulary that also lives in
+# clippy.toml's `doc-valid-idents` — these are correct domain terms, not typos.
+
+[default.extend-identifiers]
+# Exact tokens (incl. digit-bearing) that are domain vocabulary, never typos.
+M2TS = "M2TS"
+HDR10 = "HDR10"
+
+[default.extend-words]
+# Word-level allow (case-insensitive): BD structure names / extensions.
+bdmv = "bdmv"
+bdav = "bdav"
+clpi = "clpi"
+clipinf = "clipinf"
+ssif = "ssif"
+mpls = "mpls"
+indx = "indx"   # index.bdmv magic "INDX0300" (UHD detection)
+cll = "cll"     # MaxCLL — HDR maximum content light level
+ue = "ue"       # ue(v): unsigned Exp-Golomb code (H.264/H.265 syntax notation)
+compre = "compre"  # AC-3 BSI syntax element (compression-gain-word exists flag)
+
+[files]
+# Skip build output, local-only trees, generated data, and binaries.
+extend-exclude = [
+    "target/",
+    "fuzz/target/",
+    "fuzz/corpus/",  # raw-byte seed fixtures (garbage/boundary inputs), not text
+
+    "docs/",
+    "scratch/",  # local research + notes (also gitignored)
+    # ISO-639 reference table: the 3-letter codes (bre/fre/mak/...) and endonyms
+    # (Lamba/Twi/...) are domain data, not English prose — spell-checking them is
+    # all false positives.
+    "crates/bdinfo-rs-core/src/language_codes.rs",
+    "discs/",
+    "mutants.out/",
+    "supply-chain/",
+    "Cargo.lock",
+    "*.exe",
+]

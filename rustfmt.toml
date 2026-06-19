@@ -1,0 +1,27 @@
+# rustfmt configuration.
+#
+# Formatting is checked/applied with the PINNED NIGHTLY rustfmt (see
+# `scripts/_common.ps1` $Nightly) so the unstable options below take effect; the
+# rest of the gate stays on stable 1.96.0. Apply: `pwsh scripts/fmt.ps1`.
+# The gate checks with `cargo +<nightly> fmt --check`.
+
+# --- stable ---
+edition = "2024"
+max_width = 100
+use_small_heuristics = "Max"
+newline_style = "Unix"
+
+# --- nightly-only (require the pinned nightly rustfmt) ---
+# Group imports into std / external / local blocks, separated by a blank line.
+group_imports = "StdExternalCrate"
+# Merge imports from the same module into a single `use`.
+imports_granularity = "Module"
+# Reflow comments to `comment_width` for consistency (anti-drift).
+wrap_comments = true
+comment_width = 100
+# Format Rust code blocks inside doc comments.
+format_code_in_doc_comments = true
+# Uppercase hex literals (`0xB5`, `0xDEADBEEF`) — parser-friendly consistency.
+hex_literal_case = "Upper"
+# Order impl items consistently (types, then consts, then fns).
+reorder_impl_items = true
