@@ -1,32 +1,69 @@
+<div align="center">
+
 # bdinfo-rs
 
+**A memory-safe, cross-platform Blu-ray disc analyzer — the classic [BDInfo](https://github.com/UniqProject/BDInfo) report, reimplemented in Rust as a single static binary.**
+
 [![CI](https://github.com/agentjp/bdinfo-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/ci.yml)
+[![fuzz](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml)
 [![audit](https://github.com/agentjp/bdinfo-rs/actions/workflows/audit.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/audit.yml)
 [![codeql](https://github.com/agentjp/bdinfo-rs/actions/workflows/codeql.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/codeql.yml)
-[![fuzz](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/agentjp/bdinfo-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/agentjp/bdinfo-rs)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13304/badge)](https://www.bestpractices.dev/projects/13304)
+<br>
 [![release](https://img.shields.io/github/v/release/agentjp/bdinfo-rs?include_prereleases&sort=semver)](https://github.com/agentjp/bdinfo-rs/releases)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue)](rust-toolchain.toml)
 [![license](https://img.shields.io/badge/license-LGPL--2.1--only-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 
-A memory-safe, cross-platform Blu-ray disc analyzer — a Rust reimplementation of the
-classic [BDInfo](https://github.com/UniqProject/BDInfo) report tool. It scans `BDMV`
-folders and `.iso` images (playlists, clips, M2TS demux) and produces the same
-human-readable disc report: per-stream video/audio technical specs — codecs, measured
-bitrates, resolution, HDR / Dolby Vision / HDR10+. It ships as **one small
-statically-linked binary**: no runtime, no DLLs, no install — drop the file anywhere
-and it runs.
+[Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Library](#-library) · [Security](#-quality--security)
 
+</div>
+
+bdinfo-rs scans `BDMV` folders and `.iso` images — playlists, clips, M2TS demux — and
+produces the same human-readable disc report as the classic BDInfo tool: per-stream
+video/audio technical specs, including codecs, measured bitrates, resolution, and
+HDR / Dolby Vision / HDR10+. It ships as **one small statically-linked binary**: no
+runtime, no DLLs, no install — drop the file anywhere and it runs.
+
+<details>
+<summary><b>Table of contents</b></summary>
+
+- [✨ Features](#-features)
+- [🧪 Disclaimer](#-disclaimer)
+- [📦 Installation](#-installation)
+  - [Package managers](#package-managers)
+  - [Install script](#install-script)
+  - [Prebuilt binaries](#prebuilt-binaries)
+  - [Docker](#docker)
+  - [Build from source](#build-from-source)
+- [🚀 Usage](#-usage)
+  - [Shell completions & man page](#shell-completions--man-page)
+- [⚡ Performance](#-performance)
+- [📚 Library](#-library)
+- [🔒 Quality & security](#-quality--security)
+- [🔀 Differences from BDInfo](#-differences-from-bdinfo)
+- [🧬 Lineage](#-lineage)
+- [📄 License](#-license)
+
+</details>
+
+## ✨ Features
+
+- **Drop-in BDInfo replacement.** The same console flow and the same human-readable
+  disc report, byte-for-byte deterministic across platforms.
+- **One static binary.** No runtime, no DLLs, no install step — a ~2–5 MB file per
+  platform that just works.
 - **Memory-safe by construction.** `unsafe` is `forbid`-den across the workspace.
   Every read is bounds-checked; malformed input returns an error rather than panicking.
 - **Zero C dependencies.** The M2TS demuxer, all 13 codec scanners, the bitstream
   reader, and the read-only UDF 2.50 `.iso` reader are pure Rust — no libbluray, no
   libudfread, no FFI.
-- **Deterministic output.** The same disc produces the same bytes on every platform.
+- **Fast.** A pipelined demuxer keeps the scan close to NVMe read speed — roughly
+  [1.7–13× faster](#-performance) than the existing .NET BDInfo forks.
+- **Cross-platform.** Windows, Linux, and macOS, on both x64 and arm64.
 
-## DISCLAIMER
+## 🧪 Disclaimer
 
 BDInfo is mostly dead code: Blu-ray discs are a thing of the past, and the spec is very unlikely to ever change again.
 
@@ -38,19 +75,18 @@ I like to think the process is the product in this case; the code is just what f
 
 One honest caveat: all of this is best-effort. I've thrown a lot at it, proptests, fuzzing, mutation testing, and the real rips on my shelf, but Blu-ray is a sprawling, quirky format, and no test suite covers the long tail of mastering oddities out there. The real proof can only come from the wild: real users running it against the multitude of discs that actually exist. If `bdinfo-rs` stumbles on one of yours, that's the most useful thing you can send me — open an issue with the details and I'll feed it straight back into the loop.
 
-## Install
+## 📦 Installation
 
-`bdinfo-rs` is one small static binary — no runtime, no install. Pick whichever
-channel fits your platform; every one delivers the same binary.
+Prebuilt static binaries for Windows, Linux, and macOS (x64 and arm64) ship on every
+[release](https://github.com/agentjp/bdinfo-rs/releases), and bdinfo-rs is on the major
+package managers. Pick whichever route fits — they're ordered roughly easiest first, and
+all deliver the same single static binary.
 
 ### Package managers
 
-```sh
-# Rust — from crates.io (compiles from source)
-cargo install bdinfo-rs
-# …or fetch the prebuilt binary instead of compiling
-cargo binstall bdinfo-rs
+The quickest route if you already have one — a single command, kept up to date for you:
 
+```sh
 # macOS / Linux — Homebrew
 brew install agentjp/tap/bdinfo-rs
 
@@ -60,10 +96,16 @@ winget install agentjp.bdinfo-rs
 # Windows — Scoop
 scoop bucket add agentjp https://github.com/agentjp/scoop-bucket
 scoop install bdinfo-rs
+
+# Rust — fetch the prebuilt binary (no compile)…
+cargo binstall bdinfo-rs
+# …or build it from crates.io
+cargo install bdinfo-rs
 ```
 
-**Debian/Ubuntu (`.deb`) and Fedora/RHEL (`.rpm`)** packages for x64 and arm64 are
-attached to every [release](https://github.com/agentjp/bdinfo-rs/releases):
+Debian/Ubuntu (`.deb`) and Fedora/RHEL (`.rpm`) packages for x64 and arm64 are attached to
+every [release](https://github.com/agentjp/bdinfo-rs/releases) — and, like Homebrew, they
+install the man page and shell completions too:
 
 ```sh
 sudo apt install ./bdinfo-rs_*_amd64.deb     # Debian/Ubuntu
@@ -72,7 +114,7 @@ sudo dnf install ./bdinfo-rs-*.x86_64.rpm    # Fedora/RHEL
 
 ### Install script
 
-Downloads the right prebuilt binary for your platform and puts it on `PATH`:
+Downloads the right binary for your platform and puts it on `PATH`:
 
 ```sh
 # Linux / macOS
@@ -84,22 +126,67 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/agentjp/bdinfo-rs/relea
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/agentjp/bdinfo-rs/releases/latest/download/bdinfo-rs-installer.ps1 | iex"
 ```
 
-### Manual download
+### Prebuilt binaries
 
 Grab the archive for your platform (named by Rust target triple, e.g.
-`bdinfo-rs-x86_64-unknown-linux-musl.tar.gz` or `bdinfo-rs-aarch64-pc-windows-msvc.zip`),
-extract it, and run the binary — no install step. Verify a download against the
-attached aggregate `sha256.sum`, or the per-archive `.sha256` sidecar.
+`bdinfo-rs-x86_64-unknown-linux-musl.tar.gz` or
+`bdinfo-rs-aarch64-pc-windows-msvc.zip`), extract it, and run the binary — no install
+step. Verify a download against the attached aggregate `sha256.sum`, or the per-archive
+`.sha256` sidecar.
 
-## Usage
+### Docker
+
+Multi-arch images (`linux/amd64` + `linux/arm64`) are published to the GitHub Container
+Registry on each release — the image is just the static binary on `scratch`: no OS, no
+shell, no libc, nothing to patch, about 2 MB. The tags match the repo's versions
+(`1.0.0`, plus rolling `1.0` and `1`):
+
+```sh
+docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :1.0.0
+```
+
+Mount the disc and pass its in-container path. `-it` gives the interactive playlist
+picker a terminal; the report is written back into the mounted folder:
+
+```sh
+docker run --rm -it -v /path/to/disc:/mnt/bd ghcr.io/agentjp/bdinfo-rs /mnt/bd
+```
+
+Add a second mount for a separate report folder — required for an `.iso`, which has no
+folder to write into — and use the usual flags for non-interactive runs:
+
+```sh
+docker run --rm -it -v /path/to/movie.iso:/movie.iso:ro -v /path/to/out:/out \
+  ghcr.io/agentjp/bdinfo-rs /movie.iso /out
+docker run --rm -v /path/to/disc:/mnt/bd ghcr.io/agentjp/bdinfo-rs /mnt/bd --list
+```
+
+To build the image yourself instead of pulling it: `docker build -t bdinfo-rs .`
+
+### Build from source
+
+Same on every platform — no C toolchain, no system libraries, no extra steps:
+
+```sh
+git clone https://github.com/agentjp/bdinfo-rs
+cd bdinfo-rs
+cargo build --release      # binary at target/release/bdinfo-rs
+cargo test                 # run the test suite
+```
+
+The pinned Rust toolchain (1.96) installs itself automatically via `rust-toolchain.toml`;
+Cargo fetches the few pure-Rust dependencies. That's the whole setup on Windows, macOS,
+and Linux alike.
+
+## 🚀 Usage
 
 ```text
 bdinfo-rs <BD_PATH> [REPORT_DEST]
 ```
 
-`BD_PATH` accepts the disc root, the `BDMV` folder itself, any directory inside it,
-or a `.iso` image. The report is written to `REPORT_DEST` (default: the disc folder;
-required for `.iso` input) as `BDINFO.{volume label}.txt`.
+`BD_PATH` accepts the disc root, the `BDMV` folder itself, any directory inside it, or a
+`.iso` image. The report is written to `REPORT_DEST` (default: the disc folder; required
+for `.iso` input) as `BDINFO.{volume label}.txt`.
 
 ```sh
 bdinfo-rs D:\Rips\MY_MOVIE                # playlist table + interactive selection
@@ -109,17 +196,18 @@ bdinfo-rs D:\Rips\MY_MOVIE --mpls 00800,00801   # scan exactly these playlists
 bdinfo-rs D:\Rips\MY_MOVIE --whole        # scan everything the table lists
 ```
 
-The console flow is the classic one: a metadata scan, the playlist selection table,
-the live scan progress bar, and the report. Unreadable files on a damaged disc are
-collected into a `WARNING` block and the rest is scanned (exit code 3).
+The console flow is the classic one: a metadata scan, the playlist selection table, the
+live scan progress bar, and the report. Unreadable files on a damaged disc are collected
+into a `WARNING` block and the rest is scanned (exit code 3).
 
-## Shell completions & man page
+### Shell completions & man page
 
 Every release archive ships ready-to-install shell completion scripts — for **bash**,
 **zsh**, **fish**, and **PowerShell** — and a **`bdinfo-rs.1`** man page, all generated
 from the CLI itself so they always match the binary's flags and help text. Package
-managers (Homebrew and the `.deb`/`.rpm` packages) drop them into the standard
-locations automatically; to install one by hand from an extracted archive:
+managers that ship them (Homebrew, the `.deb`/`.rpm` packages, and the AUR package) drop
+them into the standard locations automatically; to install one by hand from an extracted
+archive:
 
 ```sh
 # bash  — system-wide, or source it from your ~/.bashrc
@@ -140,11 +228,11 @@ install -Dm644 bdinfo-rs.1    /usr/share/man/man1/bdinfo-rs.1
 Building from source regenerates the same files under
 `target/<profile>/build/bdinfo-rs-*/out/assets/`.
 
-## Performance
+## ⚡ Performance
 
 bdinfo-rs scans a disc's streams substantially faster than the existing .NET BDInfo
-forks. Its demuxer is pipelined — it reads the next chunk while parsing the current —
-so it stays close to NVMe read speed instead of serializing read-then-parse. The table
+forks. Its demuxer is pipelined — it reads the next chunk while parsing the current — so
+it stays close to NVMe read speed instead of serializing read-then-parse. The table
 times three tools on the **same work**: each scans the identical main feature playlist
 (the movie) with `-m`, reading the same streams and producing structurally identical
 reports, so the only variable is speed.
@@ -171,89 +259,68 @@ start‑order rotated per disc, wall‑clock end to end — Intel Core Ultra 9 2
 2 GB GC heap cap that aborts on large UHD streams — it was given unrestricted heap so it
 could complete the scan and be timed.</sub>
 
-## Library
+## 📚 Library
 
 The parser core is a separate crate, `bdinfo-rs-core`: disc discovery, MPLS/CLPI/index
 parsing, M2TS demux, the codec scanners, the UDF 2.50 reader, and the report renderer,
 all reusable behind a documented API. The CLI is a thin front-end over it.
 
-## Quality & security
+## 🔒 Quality & security
 
 Every push and pull request runs the full gate in CI:
 
-- **Build + test** on Linux, Windows, and macOS — and since `unsafe` is
-  `forbid`-den workspace-wide, a green build is itself the memory-safety guarantee.
+- **Build + test** on Linux, Windows, and macOS — and since `unsafe` is `forbid`-den
+  workspace-wide, a green build is itself the memory-safety guarantee.
 - **100% line / region / function coverage**, enforced (not aspirational).
-- **Max-strictness lints** — clippy `pedantic` + `nursery` + `cargo` plus a
-  restriction set (no indexing panics, no silent integer wrap, no `unwrap` on
-  input) as hard errors; nightly `rustfmt`; spell-check; docs-as-errors.
+- **Max-strictness lints** — clippy `pedantic` + `nursery` + `cargo` plus a restriction
+  set (no indexing panics, no silent integer wrap, no `unwrap` on input) as hard errors;
+  nightly `rustfmt`; spell-check; docs-as-errors.
 - **Supply-chain auditing** — `cargo deny` (advisories, license allowlist, a
-  no-C-dependencies ban) and `cargo vet` (every dependency covered by a trusted
-  audit), plus CodeQL SAST and dependency review.
-- **Incremental mutation testing** — every line a pull request changes is
-  mutation-tested (`cargo mutants --in-diff`): the change isn't considered
-  covered unless a test *fails* when it is mutated.
-- **Fuzzing** — the untrusted-input parsers (bitstream, M2TS, every codec
-  scanner, the UDF `.iso` reader, and the end-to-end pipeline) each carry a
-  libFuzzer target. Pull requests replay the committed seed corpus as a
-  regression gate; every release runs an extended fresh-fuzz pass over all
-  targets.
+  no-C-dependencies ban) and `cargo vet` (every dependency covered by a trusted audit),
+  plus CodeQL SAST and dependency review.
+- **Mutation testing — zero surviving mutants.** Every pull request mutation-tests its
+  diff (`cargo mutants --in-diff`), with a full sweep before each release; a mutant must
+  either make a test *fail* or be documented as provably equivalent. Coverage that can't
+  kill a mutant doesn't count.
+- **Fuzzing — no panics, no hangs.** Every untrusted-input parser (bitstream, M2TS, every
+  codec scanner, the UDF `.iso` reader, and the end-to-end pipeline) carries a libFuzzer
+  target enforcing a no-panic / no-hang contract on hostile input, with property tests as
+  the always-on backstop. Pull requests replay the committed seed corpus as a regression
+  gate; every release runs an extended fresh-fuzz pass. No open findings.
 
-## Build from source
+Every check above ships in-tree — the lint gate, mutation policy, and fuzz corpus all live
+in the repo, so anyone can clone and reproduce these results.
 
-Same on every platform — no C toolchain, no system libraries, no extra steps:
-
-```sh
-git clone https://github.com/agentjp/bdinfo-rs
-cd bdinfo-rs
-cargo build --release      # binary at target/release/bdinfo-rs
-cargo test                 # run the test suite
-```
-
-The pinned Rust toolchain (1.96) installs itself automatically via `rust-toolchain.toml`;
-Cargo fetches the few pure-Rust dependencies. That's the whole setup on Windows, macOS,
-and Linux alike.
-
-## Docker
-
-Multi-arch images (`linux/amd64` + `linux/arm64`) are published to the GitHub Container
-Registry on each release — the image is just the static binary on `scratch`, no OS, no
-shell, no libc, nothing to patch, about 2 MB. Pull `latest` or pin a release; the tags
-match the repo's versions (`1.0.0`, plus rolling `1.0` and `1`):
-
-```sh
-docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :1.0.0
-```
-
-Mount the disc and pass its in-container path. `-it` gives the interactive playlist
-picker a terminal; the report is written back into the mounted folder:
-
-```sh
-docker run --rm -it -v /path/to/disc:/mnt/bd ghcr.io/agentjp/bdinfo-rs /mnt/bd
-```
-
-Add a second mount for a separate report folder — required for an `.iso`, which has no
-folder to write into — and use the usual flags for non-interactive runs:
-
-```sh
-docker run --rm -it -v /path/to/movie.iso:/movie.iso:ro -v /path/to/out:/out \
-  ghcr.io/agentjp/bdinfo-rs /movie.iso /out
-docker run --rm -v /path/to/disc:/mnt/bd ghcr.io/agentjp/bdinfo-rs /mnt/bd --list
-```
-
-To build the image yourself instead of pulling it: `docker build -t bdinfo-rs .`
-
-## Differences from BDInfo
+## 🔀 Differences from BDInfo
 
 bdinfo-rs follows the classic BDInfo report format, but its output may differ where
-bdinfo-rs fixes a bug in the original tool. In those cases bdinfo-rs emits the value
-that is correct against the codec specification / FFmpeg, and the corrected value is
-the intended behavior — not a compatibility regression.
+bdinfo-rs fixes a bug in the original tool. In those cases bdinfo-rs emits the value that
+is correct against the codec specification / FFmpeg, and the corrected value is the
+intended behavior — not a compatibility regression.
 
-bdinfo-rs is an independent reimplementation, not affiliated with or endorsed by
-BDInfo ([UniqProject](https://github.com/UniqProject/BDInfo)).
+👉 **See [DIFFERENCES.md](DIFFERENCES.md) for the exact before/after examples** — the few
+fields where bdinfo-rs and BDInfo disagree, and which ones you'll actually see on a normal
+disc. (Also summarized in the [changelog](CHANGELOG.md#differences-from-bdinfo).)
 
-## License
+bdinfo-rs is an independent reimplementation, not affiliated with or endorsed by BDInfo
+([UniqProject](https://github.com/UniqProject/BDInfo)).
 
-[LGPL-2.1-only](LICENSE). The library can be used from applications under other
-licenses; changes to bdinfo-rs itself must be shared under the same terms.
+## 🧬 Lineage
+
+bdinfo-rs began as a port and was checked against the reference implementation and spec at
+each layer:
+
+- **Report & analysis** — ported from [UniqProject BDInfo](https://github.com/UniqProject/BDInfo),
+  the classic .NET tool, as the baseline.
+- **Console flow** — the CLI follows [BDInfoCLI-ng](https://github.com/tetrahydroc/BDInfoCLI-ng)
+  (tetra), the command-line BDInfo.
+- **Codec correctness** — edge cases cross-checked against
+  [libbluray](https://code.videolan.org/videolan/libbluray) and [FFmpeg](https://ffmpeg.org/)
+  to fix bugs in the original (see [Differences from BDInfo](#-differences-from-bdinfo)).
+- **UDF reader** — validated against [libudfread](https://code.videolan.org/videolan/libudfread)
+  and the OSTA UDF 2.60 specification.
+
+## 📄 License
+
+[LGPL-2.1-only](LICENSE). The library can be used from applications under other licenses;
+changes to bdinfo-rs itself must be shared under the same terms.

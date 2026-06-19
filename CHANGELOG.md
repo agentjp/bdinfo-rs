@@ -45,6 +45,9 @@ Where the original BDInfo is provably wrong against the codec specification /
 FFmpeg, bdinfo-rs emits the correct value and deliberately diverges (each verified
 bit-by-bit, and staying within the existing report vocabulary):
 
+See [DIFFERENCES.md](DIFFERENCES.md) for concrete before/after report examples and
+which of these are visible on a normal disc.
+
 - DTS:X IMAX detection, rendered as `DTS:X Master Audio`.
 - E-AC-3 reduced data-rate handling.
 - HDR10+ recognized from the ST 2094-40 SEI alone, decoupled from a mastering

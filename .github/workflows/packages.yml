@@ -112,6 +112,23 @@ jobs:
       - name: Build the .deb
         run: cargo deb --no-build --no-strip --target ${{ matrix.triple }} -p bdinfo-rs
 
+      - name: Verify the .deb (contents on both arches; install + run on amd64)
+        shell: bash
+        run: |
+          deb=$(ls target/${{ matrix.triple }}/debian/*.deb)
+          echo "== $deb =="; dpkg-deb --contents "$deb"
+          for p in ./usr/bin/bdinfo-rs ./usr/share/man/man1/bdinfo-rs.1 ./usr/share/bash-completion/completions/bdinfo-rs ./usr/share/zsh/site-functions/_bdinfo-rs ./usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            dpkg-deb --contents "$deb" | awk '{print $6}' | grep -Fxq "$p" || { echo "MISSING in .deb: $p"; exit 1; }
+          done
+          if [ "${{ matrix.triple }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo dpkg -i "$deb"
+            bdinfo-rs --version
+            for f in /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+              test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+            done
+            echo "amd64 .deb: installs, runs, and ships man + completions"
+          fi
+
       - name: Upload the .deb to the release
         shell: bash
         run: gh release upload "$VERSION" target/${{ matrix.triple }}/debian/*.deb --repo "$GITHUB_REPOSITORY" --clobber
@@ -153,6 +170,27 @@ jobs:
 
       - name: Build the .rpm
         run: cargo generate-rpm -p crates/bdinfo-rs --target ${{ matrix.triple }}
+
+      - name: Verify the .rpm (contents on both arches; install + run on x86_64 via Fedora)
+        shell: bash
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          rpmf=$(ls target/${{ matrix.triple }}/generate-rpm/*.rpm)
+          echo "== $rpmf =="; rpm -qpl "$rpmf"
+          for p in /usr/bin/bdinfo-rs /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            rpm -qpl "$rpmf" | grep -Fxq "$p" || { echo "MISSING in .rpm: $p"; exit 1; }
+          done
+          if [ "${{ matrix.triple }}" = "x86_64-unknown-linux-musl" ]; then
+            docker run --rm -v "$PWD/target/${{ matrix.triple }}/generate-rpm:/rpms:ro" fedora:latest bash -c '
+              set -e
+              dnf install -y -q /rpms/*.rpm
+              bdinfo-rs --version
+              for f in /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+                test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+              done
+              echo "x86_64 .rpm: installs, runs, and ships man + completions"
+            '
+          fi
 
       - name: Upload the .rpm to the release
         shell: bash

@@ -1,0 +1,43 @@
+name: install-smoke-test
+
+# Weekly + on-demand smoke test of the PUBLISHED package managers that install the
+# man page and shell completions: Homebrew (macOS + Linuxbrew). It installs the
+# formula from the tap and asserts the binary runs AND the man page + bash/zsh/fish
+# completions land in Homebrew's standard locations.
+#
+# Out of scope by design: Scoop, WinGet, and cargo install/binstall ship the bare
+# executable only (no man/completions), so there is nothing to verify there. The
+# .deb/.rpm man+completions contract is verified at build time in packages.yml.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  homebrew:
+    name: Homebrew (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    steps:
+      - uses: Homebrew/actions/setup-homebrew@6315ef70a8bfcd2c71104383846591ac113ace33 # master
+
+      - name: Install bdinfo-rs from the tap
+        run: brew install agentjp/tap/bdinfo-rs
+
+      - name: Verify the binary runs and man + completions are installed
+        shell: bash
+        run: |
+          bdinfo-rs --version
+          prefix="$(brew --prefix)"
+          test -f "$prefix/share/man/man1/bdinfo-rs.1" || { echo "missing man page"; exit 1; }
+          { test -f "$prefix/etc/bash_completion.d/bdinfo-rs" || test -f "$prefix/share/bash-completion/completions/bdinfo-rs"; } || { echo "missing bash completion"; exit 1; }
+          test -f "$prefix/share/zsh/site-functions/_bdinfo-rs" || { echo "missing zsh completion"; exit 1; }
+          test -f "$prefix/share/fish/vendor_completions.d/bdinfo-rs.fish" || { echo "missing fish completion"; exit 1; }
+          echo "Homebrew install OK: binary + man + completions present"
