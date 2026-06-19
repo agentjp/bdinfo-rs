@@ -74,8 +74,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install pinned dist
-        shell: bash
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+        # cargo install from crates.io (version-pinned) instead of the curl|sh
+        # installer, so the dependency isn't an unhashed piped script (Scorecard
+        # pinned-dependencies / downloadThenRun).
+        run: cargo install cargo-dist@0.32.0 --locked
 
       - name: Check release.yml is in sync with dist-workspace.toml
         run: dist generate --check
