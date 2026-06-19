@@ -5,6 +5,7 @@
 [![codeql](https://github.com/agentjp/bdinfo-rs/actions/workflows/codeql.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/codeql.yml)
 [![fuzz](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml/badge.svg)](https://github.com/agentjp/bdinfo-rs/actions/workflows/fuzz.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/agentjp/bdinfo-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/agentjp/bdinfo-rs)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13304/badge)](https://www.bestpractices.dev/projects/13304)
 [![release](https://img.shields.io/github/v/release/agentjp/bdinfo-rs?include_prereleases&sort=semver)](https://github.com/agentjp/bdinfo-rs/releases)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue)](rust-toolchain.toml)
 [![license](https://img.shields.io/badge/license-LGPL--2.1--only-blue)](LICENSE)
