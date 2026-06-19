@@ -1,0 +1,151 @@
+name: Output difference (wrong value)
+description: bdinfo-rs runs fine but prints a value that disagrees with the reference BDInfo tool.
+labels: ["output-difference"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when bdinfo-rs **runs without errors but prints a value that disagrees
+        with the reference BDInfo tool** — a codec name, a bitrate, a resolution, an HDR /
+        Dolby Vision flag, a stream that's listed differently, and so on. No coding needed:
+        just paste the two reports.
+
+        If bdinfo-rs instead **crashes, hangs, or exits with an error**, use the *Bug
+        report* form — or, for a panic / hang / out-of-bounds read on malformed input, the
+        **Security** tab → *Report a vulnerability* (see
+        [SECURITY.md](https://github.com/agentjp/bdinfo-rs/blob/master/SECURITY.md)).
+
+        ### What makes a report actionable
+        The disc isn't in our hands, so almost everything needed to fix this has to come
+        from you. The most useful reports include:
+        - **The same playlist scanned by both tools**, with the differing report lines from
+          each pasted below (or, better, both full reports attached as `.txt`).
+        - **A blu-ray.com link to the exact release**, so the disc can be identified and,
+          where possible, independently verified.
+        - **A third tool's read** (MediaInfo / ffprobe) of the same stream, if you have one —
+          an independent ground truth is the fastest way to settle which tool is right.
+
+        > **Owned discs only.** bdinfo-rs is for analyzing discs **you legally own**. Do not
+        > link to, request, or attach pirated material. The text reports below are technical
+        > metadata (codecs, bitrates, stream layout) and are fine to paste; **do not attach
+        > the actual video/audio (`.m2ts`) files**.
+  - type: input
+    id: disc
+    attributes:
+      label: Disc / release
+      description: Movie title, plus edition and region if they matter.
+      placeholder: "The Fifth Element — 4K UHD, US (1997)"
+    validations:
+      required: true
+  - type: input
+    id: bluray-url
+    attributes:
+      label: blu-ray.com URL for this exact release
+      description: >-
+        The blu-ray.com page for the specific release you scanned. This pins down the disc
+        precisely and lets it be independently verified — the single most useful field
+        here. (A page link only — never a link to download the disc.)
+      placeholder: "https://www.blu-ray.com/movies/The-Fifth-Element-4K-Blu-ray/123456/"
+    validations:
+      required: false
+  - type: input
+    id: playlist
+    attributes:
+      label: Playlist (and stream) that differs
+      description: Which playlist — and, if you know it, which stream / clip — shows the difference.
+      placeholder: "00800.mpls · audio track 1 (00001.m2ts)"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What differs
+      description: One or two lines — which field disagrees, and how.
+      placeholder: "Audio track 1: bdinfo-rs prints 'DTS-HD Master Audio', BDInfo prints 'DTS:X'."
+    validations:
+      required: true
+  - type: dropdown
+    id: reference-tool
+    attributes:
+      label: Reference tool you're comparing against
+      options:
+        - BDInfo (UniqProject) — the classic GUI
+        - BDInfoCLI-ng (tetra)
+        - Other / older BDInfo build
+    validations:
+      required: true
+  - type: input
+    id: reference-version
+    attributes:
+      label: Reference tool version
+      placeholder: "BDInfo 0.8.0.1b"
+    validations:
+      required: false
+  - type: textarea
+    id: reference-output
+    attributes:
+      label: Reference tool output (the lines that differ)
+      description: Paste the relevant lines from the reference BDInfo tool's report.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: bdinfo-rs-output
+    attributes:
+      label: bdinfo-rs output (the lines that differ)
+      description: The same lines from bdinfo-rs's `BDINFO.<volume label>.txt` report.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: ground-truth
+    attributes:
+      label: Independent ground truth (optional, very helpful)
+      description: >-
+        MediaInfo or ffprobe output for the same stream, if you have it. A third,
+        independent read is the quickest way to confirm which value is correct.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: bdinfo-rs version
+      description: Output of `bdinfo-rs --version`.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      description: Optional — the report is deterministic across platforms, but the disc-label line differs between a folder scan and an `.iso`.
+      placeholder: "Windows 11 x64"
+    validations:
+      required: false
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The full command you ran (redact local paths if you like).
+      placeholder: "bdinfo-rs D:\\MY_MOVIE --mpls 00800"
+      render: shell
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        **Tip:** attaching **both full reports** — the reference tool's and bdinfo-rs's
+        `BDINFO.<volume label>.txt` — as `.txt` files gives the most context for diffing.
+        They're plain technical metadata, safe to share.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      options:
+        - label: I legally own this disc, and nothing here links to or includes pirated material.
+          required: true
+        - label: This is an output difference, not a crash / hang / error (those go to the Bug report form or the Security tab).
+          required: true
+        - label: I've pasted or attached text reports only — no copyrighted video / audio files.
+          required: true
