@@ -18,8 +18,9 @@ body:
         ### What makes a report actionable
         The disc isn't in our hands, so almost everything needed to fix this has to come
         from you. The most useful reports include:
-        - **The same playlist scanned by both tools**, with the differing report lines from
-          each pasted below (or, better, both full reports attached as `.txt`).
+        - **The same playlist in both tools**, with the *whole* report block for that
+          playlist pasted from each — not just the differing lines — so the two line up
+          line-for-line (and, even better, both full reports attached as `.txt`).
         - **A blu-ray.com link to the exact release**, so the disc can be identified and,
           where possible, independently verified.
         - **A third tool's read** (MediaInfo / ffprobe) of the same stream, if you have one —
@@ -84,16 +85,24 @@ body:
   - type: textarea
     id: reference-output
     attributes:
-      label: Reference tool output (the lines that differ)
-      description: Paste the relevant lines from the reference BDInfo tool's report.
+      label: Reference tool report (whole block for this playlist)
+      description: >-
+        Paste the **entire report block for this one playlist** from the reference tool —
+        not just the differing lines — so it can be compared line-by-line. The detailed
+        stream listing (the part you start pasting from) or the QUICK SUMMARY block both
+        work; just paste the same kind of block here and in the bdinfo-rs field below so
+        the two line up.
       render: text
     validations:
       required: true
   - type: textarea
     id: bdinfo-rs-output
     attributes:
-      label: bdinfo-rs output (the lines that differ)
-      description: The same lines from bdinfo-rs's `BDINFO.<volume label>.txt` report.
+      label: bdinfo-rs report (whole block for this playlist)
+      description: >-
+        The **same block for the same playlist** from bdinfo-rs's
+        `BDINFO.<volume label>.txt` report — matching what you pasted above, so the two can
+        be diffed line-by-line.
       render: text
     validations:
       required: true
