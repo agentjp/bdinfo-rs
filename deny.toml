@@ -1,0 +1,84 @@
+# cargo-deny — supply-chain, license, and advisory policy. Run: cargo dn
+#
+#   advisories — RustSec advisories (vulns, unsoundness, unmaintained, yanked).
+#   licenses   — every dependency must match an allowed SPDX expression.
+#   bans       — duplicate-version detection; wildcard-version rejection.
+#   sources    — crates.io only; no git deps, no unknown registries.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Add advisory IDs here ONLY with a comment explaining why the risk is accepted.
+ignore = []
+
+[licenses]
+version = 2
+# Allowlist — permissive licenses only. A dependency whose SPDX expression
+# isn't satisfied here is a hard error.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+# Our own crates are LGPL-2.1. The allowlist above is for
+# dependencies (must be permissive); these scoped exceptions permit LGPL ONLY for
+# our crates, so an LGPL *dependency* would still be flagged.
+[[licenses.exceptions]]
+name = "bdinfo-rs-core"
+allow = ["LGPL-2.1-only"]
+
+[[licenses.exceptions]]
+name = "bdinfo-rs"
+allow = ["LGPL-2.1-only"]
+
+[bans]
+# A duplicate dependency tree (the same crate at two versions) bloats the binary
+# and is a supply-chain smell, so any NEW accidental dup is a hard error. The
+# known, unavoidable dups are skipped explicitly below; an unlisted one now fails
+# `cargo dn`.
+multiple-versions = "deny"
+# Also catch duplicates reachable only through dev-dependencies. They never link
+# into the shipped binary, but counting them keeps the test/proptest stack from
+# silently accreting redundant versions. The one known dev dup is skipped below.
+multiple-versions-include-dev = true
+# External `version = "*"` deps are forbidden, but internal path/workspace deps
+# (e.g. bdinfo-rs → bdinfo-rs-core) are necessarily "wildcard" and are allowed.
+wildcards = "deny"
+allow-wildcard-paths = true
+# Known dev-only duplicate: tempfile pulls getrandom 0.4 while proptest's
+# rand_core 0.9 still depends on getrandom 0.3, so the tree carries both. getrandom
+# 0.4 also drags in second copies of its target-gated wasm/UEFI backends (r-efi,
+# wit-bindgen) that no real build links. skip-tree on the 0.4 subtree drops all
+# three from duplicate counting in one entry; it stays version-pinned so a
+# getrandom bump unmatches it and forces a recheck. Remove once the rand stack
+# moves to getrandom 0.4.
+skip-tree = [
+    { crate = "getrandom@0.4.3", reason = "dev-only dup vs getrandom 0.3 (proptest's rand_core); its 0.4 subtree (r-efi) is target-gated and never linked" },
+]
+# Single-static-binary guard (defense-in-depth with compliance.ps1's no-c-deps
+# step): ban the C build/discovery tooling. Their presence means a crate compiles
+# or links external C, which breaks the static binary. Pure-Rust OS-ABI `-sys`
+# crates (windows-sys/linux-raw-sys) don't pull these and are fine.
+deny = [
+    { crate = "cc" },
+    { crate = "cmake" },
+    { crate = "bindgen" },
+    { crate = "pkg-config" },
+    { crate = "vcpkg" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

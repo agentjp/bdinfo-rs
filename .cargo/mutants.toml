@@ -1,0 +1,157 @@
+# cargo-mutants — max strictness × realistic speed. See https://mutants.rs.
+# The `mt` alias runs bare `cargo mutants`; all policy lives here.
+
+# nextest matches the rest of the gate (process-per-test isolation, faster).
+test_tool = "nextest"
+
+# Copying mode must never drag gitignored content into %TEMP%: `discs/` holds
+# hundreds of GB of test rips, and one full-tree copy has filled the disk
+# before. Scoped re-checks use --in-place anyway; this only trims the copy.
+gitignore = true
+
+# CRITICAL with our `-D warnings` clippy gate: without cap_lints, a mutation
+# that incidentally trips an unused-variable/dead-code warning is marked
+# "unviable" and masks a real test gap. With it, the mutation compiles and the
+# suite gets a fair chance to catch it. https://mutants.rs/lints.html
+cap_lints = true
+
+# Same lockfile strictness as the rest of the gate on every spawned cargo call.
+additional_cargo_args = ["--locked"]
+
+# Run the suite under nextest's `mutants` profile (.config/nextest.toml): the
+# same strictness with a tighter 10s×2 slow-timeout, so a loop-guard mutation
+# that hangs a wave of tests is terminated (and thereby CAUGHT) in 20s waves
+# instead of the dev gate's 60s — the single biggest wall-time lever for a
+# full run.
+additional_cargo_test_args = ["--profile", "mutants"]
+
+# Every mutant faces the WHOLE workspace suite, not just the mutated crate's:
+# library mutants are then also defended by the CLI's end-to-end fixture flow
+# (tests/cli.rs), which the default package-scope would skip. Measured cost:
+# ~+0.7s per mutant (~+10-15% on a full run) — cheap for the extra net.
+test_workspace = true
+
+# Don't mutate pure-plumbing call sites (logging/panicking/never-return) — their
+# args rarely have assertions, so mutating them is noise, not a real gap.
+skip_calls = ["trace", "debug", "info", "warn", "error", "panic", "unreachable", "todo", "unimplemented", "eprintln", "println"]
+skip_calls_defaults = true
+
+# A mutation can legitimately slow a path (one more loop iteration); wait rather
+# than spuriously kill a real catch. The floor sits ABOVE nextest's `mutants`
+# profile slow-timeout terminate-after (2 x 10s = 20s; see .config/nextest.toml):
+# a mutation that induces an INFINITE LOOP — e.g. breaking the termination guard
+# of an Exp-Golomb leading-zero loop, where `read_bool` at EOF faithfully returns
+# `false` without advancing — is then killed and reported as a FAILURE by nextest
+# (counted as CAUGHT), instead of tripping cargo-mutants' own timeout (which exits
+# non-zero even with zero missed mutants). Such loop-guard mutations are genuinely
+# caught; they must not masquerade as an unresolved timeout.
+timeout_multiplier = 3.0
+# Floor above the WALL time of the whole suite when a loop-guard mutation hangs
+# many tests at once: the HEVC `scan` loop is driven by ~30 tests, so a mutation
+# that breaks `scan_should_continue` (e.g. `-> true`, `&& -> ||`) hangs them all,
+# and nextest terminates each at the mutants profile's 20s slow-timeout in waves
+# (≈2 on 24 threads → ~40s wall). This floor must exceed that wall (else
+# cargo-mutants' own timeout trips first and reports an unresolved timeout
+# instead of the genuine nextest-caught FAILURE).
+minimum_test_timeout = 120
+
+# Dedicated build profile (Cargo.toml [profile.mutants]) — inherits `test` with
+# debug stripped. Don't reuse `release`: LTO kills incremental-rebuild speed.
+profile = "mutants"
+
+# Provably-EQUIVALENT mutants — no test can distinguish them, so they are not
+# suite gaps. Each entry is justified; keep this list tiny and exact.
+exclude_re = [
+    # `bitstream::TsStreamBuffer::bs_skip_bytes`: `bytes > 0` vs `bytes >= 0`
+    # differ only at `bytes == 0`, where BOTH branches are no-ops — the read loop
+    # runs zero times, and the reposition resolves to
+    # `pos + (skip_bits >> 3) + 0 == pos` because `skip_bits` is always 0..=7 (so
+    # `skip_bits >> 3 == 0`). Skipping zero bytes is a no-op however you branch, so
+    # the two are behaviorally identical.
+    "replace > with >= in TsStreamBuffer::bs_skip_bytes",
+
+    # `codec::dts_hd::scan` extension scan: the two byte-loop bounds
+    # `position < buffer.length()` and `i < len` vs `<=` differ only at the boundary,
+    # where the extra iteration reads ONE byte past the stored content. That byte is
+    # always zero-fill (`0x00`, below the 5 MiB cap) — and NONE of the six extension
+    # sync words (ending `0x47`/`0x5E`/`0x21`/`0x62`/`0x03`/`0x5A`) nor any DTS:X
+    # pattern (legacy `0x50`, IMAX `0xD0`/`0xD1`) ends in `0x00`, so the extra zero
+    # byte can never complete a match. `has_extensions` is identical either way.
+    "dts_hd\\.rs:\\d+:\\d+: replace < with <= in scan",
+
+    # `codec::mpeg2::scan` picture-counter guard: `picture_parse > 0` vs `>= 0`
+    # (line 49 — NOTE: line-pinned, re-pin when the file shifts; the 2026-06-11
+    # audit found the old `:52:` pin stale, which resurfaced this known mutant).
+    # `picture_parse` is only ever set to 2 (a picture start code) and
+    # decremented; the only readers are this branch and the inner `if picture_parse
+    # == 0`. At `picture_parse == 0` the `>= 0` mutant enters and decrements to -1
+    # (the inner `== 0` is then false — no tag, no return), after which `-1 >= 0` is
+    # false, so the branch stays frozen exactly like the original `> 0` (which leaves
+    # it at 0, also frozen) until the next start code resets it to 2 — identical in
+    # both. The two are behaviorally indistinguishable. The sibling
+    # `sequence_header_parse > 0` (line 40) is NOT equivalent and is killed by
+    # `a_picture_started_inside_a_sequence_header_decodes_after_init`.
+    "mpeg2\\.rs:49:\\d+: replace > with >= in scan",
+
+    # ── 2026-06-11 audit: PES/PAT/PMT window guards proven equivalent ─────────
+    # (all line-pinned like the entries above; re-pin on file drift)
+
+    # `parse_chunk` branch A guard `state.packet_length > 0` vs `>=`: a bounded
+    # transfer closes the instant packet_length reaches 0 (transfer_state goes
+    # false), and a PES declaring zero length sets the variable flag, failing the
+    # branch's `!packet_length_variable` conjunct — the disputed `== 0` case is
+    # unreachable with the flag clear.
+    "m2ts\\.rs:705:\\d+: replace > with >= in TsStreamFile::parse_chunk",
+
+    # `parse_chunk` branch B guard `parser.packet_length > 0` (all comparison
+    # mutants): the conjunct is redundant under the clamp two lines later
+    # (`if parser.packet_length <= offset { offset = parser.packet_length }`) —
+    # whenever B's reach condition holds, the C-then-clamp fallback computes the
+    # identical offset, so taking or skipping branch B changes nothing.
+    "m2ts\\.rs:710:\\d+: replace > with (==|<|>=) in TsStreamFile::parse_chunk",
+
+    # `parse_pat` transfer window `>` vs `>=`: at `bl - i == section_length` both
+    # branches assign the same offset.
+    "m2ts\\.rs:1006:\\d+: replace > with >= in TsStreamFile::parse_pat",
+
+    # `parse_pat` post-section guard `pat_section_parse > 0` vs `>=`: the countdown
+    # is a u32 that the mutant only ever decrements from the wrapped u32::MAX, so
+    # the acting arms (1, 0) are ~4 GiB of PID-0 bytes away, and the corrupted
+    # pat_section_length is only read under those arms.
+    "m2ts\\.rs:1077:\\d+: replace > with >= in TsStreamFile::parse_pat",
+
+    # `parse_pmt` program-info guard `pmt_program_info_length > 0` vs `>=`: the dead
+    # branch decrements pmt_section_length and the program-info countdown in
+    # LOCKSTEP from zero, so when the u16 wrap finally fires a transfer (64 KiB of
+    # padding later) the section length has wrapped back to exactly 0 — the
+    # transfer is zero-length and the stale section re-walk is idempotent
+    # (create_stream is keyed on contains_key). Traced and verified empirically
+    # with a 357-padding-packet stream.
+    "m2ts\\.rs:1231:\\d+: replace > with >= in TsStreamFile::parse_pmt",
+
+    # ── 2026-06-11 audit: environment/platform probes no test process can observe ──
+
+    # CLI `stderr_styles -> false`: the wrapper samples `stderr().is_terminal()`,
+    # which is genuinely false in every captured-stdio test process — the mutant
+    # equals the only observable value. The decision logic is factored into
+    # `styles_when(tty)` and tested on both inputs; only the live sample is opaque.
+    "main\\.rs:\\d+:\\d+: replace stderr_styles -> bool with false",
+
+    # CLI `ansi_supported` (both arms, both bools): the Windows arm returns the live
+    # crossterm console probe — `ansi_probe_matches_the_crossterm_oracle` kills
+    # whichever fixed bool contradicts the current console, but the one matching it
+    # is indistinguishable inside a single test process (no second terminal state
+    # exists). The non-Windows arm is cfg'd out on the Windows audit host entirely.
+    "main\\.rs:\\d+:\\d+: replace ansi_supported -> bool with (true|false)",
+
+    # CLI `write_stderr with ()`: writes/flushes the process's real stderr; a test
+    # cannot read its own stderr, and the styled path that calls it requires a live
+    # terminal (piped stderr never styles).
+    "main\\.rs:\\d+:\\d+: replace write_stderr with \\(\\)",
+
+    # `vfs::fs::open_sequential -> Ok(Default::default())`: only viable on the
+    # `#[cfg(not(windows))]` arm, whose body is never type-checked on a Windows
+    # host; on Linux the mutant is UNVIABLE (`File` has no `Default`). The arm's
+    # body is `File::open(path)` verbatim.
+    "fs\\.rs:\\d+:\\d+: replace open_sequential -> io::Result<File> with Ok\\(Default::default\\(\\)\\)",
+]

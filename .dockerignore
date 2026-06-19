@@ -1,0 +1,22 @@
+# Keep the build context tiny — the image build only needs the workspace
+# sources. Excluding docs/CI also keeps edits to them from busting the
+# (expensive) cargo build layer cache.
+/target
+.git
+.github
+.gitignore
+fuzz
+scripts
+.config
+discs
+scratch
+docs
+donotread
+mutants.out
+mutants.out.old
+*.log
+proptest-regressions
+Dockerfile
+.dockerignore
+README.md
+LICENSE

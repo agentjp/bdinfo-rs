@@ -1,0 +1,13 @@
+# Consistent LF line endings in the repo AND working tree — matches rustfmt
+# (`newline_style = "Unix"`). Without this, git's Windows autocrlf writes CRLF on
+# checkout, which breaks `cargo fmt --check` and byte-exact output tests.
+* text=auto eol=lf
+
+# Raw-byte fuzz seed corpus — NEVER normalize (some files are intentionally
+# invalid UTF-8 / contain control bytes; line-ending conversion would corrupt them).
+fuzz/corpus/** binary
+
+# Belt-and-suspenders: these are never text.
+*.exe binary
+*.pdb binary
+*.png binary

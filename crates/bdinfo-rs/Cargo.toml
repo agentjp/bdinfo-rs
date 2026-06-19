@@ -1,0 +1,47 @@
+[package]
+name = "bdinfo-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "bdinfo-rs — a memory-safe command-line Blu-ray analyzer (no GUI)."
+readme = "README.md"
+keywords = ["bluray", "bdmv", "m2ts", "cli", "video"]
+categories = ["command-line-utilities", "multimedia::video"]
+
+# The binary is named `bdinfo-rs`, same as this crate (the library lives in the
+# separate `bdinfo-rs-core` crate).
+[[bin]]
+name = "bdinfo-rs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+# cargo-machete (the `mc` gate step) does not scan build.rs, so it can't see that
+# these build-dependencies are used there to generate the completions + man page,
+# and false-flags them as unused. cargo-shear (`sh`), which DOES analyze build.rs,
+# confirms they are used — so this ignore is a scanner blind spot, not a real
+# unused dep. clap itself is also a [dependencies] entry used by the binary, so it
+# needs no ignore.
+[package.metadata.cargo-machete]
+ignored = ["clap_complete", "clap_mangen"]
+
+[dependencies]
+bdinfo-rs-core = { workspace = true }
+clap = { workspace = true }
+crossterm = { version = "0.29.0", default-features = false, features = ["windows"] }
+
+# Build-time ONLY — these never link into the shipped binary (they generate the
+# shell completions + man page in build.rs from the same `src/cli.rs` the binary
+# uses). All pure Rust (no C / FFI), so the single-static-binary guarantee and
+# the `cdeps` gate are untouched. clap is shared through the workspace pin so the
+# generated artifacts match the binary's clap exactly.
+[build-dependencies]
+clap = { workspace = true }
+clap_complete = "4.6"
+clap_mangen = "0.3"

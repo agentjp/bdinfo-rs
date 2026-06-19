@@ -1,0 +1,35 @@
+name: codeql
+
+# CodeQL static analysis for Rust (build-mode: none — no compilation needed).
+# Code scanning is free on public repositories; on a private repo it needs GitHub
+# Advanced Security. This workflow assumes a public repo.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Wednesdays 06:00 UTC — picks up new queries shipped in CodeQL releases.
+    - cron: "0 6 * * 3"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: rust
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:rust"

@@ -1,0 +1,115 @@
+name: fuzz
+
+# Adversarial coverage over the untrusted-input parsers (Blu-ray bytes are
+# attacker-controlled). cargo-fuzz / libFuzzer need a nightly toolchain and have
+# no Windows MSVC support, so this runs on Linux only. The local mirror is
+# scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the guards here match it.
+#
+#   pull_request / push to master -> replay the committed seed corpus (-runs=0),
+#                                     a fast deterministic regression gate.
+#   push of a v* tag              -> a longer fresh-fuzz pass per target as a
+#                                     release gate.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # cargo-fuzz needs nightly. Keep in lockstep with ci.yml NIGHTLY and
+  # $script:Nightly in scripts/_common.ps1.
+  NIGHTLY: nightly-2026-06-05
+  # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
+  # with scripts/fuzz-docker.sh.
+  TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report
+  # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
+  # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
+  # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
+  # with a statically linked musl libc and need a musl C++ cross-compiler the runner
+  # lacks. The gnu host has the dynamic libc + system C++ that libFuzzer needs.
+  FUZZ_TARGET: x86_64-unknown-linux-gnu
+  # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
+  # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
+  # (allocation-amplification guard). Applied to replay and fresh fuzz alike.
+  GUARDS: -timeout=25 -rss_limit_mb=2048
+
+jobs:
+  # PR / branch push: replay the committed seed corpus with zero fresh
+  # iterations — a deterministic regression check that the parsers still handle
+  # every recorded boundary/garbage input without panicking, hanging, or
+  # blowing up memory.
+  replay:
+    name: corpus replay (regression gate)
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned nightly
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Replay the committed corpus through every target
+        run: |
+          fail=0
+          for t in $TARGETS; do
+            echo "::group::replay $t"
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  # Release tag: a longer fresh-fuzz budget per target. New corpus growth and
+  # any crash artifacts are uploaded for inspection; a crash fails the release.
+  extended:
+    name: extended fuzz (release tag)
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pinned nightly
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fresh-fuzz every target (120s each)
+        run: |
+          fail=0
+          for t in $TARGETS; do
+            echo "::group::fuzz $t"
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -max_total_time=120 $GUARDS -print_final_stats=1 || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

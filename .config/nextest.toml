@@ -1,0 +1,39 @@
+# nextest — single max-strictness profile, picked up by `cargo nt`.
+# https://nexte.st/docs/configuration/
+
+[nextest-version]
+# Floor low enough not to fight the installed version; bump as we upgrade.
+required = "0.9.78"
+recommended = "0.9.100"
+
+[profile.default]
+# No retries — a flake is a bug; it should fail the build so it gets fixed.
+retries = 0
+# Belt + suspenders: if --retries is overridden and a test passes on retry,
+# still count the run as failed.
+flaky-result = "fail"
+# Flag slow tests at 30s; force-terminate a runaway at 2×30s so one bad case
+# can't hang the whole run.
+slow-timeout = { period = "30s", terminate-after = 2 }
+# A test whose spawned children outlive it by >100ms fails the run (catches
+# leaked subprocesses / fds before they contaminate later tests).
+leak-timeout = "100ms"
+# See ALL failures in a run, not just the first.
+fail-fast = false
+# Failing output inline AND in the final summary.
+failure-output = "immediate-final"
+# Keep passing tests quiet — high signal-to-noise.
+success-output = "never"
+status-level = "all"
+final-status-level = "all"
+
+# Profile for cargo-mutants runs ONLY (selected via additional_cargo_test_args
+# in .cargo/mutants.toml; inherits everything above). A mutation that breaks a
+# loop-termination guard hangs every test driving that path, with the hung
+# tests spinning a full core each until the slow-timeout terminates them in
+# core-count waves — the dominant cost of a mutants run. The whole suite runs
+# in ~2s and the slowest single test is <0.5s, so a 10s flag with a 2×
+# terminate keeps ~20x headroom while cutting each hang wave from 60s to 20s.
+# The dev/CI gate (`cargo nt`) keeps the roomier default above.
+[profile.mutants]
+slow-timeout = { period = "10s", terminate-after = 2 }

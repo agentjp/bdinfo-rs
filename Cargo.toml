@@ -1,0 +1,164 @@
+# Virtual workspace for bdinfo-rs — a memory-safe Blu-ray disc analyzer.
+#
+#   crates/bdinfo-rs-core — the library: BD/BDMV/M2TS parser core (publishable;
+#                           the crate other apps depend on).
+#   crates/bdinfo-rs      — the `bdinfo-rs` CLI binary (no GUI — ever).
+#
+# The gate (lints, toolchain, deny, nextest, mutants, coverage) is centralized
+# here and inherited by every member via `[lints] workspace = true`. Strictness
+# is deliberately maxed: see CLAUDE.md § "The gate".
+[workspace]
+resolver = "3"
+members = ["crates/bdinfo-rs-core", "crates/bdinfo-rs"]
+# fuzz/ is an INDEPENDENT workspace (its libfuzzer-sys harness uses `unsafe` and
+# needs nightly + Linux). Excluded so it never enters `cargo ck`/`lt --workspace`
+# or touches the forbid(unsafe_code) posture of the two first-party crates.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.96"
+# LGPL (unlike GPL) permits use from other applications.
+license = "LGPL-2.1-only"
+authors = ["bdinfo-rs contributors"]
+repository = "https://github.com/agentjp/bdinfo-rs"
+homepage = "https://github.com/agentjp/bdinfo-rs"
+documentation = "https://docs.rs/bdinfo-rs-core"
+
+# ---------------------------------------------------------------------------
+# Lints — maximum strictness. The `cargo lt` gate runs clippy with
+# `-D warnings`, so every `warn` below is effectively an error in CI; the split
+# (deny vs warn) only changes whether a bare `cargo check` is noisy.
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "forbid"                  # memory safety is the product guarantee.
+# `cargo llvm-cov` sets cfg(coverage)/cfg(coverage_nightly) when instrumenting;
+# register them so the `#[cfg_attr(coverage_nightly, …)]` coverage-exclusion
+# attributes don't trip `unexpected_cfgs` under the `-D warnings` gate.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
+missing_docs = "warn"                   # every public item carries a doc.
+missing_debug_implementations = "deny"
+unreachable_pub = "deny"
+unused_crate_dependencies = "deny"
+unused_qualifications = "deny"
+unused_import_braces = "deny"
+let_underscore_drop = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+redundant_lifetimes = "deny"
+non_ascii_idents = "deny"               # parser hygiene / homoglyph safety.
+keyword_idents_2024 = "deny"
+unused_lifetimes = "deny"
+unit_bindings = "deny"
+unused_macro_rules = "deny"
+meta_variable_misuse = "deny"
+macro_use_extern_crate = "deny"
+ffi_unwind_calls = "deny"
+explicit_outlives_requirements = "deny"
+unnameable_types = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# The only two pedantic/cargo lints kept allowed — enabling either is pure noise
+# or a false conflict, NOT a real strictness gain:
+#   module_name_repetitions — would force awkward names (`discovery::DiscoveryKind`).
+#   multiple_crate_versions — `getrandom` 0.3/0.4 are dup'd transitively via the
+#                             proptest dev-dep; unavoidable without dropping proptest.
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
+# Restriction picks — clippy's `restriction` group is a contradictory pick-list,
+# not a group to enable wholesale. These guard the exact bug classes a binary
+# bitstream parser must never hit: out-of-bounds index panics
+# (`indexing_slicing`), UTF-8 slice panics (`string_slice`), silent wrap on
+# byte/offset math (`arithmetic_side_effects`), and dev-marker leakage.
+indexing_slicing = "warn"
+string_slice = "warn"
+arithmetic_side_effects = "warn"
+# Width-typed disc fields go through `TryFrom`/`from_be_bytes`, never a silent
+# `as` truncation. The handful of remaining casts are float↔int conversions (no
+# `TryFrom`) or deliberate fixed-width truncations, each carrying a scoped
+# `#[expect(clippy::as_conversions, reason = …)]`. Test scaffolding (enum-repr
+# assertions, synthetic `.iso` builders) is expect-scoped at the module/fn level.
+as_conversions = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+panic = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+unwrap_in_result = "warn"
+exit = "warn"                           # CLI uses ExitCode, never process::exit.
+mem_forget = "warn"
+clone_on_ref_ptr = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+lossy_float_literal = "warn"
+# Anti-drift: every suppression carries a `reason = "…"`, AND must use the
+# self-cleaning `#[expect]` (warns when its suppressed lint stops firing) —
+# never a bare `#[allow]`.
+allow_attributes_without_reason = "warn"
+allow_attributes = "warn"
+
+# rustdoc — every doc lint on. The `cargo dc` alias runs with
+# RUSTDOCFLAGS=-D warnings, so these become hard errors (broken links, bare URLs,
+# unescaped backticks, malformed code fences, …).
+[workspace.lints.rustdoc]
+all = { level = "warn", priority = -1 }
+# `cargo dc` documents private items (`--document-private-items`), so internal
+# docs intentionally link to private helpers; those links resolve in our doc
+# build. This lint targets public-only doc builds, where such links break — it
+# does not apply here.
+private_intra_doc_links = "allow"
+
+[workspace.dependencies]
+# Internal (version + path so bdinfo-rs is publishable to crates.io).
+bdinfo-rs-core = { path = "crates/bdinfo-rs-core", version = "1.0.0" }
+# External (pinned to latest stable minor; deny.toml forbids wildcards).
+clap = { version = "4.6", features = ["derive"] }
+proptest = "1.11"
+# The library error type's derive (`#[derive(thiserror::Error)]`). Pure Rust
+# (proc-macro: proc-macro2/quote/syn) — no C deps, MIT/Apache, so the static
+# binary and the `cdeps` gate stay intact. `anyhow` stays out of the library.
+thiserror = "2.0"
+# Read-only DOM XML — used only to extract the disc title from META/bdmt_eng.xml.
+# Pure Rust, MIT/Apache, no C deps (the one XML crate the CLAUDE.md dependency
+# budget allows).
+roxmltree = "0.21"
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+# Release = the shipped single static binary: tuned for size.
+[profile.release]
+opt-level = "s"   # optimize for size (the product is one small drop-and-run binary)
+lto = true
+codegen-units = 1
+panic = "abort"   # drop unwind tables (smaller). The CLI aborts on the panics the
+                  # gate already forbids on input; tests/coverage use the test
+                  # profile, so this only affects the shipped binary.
+strip = true
+
+# Dedicated profile for `cargo mt` (cargo-mutants): inherits `test` (same
+# opt/codegen/panic) but drops debug info — mutants never reads it, and
+# skipping it speeds up the hundreds of incremental rebuilds. Don't reuse
+# `release`: its LTO would kill incremental-rebuild speed.
+[profile.mutants]
+inherits = "test"
+debug = "none"
+
+# The profile `dist` (cargo-dist) builds the shipped binary with (`--profile
+# dist`). dist HARD-REQUIRES this table to exist and be named exactly `dist`, so
+# it cannot be removed. It inherits the size-tuned `[profile.release]` above
+# verbatim (opt-level=s, lto=true, codegen-units=1, panic=abort, strip), so the
+# release artifact dist produces is byte-for-byte the same tuning as a manual
+# `cargo build --release`. Deliberately NO `split-debuginfo` key: with `lto=true`
+# (fat) + `panic="abort"`, an explicit `split-debuginfo="packed"` triggers a
+# build failure (rust-lang/rust#104042), so we leave it at the target default.
+[profile.dist]
+inherits = "release"

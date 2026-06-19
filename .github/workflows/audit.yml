@@ -1,0 +1,60 @@
+name: audit
+
+# Supply-chain / advisory audit of the dependency tree (the published crates DO
+# have dependencies). cargo-deny checks, against deny.toml:
+#   - RustSec advisories (vulns / unsound / unmaintained / yanked)
+#   - the license allowlist (deps must be permissive)
+#   - the no-C-dependencies bans (cc/cmake/bindgen/… → guards the static binary)
+#   - crates.io-only sources (no git / unknown registries)
+# Runs on every push/PR and weekly, so a newly-disclosed CVE surfaces between
+# pushes too.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-deny (prebuilt, no from-source compile)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Audit advisories + licenses + bans + sources
+        run: cargo deny check
+
+  # Supply-chain audit: every dependency must be covered by a trusted third-party
+  # audit, a recorded publisher-trust, or an explicit exemption in supply-chain/.
+  # --locked uses the committed imports.lock (no network refetch) so the result is
+  # deterministic; a newly-introduced unvetted dep fails here.
+  cargo-vet:
+    name: cargo vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-vet 0.10.2
+        # The committed imports.lock omits the `user-id` publisher field that
+        # cargo-vet 0.10.0 still rejects; 0.10.1+ relaxed it. Only 0.10.0 ships a
+        # prebuilt binary, so 0.10.2 is built from source (--locked = its own
+        # pinned deps). Keep in lockstep with the version that writes supply-chain/.
+        run: cargo install cargo-vet --version 0.10.2 --locked
+
+      - name: Vet the dependency tree against the committed store
+        run: cargo vet --locked

@@ -1,0 +1,215 @@
+name: docker
+
+# Push a `vX.Y.Z` tag and a multi-arch image is published to the GitHub Container
+# Registry, versioned in lock-step with the binaries `release.yml` cuts from the
+# same tag. The runtime image is `FROM scratch` + the static musl binary (see the
+# Dockerfile), so there is nothing in it to emulate: each arch is built on its OWN
+# native runner, pushed by digest, and the two are stitched into one manifest list.
+# A tag resolves to that list, and `docker pull` auto-selects the caller's arch.
+# The manifest list also gets a signed SLSA provenance + SBOM attestation, free on
+# public repos — the same supply-chain trail release.yml attaches to the binaries.
+#
+# Tags published for a release v1.2.3:  1.2.3, 1.2, 1, latest.
+# A `-pre.N` rehearsal tag publishes only the exact 1.2.3-pre.N — never latest.
+#
+# Assumes a public repo (free arm64 runners + GHCR). The package inherits the
+# repo's visibility; flip it to public once in the repo's package settings.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ── Gate: the tag must be honest before anything is built (mirrors release.yml)
+  verify:
+    name: verify tag matches crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # ancestry check against master needs history
+
+      - name: Parse the tag, compare to [workspace.package] version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(?<ver>(?<base>\d+\.\d+\.\d+)(?:-(?<pre>[0-9A-Za-z][0-9A-Za-z.-]*))?)$') {
+            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
+          }
+          $base = $Matches['base']
+
+          # The version under [workspace.package] in the root Cargo.toml.
+          $inWp = $false; $crate = $null
+          foreach ($line in (Get-Content Cargo.toml)) {
+            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
+            if ($line -match '^\[') { $inWp = $false; continue }
+            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $crate = $Matches[1]; break }
+          }
+          if (-not $crate) { throw 'No [workspace.package] version found in Cargo.toml' }
+          if ($base -ne $crate) {
+            throw "Tag $tag (base $base) does not match the workspace crate version $crate"
+          }
+
+          # The tagged commit must already be on master (i.e. gated by CI).
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/master
+          if ($LASTEXITCODE -ne 0) { throw "Tagged commit $env:GITHUB_SHA is not on master" }
+
+  # ── Build: one NATIVE runner per arch, each pushed to GHCR by digest ───────
+  # No QEMU: a native runner links the matching arch directly (the `scratch`
+  # image runs nothing at build time). The image is pushed untagged, by digest;
+  # the merge job below applies the human tags to the assembled manifest list.
+  build:
+    name: build (${{ matrix.platform }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export the digest
+        shell: pwsh
+        run: |
+          $dir = '${{ runner.temp }}/digests'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $digest = '${{ steps.build.outputs.digest }}' -replace '^sha256:', ''
+          New-Item -ItemType File "$dir/$digest" | Out-Null
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Merge: stitch the per-arch digests into one tagged manifest list, then
+  #    attest its provenance + SBOM (mirrors the binary attestation in release.yml).
+  merge:
+    name: publish manifest list
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read        # checkout (the Cargo.lock the SBOM is built from)
+      packages: write       # push the manifest list + attestations to GHCR
+      id-token: write       # sigstore signing for the attestations
+      attestations: write   # record them in the GitHub attestation store
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # {{version}} = 1.2.3 (the `v` is dropped by Docker convention); the
+          # rolling 1.2 / 1 tags and `latest` are applied to releases only, never
+          # to a `-pre.N` prerelease (metadata-action's default latest=auto).
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Create the manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        shell: pwsh
+        run: |
+          $meta = $env:DOCKER_METADATA_OUTPUT_JSON | ConvertFrom-Json
+          $tags = $meta.tags | ForEach-Object { '-t', $_ }
+          $refs = Get-ChildItem -File | ForEach-Object { "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:$($_.Name)" }
+          docker buildx imagetools create $tags $refs
+
+      - name: Capture the manifest-list digest
+        id: digest
+        shell: pwsh
+        run: |
+          $ref = "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          $digest = "$(docker buildx imagetools inspect $ref --format '{{.Manifest.Digest}}')".Trim()
+          "digest=$digest" >> $env:GITHUB_OUTPUT
+
+      # Attestations are free on public repos (Sigstore public-good); skipped on a
+      # private repo, where they would need GitHub Enterprise — as release.yml does.
+      - name: Attest build provenance for the image
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      # The image is `FROM scratch`: no OS packages to scan, so the SBOM is built
+      # from Cargo.lock — the crates compiled into the binary, i.e. what the image
+      # actually contains.
+      - name: Generate the dependency SBOM
+        if: ${{ !github.event.repository.private }}
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: ${{ runner.temp }}/sbom.spdx.json
+          upload-artifact: false
+
+      - name: Attest the SBOM for the image
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-sbom@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom.spdx.json
+          push-to-registry: true
+
+      - name: Inspect the published image
+        shell: pwsh
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
