@@ -11,3 +11,14 @@ fuzz/corpus/** binary
 *.exe binary
 *.pdb binary
 *.png binary
+
+# Real-disc CI fixtures (crates/bdinfo-rs/tests/fixtures). The BDMV folder bytes
+# and the .iso are opaque binary — a CRLF/LF rewrite would corrupt the M2TS / CLPI /
+# MPLS / index streams and break parsing, the very cross-platform failure these
+# guard against. The golden reports carry the report's locked CRLF byte contract,
+# so they must keep their exact bytes too (`-text` disables eol conversion while
+# still diffing as text). Without these, `* text=auto eol=lf` above would clobber
+# both on checkout.
+crates/bdinfo-rs/tests/fixtures/BigBuckBunny/** binary
+crates/bdinfo-rs/tests/fixtures/*.iso binary
+crates/bdinfo-rs/tests/fixtures/golden/*.txt -text diff
