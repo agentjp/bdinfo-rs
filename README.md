@@ -16,7 +16,7 @@
 [![license](https://img.shields.io/badge/license-LGPL--2.1--only-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 
-[Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Library](#-library) · [Security](#-quality--security)
+[Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Footprint](#-footprint) · [Library](#-library) · [Security](#-quality--security)
 
 </div>
 
@@ -31,6 +31,7 @@ runtime, no DLLs, no install — drop the file anywhere and it runs.
 
 - [✨ Features](#-features)
 - [🧪 Disclaimer](#-disclaimer)
+- [📀 Owned discs only](#-owned-discs-only)
 - [📦 Installation](#-installation)
   - [Package managers](#package-managers)
   - [Install script](#install-script)
@@ -40,6 +41,7 @@ runtime, no DLLs, no install — drop the file anywhere and it runs.
 - [🚀 Usage](#-usage)
   - [Shell completions & man page](#shell-completions--man-page)
 - [⚡ Performance](#-performance)
+- [🪶 Footprint](#-footprint)
 - [📚 Library](#-library)
 - [🔒 Quality & security](#-quality--security)
 - [🔀 Differences from BDInfo](#-differences-from-bdinfo)
@@ -52,8 +54,8 @@ runtime, no DLLs, no install — drop the file anywhere and it runs.
 
 - **Drop-in BDInfo replacement.** The same console flow and the same human-readable
   disc report, byte-for-byte deterministic across platforms.
-- **One static binary.** No runtime, no DLLs, no install step — a ~2–5 MB file per
-  platform that just works.
+- **One tiny static binary.** No runtime, no DLLs, no install step — a single ~1 MB
+  file per platform, [tens of times smaller](#-footprint) than the .NET BDInfo tools.
 - **Memory-safe by construction.** `unsafe` is `forbid`-den across the workspace.
   Every read is bounds-checked; malformed input returns an error rather than panicking.
 - **Zero C dependencies.** The M2TS demuxer, all 13 codec scanners, the bitstream
@@ -74,6 +76,23 @@ The goal here is to have a well-maintained open source project, all through LLMs
 I like to think the process is the product in this case; the code is just what falls out the other end, and I gotta say I am surprised by the results so far: I invite you to try it and share your results.
 
 One honest caveat: all of this is best-effort. I've thrown a lot at it, proptests, fuzzing, mutation testing, and the real rips on my shelf, but Blu-ray is a sprawling, quirky format, and no test suite covers the long tail of mastering oddities out there. The real proof can only come from the wild: real users running it against the multitude of discs that actually exist. If `bdinfo-rs` stumbles on one of yours, that's the most useful thing you can send me — open an issue with the details and I'll feed it straight back into the loop.
+
+## 📀 Owned discs only
+
+bdinfo-rs is for analyzing Blu-ray discs **you legally own**. It reads disc *structure
+and metadata* — playlists, clip info, and per-stream codec specs — from a `BDMV` folder
+or `.iso` that already exists on your filesystem. It contains **no decryption and no
+copy-protection circumvention** of any kind; it neither rips nor copies the feature
+content, and this project does not endorse or assist piracy.
+
+Because it never decrypts, it works only on **already-decrypted** discs — a decrypted
+`BDMV` folder or `.iso`; aimed at an encrypted retail disc the playlist list may still
+appear, but the per-stream analysis will be meaningless.
+
+When you file an issue — especially an [output difference](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)
+— please report only from discs you own, and paste **text reports** (codecs, bitrates,
+stream layout — technical metadata), never copyrighted video or audio. A blu-ray.com link
+to the exact release is welcome and helps verify the disc; a download link to one is not.
 
 ## 📦 Installation
 
@@ -138,7 +157,7 @@ step. Verify a download against the attached aggregate `sha256.sum`, or the per-
 
 Multi-arch images (`linux/amd64` + `linux/arm64`) are published to the GitHub Container
 Registry on each release — the image is just the static binary on `scratch`: no OS, no
-shell, no libc, nothing to patch, about 2 MB. The tags match the repo's versions
+shell, no libc, nothing to patch, about 1 MB. The tags match the repo's versions
 (`1.0.0`, plus rolling `1.0` and `1`):
 
 ```sh
@@ -258,6 +277,28 @@ start‑order rotated per disc, wall‑clock end to end — Intel Core Ultra 9 2
 [BDInfoCLI‑ng](https://github.com/tetrahydroc/BDInfoCLI-ng) (.NET 8), which ships with a
 2 GB GC heap cap that aborts on large UHD streams — it was given unrestricted heap so it
 could complete the scan and be timed.</sub>
+
+## 🪶 Footprint
+
+bdinfo-rs isn't just faster — it's a rounding error on the others' size. It's a single
+self-contained binary of about **1 MB** with nothing else to install. The .NET BDInfo
+tools bundle (or require) the .NET runtime and ship alongside dozens of DLLs, so a working
+install is **tens of megabytes spread across many files**:
+
+| Tool | Installed on disk | Files | Runtime |
+|---|--:|--:|:--|
+| **bdinfo-rs** | **≈ 1 MB** | **1** | none |
+| BDInfo (uniqproject) | ≈ 54 MB | 8 | .NET + Skia, bundled |
+| BDInfoCLI‑ng (tetra) | ≈ 71 MB | 191 | .NET 8, bundled |
+
+That's roughly **50–80× smaller** — one file you can drop on a USB stick, commit to a
+repo, or bake into a `FROM scratch` container, with no runtime and no DLLs to carry along.
+
+<sub>On-disk size of a complete install, measured on Windows x64: the size-optimized
+`bdinfo-rs` release binary vs. the self-contained publishes of
+[UniqProject BDInfo](https://github.com/UniqProject/BDInfo) 0.8.0.1b and
+[BDInfoCLI‑ng](https://github.com/tetrahydroc/BDInfoCLI-ng) (.NET 8). The Linux musl and
+macOS binaries are in the same ≈1 MB ballpark.</sub>
 
 ## 📚 Library
 

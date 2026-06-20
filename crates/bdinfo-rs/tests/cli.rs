@@ -409,3 +409,60 @@ fn a_subcommand_style_invocation_is_just_a_bad_path() {
         assert_eq!(output.status.code(), Some(2), "{word}");
     }
 }
+
+// --- Real-disc end-to-end: the same scan on every platform ---------------------
+//
+// The two fixtures under `tests/fixtures/` are tiny but REAL BD-ROM discs: a ~5 s
+// Big Buck Bunny clip (CC BY 3.0 — see that dir's README) authored with tsMuxeR
+// into a 1080p H.264 video track plus an LPCM audio track. One is a BDMV folder,
+// the other the same disc as a UDF `.iso`. We scan each with the built binary and
+// assert the report matches a committed golden byte-for-byte.
+//
+// This is the cross-platform guarantee. The report is locked (CRLF, UTF-8 no BOM,
+// invariant number spellings, ties-to-even fixed point), so one golden must
+// reproduce identically on x86_64 and aarch64 across Linux, Windows and macOS —
+// the CI `test` matrix runs this on a native runner for every released binary, and
+// a byte differing between arches would mean a real determinism bug. The
+// `.gitattributes` rules keep the disc bytes (`binary`) and the golden's CRLF
+// (`-text`) verbatim so checkout can't perturb either.
+
+/// Absolute path to a committed real-disc fixture under `tests/fixtures/`.
+fn real_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name)
+}
+
+/// Scan `disc` with `-m 00000` into a fresh temp dest and return the report it
+/// writes as `BDINFO.{label}.txt`. `label` is the disc label the scan derives: a
+/// folder takes its directory name, an `.iso` its UDF volume label.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
+)]
+fn scan_report(disc: &std::path::Path, label: &str, tag: &str) -> String {
+    let dest = std::env::temp_dir().join(format!("bdinfo-rs-real-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dest).expect("create dest");
+    let output = bdinfo_rs()
+        .args([disc.as_os_str(), dest.as_os_str(), "-m".as_ref(), "00000".as_ref()])
+        .output()
+        .expect("spawn bdinfo-rs");
+    let report = std::fs::read(dest.join(format!("BDINFO.{label}.txt"))).expect("read the report");
+    let _ = std::fs::remove_dir_all(&dest).is_ok();
+    assert!(output.status.success(), "scan failed: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(report).expect("the report is valid UTF-8")
+}
+
+#[test]
+fn a_real_bdmv_folder_scan_matches_the_golden_byte_for_byte() {
+    let got = scan_report(&real_fixture("BigBuckBunny"), "BigBuckBunny", "folder");
+    assert_eq!(
+        got,
+        include_str!("fixtures/golden/folder.txt"),
+        "folder report drifted from golden"
+    );
+}
+
+#[test]
+fn a_real_iso_scan_matches_the_golden_byte_for_byte() {
+    let got = scan_report(&real_fixture("BigBuckBunny.iso"), "Blu-Ray", "iso");
+    assert_eq!(got, include_str!("fixtures/golden/iso.txt"), "iso report drifted from golden");
+}

@@ -27,10 +27,22 @@ jobs:
   test:
     name: build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # One native runner per RELEASED binary — x86_64 AND aarch64 across Linux,
+    # Windows and macOS — so `cargo test` (including the real-disc end-to-end scan
+    # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
+    # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
+    # runners, free for public repos. Keep this in lockstep with the six dist
+    # targets in dist-workspace.toml.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2025, macos-15]
+        os:
+          - ubuntu-latest      # x86_64-unknown-linux-musl
+          - ubuntu-24.04-arm   # aarch64-unknown-linux-musl
+          - windows-2025       # x86_64-pc-windows-msvc
+          - windows-11-arm     # aarch64-pc-windows-msvc
+          - macos-15-intel     # x86_64-apple-darwin
+          - macos-15           # aarch64-apple-darwin
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -187,3 +199,105 @@ jobs:
         run: |
           git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
           cargo mutants --no-shuffle --in-diff pr.diff
+
+  # The ultimate real-world gate: do exactly what a user does — install bdinfo-rs
+  # the traditional way (build it from source; no package managers), scan the
+  # committed fixture disc, and confirm the report is byte-identical to the golden.
+  # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
+  # so this exercises the actual RELEASE/static artifact (not the debug test binary)
+  # on hardware we don't own — Linux builds the static musl target it ships. Runs
+  # last, after the rest of the gate. (Running the binary in TOTAL isolation — FROM
+  # scratch, zero runtime deps — is the separate `isolation` job below; docker.yml
+  # ships that same scratch image on release.)
+  e2e:
+    name: real-world install + scan (${{ matrix.os }})
+    needs: [test, lint, coverage]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: windows-2025, target: "" }
+          - { os: windows-11-arm, target: "" }
+          - { os: macos-15-intel, target: "" }
+          - { os: macos-15, target: "" }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # "Install" the way a user would: build from source and drop the binary in a
+      # bin dir — exactly what `cargo install bdinfo-rs` does off crates.io. On Linux
+      # we target static musl so it matches the shipped artifact byte-for-byte.
+      - name: Install bdinfo-rs from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add "${{ matrix.target }}"
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst" --target "${{ matrix.target }}"
+          else
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst"
+          fi
+
+      # Scan both fixture discs with the installed binary and assert each report is
+      # byte-identical to its golden — the eyeball check a person does, made exact.
+      - name: Scan the fixture disc and diff against the golden
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/inst/bin/bdinfo-rs"
+          fix="crates/bdinfo-rs/tests/fixtures"
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          "$bin" --version
+          "$bin" -m 00000 "$fix/BigBuckBunny"     "$out"
+          "$bin" -m 00000 "$fix/BigBuckBunny.iso" "$out"
+          cmp "$out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          echo "OK — both reports byte-identical to the golden"
+
+  # The "drop one file, it runs" proof, as its OWN job (not a step wedged into the
+  # e2e matrix): build the shipped static musl binary, bake it into an EMPTY `FROM
+  # scratch` image — no libc, no shell, no /tmp, nothing — and scan the fixture disc
+  # from inside it, byte-checked against the golden. A binary with any runtime dep
+  # could not even start in scratch, so green = the zero-deps guarantee, functional.
+  # Linux x86_64 + aarch64 (the two static-musl targets we ship; Windows/macOS have
+  # no empty-container equivalent). docker.yml ships this same image on release.
+  isolation:
+    name: zero-deps scan FROM scratch (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # Build the actual shipped artifact: the fully static musl release binary.
+      # Pure-Rust (no C deps), so the musl target needs no C toolchain.
+      - name: Build the static musl binary
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p bdinfo-rs --target ${{ matrix.target }}
+
+      - name: Scan the fixture disc FROM scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/ctx"
+          mkdir -p "$ctx/out"
+          install -D "target/${{ matrix.target }}/release/bdinfo-rs" "$ctx/bdinfo-rs"
+          printf 'FROM scratch\nCOPY bdinfo-rs /bdinfo-rs\nENTRYPOINT ["/bdinfo-rs"]\n' > "$ctx/Dockerfile"
+          docker build -t bdinfo-scratch "$ctx"
+          fix="$PWD/crates/bdinfo-rs/tests/fixtures"
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny     /out
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny.iso /out
+          cmp "$ctx/out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$ctx/out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          echo "OK — scanned both discs FROM scratch, byte-identical to golden"
