@@ -205,9 +205,10 @@ jobs:
   # committed fixture disc, and confirm the report is byte-identical to the golden.
   # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
   # so this exercises the actual RELEASE/static artifact (not the debug test binary)
-  # on hardware we don't own. On Linux it builds the static musl target and scans a
-  # second time FROM an empty `scratch` container — proving the "drop one file, it
-  # runs" promise with zero runtime deps. Runs last, after the rest of the gate.
+  # on hardware we don't own — Linux builds the static musl target it ships. Runs
+  # last, after the rest of the gate. (Running the binary in TOTAL isolation — FROM
+  # scratch, zero runtime deps — is the separate `isolation` job below; docker.yml
+  # ships that same scratch image on release.)
   e2e:
     name: real-world install + scan (${{ matrix.os }})
     needs: [test, lint, coverage]
@@ -257,23 +258,46 @@ jobs:
           cmp "$out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
           echo "OK — both reports byte-identical to the golden"
 
-      # Linux only: the shipped binary is fully static, so prove "drop one file, it
-      # runs" by baking it into an EMPTY `FROM scratch` image (no libc, no shell,
-      # nothing) and scanning from there — zero runtime deps, the whole point.
-      - name: Scan FROM scratch (zero runtime deps)
-        if: runner.os == 'Linux'
+  # The "drop one file, it runs" proof, as its OWN job (not a step wedged into the
+  # e2e matrix): build the shipped static musl binary, bake it into an EMPTY `FROM
+  # scratch` image — no libc, no shell, no /tmp, nothing — and scan the fixture disc
+  # from inside it, byte-checked against the golden. A binary with any runtime dep
+  # could not even start in scratch, so green = the zero-deps guarantee, functional.
+  # Linux x86_64 + aarch64 (the two static-musl targets we ship; Windows/macOS have
+  # no empty-container equivalent). docker.yml ships this same image on release.
+  isolation:
+    name: zero-deps scan FROM scratch (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # Build the actual shipped artifact: the fully static musl release binary.
+      # Pure-Rust (no C deps), so the musl target needs no C toolchain.
+      - name: Build the static musl binary
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p bdinfo-rs --target ${{ matrix.target }}
+
+      - name: Scan the fixture disc FROM scratch
         shell: bash
         run: |
           set -euo pipefail
           ctx="$RUNNER_TEMP/ctx"
           mkdir -p "$ctx/out"
-          install -D "$RUNNER_TEMP/inst/bin/bdinfo-rs" "$ctx/bdinfo-rs"
-          file "$ctx/bdinfo-rs" | grep -q "statically linked"
+          install -D "target/${{ matrix.target }}/release/bdinfo-rs" "$ctx/bdinfo-rs"
           printf 'FROM scratch\nCOPY bdinfo-rs /bdinfo-rs\nENTRYPOINT ["/bdinfo-rs"]\n' > "$ctx/Dockerfile"
           docker build -t bdinfo-scratch "$ctx"
-          docker run --rm \
-            -v "$PWD/crates/bdinfo-rs/tests/fixtures:/fix:ro" \
-            -v "$ctx/out:/out" \
-            bdinfo-scratch -m 00000 /fix/BigBuckBunny /out
-          cmp "$ctx/out/BDINFO.BigBuckBunny.txt" crates/bdinfo-rs/tests/fixtures/golden/folder.txt
-          echo "OK — runs FROM scratch with zero runtime deps"
+          fix="$PWD/crates/bdinfo-rs/tests/fixtures"
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny     /out
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny.iso /out
+          cmp "$ctx/out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$ctx/out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          echo "OK — scanned both discs FROM scratch, byte-identical to golden"
