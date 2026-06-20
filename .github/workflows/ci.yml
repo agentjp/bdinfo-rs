@@ -27,10 +27,22 @@ jobs:
   test:
     name: build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # One native runner per RELEASED binary — x86_64 AND aarch64 across Linux,
+    # Windows and macOS — so `cargo test` (including the real-disc end-to-end scan
+    # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
+    # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
+    # runners, free for public repos. Keep this in lockstep with the six dist
+    # targets in dist-workspace.toml.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2025, macos-15]
+        os:
+          - ubuntu-latest      # x86_64-unknown-linux-musl
+          - ubuntu-24.04-arm   # aarch64-unknown-linux-musl
+          - windows-2025       # x86_64-pc-windows-msvc
+          - windows-11-arm     # aarch64-pc-windows-msvc
+          - macos-15-intel     # x86_64-apple-darwin
+          - macos-15           # aarch64-apple-darwin
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
