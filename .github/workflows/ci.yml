@@ -199,3 +199,81 @@ jobs:
         run: |
           git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff
           cargo mutants --no-shuffle --in-diff pr.diff
+
+  # The ultimate real-world gate: do exactly what a user does — install bdinfo-rs
+  # the traditional way (build it from source; no package managers), scan the
+  # committed fixture disc, and confirm the report is byte-identical to the golden.
+  # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
+  # so this exercises the actual RELEASE/static artifact (not the debug test binary)
+  # on hardware we don't own. On Linux it builds the static musl target and scans a
+  # second time FROM an empty `scratch` container — proving the "drop one file, it
+  # runs" promise with zero runtime deps. Runs last, after the rest of the gate.
+  e2e:
+    name: real-world install + scan (${{ matrix.os }})
+    needs: [test, lint, coverage]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - { os: windows-2025, target: "" }
+          - { os: windows-11-arm, target: "" }
+          - { os: macos-15-intel, target: "" }
+          - { os: macos-15, target: "" }
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+
+      # "Install" the way a user would: build from source and drop the binary in a
+      # bin dir — exactly what `cargo install bdinfo-rs` does off crates.io. On Linux
+      # we target static musl so it matches the shipped artifact byte-for-byte.
+      - name: Install bdinfo-rs from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add "${{ matrix.target }}"
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst" --target "${{ matrix.target }}"
+          else
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst"
+          fi
+
+      # Scan both fixture discs with the installed binary and assert each report is
+      # byte-identical to its golden — the eyeball check a person does, made exact.
+      - name: Scan the fixture disc and diff against the golden
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/inst/bin/bdinfo-rs"
+          fix="crates/bdinfo-rs/tests/fixtures"
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          "$bin" --version
+          "$bin" -m 00000 "$fix/BigBuckBunny"     "$out"
+          "$bin" -m 00000 "$fix/BigBuckBunny.iso" "$out"
+          cmp "$out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          echo "OK — both reports byte-identical to the golden"
+
+      # Linux only: the shipped binary is fully static, so prove "drop one file, it
+      # runs" by baking it into an EMPTY `FROM scratch` image (no libc, no shell,
+      # nothing) and scanning from there — zero runtime deps, the whole point.
+      - name: Scan FROM scratch (zero runtime deps)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/ctx"
+          mkdir -p "$ctx/out"
+          install -D "$RUNNER_TEMP/inst/bin/bdinfo-rs" "$ctx/bdinfo-rs"
+          file "$ctx/bdinfo-rs" | grep -q "statically linked"
+          printf 'FROM scratch\nCOPY bdinfo-rs /bdinfo-rs\nENTRYPOINT ["/bdinfo-rs"]\n' > "$ctx/Dockerfile"
+          docker build -t bdinfo-scratch "$ctx"
+          docker run --rm \
+            -v "$PWD/crates/bdinfo-rs/tests/fixtures:/fix:ro" \
+            -v "$ctx/out:/out" \
+            bdinfo-scratch -m 00000 /fix/BigBuckBunny /out
+          cmp "$ctx/out/BDINFO.BigBuckBunny.txt" crates/bdinfo-rs/tests/fixtures/golden/folder.txt
+          echo "OK — runs FROM scratch with zero runtime deps"
