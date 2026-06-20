@@ -85,6 +85,10 @@ or `.iso` that already exists on your filesystem. It contains **no decryption an
 copy-protection circumvention** of any kind; it neither rips nor copies the feature
 content, and this project does not endorse or assist piracy.
 
+Because it never decrypts, it works only on **already-decrypted** discs — a decrypted
+`BDMV` folder or `.iso`; aimed at an encrypted retail disc the playlist list may still
+appear, but the per-stream analysis will be meaningless.
+
 When you file an issue — especially an [output difference](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)
 — please report only from discs you own, and paste **text reports** (codecs, bitrates,
 stream layout — technical metadata), never copyrighted video or audio. A blu-ray.com link
