@@ -120,10 +120,10 @@ host = "aarch64-pc-windows-msvc"
 # (dist renders `{name}@{value}` verbatim) so the pins read like the rest of the
 # repo and Dependabot tracks them. Each pin is dist 0.32's own default major
 # (checkout v6, upload-artifact v7, download-artifact v8, attest v4): we stay on
-# dist's tested versions and just pin them — release.yml keeps dist's v6 checkout
-# while the hand-maintained workflows track the latest v7.
+# dist's tested versions and just pin them — checkout v7 now matches the
+# hand-maintained workflows, so the whole repo tracks one SHA.
 [dist.github-action-commits]
-"actions/checkout" = "df4cb1c069e1874edd31b4311f1884172cec0e10 # v6"
+"actions/checkout" = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7"
 "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7"
 "actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8"
 "actions/attest" = "59d89421af93a897026c735860bf21b6eb4f7b26 # v4"
