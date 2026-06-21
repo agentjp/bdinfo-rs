@@ -35,11 +35,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0   # ancestry check against master needs history
+          persist-credentials: false
 
       - name: Parse the tag, compare to [workspace.package] version
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = $env:GITHUB_REF_NAME
           if ($tag -notmatch '^v(?<ver>(?<base>\d+\.\d+\.\d+)(?:-(?<pre>[0-9A-Za-z][0-9A-Za-z.-]*))?)$') {
             throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
           }
@@ -84,6 +85,8 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
@@ -109,10 +112,12 @@ jobs:
 
       - name: Export the digest
         shell: pwsh
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          $dir = '${{ runner.temp }}/digests'
+          $dir = "${env:RUNNER_TEMP}/digests"
           New-Item -ItemType Directory -Force $dir | Out-Null
-          $digest = '${{ steps.build.outputs.digest }}' -replace '^sha256:', ''
+          $digest = $env:DIGEST -replace '^sha256:', ''
           New-Item -ItemType File "$dir/$digest" | Out-Null
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -135,6 +140,8 @@ jobs:
       attestations: write   # record them in the GitHub attestation store
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -168,14 +175,16 @@ jobs:
         run: |
           $meta = $env:DOCKER_METADATA_OUTPUT_JSON | ConvertFrom-Json
           $tags = $meta.tags | ForEach-Object { '-t', $_ }
-          $refs = Get-ChildItem -File | ForEach-Object { "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:$($_.Name)" }
+          $refs = Get-ChildItem -File | ForEach-Object { "${env:REGISTRY}/${env:IMAGE_NAME}@sha256:$($_.Name)" }
           docker buildx imagetools create $tags $refs
 
       - name: Capture the manifest-list digest
         id: digest
         shell: pwsh
+        env:
+          META_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          $ref = "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+          $ref = "${env:REGISTRY}/${env:IMAGE_NAME}:${env:META_VERSION}"
           $digest = "$(docker buildx imagetools inspect $ref --format '{{.Manifest.Digest}}')".Trim()
           "digest=$digest" >> $env:GITHUB_OUTPUT
 
@@ -212,4 +221,6 @@ jobs:
 
       - name: Inspect the published image
         shell: pwsh
-        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}"
+        env:
+          META_VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "${env:REGISTRY}/${env:IMAGE_NAME}:${env:META_VERSION}"

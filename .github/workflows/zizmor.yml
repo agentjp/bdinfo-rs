@@ -1,0 +1,50 @@
+name: zizmor
+
+# Static security analysis of the GitHub Actions workflows themselves (zizmor):
+# template injection, token over-permissioning, unpinned/impostor actions, cache
+# poisoning, dangerous triggers, credential persistence, and more. Runs the FULL
+# audit set online — the GITHUB_TOKEN enables the impostor-commit /
+# known-vulnerable-actions checks that need the GitHub API — and hard-fails on any
+# finding, like the other quality gates. Weekly too, so a newly-disclosed
+# vulnerable action surfaces between pushes. The only accepted residuals live in
+# .github/zizmor.yml (the cargo-dist-generated release.yml, which cannot be
+# hand-edited) and inline (the two architecturally-required workflow_run triggers);
+# every hand-maintained workflow is fixed in place, not suppressed.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 4"   # Thursdays 07:00 UTC — catch newly-disclosed action vulns
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor (workflow security)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor (prebuilt, no from-source compile)
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        with:
+          tool: zizmor
+
+      # Audit every workflow at full strength. The token enables the online audits
+      # (impostor-commit, known-vulnerable-actions); .github/zizmor.yml is
+      # auto-discovered for the accepted release.yml residuals. zizmor exits
+      # non-zero when any finding remains, which fails the gate.
+      - name: Audit the workflows
+        run: zizmor .github/workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
