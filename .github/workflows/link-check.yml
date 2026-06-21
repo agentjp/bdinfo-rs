@@ -1,0 +1,58 @@
+name: link-check
+
+# Stale-link guard: lychee verifies every URL and relative/file link across the
+# repo (README, CHANGELOG, DIFFERENCES, CONTRIBUTING, the issue templates, the
+# Cargo/audit metadata, and the doc-comment URLs in src). Runs on every push/PR
+# like the other quality gates, plus weekly to catch links that rot after merge
+# (external pages move without touching our code). Cheap: lychee caches its
+# results and only re-checks day-old links; a residual rate-limit (429) is
+# accepted rather than failed, so an external host can't red-X an unrelated push.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 3"   # Wednesdays 07:00 UTC — catch post-merge rot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: link-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: Check links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      # Persist lychee's response cache so reruns only re-check day-old links.
+      - name: Restore the lychee cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: .lycheecache
+          key: lychee-${{ github.run_id }}
+          restore-keys: lychee-
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
+        with:
+          # Whole repo; skip the generated lockfile and the binary fuzz seed
+          # corpus (the binary disc fixtures are skipped automatically by their
+          # non-text extensions). Accept 429 so an external host's rate-limit
+          # can't fail the gate; fail:true turns any broken link into a failure.
+          args: >-
+            --cache
+            --max-cache-age 1d
+            --no-progress
+            --accept 200..=299,429
+            --exclude-path Cargo.lock
+            --exclude-path fuzz/corpus
+            .
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
