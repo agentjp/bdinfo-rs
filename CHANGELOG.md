@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-20
+
+Distribution and documentation only — the analyzer and its report output are
+unchanged from 1.0.0 (the binary is byte-for-byte identical; no `src/` changes).
+
 ### Added
 
 - **Install by name on Linux**: `apt install bdinfo-rs` (Debian/Ubuntu) and
@@ -77,5 +82,6 @@ which of these are visible on a normal disc.
 - AC-3 low-sample-rate frame-size shift.
 - DTS core 1536 kbps bitrate.
 
-[Unreleased]: https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/agentjp/bdinfo-rs/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/agentjp/bdinfo-rs/releases/tag/v1.0.1
 [1.0.0]: https://github.com/agentjp/bdinfo-rs/releases/tag/v1.0.0
