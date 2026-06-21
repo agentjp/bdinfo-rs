@@ -31,15 +31,19 @@ jobs:
       id-token: write # mint the short-lived crates.io OIDC token
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+      # No build cache here: this workflow runs only on a release tag and publishes
+      # to crates.io, so a cache poisoned in a less-trusted context could taint a
+      # published crate (zizmor cache-poisoning). cargo publish builds fresh.
 
       # cargo publishes whatever version is in Cargo.toml, not the tag — fail fast
       # if a tag was cut that does not match (mirrors the guard in docker.yml).
       - name: Verify the tag matches the workspace version
         shell: pwsh
         run: |
-          $tag = '${{ github.ref_name }}'
+          $tag = $env:GITHUB_REF_NAME
           if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
             throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
           }

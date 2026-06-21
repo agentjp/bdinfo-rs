@@ -24,7 +24,7 @@ name: packages
 # NOTE: the deb/rpm jobs repackage the prebuilt musl binaries; tweak the cargo-deb
 # / cargo-generate-rpm invocation here (not the binary) if a path needs adjusting.
 
-on:
+on:  # zizmor: ignore[dangerous-triggers] repackages published release assets; checks out master at the tag, never PR code
   workflow_run:
     workflows: ["Release"]
     types: [completed]
@@ -104,6 +104,8 @@ jobs:
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Render the PKGBUILD for this version
         shell: bash
@@ -145,6 +147,8 @@ jobs:
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install cargo-deb
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
@@ -220,6 +224,8 @@ jobs:
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install cargo-generate-rpm
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2

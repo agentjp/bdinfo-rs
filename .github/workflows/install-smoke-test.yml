@@ -12,7 +12,7 @@ name: install-smoke-test
 # executable only (no man/completions), so there is nothing to verify there. The
 # .deb/.rpm/Cloudsmith man+completions contract is verified per-release in packages.yml.
 
-on:
+on:  # zizmor: ignore[dangerous-triggers] only installs the published formula; never checks out untrusted PR code
   workflow_run:
     workflows: ["Release"]
     types: [completed]
