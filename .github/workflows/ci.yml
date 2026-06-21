@@ -54,26 +54,35 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-  # Lint the workflow YAML itself with action-validator (a Rust tool) — catches
-  # schema errors and the invalid-YAML traps (e.g. an unquoted colon in a step
-  # name) that would otherwise only surface when the workflow runs.
+  # Lint the config YAML two ways, both with Rust tools. action-validator
+  # schema-checks the workflow files (catches schema errors + invalid-YAML traps
+  # like an unquoted colon in a step name). ryl (a Rust yamllint) style/syntax-
+  # lints EVERY tracked YAML against .yamllint.yml — duplicate keys, trailing
+  # whitespace, bad indentation, missing final newline, etc. — and covers the
+  # non-workflow YAML (dependabot, issue templates, scorecard) that
+  # action-validator's workflow-only schema can't read. Mirrors the local gate.
   yaml:
-    name: lint workflows (action-validator)
+    name: lint YAML (action-validator + ryl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
-      - name: Install action-validator
-        run: cargo install action-validator --locked
+      - name: Install action-validator + ryl
+        run: |
+          cargo install action-validator --locked
+          cargo install ryl --version 0.20.0 --locked
 
-      - name: Validate GitHub workflow YAML
+      - name: Schema-validate the workflow YAML (action-validator)
         run: |
           for f in .github/workflows/*.yml; do
             echo "validating $f"
             action-validator "$f"
           done
+
+      - name: Style/syntax-lint all YAML (ryl, strict)
+        run: ryl -f github -o - -s .
 
   # Drift guard: the committed release.yml is generated from dist-workspace.toml by
   # dist. This regenerates it in-memory and fails if it differs from the on-disk
