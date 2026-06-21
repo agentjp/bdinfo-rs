@@ -17,20 +17,20 @@ clpi = "clpi"
 clipinf = "clipinf"
 ssif = "ssif"
 mpls = "mpls"
-indx = "indx"   # index.bdmv magic "INDX0300" (UHD detection)
-cll = "cll"     # MaxCLL — HDR maximum content light level
-ue = "ue"       # ue(v): unsigned Exp-Golomb code (H.264/H.265 syntax notation)
-compre = "compre"  # AC-3 BSI syntax element (compression-gain-word exists flag)
+indx = "indx" # index.bdmv magic "INDX0300" (UHD detection)
+cll = "cll" # MaxCLL — HDR maximum content light level
+ue = "ue" # ue(v): unsigned Exp-Golomb code (H.264/H.265 syntax notation)
+compre = "compre" # AC-3 BSI syntax element (compression-gain-word exists flag)
 
 [files]
 # Skip build output, local-only trees, generated data, and binaries.
 extend-exclude = [
     "target/",
     "fuzz/target/",
-    "fuzz/corpus/",  # raw-byte seed fixtures (garbage/boundary inputs), not text
+    "fuzz/corpus/", # raw-byte seed fixtures (garbage/boundary inputs), not text
 
     "docs/",
-    "scratch/",  # local research + notes (also gitignored)
+    "scratch/", # local research + notes (also gitignored)
     # Real-disc test fixtures: the golden reports are locked BDInfo output (domain
     # jargon, not prose) and the README credits the CC-BY source; the disc bytes are
     # binary. Spell-checking any of it is all false positives.

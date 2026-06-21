@@ -5,7 +5,7 @@
 # Cargo.toml as `[profile.dist]` (dist builds with `--profile dist`).
 
 [workspace]
-members = ["cargo:."]   # pull in the whole Cargo workspace rooted here
+members = ["cargo:."] # pull in the whole Cargo workspace rooted here
 
 [dist]
 # Pin dist itself (reproducibility): the generated CI installs exactly this

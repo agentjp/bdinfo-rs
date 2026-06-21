@@ -2,7 +2,7 @@
 # compiler — reproducible gate across machines and CI. rustup reads this and
 # installs the version + components on demand. Bump deliberately.
 [toolchain]
-channel = "1.96.0"  # latest stable (2026-05-25)
+channel = "1.96.0" # latest stable (2026-05-25)
 # clippy + rustfmt for the lint/format gate; llvm-tools-preview ships the
 # profdata/profcov binaries cargo-llvm-cov shells out to (the `cov` alias
 # fails on a fresh machine without it).
