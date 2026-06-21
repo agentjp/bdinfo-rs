@@ -1,9 +1,16 @@
 name: packages
 
-# Fan-out package publishing, fired AFTER release.yml has published the GitHub
-# Release (the `released` event carries the uploaded archives + checksums, and it
-# does NOT fire for prereleases — stable-only, matching Homebrew's default). Every
-# job runs on a Linux runner; every action is SHA-pinned.
+# Fan-out package publishing, run AFTER release.yml ("Release") has built and
+# uploaded the GitHub Release archives. release.yml (cargo-dist) creates that
+# release with the default GITHUB_TOKEN, and GitHub suppresses the
+# `release: released` event for token-created releases — so a `release`-triggered
+# workflow never fires (this is why v1.0.0's .deb/.rpm had to be uploaded by hand).
+# Instead we chain off release.yml's completion via `workflow_run` (which DOES
+# fire), and expose a manual `workflow_dispatch` for re-runs / backfills. Every job
+# runs on a Linux runner; every action is SHA-pinned.
+#
+# Stable-only: the `gate` job skips prerelease tags (anything but a bare vX.Y.Z),
+# matching the old `released`-event semantics and Homebrew's default.
 #
 # Channels handled ELSEWHERE (not here):
 #   - Homebrew  -> release.yml (cargo-dist homebrew publish job)
@@ -14,30 +21,69 @@ name: packages
 #   WINGET_TOKEN - classic PAT (public_repo) on the bot account that forked winget-pkgs
 #   AUR_SSH_KEY  - private SSH key whose public half is on the aur.archlinux.org account
 #
-# NOTE: the deb/rpm jobs repackage the prebuilt musl binaries and are validated on
-# the first real release; tweak the cargo-deb / cargo-generate-rpm invocation here
-# (not the binary) if a path needs adjusting.
+# NOTE: the deb/rpm jobs repackage the prebuilt musl binaries; tweak the cargo-deb
+# / cargo-generate-rpm invocation here (not the binary) if a path needs adjusting.
 
 on:
-  release:
-    types: [released]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package, e.g. v1.0.1
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-env:
-  VERSION: ${{ github.event.release.tag_name }}
-
 jobs:
+  # Resolve the release tag (from the dispatch input or the upstream run's tag)
+  # and gate the fan-out: proceed only for a successful release.yml run (or a
+  # manual dispatch) AND a stable vX.Y.Z tag (no prerelease suffix). The downstream
+  # jobs read the tag from `needs.gate.outputs.version` into their own $VERSION.
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      stable: ${{ steps.resolve.outputs.stable }}
+    steps:
+      - name: Resolve tag + stable check
+        id: resolve
+        shell: bash
+        env:
+          RAW_TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+        run: |
+          tag="$RAW_TAG"
+          if [ -z "$tag" ]; then
+            echo "Could not resolve a release tag from the event payload." >&2
+            exit 1
+          fi
+          if [[ "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then stable=true; else stable=false; fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag '$tag' (stable=$stable)"
   # ── Windows: WinGet (Microsoft community repo) ─────────────────────────────
   winget:
     name: WinGet
     runs-on: ubuntu-latest
+    needs: gate
+    if: needs.gate.outputs.stable == 'true'
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - name: Submit the new version to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         with:
           identifier: agentjp.bdinfo-rs
+          # Pass the tag explicitly: the action's default (github.ref_name) is the
+          # default branch under workflow_run, not the release tag.
+          release-tag: ${{ env.VERSION }}
           # Both windows-msvc .zip archives (x64 + arm64); excludes the .sha256 sidecars.
           installers-regex: '-pc-windows-msvc\.zip$'
           # The bot account that holds the fork of microsoft/winget-pkgs.
@@ -52,7 +98,10 @@ jobs:
     # disabled, so there is no AUR account/package to push to yet. Re-enable by
     # setting the repo variable AUR_ENABLED=true (after registering the account and
     # the AUR_SSH_KEY public key) — no code change needed; the secret is already set.
-    if: ${{ vars.AUR_ENABLED == 'true' }}
+    needs: gate
+    if: ${{ needs.gate.outputs.stable == 'true' && vars.AUR_ENABLED == 'true' }}
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -73,19 +122,27 @@ jobs:
           test: true # build the package in an Arch container before pushing
           commit_username: bdinfo-rs CI
           commit_email: bdinfo-rs@users.noreply.github.com
-          commit_message: Update to ${{ github.event.release.tag_name }}
+          commit_message: Update to ${{ env.VERSION }}
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
 
   # ── Debian/Ubuntu: .deb attached to the release (x64 + arm64) ──────────────
   deb:
     name: .deb (${{ matrix.triple }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    needs: gate
+    if: needs.gate.outputs.stable == 'true'
     permissions:
       contents: write # gh release upload
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
     strategy:
       fail-fast: false
+      # One NATIVE runner per arch so the install test runs the arch-matching binary
+      # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
       matrix:
-        triple: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -112,22 +169,20 @@ jobs:
       - name: Build the .deb
         run: cargo deb --no-build --no-strip --target ${{ matrix.triple }} -p bdinfo-rs
 
-      - name: Verify the .deb (contents on both arches; install + run on amd64)
+      - name: Verify the .deb (install + run + man/completions on the native arch)
         shell: bash
         run: |
+          set -euo pipefail
           deb=$(ls target/${{ matrix.triple }}/debian/*.deb)
           echo "== $deb =="; dpkg-deb --contents "$deb"
-          for p in ./usr/bin/bdinfo-rs ./usr/share/man/man1/bdinfo-rs.1 ./usr/share/bash-completion/completions/bdinfo-rs ./usr/share/zsh/site-functions/_bdinfo-rs ./usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
-            dpkg-deb --contents "$deb" | awk '{print $6}' | grep -Fxq "$p" || { echo "MISSING in .deb: $p"; exit 1; }
+          sudo dpkg -i "$deb"
+          bdinfo-rs --version
+          # cargo-deb gzips the man page (.1.gz); cargo-generate-rpm keeps it (.1) — accept either.
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
           done
-          if [ "${{ matrix.triple }}" = "x86_64-unknown-linux-musl" ]; then
-            sudo dpkg -i "$deb"
-            bdinfo-rs --version
-            for f in /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
-              test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
-            done
-            echo "amd64 .deb: installs, runs, and ships man + completions"
-          fi
+          echo "${{ matrix.triple }} .deb: installs, runs, and ships man + completions"
 
       - name: Upload the .deb to the release
         shell: bash
@@ -135,16 +190,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Publish to the Cloudsmith apt repo so users can `apt install bdinfo-rs` by
+      # name (one `any-distro/any-version` upload serves every Debian-family distro).
+      - name: Publish the .deb to Cloudsmith
+        shell: bash
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          pipx install cloudsmith-cli==1.19.0
+          cloudsmith push deb bdinfo-rs/bdinfo-rs/any-distro/any-version target/${{ matrix.triple }}/debian/*.deb
+
   # ── Fedora/RHEL: .rpm attached to the release (x64 + arm64) ────────────────
   rpm:
     name: .rpm (${{ matrix.triple }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    needs: gate
+    if: needs.gate.outputs.stable == 'true'
     permissions:
       contents: write # gh release upload
+    env:
+      VERSION: ${{ needs.gate.outputs.version }}
     strategy:
       fail-fast: false
+      # One NATIVE runner per arch so the install test runs the arch-matching binary
+      # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
       matrix:
-        triple: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -171,29 +244,82 @@ jobs:
       - name: Build the .rpm
         run: cargo generate-rpm -p crates/bdinfo-rs --target ${{ matrix.triple }}
 
-      - name: Verify the .rpm (contents on both arches; install + run on x86_64 via Fedora)
+      - name: Verify the .rpm (install + run + man/completions on the native arch)
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          sudo rpm --initdb 2>/dev/null || true
           rpmf=$(ls target/${{ matrix.triple }}/generate-rpm/*.rpm)
           echo "== $rpmf =="; rpm -qpl "$rpmf"
-          for p in /usr/bin/bdinfo-rs /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
-            rpm -qpl "$rpmf" | grep -Fxq "$p" || { echo "MISSING in .rpm: $p"; exit 1; }
+          # rpm tool on Ubuntu lays the package's files onto the filesystem; --nodeps
+          # (the binary is static, no deps) and --ignorearch (rpm's host-arch string
+          # may not match the package arch label) keep it from balking.
+          sudo rpm -i --nodeps --ignorearch --force "$rpmf"
+          bdinfo-rs --version
+          # cargo-deb gzips the man page (.1.gz); cargo-generate-rpm keeps it (.1) — accept either.
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
           done
-          if [ "${{ matrix.triple }}" = "x86_64-unknown-linux-musl" ]; then
-            docker run --rm -v "$PWD/target/${{ matrix.triple }}/generate-rpm:/rpms:ro" fedora:latest bash -c '
-              set -e
-              dnf install -y -q /rpms/*.rpm
-              bdinfo-rs --version
-              for f in /usr/share/man/man1/bdinfo-rs.1 /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
-                test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
-              done
-              echo "x86_64 .rpm: installs, runs, and ships man + completions"
-            '
-          fi
+          echo "${{ matrix.triple }} .rpm: installs (rpm -i), runs, and ships man + completions"
 
       - name: Upload the .rpm to the release
         shell: bash
         run: gh release upload "$VERSION" target/${{ matrix.triple }}/generate-rpm/*.rpm --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish to the Cloudsmith yum repo so users can `dnf install bdinfo-rs` by
+      # name (one `any-distro/any-version` upload serves every RPM-family distro).
+      - name: Publish the .rpm to Cloudsmith
+        shell: bash
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          pipx install cloudsmith-cli==1.19.0
+          cloudsmith push rpm bdinfo-rs/bdinfo-rs/any-distro/any-version target/${{ matrix.triple }}/generate-rpm/*.rpm
+
+  # ── Verify the PUBLISHED Cloudsmith repo: install bdinfo-rs BY NAME and confirm
+  # ── the binary + man + completions all land — on both arches, native runners, no
+  # ── Docker. Runs after `deb` has pushed; retries while the apt index propagates.
+  cloudsmith-verify:
+    name: verify Cloudsmith apt install (${{ matrix.triple }})
+    runs-on: ${{ matrix.os }}
+    needs: [gate, deb]
+    if: needs.gate.outputs.stable == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+    steps:
+      # A CLEAN container (not the runner) = a faithful "fresh user" install and no
+      # interference from the runner's pre-seeded apt state. The arm64 runner runs an
+      # arm64 container natively, so each arch verifies its own Cloudsmith package.
+      # The retry absorbs apt-index propagation right after the deb job's push.
+      - name: apt install bdinfo-rs from Cloudsmith (clean container) + check man/completions
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm ubuntu:latest bash -c '
+            set -e
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+            # Minimal Ubuntu images dpkg-exclude /usr/share/man/* to stay small;
+            # drop that so the install is complete like a real system (the man page
+            # IS in the .deb — the runner-based deb job already proves it installs).
+            rm -f /etc/dpkg/dpkg.cfg.d/excludes
+            for i in $(seq 1 12); do
+              if curl -1sLf "https://dl.cloudsmith.io/public/bdinfo-rs/bdinfo-rs/setup.deb.sh" | bash \
+                 && apt-get install -y -qq bdinfo-rs; then ok=1; break; fi
+              echo "waiting for the Cloudsmith index to propagate... ($i)"; sleep 10
+            done
+            [ -n "${ok:-}" ] || { echo "could not apt install bdinfo-rs from Cloudsmith"; exit 1; }
+            bdinfo-rs --version
+            ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "MISSING: man page"; exit 1; }
+            for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+              test -f "$f" || { echo "MISSING: $f"; exit 1; }
+            done
+            echo "Cloudsmith apt install ships the binary + man + completions"
+          '

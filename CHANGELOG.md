@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Install by name on Linux**: `apt install bdinfo-rs` (Debian/Ubuntu) and
+  `dnf install bdinfo-rs` (Fedora/RHEL/openSUSE) from a hosted package repository —
+  add the repo once, then use your package manager normally, updates included — in
+  addition to the standalone `.deb`/`.rpm` release downloads.
+- README: an installed-footprint size comparison and an "owned discs only" usage
+  policy; a one-paragraph code of conduct; and a structured output-difference
+  issue template.
+
+### Fixed
+
+- `cargo binstall bdinfo-rs` now resolves the prebuilt release archives via
+  explicit binstall metadata, including the flat Windows `.zip` layout. (1.0.0
+  shipped no binstall configuration, so installs fell back to fragile
+  auto-detection.)
+- The `.deb` and `.rpm` release packages now publish automatically on every release
+  (1.0.0's had to be attached by hand).
+
 ## [1.0.0] - 2026-06-19
 
 First public release — a memory-safe, single-static-binary drop-in for the

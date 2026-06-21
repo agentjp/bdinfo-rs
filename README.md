@@ -122,14 +122,29 @@ cargo binstall bdinfo-rs
 cargo install bdinfo-rs
 ```
 
-Debian/Ubuntu (`.deb`) and Fedora/RHEL (`.rpm`) packages for x64 and arm64 are attached to
-every [release](https://github.com/agentjp/bdinfo-rs/releases) — and, like Homebrew, they
-install the man page and shell completions too:
+On Debian/Ubuntu and Fedora/RHEL/openSUSE, install **by name with updates** from the hosted
+package repository — add it once (like any third-party repo), then use your package manager
+normally. Like Homebrew, these ship the man page and shell completions too:
+
+```sh
+# Debian / Ubuntu (and derivatives)
+curl -1sLf 'https://dl.cloudsmith.io/public/bdinfo-rs/bdinfo-rs/setup.deb.sh' | sudo -E bash
+sudo apt install bdinfo-rs
+
+# Fedora / RHEL / openSUSE
+curl -1sLf 'https://dl.cloudsmith.io/public/bdinfo-rs/bdinfo-rs/setup.rpm.sh' | sudo -E bash
+sudo dnf install bdinfo-rs
+```
+
+Prefer not to add a repository? The individual `.deb`/`.rpm` packages (x64 + arm64) are attached
+to every [release](https://github.com/agentjp/bdinfo-rs/releases) — download and install one directly:
 
 ```sh
 sudo apt install ./bdinfo-rs_*_amd64.deb     # Debian/Ubuntu
 sudo dnf install ./bdinfo-rs-*.x86_64.rpm    # Fedora/RHEL
 ```
+
+The `apt`/`dnf` repository is graciously hosted by [Cloudsmith](https://cloudsmith.com) ♥ OSS.
 
 ### Install script
 
@@ -256,7 +271,7 @@ times three tools on the **same work**: each scans the identical main feature pl
 (the movie) with `-m`, reading the same streams and producing structurally identical
 reports, so the only variable is speed.
 
-| Feature playlist scanned | bdinfo-rs | uniqproject | tetra |
+| Feature playlist scanned | bdinfo-rs | uniqproject | tetrahydroc |
 |---|--:|--:|--:|
 | MPEG‑2 · 1080i · 3 GB | **0.6 s** | 1.9 s *(2.9×)* | 2.2 s *(3.4×)* |
 | AVC · 1080p · DTS:X · 14 GB | **2.7 s** | 6.8 s *(2.5×)* | 35.4 s *(13.2×)* |
@@ -265,15 +280,15 @@ reports, so the only variable is speed.
 | HEVC · 2160p · HDR10/DV · 50 GB | **15.8 s** | 26.2 s *(1.7×)* | 128.8 s *(8.2×)* |
 
 Across every Blu‑ray video codec and up to 2160p, bdinfo-rs is **≈1.7–2.9× faster than
-uniqproject and ≈3–13× faster than tetra** on byte‑for‑byte equal work. Its lead over
+uniqproject and ≈3–13× faster than tetrahydroc** on byte‑for‑byte equal work. Its lead over
 uniqproject is widest on cache‑resident discs and narrows on the largest ones, where both
-become bound by the same NVMe read; tetra trails by roughly an order of magnitude on any
+become bound by the same NVMe read; tetrahydroc trails by roughly an order of magnitude on any
 full‑length feature, its scanner CPU‑bound far below disk speed.
 
 <sub>Median of 3 runs (slow references timed once), warm page cache, tools interleaved and
 start‑order rotated per disc, wall‑clock end to end — Intel Core Ultra 9 285K · NVMe SSD ·
 47 GB RAM · Windows 11. Reference builds: uniqproject =
-[UniqProject BDInfo](https://github.com/UniqProject/BDInfo) 0.8.0.1b; tetra =
+[UniqProject BDInfo](https://github.com/UniqProject/BDInfo) 0.8.0.1b; tetrahydroc =
 [BDInfoCLI‑ng](https://github.com/tetrahydroc/BDInfoCLI-ng) (.NET 8), which ships with a
 2 GB GC heap cap that aborts on large UHD streams — it was given unrestricted heap so it
 could complete the scan and be timed.</sub>
@@ -282,17 +297,17 @@ could complete the scan and be timed.</sub>
 
 bdinfo-rs isn't just faster — it's a rounding error on the others' size. It's a single
 self-contained binary of about **1 MB** with nothing else to install. The .NET BDInfo
-tools bundle (or require) the .NET runtime and ship alongside dozens of DLLs, so a working
-install is **tens of megabytes spread across many files**:
+tools bundle (or require) the .NET runtime, so a working install runs to **tens of
+megabytes**:
 
-| Tool | Installed on disk | Files | Runtime |
-|---|--:|--:|:--|
-| **bdinfo-rs** | **≈ 1 MB** | **1** | none |
-| BDInfo (uniqproject) | ≈ 54 MB | 8 | .NET + Skia, bundled |
-| BDInfoCLI‑ng (tetra) | ≈ 71 MB | 191 | .NET 8, bundled |
+| Tool | Installed on disk | Runtime |
+|---|--:|:--|
+| **bdinfo-rs** | **≈ 1 MB** | none |
+| BDInfoCLI‑ng (tetrahydroc) | 33.7 MB | .NET 8, bundled |
+| BDInfo (uniqproject) | 54.1 MB | .NET + Skia, bundled |
 
-That's roughly **50–80× smaller** — one file you can drop on a USB stick, commit to a
-repo, or bake into a `FROM scratch` container, with no runtime and no DLLs to carry along.
+That's roughly **34–54× smaller** — one file you can drop on a USB stick, commit to a
+repo, or bake into a `FROM scratch` container, with no runtime to carry along.
 
 <sub>On-disk size of a complete install, measured on Windows x64: the size-optimized
 `bdinfo-rs` release binary vs. the self-contained publishes of
@@ -354,7 +369,7 @@ each layer:
 - **Report & analysis** — ported from [UniqProject BDInfo](https://github.com/UniqProject/BDInfo),
   the classic .NET tool, as the baseline.
 - **Console flow** — the CLI follows [BDInfoCLI-ng](https://github.com/tetrahydroc/BDInfoCLI-ng)
-  (tetra), the command-line BDInfo.
+  (tetrahydroc), the command-line BDInfo.
 - **Codec correctness** — edge cases cross-checked against
   [libbluray](https://code.videolan.org/videolan/libbluray) and [FFmpeg](https://ffmpeg.org/)
   to fix bugs in the original (see [Differences from BDInfo](#-differences-from-bdinfo)).
