@@ -76,6 +76,20 @@ checksum = "sha256"
 # only — satisfied). dist 0.32 emits actions/attest@v4.
 github-attestations = true
 
+# Embed the dependency tree (a Zlib-compressed JSON in the `.dep-v0` linker
+# section) into every shipped binary via cargo-auditable, so a CONSUMER can audit
+# the distributed artifact itself — `cargo audit bin`, `rust-audit-info`, trivy,
+# grype, osv-scanner — closing the loop our build-time cargo-deny/cargo-vet don't:
+# those check the source we build, this lets downstream re-check the binary. dist
+# runs `cargo auditable build`/`cargo auditable zigbuild` instead of plain
+# `cargo build`, and the generated release.yml installs cargo-auditable on each
+# runner (the `need_cargo_auditable` matrix step). Requires dist >= 0.32 — that
+# release lifted the prior cargo-auditable⊕zigbuild mutual exclusion, so our two
+# musl (zigbuild) targets get the section too, not just the cargo-build ones. The
+# embedded section is allocated data, not debuginfo, so `strip = true` keeps it;
+# it adds no runtime dep and no C, so the single-static-binary guarantee holds.
+cargo-auditable = true
+
 # Abort the whole run if any single target fails to build.
 fail-fast = true
 
