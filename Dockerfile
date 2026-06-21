@@ -8,6 +8,11 @@
 # CI gets a multi-arch image by building each arch on its own native runner.
 
 # --- build: compile the static musl binary --------------------------------
+# `cargo auditable build` (not plain `cargo build`) embeds the dependency tree in
+# the binary's `.dep-v0` section, so the GHCR image is auditable by the same tools
+# as the release binaries (`cargo audit bin`, trivy, grype) — matching the
+# cargo-auditable=true that release.yml's dist build uses. Pure Rust, no C, no
+# runtime dep: the FROM-scratch static guarantee is unchanged.
 FROM rust:1.96-slim@sha256:3b05f7c617a200c41c3506097f0d15fc193a1c93bfd8f141007b47cac8f95d3c AS build
 ARG TARGETARCH
 WORKDIR /src
@@ -19,7 +24,8 @@ RUN set -eux; \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     rustup target add "$target"; \
-    cargo build --release -p bdinfo-rs --target "$target" --locked; \
+    cargo install cargo-auditable --locked; \
+    cargo auditable build --release -p bdinfo-rs --target "$target" --locked; \
     cp "target/$target/release/bdinfo-rs" /bdinfo-rs
 
 # --- runtime: the binary, alone -------------------------------------------
