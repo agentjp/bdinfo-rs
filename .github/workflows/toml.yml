@@ -1,0 +1,41 @@
+name: toml
+
+# TOML formatting + lint gate (taplo): every tracked TOML — the Cargo manifests,
+# the gate configs (clippy/deny/nextest/mutants/typos), dist-workspace.toml — must
+# match `taplo fmt` and pass `taplo lint`, against the committed taplo.toml. Mirrors
+# the local gate's `tp` step. Cargo.lock and the cargo-vet-managed
+# supply-chain/*.toml are excluded in taplo.toml so taplo never fights a generator.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: toml-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  taplo:
+    name: lint TOML (taplo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install taplo (prebuilt, no from-source compile)
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
+        with:
+          tool: taplo-cli
+
+      # taplo auto-discovers taplo.toml (include/exclude + formatting). --check
+      # fails on any unformatted file; --diff prints exactly what differs.
+      - name: Check formatting (taplo fmt --check)
+        run: taplo fmt --check --diff
+
+      - name: Lint (taplo lint)
+        run: taplo lint

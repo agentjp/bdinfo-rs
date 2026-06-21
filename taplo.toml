@@ -1,0 +1,30 @@
+# taplo configuration — TOML formatter + linter, enforced by the `toml` CI job and
+# the local gate (scripts/compliance.ps1 `tp` step). The formatting options below
+# are tuned to match the repo's existing hand-formatting, so the one-time baseline
+# reformat normalizes only spacing/commas and never re-flows the author's chosen
+# array line breaks.
+include = ["**/*.toml"]
+# Cargo.lock is generated (and is a .lock, not a .toml — never matched anyway);
+# supply-chain/{audits,config}.toml are written by cargo-vet — leave both to their
+# generators so taplo never fights them. target/ holds throwaway build artifacts.
+exclude = ["Cargo.lock", "supply-chain/**", "target/**"]
+
+[formatting]
+# 4-space indent matches the repo's multi-line arrays (e.g. dist-workspace targets,
+# deny.toml allow, the mutants exclude_re).
+indent_string = "    "
+# Don't column-align trailing comments: aligning to the widest sibling in a block
+# shoves short entries' comments far right (and is inconsistent). One space before
+# every `#` is uniform and the smallest, most predictable normalization.
+align_comments = false
+# Preserve the author's line breaks: never auto-expand a single-line array or
+# auto-collapse a multi-line one. This keeps deliberate layouts (a one-line
+# skip_calls list, a multi-line deb `assets` array of arrays) exactly as written.
+array_auto_expand = false
+array_auto_collapse = false
+# Never reorder keys or array entries — order is semantic here (license precedence,
+# target order, lint grouping) and reordering would be churn plus a real risk.
+reorder_keys = false
+reorder_arrays = false
+# Wide enough that nothing wraps on width alone (array re-flow is already off).
+column_width = 120

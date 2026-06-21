@@ -32,12 +32,12 @@ documentation = "https://docs.rs/bdinfo-rs-core"
 # (deny vs warn) only changes whether a bare `cargo check` is noisy.
 # ---------------------------------------------------------------------------
 [workspace.lints.rust]
-unsafe_code = "forbid"                  # memory safety is the product guarantee.
+unsafe_code = "forbid" # memory safety is the product guarantee.
 # `cargo llvm-cov` sets cfg(coverage)/cfg(coverage_nightly) when instrumenting;
 # register them so the `#[cfg_attr(coverage_nightly, …)]` coverage-exclusion
 # attributes don't trip `unexpected_cfgs` under the `-D warnings` gate.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
-missing_docs = "warn"                   # every public item carries a doc.
+missing_docs = "warn" # every public item carries a doc.
 missing_debug_implementations = "deny"
 unreachable_pub = "deny"
 unused_crate_dependencies = "deny"
@@ -49,7 +49,7 @@ trivial_numeric_casts = "deny"
 elided_lifetimes_in_paths = "deny"
 single_use_lifetimes = "deny"
 redundant_lifetimes = "deny"
-non_ascii_idents = "deny"               # parser hygiene / homoglyph safety.
+non_ascii_idents = "deny" # parser hygiene / homoglyph safety.
 keyword_idents_2024 = "deny"
 unused_lifetimes = "deny"
 unit_bindings = "deny"
@@ -93,7 +93,7 @@ panic = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
 unwrap_in_result = "warn"
-exit = "warn"                           # CLI uses ExitCode, never process::exit.
+exit = "warn" # CLI uses ExitCode, never process::exit.
 mem_forget = "warn"
 clone_on_ref_ptr = "warn"
 rc_buffer = "warn"
@@ -136,12 +136,12 @@ roxmltree = "0.21"
 # ---------------------------------------------------------------------------
 # Release = the shipped single static binary: tuned for size.
 [profile.release]
-opt-level = "s"   # optimize for size (the product is one small drop-and-run binary)
+opt-level = "s" # optimize for size (the product is one small drop-and-run binary)
 lto = true
 codegen-units = 1
-panic = "abort"   # drop unwind tables (smaller). The CLI aborts on the panics the
-                  # gate already forbids on input; tests/coverage use the test
-                  # profile, so this only affects the shipped binary.
+panic = "abort" # drop unwind tables (smaller). The CLI aborts on the panics the
+# gate already forbids on input; tests/coverage use the test
+# profile, so this only affects the shipped binary.
 strip = true
 
 # Dedicated profile for `cargo mt` (cargo-mutants): inherits `test` (same
