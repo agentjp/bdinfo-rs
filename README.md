@@ -289,7 +289,7 @@ full‑length feature, its scanner CPU‑bound far below disk speed.
 start‑order rotated per disc, wall‑clock end to end — Intel Core Ultra 9 285K · NVMe SSD ·
 47 GB RAM · Windows 11. Reference builds: uniqproject =
 [UniqProject BDInfo](https://github.com/UniqProject/BDInfo) 0.8.0.1b; tetrahydroc =
-[BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI) (.NET 8), which ships with a
+[BDInfoCLI‑ng](https://github.com/tetrahydroc/BDInfoCLI-ng) (.NET 8), which ships with a
 2 GB GC heap cap that aborts on large UHD streams — it was given unrestricted heap so it
 could complete the scan and be timed.</sub>
 
@@ -303,7 +303,7 @@ megabytes**:
 | Tool | Installed on disk | Runtime |
 |---|--:|:--|
 | **bdinfo-rs** | **≈ 1 MB** | none |
-| BDInfoCLI (tetrahydroc) | 33.7 MB | .NET 8, bundled |
+| BDInfoCLI‑ng (tetrahydroc) | 33.7 MB | .NET 8, bundled |
 | BDInfo (uniqproject) | 54.1 MB | .NET + Skia, bundled |
 
 That's roughly **34–54× smaller** — one file you can drop on a USB stick, commit to a
@@ -312,7 +312,7 @@ repo, or bake into a `FROM scratch` container, with no runtime to carry along.
 <sub>On-disk size of a complete install, measured on Windows x64: the size-optimized
 `bdinfo-rs` release binary vs. the self-contained publishes of
 [UniqProject BDInfo](https://github.com/UniqProject/BDInfo) 0.8.0.1b and
-[BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI) (.NET 8). The Linux musl and
+[BDInfoCLI‑ng](https://github.com/tetrahydroc/BDInfoCLI-ng) (.NET 8). The Linux musl and
 macOS binaries are in the same ≈1 MB ballpark.</sub>
 
 ## 📚 Library
@@ -368,7 +368,7 @@ each layer:
 
 - **Report & analysis** — ported from [UniqProject BDInfo](https://github.com/UniqProject/BDInfo),
   the classic .NET tool, as the baseline.
-- **Console flow** — the CLI follows [BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI)
+- **Console flow** — the CLI follows [BDInfoCLI-ng](https://github.com/tetrahydroc/BDInfoCLI-ng)
   (tetrahydroc), the command-line BDInfo.
 - **Codec correctness** — edge cases cross-checked against
   [libbluray](https://code.videolan.org/videolan/libbluray) and [FFmpeg](https://ffmpeg.org/)
