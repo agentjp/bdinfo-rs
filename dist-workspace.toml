@@ -130,14 +130,17 @@ host = "aarch64-pc-windows-msvc"
 # Pin every action dist emits to a full-length commit SHA so the GENERATED
 # release.yml satisfies Scorecard's pinned-dependencies check — without detaching
 # from dist (the `dist generate --check` drift guard in ci.yml stays green because
-# this IS what dist now generates). The trailing `# vN` rides along in the value
-# (dist renders `{name}@{value}` verbatim) so the pins read like the rest of the
-# repo and Dependabot tracks them. Each pin is dist 0.32's own default major
-# (checkout v6, upload-artifact v7, download-artifact v8, attest v4): we stay on
-# dist's tested versions and just pin them — checkout v7 now matches the
-# hand-maintained workflows, so the whole repo tracks one SHA.
+# this IS what dist now generates). The trailing comment names the EXACT immutable
+# tag the SHA resolves to (`# vX.Y.Z`, not the moving major `# vN`): it rides along
+# in the value (dist renders `{name}@{value}` verbatim) so release.yml satisfies
+# zizmor's ref-version-mismatch audit like the hand-maintained workflows, and a
+# stale pin can never make the comment lie (an exact tag is immutable, a moving
+# major is not). Dependabot bumps the SHA and the comment together. The SHA is
+# still dist 0.32's own default major line (checkout v7, upload-artifact v7,
+# download-artifact v8, attest v4) — we only made the comment exact; checkout v7
+# matches the hand-maintained workflows, so the whole repo tracks one SHA.
 [dist.github-action-commits]
-"actions/checkout" = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7"
-"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7"
-"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8"
-"actions/attest" = "59d89421af93a897026c735860bf21b6eb4f7b26 # v4"
+"actions/checkout" = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0"
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"
+"actions/attest" = "59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0"
