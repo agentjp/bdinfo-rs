@@ -1,0 +1,28 @@
+# ryl (a Rust yamllint) config — enforced by the `yaml` job in ci.yml and the
+# local gate (scripts/compliance.ps1). Starts from yamllint's `default` ruleset.
+# Only THREE rules are relaxed, and each is forced by the dist-GENERATED
+# release.yml (which must pass unmodified — `dist generate --check` forbids
+# hand-edits): keeping the rest of the repo consistent with that generated file
+# is itself the strict choice. Every other default rule stays fully on.
+extends: default
+
+rules:
+  # FORCED by release.yml (52 generated 300+ char lines) plus unbreakable URLs
+  # and long `run:` commands elsewhere. Line length is not a YAML correctness
+  # signal, so it is not gated.
+  line-length: disable
+  # FORCED by release.yml: cargo-dist emits one-space inline comments. Matching
+  # that single space repo-wide (incl. the `uses: ...@<sha> # vN` pins) keeps
+  # every file consistent with the generated one. require-starting-space (the
+  # space AFTER `#`) stays on.
+  comments:
+    min-spaces-from-content: 1
+  # FORCED, and the documented GitHub Actions practice: the `on:` trigger key
+  # parses as a YAML boolean. Only key-level truthy is waived; a stray VALUE
+  # like `foo: yes` is still flagged.
+  truthy:
+    check-keys: false
+  # NOT a relaxation — a tightening: the repo (and release.yml) deliberately omit
+  # the `---` marker, so actively FORBID it rather than just ignore the rule.
+  document-start:
+    present: false

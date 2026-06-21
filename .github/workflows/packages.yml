@@ -141,8 +141,8 @@ jobs:
       # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
       matrix:
         include:
-          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
-          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
+          - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -216,8 +216,8 @@ jobs:
       # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
       matrix:
         include:
-          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
-          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
+          - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
@@ -292,8 +292,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
-          - { triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
+          - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
       # A CLEAN container (not the runner) = a faithful "fresh user" install and no
       # interference from the runner's pre-seeded apt state. The arm64 runner runs an
