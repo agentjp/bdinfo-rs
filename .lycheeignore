@@ -1,0 +1,11 @@
+# Self-referential CHANGELOG links to this repo's own release tags and compares.
+# A release PR cuts a new version section whose link refs point at
+#   https://github.com/agentjp/bdinfo-rs/releases/tag/vX.Y.Z
+#   https://github.com/agentjp/bdinfo-rs/compare/vX.Y.Z...HEAD
+# Both 404 until the vX.Y.Z tag is pushed, which by our release flow happens
+# after the PR merges -- so without these excludes the Check links gate hard-
+# fails on every release or version-bump PR. We exclude only our own tag and
+# compare URLs, so those PRs stay green with no per-PR step while lychee still
+# verifies every other link, including the badges, /releases, and installer URLs.
+https://github\.com/agentjp/bdinfo-rs/releases/tag/v
+https://github\.com/agentjp/bdinfo-rs/compare/v
