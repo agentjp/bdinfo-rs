@@ -1,0 +1,19 @@
+# OpenSSF Scorecard maintainer annotations.
+#
+# The Binary-Artifacts check flags every committed binary as "non-reviewable
+# code", because its purpose is to catch generated executables that can drift
+# from their source. Our one committed binary is the opposite of that: the Big
+# Buck Bunny BD-ROM test fixture (crates/bdinfo-rs/tests/fixtures/BigBuckBunny.iso,
+# CC-BY) — a real Blu-ray disc image the end-to-end CI test scans and diffs
+# byte-exact against a committed golden report. It is reviewable test data, not
+# a generated executable, and removing it would break the cross-platform parse
+# guarantee it exists to hold.
+#
+# The `test-data` reason records that this finding is accepted; the
+# scorecard-action emits it as a SARIF suppression, so code scanning stops
+# raising the alert on future runs.
+annotations:
+  - checks:
+      - binary-artifacts
+    reasons:
+      - reason: test-data
