@@ -1,17 +1,23 @@
 name: install-smoke-test
 
-# Weekly + on-demand smoke test of the PUBLISHED package managers that install the
-# man page and shell completions: Homebrew (macOS + Linuxbrew). It installs the
-# formula from the tap and asserts the binary runs AND the man page + bash/zsh/fish
-# completions land in Homebrew's standard locations.
+# Smoke test of the PUBLISHED Homebrew formula (macOS + Linuxbrew): it `brew install`s
+# from the tap and asserts the binary runs AND the man page + bash/zsh/fish completions
+# land in Homebrew's standard locations.
+#
+# Runs AUTOMATICALLY after every release — cargo-dist publishes the formula during
+# release.yml, so by the time that workflow completes the tap has the new version —
+# PLUS daily to catch Homebrew/macOS ecosystem drift between releases, PLUS on demand.
 #
 # Out of scope by design: Scoop, WinGet, and cargo install/binstall ship the bare
 # executable only (no man/completions), so there is nothing to verify there. The
-# .deb/.rpm man+completions contract is verified at build time in packages.yml.
+# .deb/.rpm/Cloudsmith man+completions contract is verified per-release in packages.yml.
 
 on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   schedule:
-    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+    - cron: "0 7 * * *" # daily 07:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -21,6 +27,9 @@ jobs:
   homebrew:
     name: Homebrew (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # When chained off release.yml, only run if the release actually succeeded
+    # (nothing new is published otherwise). Schedule/manual runs always proceed.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       fail-fast: false
       matrix:
