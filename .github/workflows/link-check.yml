@@ -43,8 +43,12 @@ jobs:
         with:
           # Whole repo; skip the generated lockfile and the binary fuzz seed
           # corpus (the binary disc fixtures are skipped automatically by their
-          # non-text extensions). Accept 429 so an external host's rate-limit
-          # can't fail the gate; fail:true turns any broken link into a failure.
+          # non-text extensions). The golden disc reports are byte-exact BDInfo
+          # output: the two URLs they carry (cinemasquid/avsforum) are part of
+          # the locked format and reproduce a defunct tool's text verbatim, so
+          # they're pinned, not maintainable link surface — exclude them.
+          # Accept 429 so an external host's rate-limit can't fail the gate;
+          # fail:true turns any broken link into a failure.
           args: >-
             --cache
             --max-cache-age 1d
@@ -52,6 +56,7 @@ jobs:
             --accept 200..=299,429
             --exclude-path Cargo.lock
             --exclude-path fuzz/corpus
+            --exclude-path crates/bdinfo-rs/tests/fixtures/golden
             .
           fail: true
         env:
