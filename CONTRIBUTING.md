@@ -78,10 +78,10 @@ makes, and a change that breaks one will not be merged.
 
 ## Commit messages — Conventional Commits
 
-bdinfo-rs uses [**Conventional Commits**](https://www.conventionalcommits.org/),
-and master is **rebase-merged** — every commit you push is preserved on master
-verbatim and feeds the generated changelog and the computed release version. Each
-commit subject is therefore release-note copy. The format is:
+bdinfo-rs uses [**Conventional Commits**](https://www.conventionalcommits.org/).
+master is **squash-merged**, so each PR lands as one commit whose subject is the **PR
+title** — that subject feeds the generated changelog and the computed release version.
+Write the PR title (and every commit) as release-note copy. The format is:
 
 ```text
 <type>(<scope>): <description>
@@ -156,21 +156,17 @@ via the local `scripts/install-hooks.ps1`.
 ## Pull requests
 
 Open a PR from a branch — never push to master, which is protected. Keep the branch
-**rebased** on `origin/master`, not merged: master is **linear** and **rebase-merged**,
-so your commits land as-is.
+**rebased** on `origin/master` (master keeps a **linear history**).
 
-- Make each commit a coherent, conventional step; prefer several small commits over one
-  large one. Squash away `fixup!` / WIP commits (`git commit --fixup` + `git rebase
-  --autosquash`) **before** requesting merge — every commit you leave appears on master
-  and in the changelog.
-- PRs are merged with **Rebase and merge**. The PR title is cosmetic (it never lands on
-  master under rebase-merge); CI lints it as a conventional commit only as an advisory
-  warning.
+- master is **squash-merged**: the whole PR lands as ONE commit whose subject is the **PR
+  title**, so the **PR title must be a Conventional Commit** — it is the changelog line and
+  the version driver, and CI enforces it (a required check). Every commit in the PR must
+  still be conventional (hygiene, and a single-commit PR's message is the squash fallback),
+  but the individual commits do not appear on master.
+- **Why squash, not rebase:** master requires **signed commits** AND **linear history**.
+  GitHub cannot sign rebased commits, and merge commits are non-linear — so squash, which
+  GitHub signs (Verified) and keeps linear, is the only method compatible with both.
 - All required checks must be green, including **conventional commits + banned words**.
-- Commits are signed. GitHub re-creates commits during **Rebase and merge**, so confirm
-  they land **Verified** on master; if a rebase-merge ever lands them Unverified under
-  the required-signatures rule, fall back to **Squash and merge** plus the advisory
-  PR-title lint.
 
 Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
 
@@ -212,4 +208,5 @@ triggers a release; only the tag does (it runs cargo-dist). Before tagging:
    `ai.github.com` → `github.com` in the generated links; the cockpit
    `scripts/release-prep.ps1` does steps 1–3, the rewrite included, in one pass.
 
-4. Run the gate, open a PR, **Rebase and merge**, then push the `vX.Y.Z` tag on master.
+4. Run the gate, open a PR (its title is the conventional release commit), **Squash and
+   merge**, then push the `vX.Y.Z` tag on master.
