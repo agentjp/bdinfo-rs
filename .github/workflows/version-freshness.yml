@@ -6,10 +6,13 @@ name: version-freshness
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
 #   - cargo-vet (the `--version` pin in audit.yml),
-#   - the Dockerfile `rust:<ver>-slim` build base (must track the stable pin).
-# (Cargo deps/dev-deps, GitHub Action SHAs, and the Dockerfile digest are already
-# auto-bumped by Dependabot — cargo + github-actions + docker ecosystems — so they
-# are deliberately NOT re-checked here.)
+#   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job).
+# (Cargo deps/dev-deps and GitHub Action SHAs are already auto-bumped by
+# Dependabot — cargo + github-actions ecosystems — so they are deliberately NOT
+# re-checked here. The other gate tools — taplo, zizmor, action-validator,
+# cargo-{machete,shear,semver-checks,llvm-cov,nextest,mutants,deny}, typos — are
+# installed at LATEST every run, so they self-update and have no pin to rot. The
+# Dockerfile is `FROM scratch`, so there is no build-base tag to track either.)
 #
 # This daily ~1-minute job compares each silently-rotting pin to its upstream
 # latest (and cross-checks the pins that must agree); when anything is stale or
@@ -58,6 +61,19 @@ jobs:
             return $null
           }
 
+          # The latest stable version of a crates.io crate (the source `cargo
+          # install <crate> --version X` resolves against — more authoritative
+          # than GitHub releases, which a crate may not publish), or $null on
+          # failure. crates.io rejects requests without a User-Agent.
+          function Latest-CratesIo($crate) {
+            try {
+              $resp = Invoke-RestMethod -Uri "https://crates.io/api/v1/crates/$crate" `
+                -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
+              return $resp.crate.max_stable_version
+            }
+            catch { return $null }
+          }
+
           # --- Rust stable: rust-toolchain.toml vs rust-lang/rust ---------------
           $stablePin = Read-Pin 'rust-toolchain.toml' '^channel\s*=\s*"([0-9.]+)"'
           if (-not $stablePin) { throw 'No pinned stable channel in rust-toolchain.toml' }
@@ -101,17 +117,19 @@ jobs:
             $problems += "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
           }
 
-          # --- Dockerfile build base must track the stable pin -----------------
-          # (Dependabot's docker ecosystem refreshes the digest + proposes newer
-          # tags; this just asserts the tag stays in lockstep with the toolchain.)
-          $dockerRust = Read-Pin 'Dockerfile' 'FROM rust:([0-9.]+)'
-          if (-not $dockerRust) { throw 'No `FROM rust:<version>` base image in Dockerfile' }
-          $stableMajorMinor = ($stablePin -split '\.')[0..1] -join '.'
-          if ($dockerRust -ne $stableMajorMinor) {
-            $problems += "- Dockerfile base ``rust:$dockerRust-slim`` does not match the stable Rust pin ``$stablePin`` (rust-toolchain.toml) — bump the tag to ``rust:$stableMajorMinor-slim``"
+          # --- ryl: ci.yml YAML-lint pin vs crates.io --------------------------
+          # ryl is pinned (`cargo install ryl --version X`) so the YAML lint stays
+          # reproducible; nothing else watches it, so check it here like cargo-vet.
+          $rylPin = Read-Pin '.github/workflows/ci.yml' 'cargo install ryl --version ([0-9.]+)'
+          if (-not $rylPin) { throw 'No `cargo install ryl --version` pin in ci.yml' }
+          $rylLatest = Latest-CratesIo 'ryl'
+          if (-not $rylLatest) {
+            $problems += '- could not query the latest ryl release (crates.io)'
+          } elseif ([version]$rylLatest -gt [version]$rylPin) {
+            $problems += "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
           }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  docker-rust: $dockerRust"
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
