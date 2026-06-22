@@ -6,7 +6,7 @@ name: audit
 #   - the license allowlist (deps must be permissive)
 #   - the no-C-dependencies bans (cc/cmake/bindgen/… → guards the static binary)
 #   - crates.io-only sources (no git / unknown registries)
-# Runs on every push/PR and weekly, so a newly-disclosed CVE surfaces between
+# Runs on every push/PR and daily, so a newly-disclosed CVE surfaces between
 # pushes too.
 
 on:
@@ -14,7 +14,7 @@ on:
     branches: [master]
   pull_request:
   schedule:
-    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+    - cron: "0 6 * * *"   # daily 06:00 UTC
   workflow_dispatch:
 
 permissions:

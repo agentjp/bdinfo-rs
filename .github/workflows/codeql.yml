@@ -9,8 +9,8 @@ on:
     branches: [master]
   pull_request:
   schedule:
-    # Wednesdays 06:00 UTC — picks up new queries shipped in CodeQL releases.
-    - cron: "0 6 * * 3"
+    # Daily 06:00 UTC — picks up new queries shipped in CodeQL releases.
+    - cron: "0 6 * * *"
 
 permissions:
   contents: read

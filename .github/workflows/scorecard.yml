@@ -9,7 +9,7 @@ on:
   # Re-score when branch protection changes (Scorecard reads those settings).
   branch_protection_rule:
   schedule:
-    - cron: "0 6 * * 2"   # Tuesdays 06:00 UTC
+    - cron: "0 6 * * *"   # daily 06:00 UTC
   push:
     branches: [master]
 
