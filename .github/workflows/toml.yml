@@ -30,7 +30,10 @@ jobs:
       - name: Install taplo (prebuilt, no from-source compile)
         uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
-          tool: taplo-cli
+          # Pinned (not latest) so a new taplo can't reformat/relint the tree and
+          # red-X an unrelated PR; version-freshness watches it against crates.io
+          # and the bump stays deliberate, like rustfmt's nightly pin.
+          tool: taplo-cli@0.10.0
 
       # taplo auto-discovers taplo.toml (include/exclude + formatting). --check
       # fails on any unformatted file; --diff prints exactly what differs.

@@ -6,10 +6,13 @@ name: version-freshness
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
 #   - cargo-vet (the `--version` pin in audit.yml),
-#   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job).
+#   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
+#   - taplo (the `tool: taplo-cli@X` pin in toml.yml — a formatter, pinned like
+#     rustfmt so a new release can't reformat/relint the tree out from under a PR).
 # (Cargo deps/dev-deps and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + github-actions ecosystems — so they are deliberately NOT
-# re-checked here. The other gate tools — taplo, zizmor, action-validator,
+# re-checked here. The remaining gate tools — zizmor (a security linter, kept at
+# latest on purpose so new vuln checks land immediately), action-validator,
 # cargo-{machete,shear,semver-checks,llvm-cov,nextest,mutants,deny}, typos — are
 # installed at LATEST every run, so they self-update and have no pin to rot. The
 # Dockerfile is `FROM scratch`, so there is no build-base tag to track either.)
@@ -88,7 +91,7 @@ jobs:
           $nightlyPin = Read-Pin '.github/workflows/ci.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
           if (-not $nightlyPin) { throw 'No NIGHTLY pin in ci.yml' }
           $nightlyAgeDays = [int]((Get-Date) - [datetime]::ParseExact($nightlyPin, 'yyyy-MM-dd', $null)).TotalDays
-          if ($nightlyAgeDays -gt 90) {
+          if ($nightlyAgeDays -gt 30) {
             $problems += "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY + scripts/_common.ps1) is $nightlyAgeDays days old"
           }
 
@@ -129,7 +132,19 @@ jobs:
             $problems += "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
           }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)"
+          # --- taplo: toml.yml `tool: taplo-cli@X` pin vs crates.io -------------
+          # Pinned like ryl so the TOML format/lint stays reproducible; nothing
+          # else watches it.
+          $taploPin = Read-Pin '.github/workflows/toml.yml' 'tool:\s*taplo-cli@([0-9.]+)'
+          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in toml.yml' }
+          $taploLatest = Latest-CratesIo 'taplo-cli'
+          if (-not $taploLatest) {
+            $problems += '- could not query the latest taplo release (crates.io taplo-cli)'
+          } elseif ([version]$taploLatest -gt [version]$taploPin) {
+            $problems += "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
+          }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
