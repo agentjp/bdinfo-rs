@@ -1,4 +1,4 @@
-<!-- Keep PRs focused. One imperative single-sentence subject per commit; no body, no trailers, no attribution. -->
+<!-- Keep PRs focused. Squash-merged: the PR TITLE is the conventional squash subject (`type(scope): description`). No trailers, no attribution. See CONTRIBUTING.md. -->
 
 ## What this changes
 
@@ -13,5 +13,9 @@
 - [ ] Coverage floors still hold (100% lines / regions / functions on the
       library).
 - [ ] No `unsafe`, and no new C / FFI dependency.
-- [ ] Commit messages follow the one-sentence rule (imperative subject, no body,
-      no trailers, no attribution).
+- [ ] The PR **title** is a Conventional Commit (`type(scope): description`) — it
+      becomes the squash commit subject, the changelog line, and the version driver.
+- [ ] Every commit is also a Conventional Commit — `convco check origin/master..HEAD`
+      passes.
+- [ ] No attribution or LLM/AI-attribution words in any commit message or in this
+      PR's title / body.

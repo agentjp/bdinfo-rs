@@ -45,6 +45,10 @@ deliberately strict:
 - **coverage** — 100% lines / regions / functions on the library.
 - **cargo-deny** and **cargo-vet** — advisories, the license allow-list, the
   no-C-dependency bans, and per-dependency supply-chain audits.
+- **conventional commits + banned words** — `convco check` verifies every commit
+  on the PR is a [Conventional Commit](https://www.conventionalcommits.org/), and a
+  banned-word gate rejects LLM/AI-attribution tokens in the commit messages and the
+  PR title/body. See [Commit messages](#commit-messages--conventional-commits) below.
 
 Running `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt --check`
 locally before pushing catches the common failures early.
@@ -72,24 +76,137 @@ makes, and a change that breaks one will not be merged.
   deliberate change (for example a spec-correctness fix) must arrive with the
   re-pinned fixture and a clear rationale.
 
-## Commit messages
+## Commit messages — Conventional Commits
 
-One **imperative, single-sentence subject line — and nothing else**:
+bdinfo-rs uses [**Conventional Commits**](https://www.conventionalcommits.org/).
+master is **squash-merged**, so each PR lands as one commit whose subject is the **PR
+title** — that subject feeds the generated changelog and the computed release version.
+Write the PR title (and every commit) as release-note copy. The format is:
 
-- No body, no bullets, no rationale. If it doesn't fit in one clear sentence, the
-  commit is too big — split it.
-- No trailers, no attribution — no `Co-Authored-By`, no "Generated with…", no
-  sign-off.
-- Capitalized, imperative mood, no trailing period.
+```text
+<type>(<scope>): <description>
+```
 
-Good: `Add case-insensitive BDMV directory lookup` ·
-`Fix off-by-one in the MPLS chapter count`.
+**type** (required) sets the changelog section and the SemVer impact. These are the
+only accepted types — `convco check` rejects anything else. The **bump** column is
+what `convco version --bump` derives automatically; convco only bumps for `feat`,
+`fix`, and breaking changes, so the rest read as no automatic bump (a release that
+wants one anyway overrides it — see [Cutting a release](#cutting-a-release-maintainers)):
+
+| type | bump | changelog | use for |
+|------|-------|-----------|---------|
+| `feat` | minor | **Features** | a new user-visible capability |
+| `fix` | patch | **Bug Fixes** | a bug fix |
+| `perf` | — | **Performance** | a measurable speed / size improvement |
+| `refactor` | — | hidden | a behaviour-preserving code change |
+| `docs` | — | hidden | documentation only |
+| `test` | — | hidden | tests only |
+| `build` | — | hidden | build system / dependencies |
+| `ci` | — | hidden | CI configuration / workflows |
+| `chore` | — | hidden | housekeeping touching no src / tests |
+| `style` | — | hidden | formatting only |
+
+A `!` after the type/scope or a `BREAKING CHANGE:` footer forces a **major** bump.
+
+**scope** (optional) names the area, from the closed vocabulary in
+[`.convco`](.convco): code — `core cli vfs udf bitstream bytes stream bdrom mpls clpi
+m2ts index discovery codec report`; infrastructure — `deps ci release docker fuzz
+packaging gate`. Adding a module means adding its scope to `.convco`.
+
+**description** (required) — imperative, lower-case start, no trailing period; a full
+release-note sentence.
+
+**breaking changes** — append `!` after the type / scope (`feat(report)!: …`) or add
+a `BREAKING CHANGE:` footer; either bumps the **major** version.
+
+```text
+feat(udf): add case-insensitive descriptor lookup
+fix(mpls): correct the off-by-one in the chapter count
+perf(m2ts): halve the allocations in the packet scan
+feat(report)!: drop the legacy column from the locked report
+```
+
+**No attribution, ever** — no `Co-Authored-By`, no "Generated with…", no sign-off,
+and no LLM/AI-attribution words (`Claude`, `Copilot`, `GPT`, `AI`, the 🤖 emoji, …)
+anywhere in a commit message or in the PR title / body. This is enforced mechanically
+by [`.github/scripts/check-banned-words.ps1`](.github/scripts/check-banned-words.ps1),
+which runs both in the commit-msg hook and in CI.
+
+### Authoring and checking locally
+
+Install [convco](https://convco.github.io/) as a prebuilt binary (`cargo binstall
+convco`, or `taiki-e/install-action`; avoid the from-source build, which compiles C —
+convco is a dev tool, never a bdinfo-rs dependency). Write the subject by hand, or let
+convco scaffold it:
+
+```sh
+convco commit --feat --scope udf -m "add case-insensitive descriptor lookup"
+```
+
+Validate before pushing — the same two checks CI runs:
+
+```sh
+convco check origin/master..HEAD          # every commit is conventional
+git log --format=%B origin/master..HEAD | pwsh .github/scripts/check-banned-words.ps1 -Label commits
+```
+
+Maintainers can install git hooks (commit-msg + pre-push) that run both automatically
+via the local `scripts/install-hooks.ps1`.
 
 ## Pull requests
 
-Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md) — a short
-checklist mirroring the rules above. Keep PRs focused; prefer several small
-commits, each a coherent step that stands on its own.
+Open a PR from a branch — never push to master, which is protected. Keep the branch
+**rebased** on `origin/master` (master keeps a **linear history**).
 
-By contributing you agree that your contributions are licensed under the
-project's [LGPL-2.1-only](LICENSE) license.
+- master is **squash-merged**: the whole PR lands as ONE commit whose subject is the **PR
+  title**, so the **PR title must be a Conventional Commit** — it is the changelog line and
+  the version driver, and CI enforces it (a required check). Every commit in the PR must
+  still be conventional (hygiene, and a single-commit PR's message is the squash fallback),
+  but the individual commits do not appear on master.
+- **Why squash, not rebase:** master requires **signed commits** AND **linear history**.
+  GitHub cannot sign rebased commits, and merge commits are non-linear — so squash, which
+  GitHub signs (Verified) and keeps linear, is the only method compatible with both.
+- All required checks must be green, including **conventional commits + banned words**.
+
+Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+
+By contributing you agree that your contributions are licensed under the project's
+[LGPL-2.1-only](LICENSE) license.
+
+## Cutting a release (maintainers)
+
+convco computes the version and changelog, but it never commits, tags, or pushes — its
+output is advisory and the pushed `vX.Y.Z` tag is the source of truth. Merging a PR never
+triggers a release; only the tag does (it runs cargo-dist). Before tagging:
+
+1. **Compute the next version (advisory):**
+
+   ```sh
+   convco version --bump          # e.g. 1.1.0; override with --patch / --minor / --major
+   ```
+
+2. **Set it across the workspace** and bump the internal pin, then refresh the lockfile:
+
+   ```sh
+   cargo set-version --workspace <X.Y.Z>
+   # then bump [workspace.dependencies] bdinfo-rs-core = { …, version = "X.Y.Z" }
+   cargo build
+   ```
+
+3. **Generate the new CHANGELOG section** from the commits since the last tag and insert
+   it above the existing history — the curated pre-adoption entries are preserved, only
+   the new version's section is generated:
+
+   ```sh
+   convco changelog v<previous>..HEAD
+   ```
+
+   convco emits the bracketed Keep-a-Changelog format (`## [X.Y.Z](…) (date)` with
+   `### Features` / `### Bug Fixes` sections) that cargo-dist parses for the release
+   notes — the same heading shape as the existing `## [1.0.0]` entry. convco 0.6.4 derives
+   the link host from the git remote (the `ai.github.com` SSH alias), so rewrite
+   `ai.github.com` → `github.com` in the generated links; the cockpit
+   `scripts/release-prep.ps1` does steps 1–3, the rewrite included, in one pass.
+
+4. Run the gate, open a PR (its title is the conventional release commit), **Squash and
+   merge**, then push the `vX.Y.Z` tag on master.
