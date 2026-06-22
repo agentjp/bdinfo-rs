@@ -1,0 +1,114 @@
+# convco (Conventional Commits CLI) configuration. Read by `convco check`,
+# `convco changelog`, and `convco version`; see CONTRIBUTING.md for the workflow.
+#
+# bdinfo-rs uses Conventional Commits. Master is rebase-merged, so every commit a
+# PR adds is preserved on master and MUST be a valid conventional commit. That is
+# enforced locally by the commit-msg hook (scripts/install-hooks.ps1) and in CI by
+# .github/workflows/conventional.yml — both call `convco check`. The same commits
+# drive the generated CHANGELOG section and the advisory release version
+# (`convco version --bump`). convco never commits, tags, or pushes on its own; its
+# output is advisory and the pushed `vX.Y.Z` tag remains the source of truth.
+
+# Changelog/version links should point at github.com. NOTE: convco 0.6.4 ALWAYS
+# derives host/owner/repository from `git remote origin` and ignores the values
+# below when a remote exists. This repo's origin is the `ai.github.com` SSH-config
+# alias, so convco renders https://ai.github.com/ links. These keys are kept to
+# express intent (and in case a future convco honours them); the cockpit release
+# helper (scripts/release-prep.ps1) rewrites `ai.github.com` -> `github.com` in the
+# generated section before it lands in CHANGELOG.md. See CONTRIBUTING.md.
+host: https://github.com
+owner: agentjp
+repository: bdinfo-rs
+
+# The conventional-commit TYPE allowlist. Listing `types` REPLACES convco's
+# built-in defaults, so `convco check` rejects any commit whose type is not listed
+# here (verified: a minimal feat/fix list makes `chore:`/`docs:` fail). The set
+# below is convco's full recognised lexicon — feat fix perf refactor docs test
+# build ci chore style; convco does NOT recognise `revert`, so it is intentionally
+# absent (a `revert:` commit can never pass `check`; see ignoreMessagePattern and
+# the gate's `--ignore-reverts` for how git reverts are handled instead).
+# `section` is the CHANGELOG heading and `hidden` keeps a type out of the rendered
+# changelog. NOTE on `increment`: convco 0.6.4 derives `version --bump` ONLY from
+# feat (minor), fix (patch), and `!`/BREAKING CHANGE (major) — verified: a `perf`
+# commit with `increment: Patch` produced no bump. The field is therefore set to
+# match that built-in behaviour (it is not otherwise honoured); a release that
+# wants a bump from docs/perf/refactor-only work overrides it at tag time
+# (`convco version --bump --patch`, or just choose the tag — see CONTRIBUTING.md).
+types:
+  - type: feat
+    increment: Minor
+    section: Features
+    hidden: false
+  - type: fix
+    increment: Patch
+    section: Bug Fixes
+    hidden: false
+  - type: perf
+    increment: None
+    section: Performance
+    hidden: false
+  - type: refactor
+    increment: None
+    section: Other
+    hidden: true
+  - type: docs
+    increment: None
+    section: Documentation
+    hidden: true
+  - type: test
+    increment: None
+    section: Other
+    hidden: true
+  - type: build
+    increment: None
+    section: Other
+    hidden: true
+  - type: ci
+    increment: None
+    section: Other
+    hidden: true
+  - type: chore
+    increment: None
+    section: Other
+    hidden: true
+  - type: style
+    increment: None
+    section: Other
+    hidden: true
+
+# Allowed SCOPES — an exact alternation of the real module map plus the
+# infrastructure areas. Scope is OPTIONAL, but when present it should be one of
+# these. The code scopes mirror crates/bdinfo-rs-core/src (the parser modules) and
+# crates/bdinfo-rs (cli); the rest cover the repo infrastructure
+# (deps/ci/release/docker/fuzz/packaging/gate). Adding a new module means adding
+# its scope here. NOTE: convco 0.6.4 applies scopeRegex only in the `convco commit`
+# wizard, not in `convco check`, so this documents/guides the vocabulary rather
+# than hard-gating it; the CI gate enforces TYPE, not scope. See CONTRIBUTING.md.
+scopeRegex: ^(core|cli|vfs|udf|bitstream|bytes|stream|bdrom|mpls|clpi|m2ts|index|discovery|codec|report|deps|ci|release|docker|fuzz|packaging|gate)$
+
+# Require a real description (no terse "fix" / "wip"), matching the house rule
+# that a subject reads as a full release-note sentence.
+description:
+  length:
+    min: 10
+
+# Keep noise out of BOTH the generated changelog and the version calc: the release
+# version-bump commit, git-revert subjects, and fixup!/squash! work-in-progress
+# markers. Conventional `revert:` commits are still accepted by `check`; this only
+# keeps the listed shapes out of the rendered changelog and the bump.
+ignoreMessagePattern: '^(chore\(release\)|Revert |fixup!|squash!)'
+
+# Last line of defence for the RENDERED changelog: if an LLM/AI-attribution token
+# ever reaches a merged commit, strip it from released notes. This does NOT reject
+# commits — the commit-msg hook and the CI banned-word gate
+# (.github/scripts/check-banned-words.ps1, the source of truth) do the rejecting;
+# stripRegex only edits changelog output. This mirrors the high-signal NAME tokens
+# from that script; it omits the bare "ai" acronym on purpose, because the generated
+# changelog links contain this repo's `ai.github.com` remote-alias host and `\bai\b`
+# would mangle them (the script bans the standalone uppercase "AI" instead).
+stripRegex: (?i)\b(claude|anthropic|opus|sonnet|haiku|fable|mythos|copilot|chatgpt|gpt|llm)\b
+
+# Linear history (rebase-merge): follow first parent and never fold merge commits
+# into the changelog.
+firstParent: true
+merges: false
