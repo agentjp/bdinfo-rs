@@ -51,6 +51,7 @@ use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
+use clap::CommandFactory as _;
 use crossterm::style::Stylize as _;
 use crossterm::{Command as _, cursor, terminal};
 
@@ -62,6 +63,18 @@ use crossterm::{Command as _, cursor, terminal};
 include!("cli.rs");
 
 fn main() -> ExitCode {
+    // A bare invocation (no arguments at all) prints the help to stdout and
+    // exits 0, rather than letting clap reject the missing required BD_PATH with
+    // a usage error on stderr (exit 2). Treating "no arguments" as a help request
+    // is friendlier for a double-clicked binary, and keeps package-manager
+    // install validators that smoke-run the executable from reading a clean run
+    // as a failure. Any actual argument still parses normally — a missing or bad
+    // path remains the usual exit-2 usage error. `args_os` (not `args`) so a
+    // non-UTF-8 argument can't panic this check.
+    if std::env::args_os().nth(1).is_none() {
+        let _ = Cli::command().print_long_help().is_ok();
+        return ExitCode::SUCCESS;
+    }
     ExitCode::from(run(&Cli::parse()))
 }
 

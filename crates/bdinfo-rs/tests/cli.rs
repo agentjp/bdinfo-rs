@@ -46,6 +46,20 @@ fn help_shows_the_normalized_surface_and_exits_zero() {
     }
 }
 
+#[test]
+fn no_arguments_print_help_and_exit_zero() {
+    // A bare invocation is treated as a help request: the long help goes to
+    // stdout and the process exits 0 (not clap's exit-2 usage error), with
+    // nothing on stderr. Any actual argument still parses — see
+    // `a_subcommand_style_invocation_is_just_a_bad_path` for the exit-2 path.
+    let output = bdinfo_rs().output().expect("spawn bdinfo-rs");
+    assert!(output.status.success(), "no-args exits 0: {:?}", output.status.code());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage:"), "no-args prints usage: {stdout}");
+    assert!(stdout.contains("<BD_PATH>"), "no-args prints help: {stdout}");
+    assert!(output.stderr.is_empty(), "no error output on a help request: {:?}", output.stderr);
+}
+
 /// A valid zero-item `*.mpls` (magic `MPLS0300`, one empty `PlayList`, no marks)
 /// — enough for the scan to emit its playlist row.
 fn empty_mpls() -> Vec<u8> {

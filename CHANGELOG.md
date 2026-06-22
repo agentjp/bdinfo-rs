@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Running `bdinfo-rs` with no arguments now prints the help and exits 0, instead
+  of clap's missing-argument usage error (exit 2). Invoking it with an actual but
+  invalid argument still reports a usage error. This makes a bare run friendlier
+  (such as a double-clicked binary) and lets package-manager install validators
+  that smoke-run the executable see a clean exit.
+
 ### Added
 
 - **Install by name on Linux**: `apt install bdinfo-rs` (Debian/Ubuntu) and
