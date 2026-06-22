@@ -1,14 +1,20 @@
-# Dependabot — grouped + monthly, deliberately frugal: updates arrive as ONE
-# grouped cargo PR and ONE grouped GitHub-Actions PR per month, not a trickle.
-# Security advisories are NOT throttled by this cadence: Dependabot security
-# updates (enabled repo-side) and the audit.yml workflow react to RustSec /
-# GitHub advisories immediately.
+# Dependabot — grouped + daily: updates arrive as ONE grouped cargo PR and ONE
+# grouped GitHub-Actions PR per day, and only when a member actually has an
+# update (a grouped PR is opened solely when there is something to bump), so a
+# quiet day is silent. Security advisories are NOT throttled by this cadence:
+# Dependabot security updates (enabled repo-side) and the audit.yml workflow
+# react to RustSec / GitHub advisories immediately.
+#
+# There is deliberately no `docker` ecosystem: the Dockerfile is `FROM scratch`
+# (it ships the prebuilt release binary, no base image), so there is no image
+# tag or digest for Dependabot to bump. The docker GitHub Actions used by
+# docker.yml are covered by the github-actions ecosystem below.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: monthly
+      interval: daily
     groups:
       cargo-dependencies:
         patterns: ["*"]
@@ -17,20 +23,8 @@ updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: monthly
+      interval: daily
     groups:
       github-actions:
-        patterns: ["*"]
-    labels: [dependencies, ci]
-
-  # The Dockerfile build base (`rust:<ver>-slim@sha256:...`): Dependabot refreshes
-  # the digest and proposes newer tags. The version-freshness job separately
-  # asserts the tag stays in lockstep with the stable Rust pin.
-  - package-ecosystem: docker
-    directory: "/"
-    schedule:
-      interval: monthly
-    groups:
-      docker:
         patterns: ["*"]
     labels: [dependencies, ci]
