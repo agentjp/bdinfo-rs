@@ -1,23 +1,33 @@
 name: docker
 
-# Push a `vX.Y.Z` tag and a multi-arch image is published to the GitHub Container
-# Registry, versioned in lock-step with the binaries `release.yml` cuts from the
-# same tag. The runtime image is `FROM scratch` + the static musl binary (see the
-# Dockerfile), so there is nothing in it to emulate: each arch is built on its OWN
-# native runner, pushed by digest, and the two are stitched into one manifest list.
-# A tag resolves to that list, and `docker pull` auto-selects the caller's arch.
-# The manifest list also gets a signed SLSA provenance + SBOM attestation, free on
-# public repos — the same supply-chain trail release.yml attaches to the binaries.
+# Publish the multi-arch GHCR image AFTER the Release completes. The image ships
+# the EXACT static musl binary cargo-dist already built, checksummed, and attested
+# in release.yml: docker.yml downloads it from the published Release and packages it
+# `FROM scratch` (see the Dockerfile). So the binary in the image is byte-for-byte
+# the one users download — same SHA-256, same Sigstore attestation — not a separate
+# rebuild we would have to prove equivalent. There is no compile here, just a COPY.
+#
+# Triggered by release.yml FINISHING (workflow_run), not the tag push: that fires
+# only once the whole release has uploaded its assets, so the download never races
+# the upload. `workflow_dispatch` re-publishes the image for a given tag by hand
+# (e.g. if only the image push failed while the release itself is fine).
 #
 # Tags published for a release v1.2.3:  1.2.3, 1.2, 1, latest.
-# A `-pre.N` rehearsal tag publishes only the exact 1.2.3-pre.N — never latest.
+# A `-pre.N` rehearsal tag publishes only the exact 1.2.3-pre.N — never latest
+# (docker/metadata-action omits the rolling + latest tags for prereleases).
 #
-# Assumes a public repo (free arm64 runners + GHCR). The package inherits the
+# Assumes a public repo (free arm64 build minutes + GHCR). The package inherits the
 # repo's visibility; flip it to public once in the repo's package settings.
 
-on:
-  push:
-    tags: ["v*"]
+on:  # zizmor: ignore[dangerous-triggers] runs only after our own Release; checks out the released tag, never untrusted PR code
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish the image for, e.g. v1.2.3"
+        required: true
 
 permissions:
   contents: read
@@ -27,66 +37,64 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # ── Gate: the tag must be honest before anything is built (mirrors release.yml)
-  verify:
-    name: verify tag matches crate version
+  publish:
+    name: publish multi-arch image
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0   # ancestry check against master needs history
-          persist-credentials: false
-
-      - name: Parse the tag, compare to [workspace.package] version
-        shell: pwsh
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          if ($tag -notmatch '^v(?<ver>(?<base>\d+\.\d+\.\d+)(?:-(?<pre>[0-9A-Za-z][0-9A-Za-z.-]*))?)$') {
-            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
-          }
-          $base = $Matches['base']
-
-          # The version under [workspace.package] in the root Cargo.toml.
-          $inWp = $false; $crate = $null
-          foreach ($line in (Get-Content Cargo.toml)) {
-            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
-            if ($line -match '^\[') { $inWp = $false; continue }
-            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $crate = $Matches[1]; break }
-          }
-          if (-not $crate) { throw 'No [workspace.package] version found in Cargo.toml' }
-          if ($base -ne $crate) {
-            throw "Tag $tag (base $base) does not match the workspace crate version $crate"
-          }
-
-          # The tagged commit must already be on master (i.e. gated by CI).
-          git merge-base --is-ancestor $env:GITHUB_SHA origin/master
-          if ($LASTEXITCODE -ne 0) { throw "Tagged commit $env:GITHUB_SHA is not on master" }
-
-  # ── Build: one NATIVE runner per arch, each pushed to GHCR by digest ───────
-  # No QEMU: a native runner links the matching arch directly (the `scratch`
-  # image runs nothing at build time). The image is pushed untagged, by digest;
-  # the merge job below applies the human tags to the assembled manifest list.
-  build:
-    name: build (${{ matrix.platform }})
-    needs: verify
-    runs-on: ${{ matrix.runner }}
+    # Skip unless the triggering Release succeeded (a failed release published
+    # nothing to package). A manual dispatch always proceeds.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
+      contents: read        # checkout the tagged source (Dockerfile + Cargo.lock)
+      packages: write       # push the image + attestations to GHCR
+      id-token: write       # sigstore signing for the attestations
+      attestations: write   # record them in the GitHub attestation store
     steps:
+      # The tag is the upstream Release run's branch (a tag push, so head_branch is
+      # the tag name), or the manual input. Validated to a vX.Y.Z[-pre] tag so a
+      # stray trigger fails loudly instead of building a mislabelled image.
+      - name: Resolve the release tag
+        id: tag
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          $tag = if ($env:EVENT_NAME -eq 'workflow_dispatch') { $env:DISPATCH_TAG } else { $env:WORKFLOW_RUN_TAG }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+            throw "Not a release tag: '$tag' (expected vMAJOR.MINOR.PATCH[-prerelease])"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ steps.tag.outputs.tag }}
           persist-credentials: false
+
+      # Pull the two musl archives dist attached to the Release and unpack just the
+      # binary into bin/<arch>/, the path the Dockerfile COPYs per TARGETARCH. dist
+      # wraps unix archives in a `<pkg>-<triple>/` dir, hence --strip-components=1.
+      - name: Download the released musl binaries and stage them per arch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Force dl | Out-Null
+          gh release download $env:TAG --repo $env:REPO --pattern '*-unknown-linux-musl.tar.gz' --dir dl
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed for $env:TAG" }
+          $arches = [ordered]@{
+            'x86_64-unknown-linux-musl'  = 'amd64'
+            'aarch64-unknown-linux-musl' = 'arm64'
+          }
+          foreach ($triple in $arches.Keys) {
+            $arch = $arches[$triple]
+            New-Item -ItemType Directory -Force "bin/$arch" | Out-Null
+            tar -xzf "dl/bdinfo-rs-$triple.tar.gz" -C "bin/$arch" --strip-components=1 "bdinfo-rs-$triple/bdinfo-rs"
+            if ($LASTEXITCODE -ne 0) { throw "extract failed for $triple" }
+          }
+          Get-ChildItem -Recurse bin | Select-Object FullName, Length | Format-Table -AutoSize
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -100,93 +108,33 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # {{version}} = 1.2.3 (the `v` is dropped by Docker convention). The
+          # rolling 1.2 / 1 tags and `latest` apply to stable releases only —
+          # metadata-action omits them for a `-pre.N` prerelease. value= feeds the
+          # resolved tag because github.ref is the default branch on a workflow_run,
+          # not the tag.
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.tag.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.tag.outputs.tag }}
+            type=semver,pattern={{major}},value=${{ steps.tag.outputs.tag }}
 
-      - name: Build and push by digest
+      # No RUN in the Dockerfile, so a single multi-platform build needs no QEMU and
+      # emits the manifest list directly; outputs.digest is that list's digest.
+      - name: Build and push the multi-arch image
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export the digest
-        shell: pwsh
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          $dir = "${env:RUNNER_TEMP}/digests"
-          New-Item -ItemType Directory -Force $dir | Out-Null
-          $digest = $env:DIGEST -replace '^sha256:', ''
-          New-Item -ItemType File "$dir/$digest" | Out-Null
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: digest-${{ matrix.arch }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # ── Merge: stitch the per-arch digests into one tagged manifest list, then
-  #    attest its provenance + SBOM (mirrors the binary attestation in release.yml).
-  merge:
-    name: publish manifest list
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read        # checkout (the Cargo.lock the SBOM is built from)
-      packages: write       # push the manifest list + attestations to GHCR
-      id-token: write       # sigstore signing for the attestations
-      attestations: write   # record them in the GitHub attestation store
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digest-*
-          merge-multiple: true
-
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # {{version}} = 1.2.3 (the `v` is dropped by Docker convention); the
-          # rolling 1.2 / 1 tags and `latest` are applied to releases only, never
-          # to a `-pre.N` prerelease (metadata-action's default latest=auto).
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-
-      - name: Create the manifest list and push
-        working-directory: ${{ runner.temp }}/digests
-        shell: pwsh
-        run: |
-          $meta = $env:DOCKER_METADATA_OUTPUT_JSON | ConvertFrom-Json
-          $tags = $meta.tags | ForEach-Object { '-t', $_ }
-          $refs = Get-ChildItem -File | ForEach-Object { "${env:REGISTRY}/${env:IMAGE_NAME}@sha256:$($_.Name)" }
-          docker buildx imagetools create $tags $refs
-
-      - name: Capture the manifest-list digest
-        id: digest
-        shell: pwsh
-        env:
-          META_VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          $ref = "${env:REGISTRY}/${env:IMAGE_NAME}:${env:META_VERSION}"
-          $digest = "$(docker buildx imagetools inspect $ref --format '{{.Manifest.Digest}}')".Trim()
-          "digest=$digest" >> $env:GITHUB_OUTPUT
+          # Disable BuildKit's own provenance/SBOM attestations: they add
+          # `unknown/unknown` entries to the manifest list (changing the digest) and
+          # duplicate the GitHub Sigstore attestations attached below, which mirror
+          # the ones release.yml puts on the binaries. Keep the list to the 2 arches.
+          provenance: false
+          sbom: false
 
       # Attestations are free on public repos (Sigstore public-good); skipped on a
       # private repo, where they would need GitHub Enterprise — as release.yml does.
@@ -195,12 +143,12 @@ jobs:
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
       # The image is `FROM scratch`: no OS packages to scan, so the SBOM is built
-      # from Cargo.lock — the crates compiled into the binary, i.e. what the image
-      # actually contains.
+      # from Cargo.lock at the tagged commit — the crates compiled into the binary,
+      # i.e. what the image actually contains.
       - name: Generate the dependency SBOM
         if: ${{ !github.event.repository.private }}
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -215,7 +163,7 @@ jobs:
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.digest.outputs.digest }}
+          subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: ${{ runner.temp }}/sbom.spdx.json
           push-to-registry: true
 
