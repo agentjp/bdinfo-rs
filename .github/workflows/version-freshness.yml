@@ -8,7 +8,9 @@ name: version-freshness
 #   - cargo-vet (the `--version` pin in audit.yml),
 #   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
 #   - taplo (the `tool: taplo-cli@X` pin in toml.yml — a formatter, pinned like
-#     rustfmt so a new release can't reformat/relint the tree out from under a PR).
+#     rustfmt so a new release can't reformat/relint the tree out from under a PR),
+#   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
+#     output drives a reproducible changelog/version format, like taplo/rustfmt).
 # (Cargo deps/dev-deps and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + github-actions ecosystems — so they are deliberately NOT
 # re-checked here. The remaining gate tools — zizmor (a security linter, kept at
@@ -144,7 +146,19 @@ jobs:
             $problems += "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
           }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)"
+          # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
+          # Pinned because its output drives a reproducible changelog/version
+          # format (like taplo/rustfmt); nothing else watches it.
+          $convcoPin = Read-Pin '.github/workflows/conventional.yml' 'tool:\s*convco@([0-9.]+)'
+          if (-not $convcoPin) { throw 'No `tool: convco@<version>` pin in conventional.yml' }
+          $convcoLatest = Latest-CratesIo 'convco'
+          if (-not $convcoLatest) {
+            $problems += '- could not query the latest convco release (crates.io)'
+          } elseif ([version]$convcoLatest -gt [version]$convcoPin) {
+            $problems += "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
+          }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
