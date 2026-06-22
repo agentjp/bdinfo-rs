@@ -8,10 +8,12 @@ name: scorecard
 on:
   # Re-score when branch protection changes (Scorecard reads those settings).
   branch_protection_rule:
+  # Daily only — deliberately NOT on push: a push-triggered scan races the
+  # still-running CodeQL on the just-merged commit and reports it as an
+  # unchecked SAST commit (a transient that the daily scan, run after CodeQL
+  # settles, never sees).
   schedule:
     - cron: "0 6 * * *"   # daily 06:00 UTC
-  push:
-    branches: [master]
 
 # Least privilege at the top; the analysis job widens only what it needs.
 permissions:
