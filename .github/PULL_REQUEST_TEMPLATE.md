@@ -1,4 +1,4 @@
-<!-- Keep PRs focused. One imperative single-sentence subject per commit; no body, no trailers, no attribution. -->
+<!-- Keep PRs focused. Conventional Commits (`type(scope): description`); rebase, don't merge; no trailers, no attribution. See CONTRIBUTING.md. -->
 
 ## What this changes
 
@@ -13,5 +13,7 @@
 - [ ] Coverage floors still hold (100% lines / regions / functions on the
       library).
 - [ ] No `unsafe`, and no new C / FFI dependency.
-- [ ] Commit messages follow the one-sentence rule (imperative subject, no body,
-      no trailers, no attribution).
+- [ ] Every commit is a Conventional Commit (`type(scope): description`, an allowed
+      type) — `convco check origin/master..HEAD` passes.
+- [ ] No attribution or LLM/AI-attribution words in any commit message or in this
+      PR's title / body.

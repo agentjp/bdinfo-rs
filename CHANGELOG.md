@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<!-- From the next release onward, each new `## [X.Y.Z]` section is GENERATED from the
+     Conventional Commits since the previous tag (`convco changelog v<prev>..HEAD`) and
+     inserted above the preserved history below; the curated pre-adoption entries are
+     never regenerated or overwritten. convco emits the same bracketed Keep-a-Changelog
+     heading shape used below, which cargo-dist parses for the GitHub Release notes. See
+     CONTRIBUTING.md § "Cutting a release". -->
+
 ## [Unreleased]
 
 ### Changed
