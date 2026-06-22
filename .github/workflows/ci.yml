@@ -76,7 +76,7 @@ jobs:
       - name: Install action-validator + ryl
         run: |
           cargo install action-validator --locked
-          cargo install ryl --version 0.20.0 --locked
+          cargo install ryl --version 0.21.0 --locked
 
       - name: Schema-validate the workflow YAML (action-validator)
         run: |
