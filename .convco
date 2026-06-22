@@ -1,13 +1,14 @@
 # convco (Conventional Commits CLI) configuration. Read by `convco check`,
 # `convco changelog`, and `convco version`; see CONTRIBUTING.md for the workflow.
 #
-# bdinfo-rs uses Conventional Commits. Master is rebase-merged, so every commit a
-# PR adds is preserved on master and MUST be a valid conventional commit. That is
-# enforced locally by the commit-msg hook (scripts/install-hooks.ps1) and in CI by
-# .github/workflows/conventional.yml — both call `convco check`. The same commits
-# drive the generated CHANGELOG section and the advisory release version
-# (`convco version --bump`). convco never commits, tags, or pushes on its own; its
-# output is advisory and the pushed `vX.Y.Z` tag remains the source of truth.
+# bdinfo-rs uses Conventional Commits. Master is SQUASH-merged (required-signatures +
+# linear-history make rebase/merge-commit unusable), so each PR lands as one commit
+# whose subject is the PR TITLE — that subject MUST be a valid conventional commit and
+# drives the changelog + version. Every commit in a PR must also be conventional: the
+# commit-msg hook (scripts/install-hooks.ps1) and CI (.github/workflows/conventional.yml)
+# both call `convco check`, and CI additionally lints the PR title as a required gate.
+# convco never commits, tags, or pushes on its own; its output is advisory and the
+# pushed `vX.Y.Z` tag remains the source of truth.
 
 # Changelog/version links should point at github.com. NOTE: convco 0.6.4 ALWAYS
 # derives host/owner/repository from `git remote origin` and ignores the values
@@ -108,7 +109,7 @@ ignoreMessagePattern: '^(chore\(release\)|Revert |fixup!|squash!)'
 # would mangle them (the script bans the standalone uppercase "AI" instead).
 stripRegex: (?i)\b(claude|anthropic|opus|sonnet|haiku|fable|mythos|copilot|chatgpt|gpt|llm)\b
 
-# Linear history (rebase-merge): follow first parent and never fold merge commits
-# into the changelog.
+# Linear history (squash-merge keeps master linear): follow first parent and never
+# fold merge commits into the changelog.
 firstParent: true
 merges: false

@@ -1,13 +1,15 @@
 name: conventional
 
-# Enforce Conventional Commits on every pull request. master is REBASE-merged, so
-# each commit a PR adds is preserved on master verbatim — therefore every commit in
-# the PR must be a valid conventional commit. `convco check` (reading the repo's
-# .convco) is the PRIMARY gate. A second gate bans LLM/AI-attribution tokens from
-# the commit messages AND the PR title/body, via the shared single-source script
-# .github/scripts/check-banned-words.ps1 (the same script the local commit-msg hook
-# runs). Linting the PR title as a conventional commit is advisory only (under
-# rebase-merge the title is cosmetic and never lands on master).
+# Enforce Conventional Commits on every pull request. master is SQUASH-merged under
+# required-signatures + linear-history (rebase/merge-commit are incompatible with
+# those rules), so the PR collapses to ONE commit whose subject is the PR TITLE —
+# that subject is the changelog line and the version driver, so the PR-title
+# conventional lint is a REQUIRED gate here. `convco check` over every commit in the
+# PR is also enforced (good hygiene, and GitHub's squash default falls back to the
+# commit message for a single-commit PR). A second gate bans LLM/AI-attribution
+# tokens from the commit messages AND the PR title/body, via the shared
+# single-source script .github/scripts/check-banned-words.ps1 (the same script the
+# local commit-msg hook runs).
 #
 # convco is a calculator/linter: it never commits, tags, or pushes. The version
 # bump + changelog (see CONTRIBUTING.md) stay manual, and only a pushed vX.Y.Z tag
@@ -45,10 +47,11 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/check-banned-words.ps1 -SelfTest
 
-      # PRIMARY gate: every commit the PR adds must be conventional. --ignore-reverts
-      # skips `git revert`'s non-conventional "Revert ..." subjects. The SHAs come
-      # from the trusted GitHub context but are routed through env anyway (zizmor
-      # template-injection hygiene), as the PR title/body below require.
+      # Every commit the PR adds must be conventional (hygiene + the single-commit
+      # squash fallback). --ignore-reverts skips `git revert`'s non-conventional
+      # "Revert ..." subjects. The SHAs come from the trusted GitHub context but are
+      # routed through env anyway (zizmor template-injection hygiene), as the PR
+      # title/body below require.
       - name: Conventional commits (convco check)
         shell: pwsh
         env:
@@ -90,15 +93,15 @@ jobs:
           if ($bad) { exit 1 }
           Write-Host 'no banned LLM/AI-attribution tokens found.'
 
-      # ADVISORY: lint the PR title as a conventional commit. It does not gate the
-      # merge (the title is cosmetic under rebase-merge), but a malformed title is
-      # surfaced as a warning so the PR list stays tidy.
-      - name: PR title conventional (advisory)
+      # REQUIRED: the PR title is the squash commit's subject, so it must be a valid
+      # conventional commit — it is the changelog line and the version driver.
+      - name: PR title is a conventional commit (squash subject)
         shell: pwsh
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           "$env:PR_TITLE" | convco check --from-stdin
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::warning::PR title is not a conventional commit: $env:PR_TITLE"
+            Write-Host "::error::PR title is not a conventional commit (it becomes the squash commit subject): $env:PR_TITLE"
+            exit 1
           }
