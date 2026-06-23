@@ -12,34 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
-## [Unreleased]
+## [v1.0.1](https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...218dab463b7973086ae318e8d38da945787dd458) (2026-06-22)
 
-### Changed
+### Features
 
-- Running `bdinfo-rs` with no arguments now prints the help and exits 0, instead
-  of clap's missing-argument usage error (exit 2). Invoking it with an actual but
-  invalid argument still reports a usage error. This makes a bare run friendlier
-  (such as a double-clicked binary) and lets package-manager install validators
-  that smoke-run the executable see a clean exit.
+* **packaging:** install by name on Linux — `apt install bdinfo-rs` (Debian/Ubuntu)
+  and `dnf install bdinfo-rs` (Fedora/RHEL/openSUSE) from a hosted package
+  repository, in addition to the standalone `.deb`/`.rpm` release downloads.
 
-### Added
+### Bug Fixes
 
-- **Install by name on Linux**: `apt install bdinfo-rs` (Debian/Ubuntu) and
-  `dnf install bdinfo-rs` (Fedora/RHEL/openSUSE) from a hosted package repository —
-  add the repo once, then use your package manager normally, updates included — in
-  addition to the standalone `.deb`/`.rpm` release downloads.
-- README: an installed-footprint size comparison and an "owned discs only" usage
-  policy; a one-paragraph code of conduct; and a structured output-difference
-  issue template.
-
-### Fixed
-
-- `cargo binstall bdinfo-rs` now resolves the prebuilt release archives via
-  explicit binstall metadata, including the flat Windows `.zip` layout. (1.0.0
-  shipped no binstall configuration, so installs fell back to fragile
-  auto-detection.)
-- The `.deb` and `.rpm` release packages now publish automatically on every release
-  (1.0.0's had to be attached by hand).
+* **cli:** running `bdinfo-rs` with no arguments now prints the help and exits 0
+  instead of clap's missing-argument usage error (exit 2); an actual but invalid
+  argument still reports a usage error. Friendlier for a double-clicked binary and
+  for package-manager install validators that smoke-run the executable.
+* **packaging:** `cargo binstall bdinfo-rs` now resolves the prebuilt release
+  archives via explicit binstall metadata, including the flat Windows `.zip` layout
+  (1.0.0 shipped no binstall configuration).
+* **packaging:** the `.deb` and `.rpm` release packages now publish automatically
+  on every release (1.0.0's had to be attached by hand).
 
 ## [1.0.0] - 2026-06-19
 
@@ -92,5 +83,4 @@ which of these are visible on a normal disc.
 - AC-3 low-sample-rate frame-size shift.
 - DTS core 1536 kbps bitrate.
 
-[Unreleased]: https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/agentjp/bdinfo-rs/releases/tag/v1.0.0
