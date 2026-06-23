@@ -72,8 +72,15 @@ jobs:
   winget:
     name: WinGet
     runs-on: ubuntu-latest
+    # GATED OFF (2026-06-23): winget-releaser UPDATES an existing package — it bases
+    # the new manifest on the package's prior version already in microsoft/winget-pkgs.
+    # The first submission (agentjp.bdinfo-rs 1.0.0) is still an open New-Package PR
+    # awaiting manual moderator review, so an auto-update now would fail (no base
+    # manifest) and could jump ahead of that pending PR. Re-enable by setting the repo
+    # variable WINGET_ENABLED=true once 1.0.0 has merged into winget-pkgs master — no
+    # code change needed; the WINGET_TOKEN secret is already set.
     needs: gate
-    if: needs.gate.outputs.stable == 'true'
+    if: ${{ needs.gate.outputs.stable == 'true' && vars.WINGET_ENABLED == 'true' }}
     env:
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
