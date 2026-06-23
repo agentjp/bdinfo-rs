@@ -63,6 +63,15 @@ bin-dir = "{ bin }{ binary-ext }"
 # asset prefix to that path and derives the Debian arch from `--target`. The
 # completion/man assets are staged under the crate's `release-assets/`. The static
 # musl binary has no shared-library deps, so `depends` is emptied.
+#
+# Debian packages carry NO license field in their `control` metadata — by policy the
+# license lives only in the DEP-5 `/usr/share/doc/<pkg>/copyright` file. cargo-deb
+# auto-generates a MINIMAL header-only copyright (no `Files:` stanza), which license
+# scanners/registries (e.g. Cloudsmith) skip → "no license data" (the .rpm is fine
+# because RPM has a first-class `License:` tag). So we ship our own complete, machine-
+# readable `debian/copyright` (header + `Files: *` `License: LGPL-2.1-only` stanza +
+# the license paragraph) as the canonical-path asset; cargo-deb uses it verbatim
+# instead of generating one. The path is resolved relative to this crate dir.
 [package.metadata.deb]
 maintainer = "bdinfo-rs contributors <bdinfo-rs@users.noreply.github.com>"
 section = "utils"
@@ -71,6 +80,7 @@ depends = ""
 extended-description = "A memory-safe, statically-linked command-line Blu-ray disc analyzer — a drop-in replacement for the classic BDInfo report tool. Scans BDMV folders and .iso images and renders the classic per-stream video/audio technical report."
 assets = [
     ["target/release/bdinfo-rs", "usr/bin/", "755"],
+    ["debian/copyright", "usr/share/doc/bdinfo-rs/copyright", "644"],
     ["release-assets/bdinfo-rs.1", "usr/share/man/man1/", "644"],
     ["release-assets/bdinfo-rs.bash", "usr/share/bash-completion/completions/bdinfo-rs", "644"],
     ["release-assets/_bdinfo-rs", "usr/share/zsh/site-functions/", "644"],
