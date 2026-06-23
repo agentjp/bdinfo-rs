@@ -1,0 +1,93 @@
+name: homebrew
+
+# Custom dist PUBLISH job, wired via `publish-jobs = ["./homebrew"]` in
+# dist-workspace.toml. It REPLACES dist's built-in `homebrew` publish job (removed
+# from publish-jobs) while dist still GENERATES the formula (the `homebrew`
+# installer stays in `installers`, and dist attaches the generated `.rb` to the
+# GitHub Release).
+#
+# WHY THIS EXISTS: dist's generated formula (templates/installer/homebrew.rb.j2)
+# installs ONLY the binary and dumps the man page + shell completions into pkgshare
+# — its `def install` has no `man1.install` / `*_completion.install`, and the
+# homebrew installer config exposes no way to add them (only `tap` and `formula`).
+# So we take dist's own generated formula, add the four install lines, and push it
+# to the tap ourselves: ONE commit per release, reusing dist's correct multi-arch
+# url/sha generation. Nothing else dist does changes.
+#
+# dist regenerates only the CALL to this workflow in release.yml (passing `plan`
+# and `secrets: inherit`), never this file, so it survives `dist generate --check`.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The dist release plan (JSON), passed by dist.
+        required: true
+        type: string
+
+permissions:
+  contents: read # read the release to download dist's generated formula
+
+jobs:
+  homebrew:
+    name: publish the Homebrew formula (with man page + completions)
+    runs-on: ubuntu-latest
+    env:
+      # GITHUB_TOKEN downloads the formula from THIS repo's release; the push to
+      # the tap uses HOMEBREW_TAP_TOKEN (the checkout credentials), not this.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN: ${{ inputs.plan }}
+    steps:
+      # Check out the TAP repo (not this one) with a token that can push to it.
+      # persist-credentials stays true so the formula commit below can push.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: agentjp/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true # zizmor: ignore[artipacked] the token MUST persist to push the formula commit
+
+      - name: Add the man page + shell completions to dist's formula, then push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "bdinfo-rs CI"
+          git config user.email "bdinfo-rs@users.noreply.github.com"
+          export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+
+          # dist attached the generated formula to the release; one *.rb per release
+          # that produced one (we ship exactly one). Compact JSON has no internal
+          # spaces, so word-splitting the loop is safe (this mirrors dist's own job).
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
+            filename=$(echo "$release" | jq --raw-output '.artifacts[] | select(endswith(".rb"))')
+            name=$(echo "$filename" | sed 's/\.rb$//')
+            version=$(echo "$release" | jq --raw-output '.app_version')
+
+            # Pull dist's just-generated formula from the release into the tap.
+            gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$filename" --dir Formula --clobber
+            f="Formula/${filename}"
+
+            # dist installs only the binary; add the man page + the bash/zsh/fish
+            # completions to the standard Homebrew dirs (the archive ships all of
+            # them). Idempotent: a re-run that already has them is a no-op.
+            if ! grep -q 'man1.install' "$f"; then
+              awk '{ print }
+                   /^    install_binary_aliases!$/ {
+                     print "    man1.install \"bdinfo-rs.1\""
+                     print "    bash_completion.install \"bdinfo-rs.bash\" => \"bdinfo-rs\""
+                     print "    zsh_completion.install \"_bdinfo-rs\""
+                     print "    fish_completion.install \"bdinfo-rs.fish\""
+                   }' "$f" > "$f.patched"
+              mv "$f.patched" "$f"
+            fi
+            # Fail the release loudly rather than push a man-less formula if dist's
+            # template ever changes the anchor line above.
+            grep -q 'man1.install' "$f" || { echo "::error::could not inject man1.install — dist's formula template changed; update homebrew.yml"; exit 1; }
+
+            # Canonicalize like dist does (non-fatal; our lines are standard idioms).
+            brew update
+            brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "$f" || true
+
+            git add "$f"
+            git commit -m "${name} ${version}"
+          done
+          git push

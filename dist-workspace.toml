@@ -99,14 +99,19 @@ fail-fast = true
 installers = ["shell", "powershell", "homebrew"]
 hosting = ["github"]
 
-# Homebrew: publish a BINARY formula (it fetches the prebuilt .tar.gz archives —
-# no source build, no macOS runner) to our own tap on each STABLE release. One
-# formula covers macOS (Intel + Apple Silicon) and Linuxbrew. dist's homebrew
-# publish job pushes to the tap using the `HOMEBREW_TAP_TOKEN` repo secret (a
-# fine-grained PAT scoped to the tap repo, Contents:read/write). The tap repo is
-# named `homebrew-tap`; users tap it as `agentjp/tap`.
+# Homebrew: dist GENERATES a BINARY formula (it fetches the prebuilt .tar.gz
+# archives — no source build, no macOS runner) covering macOS (Intel + Apple
+# Silicon) and Linuxbrew, from our own tap; users tap it as `agentjp/tap`. The
+# PUSH is our own job (`./homebrew`), NOT dist's built-in `homebrew` publisher:
+# dist's formula installs only the binary and never the man page / shell
+# completions (its templates/installer/homebrew.rb.j2 has no man1.install and the
+# homebrew installer config exposes no way to add it). So `./homebrew` takes dist's
+# generated formula, adds those four install lines, and pushes to the tap with the
+# `HOMEBREW_TAP_TOKEN` secret — one commit, reusing dist's multi-arch url/sha
+# generation. Keeping `homebrew` in `installers` (above) keeps the formula
+# generation; only the publisher is swapped. See .github/workflows/homebrew.yml.
 tap = "agentjp/homebrew-tap"
-publish-jobs = ["homebrew"]
+publish-jobs = ["./homebrew"]
 
 # A reusable workflow wired in at the start of CI (before any build): it fails the
 # whole release unless the tagged commit is an ancestor of origin/master. dist
@@ -115,6 +120,13 @@ publish-jobs = ["homebrew"]
 plan-jobs = ["./guard-ancestor"]
 
 [dist.github-custom-job-permissions.guard-ancestor]
+contents = "read"
+
+# The custom ./homebrew publish job only needs to read THIS repo's release (to
+# download dist's generated formula); the push to the tap uses HOMEBREW_TAP_TOKEN,
+# not GITHUB_TOKEN. This OVERRIDES dist's default publish-job grant (id-token +
+# packages write), which the job does not use.
+[dist.github-custom-job-permissions.homebrew]
 contents = "read"
 
 [dist.github-custom-runners.aarch64-pc-windows-msvc]
