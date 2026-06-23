@@ -37,6 +37,20 @@ jobs:
     steps:
       - uses: Homebrew/actions/setup-homebrew@6315ef70a8bfcd2c71104383846591ac113ace33 # master
 
+      # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
+      # check then warns about them on every brew command. We install bdinfo-rs by its
+      # fully-qualified name (which trusts only that item), so those taps are unrelated noise
+      # — trust them to silence it. Scoped to the two named taps ON PURPOSE: if the image
+      # later pre-taps a new one we WANT that warning, so we never blanket-disable the
+      # feature. Tolerant: those taps don't exist on the Linux runner. (The lone remaining
+      # "Sandbox unavailable" warning on Linux is left deliberately — it's an honest signal
+      # that self-resolves when the runner gains a usable sandbox; HOMEBREW_NO_SANDBOX_LINUX
+      # would force-disable it forever and hide that, for a binary formula with nothing to
+      # sandbox.)
+      - name: Trust the runner's pre-tapped third-party taps
+        shell: bash
+        run: for tap in aws/tap azure/bicep; do brew trust "$tap" 2>/dev/null || true; done
+
       - name: Install bdinfo-rs from the tap
         run: brew install agentjp/tap/bdinfo-rs
 
