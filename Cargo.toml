@@ -16,7 +16,7 @@ members = ["crates/bdinfo-rs-core", "crates/bdinfo-rs"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.96"
 # LGPL (unlike GPL) permits use from other applications.
@@ -118,7 +118,7 @@ private_intra_doc_links = "allow"
 
 [workspace.dependencies]
 # Internal (version + path so bdinfo-rs is publishable to crates.io).
-bdinfo-rs-core = { path = "crates/bdinfo-rs-core", version = "1.0.0" }
+bdinfo-rs-core = { path = "crates/bdinfo-rs-core", version = "1.0.1" }
 # External (pinned to latest stable minor; deny.toml forbids wildcards).
 clap = { version = "4.6", features = ["derive"] }
 proptest = "1.11"
