@@ -19,6 +19,14 @@ updates:
       cargo-dependencies:
         patterns: ["*"]
     labels: [dependencies]
+    # master is squash-merged and the conventional gate (conventional.yml) lints
+    # the PR title AND every commit, so Dependabot's default "Bump ..." subject is
+    # rejected. Emit a Conventional Commit instead — `build(deps): bump ...` (cargo
+    # deps are build inputs; the deps/deps-dev scope comes from include: scope).
+    # `build` is a no-bump type, so a dependency PR never drives a release on its own.
+    commit-message:
+      prefix: build
+      include: scope
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -28,3 +36,8 @@ updates:
       github-actions:
         patterns: ["*"]
     labels: [dependencies, ci]
+    # Same reason as cargo above: produce `ci(deps): bump ...` so the squash subject
+    # and the commit both pass the conventional gate. `ci` is a no-bump type too.
+    commit-message:
+      prefix: ci
+      include: scope
