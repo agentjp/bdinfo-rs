@@ -10,10 +10,15 @@ name: version-freshness
 #   - taplo (the `tool: taplo-cli@X` pin in toml.yml — a formatter, pinned like
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
-#     output drives a reproducible changelog/version format, like taplo/rustfmt).
+#     output drives a reproducible changelog/version format, like taplo/rustfmt),
+#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) — the ONE
+#     action SHA watched here: it pins a TAGLESS repo's `master`, so Dependabot
+#     (which bumps toward releases) can't move it, and zizmor's ref-version-mismatch
+#     is inline-ignored for it; without this nag nothing would tell us it drifted.
 # (Cargo deps/dev-deps and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + github-actions ecosystems — so they are deliberately NOT
-# re-checked here. The remaining gate tools — zizmor (a security linter, kept at
+# re-checked here, EXCEPT the one tagless branch-pinned action noted above that
+# Dependabot cannot bump. The remaining gate tools — zizmor (a security linter, kept at
 # latest on purpose so new vuln checks land immediately), action-validator,
 # cargo-{machete,shear,semver-checks,llvm-cov,nextest,mutants,deny}, typos — are
 # installed at LATEST every run, so they self-update and have no pin to rot. The
@@ -158,7 +163,23 @@ jobs:
             $problems += "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
           }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)"
+          # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
+          # SHA-pinned to a TAGLESS repo's master branch, so Dependabot can't bump it
+          # (no release to target) and zizmor's ref-version-mismatch is inline-ignored
+          # on that line. Watch it here instead: nag (don't fail CI) when Homebrew
+          # master moves past the frozen SHA, so re-pinning stays a deliberate edit.
+          $brewPin = Read-Pin '.github/workflows/install-smoke-test.yml' 'setup-homebrew@([0-9a-f]{40})'
+          if (-not $brewPin) { throw 'No Homebrew/actions/setup-homebrew SHA pin in install-smoke-test.yml' }
+          $brewHead = gh api repos/Homebrew/actions/branches/master --jq '.commit.sha' 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $brewHead) {
+            $problems += '- could not query Homebrew/actions master HEAD (GitHub API)'
+          } elseif ($brewPin -ne $brewHead) {
+            $problems += "- Homebrew/actions/setup-homebrew pin ``$($brewPin.Substring(0, 12))`` (install-smoke-test.yml) is behind master HEAD ``$($brewHead.Substring(0, 12))`` — re-pin deliberately (the repo ships no tags, so the SHA is frozen on purpose)"
+          }
+          $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
+          $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  brew: $brewPinShort (head $brewHeadShort)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'

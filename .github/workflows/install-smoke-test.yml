@@ -35,7 +35,18 @@ jobs:
       matrix:
         os: [macos-15, ubuntu-latest]
     steps:
-      - uses: Homebrew/actions/setup-homebrew@841d750a0ed9262d3c3ca31f2173974696bc261a # master
+      # Homebrew/actions publishes NO version tags, so this pin cannot carry an
+      # immutable `# vX.Y.Z` like every other action in the repo. The SHA is a
+      # deliberate FREEZE of a reviewed master commit — never "track latest". We
+      # therefore exempt only this line from zizmor's ref-version-mismatch, which
+      # would otherwise resolve a `# master` comment against the live branch HEAD and
+      # red-X every PR each time Homebrew pushes to master. It stays SHA-pinned, so
+      # Scorecard pinned-dependencies and zizmor's unpinned-uses are still satisfied.
+      # Staying current is out-of-band, not a blocking check: version-freshness.yml
+      # nags (files an issue) when Homebrew master moves past this SHA, and the bump
+      # is then a deliberate edit here. Dependabot cannot do it (it bumps toward
+      # releases, and this repo has none).
+      - uses: Homebrew/actions/setup-homebrew@841d750a0ed9262d3c3ca31f2173974696bc261a # zizmor: ignore[ref-version-mismatch]
 
       # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
       # check then warns about them on every brew command. We install bdinfo-rs by its

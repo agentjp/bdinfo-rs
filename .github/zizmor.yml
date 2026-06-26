@@ -7,9 +7,14 @@
 # release.yml by rule id (whole-file, since regeneration shifts line numbers).
 # Findings in every hand-maintained workflow are fixed in place, not ignored.
 #
-# ref-version-mismatch is intentionally NOT suppressed: every SHA pin carries the
-# EXACT immutable tag it resolves to (`# vX.Y.Z`, not a moving major `# vN`), so a
-# pin's comment can never drift from its hash and Dependabot bumps both together.
+# ref-version-mismatch is intentionally NOT suppressed in this config: every SHA
+# pin carries the EXACT immutable tag it resolves to (`# vX.Y.Z`, not a moving
+# major `# vN`), so a pin's comment can never drift from its hash and Dependabot
+# bumps both together. The ONE exception is handled inline, not here:
+# Homebrew/actions/setup-homebrew (install-smoke-test.yml) pins a TAGLESS repo's
+# `master`, so it cannot carry an immutable tag — it is frozen at a reviewed SHA
+# and exempted with an on-line `# zizmor: ignore[ref-version-mismatch]`, while
+# version-freshness.yml watches it for upstream movement.
 rules:
   # cargo-dist hardcodes a top-level `contents: write` (needed to upload release
   # assets); it is not tightenable without editing the generated file.
