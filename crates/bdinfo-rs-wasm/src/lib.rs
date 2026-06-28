@@ -148,7 +148,7 @@ fn extension_of(name: &str) -> &str {
 struct MemFile {
     name: String,
     full: String,
-    data: Arc<Vec<u8>>,
+    data: Arc<[u8]>,
 }
 
 impl BdFile for MemFile {
@@ -173,16 +173,16 @@ impl BdFile for MemFile {
     }
 
     fn open_read(&self) -> io::Result<Box<dyn ReadSeek>> {
-        Ok(Box::new(Cursor::new(self.data.as_ref().clone())))
+        Ok(Box::new(Cursor::new(Arc::clone(&self.data))))
     }
 
     fn open_text(&self) -> io::Result<Box<dyn BufRead>> {
-        Ok(Box::new(BufReader::new(Cursor::new(self.data.as_ref().clone()))))
+        Ok(Box::new(BufReader::new(Cursor::new(Arc::clone(&self.data)))))
     }
 }
 
 fn mem_file(dir: &str, name: &str, data: Vec<u8>) -> MemFile {
-    MemFile { name: name.to_owned(), full: format!("{dir}/{name}"), data: Arc::new(data) }
+    MemFile { name: name.to_owned(), full: format!("{dir}/{name}"), data: Arc::from(data) }
 }
 
 /// Splits `data` into up to six `u32`-BE length-prefixed sections (see the
