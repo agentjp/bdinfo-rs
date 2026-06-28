@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <title>bdinfo-rs wasm parity harness</title>
+  </head>
+  <body>
+    <!-- Headless-Chrome parity harness: exposes the package's `analyze` on the
+         window so the Playwright test can hand it File objects built from the
+         committed Big Buck Bunny fixture and compare the result to the golden. -->
+    <script type="module">
+      import { analyze } from "/dist/analyze.js";
+      window.__analyze = analyze;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>bdinfo-rs — in-browser Blu-ray scan</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 70rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.5;
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      #status {
+        color: #555;
+        min-height: 1.2em;
+      }
+      #report {
+        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        font-size: 0.8rem;
+        white-space: pre;
+        overflow-x: auto;
+        background: #0b0b0b;
+        color: #d6d6d6;
+        padding: 1rem;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>bdinfo-rs — in-browser Blu-ray scan</h1>
+    <p>
+      Pick a disc's <code>BDMV</code> folder (or the disc root). The full measured
+      scan runs locally in a Web Worker — no bytes are uploaded.
+    </p>
+    <input id="picker" type="file" webkitdirectory multiple />
+    <pre id="status"></pre>
+    <pre id="report"></pre>
+    <script type="module" src="/dist/demo.js"></script>
+  </body>
+</html>

@@ -1,0 +1,34 @@
+{
+  "name": "@bdinfo-rs/wasm",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "In-browser Blu-ray disc analyzer — the bdinfo-rs measured scan compiled to WebAssembly, run off the main thread in a Web Worker over a webkitdirectory-picked BDMV folder.",
+  "license": "LGPL-2.1-only",
+  "exports": {
+    ".": {
+      "types": "./pkg/bdinfo_rs_wasm.d.ts",
+      "import": "./dist/analyze.js"
+    }
+  },
+  "files": [
+    "dist",
+    "pkg",
+    "src",
+    "demo.html"
+  ],
+  "scripts": {
+    "build:wasm": "node build.mjs",
+    "build:ts": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
+    "build": "npm run build:wasm && npm run build:ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "check": "biome check .",
+    "format": "biome check --write .",
+    "test:chrome": "node test/parity.chrome.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2",
+    "playwright-core": "^1",
+    "typescript": "^5"
+  }
+}
