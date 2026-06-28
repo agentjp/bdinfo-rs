@@ -69,7 +69,7 @@ const READ_WINDOW: usize = 1 << 20;
 struct Node<F> {
     name: String,
     full: String,
-    dirs: Vec<Node<F>>,
+    dirs: Vec<Self>,
     files: Vec<F>,
 }
 
@@ -85,7 +85,9 @@ impl<F> Node<F> {
 fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     match pattern.split_first() {
         None => name.is_empty(),
-        Some((b'*', rest)) => (0..=name.len()).any(|skip| glob_match(rest, &name[skip..])),
+        Some((b'*', rest)) => {
+            (0..=name.len()).any(|skip| name.get(skip..).is_some_and(|tail| glob_match(rest, tail)))
+        }
         Some((b'?', rest)) => match name.split_first() {
             Some((_, tail)) => glob_match(rest, tail),
             None => false,
@@ -151,7 +153,7 @@ impl<F: BdFile + Clone + 'static> BdDir for Node<F> {
 /// The extension *including* the leading dot, e.g. `.mpls`; the empty string
 /// when the name has no `.`.
 fn extension_of(name: &str) -> &str {
-    name.rfind('.').map_or("", |i| &name[i..])
+    name.rfind('.').and_then(|i| name.get(i..)).unwrap_or("")
 }
 
 // ── in-memory backend (the `scan_report` framing path) ──────────────────────
@@ -208,8 +210,10 @@ fn split_sections(data: &[u8]) -> Vec<Vec<u8>> {
         let Some((len_bytes, tail)) = rest.split_first_chunk::<4>() else { break };
         let want = u32::from_be_bytes(*len_bytes) as usize;
         let take = want.min(tail.len());
-        sections.push(tail[..take].to_vec());
-        rest = &tail[take..];
+        // `take <= tail.len()`, so `split_at` cannot panic.
+        let (head, next) = tail.split_at(take);
+        sections.push(head.to_vec());
+        rest = next;
         if take < want {
             break;
         }
@@ -346,7 +350,11 @@ impl Read for WebReader {
             .map_err(|e| io::Error::other(js_message(&e)))?;
         let view = js_sys::Uint8Array::new(&array);
         let n = view.length() as usize;
-        view.copy_to(&mut buf[..n]);
+        // `n` is the length of a blob sliced to at most `buf.len()` bytes, so the
+        // destination window always exists; copy into it when non-empty.
+        if let Some(dst) = buf.get_mut(..n) {
+            view.copy_to(dst);
+        }
         self.pos = self.pos.saturating_add(n as u64);
         Ok(n)
     }
@@ -534,7 +542,8 @@ fn assemble_tree<F>(entries: Vec<(Vec<&str>, F)>) -> Result<Node<F>, TreeError> 
         // wrapping, the shared root (`BDMV`) is the first child of the synthetic
         // root; otherwise the shared root *is* the root, so only the components
         // between it and the file name are intermediate directories.
-        let chain = if wrap { dirs } else { dirs.split_first().map_or(&[][..], |(_, rest)| rest) };
+        let chain =
+            if wrap { dirs } else { dirs.split_first().map_or([].as_slice(), |(_, rest)| rest) };
         insert_file(&mut root, chain, file);
     }
     Ok(root)
@@ -559,7 +568,13 @@ fn insert_file<F>(root: &mut Node<F>, chain: &[&str], file: F) {
             node.dirs.push(Node::dir(dir, &full));
             node.dirs.len().saturating_sub(1)
         };
-        let Some(next) = node.dirs.get_mut(idx) else { return };
+        // `idx` is a position just found in `node.dirs` or the index of the entry
+        // just pushed, so it is always in bounds.
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "idx is freshly found-or-pushed in node.dirs, always in bounds"
+        )]
+        let next = &mut node.dirs[idx];
         node = next;
     }
     node.files.push(file);
@@ -619,9 +634,10 @@ fn render_disc(
     Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
 
-/// Renders the synthetic in-memory tree built from `data` (no progress); an
-/// unopenable structure renders as the empty string, the resilient-open absence
-/// path the `parse_report` fuzz target and the parity test expect.
+/// Renders the synthetic in-memory tree built from `data` (no progress).
+///
+/// An unopenable structure renders as the empty string — the resilient-open
+/// absence path the `parse_report` fuzz target and the parity test expect.
 #[must_use]
 pub fn run_report(data: &[u8]) -> String {
     render_disc(&build_tree(data), &mut |_| {}).unwrap_or_default()
@@ -692,6 +708,27 @@ mod tests {
     /// takes, tagging each file with its index so placement stays checkable.
     fn entries<'a>(paths: &[&'a str]) -> Vec<(Vec<&'a str>, usize)> {
         paths.iter().enumerate().map(|(i, path)| (path_components(path), i)).collect()
+    }
+
+    /// The committed Big Buck Bunny fixture framed into the six `u32`-BE sections
+    /// the in-memory path expects (the bytes the parity golden is built from).
+    fn fixture_blob() -> Vec<u8> {
+        const INDEX: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
+        const MOVIE: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/MovieObject.bdmv");
+        const MPLS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/PLAYLIST/00000.mpls");
+        const CLPI: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/CLIPINF/00000.clpi");
+        const M2TS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/STREAM/00000.m2ts");
+        let mut blob = Vec::new();
+        for section in [INDEX, MOVIE, MPLS, CLPI, M2TS, [].as_slice()] {
+            blob.extend_from_slice(&(section.len() as u32).to_be_bytes());
+            blob.extend_from_slice(section);
+        }
+        blob
     }
 
     #[test]
@@ -786,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn assemble_skips_entries_with_no_path_components() {
+        // An entry whose path has no components (e.g. "") is skipped in both the
+        // root-scan and the insert pass; a coherent sibling still assembles. The
+        // mix is needed: the empty entry exercises the skip, the real one keeps
+        // the run past the empty-selection guard so the second skip is reached.
+        let tree = assemble_tree(entries(&["", "DISC/BDMV/index.bdmv"]))
+            .expect("the empty-path entry is skipped, the real one assembles");
+        assert_eq!(tree.name, "DISC");
+        assert_eq!(tree.dirs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["BDMV"]);
+    }
+
+    #[test]
     fn a_bdmv_rooted_selection_renders_like_the_canonical_framing() {
         use std::sync::Arc;
 
@@ -806,7 +855,7 @@ mod tests {
 
         // The canonical in-memory framing (`WASMDISC`-rooted) the golden pins.
         let mut blob = Vec::new();
-        for section in [INDEX, MOVIE, MPLS, CLPI, M2TS, &[][..]] {
+        for section in [INDEX, MOVIE, MPLS, CLPI, M2TS, [].as_slice()] {
             blob.extend_from_slice(&(section.len() as u32).to_be_bytes());
             blob.extend_from_slice(section);
         }
@@ -858,7 +907,10 @@ mod tests {
         // filter (`PlaylistFilter::default`) drops it: the first PlayItem's
         // OUT_time is a u32-BE at file offset 86 (IN_time is 27_000_000 at 82).
         let mut short = MPLS.to_vec();
-        short[86..90].copy_from_slice(&(27_000_000_u32 + 45_000 * 10).to_be_bytes());
+        short
+            .get_mut(86..90)
+            .expect("the fixture playlist has an OUT_time at offset 86")
+            .copy_from_slice(&(27_000_000_u32 + 45_000 * 10).to_be_bytes());
 
         let files: [(&str, Vec<u8>); 6] = [
             ("DISC/BDMV/index.bdmv", INDEX.to_vec()),
@@ -904,6 +956,80 @@ mod tests {
         let tree = assemble_tree(vec![(path_components(&deep), 0_usize)]).expect("assemble");
         assert_eq!(tree.name, "DISC");
         assert!(tree.dirs.is_empty(), "the over-deep file should be dropped");
+    }
+
+    #[test]
+    fn mem_file_exposes_metadata_and_reads_as_bytes_and_text() {
+        use std::io::Read;
+
+        use bdinfo_rs_core::vfs::BdFile;
+
+        use super::mem_file;
+
+        // The scan reaches MemFile only through `open_read`; `full_name`,
+        // `is_dir`, and `open_text` are off the render path, so cover them here.
+        let file = mem_file("WASMDISC/BDMV", "index.bdmv", b"hello".to_vec());
+        assert_eq!(file.name(), "index.bdmv");
+        assert_eq!(file.full_name(), "WASMDISC/BDMV/index.bdmv");
+        assert_eq!(file.extension(), ".bdmv");
+        assert_eq!(file.length(), 5);
+        assert!(!file.is_dir());
+
+        let mut bytes = Vec::new();
+        file.open_read().expect("open_read").read_to_end(&mut bytes).expect("read bytes");
+        assert_eq!(bytes, b"hello");
+
+        let mut text = String::new();
+        file.open_text().expect("open_text").read_to_string(&mut text).expect("read text");
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn node_walk_matches_patterns_with_and_without_recursion() {
+        use bdinfo_rs_core::vfs::{BdDir, SearchOption};
+
+        use super::{Node, mem_file};
+
+        let mut stream = Node::dir("STREAM", "DISC/BDMV/STREAM");
+        stream.files.push(mem_file("DISC/BDMV/STREAM", "00000.m2ts", vec![0_u8; 4]));
+        let mut root = Node::dir("BDMV", "DISC/BDMV");
+        root.files.push(mem_file("DISC/BDMV", "index.bdmv", vec![0_u8; 2]));
+        root.dirs.push(stream);
+
+        assert_eq!(root.name(), "BDMV");
+        assert_eq!(root.full_name(), "DISC/BDMV");
+        assert!(root.parent().is_none());
+        assert_eq!(root.get_files().expect("files").len(), 1);
+        assert_eq!(root.get_directories().expect("dirs").len(), 1);
+
+        // TopDirectoryOnly does not descend into STREAM; AllDirectories does
+        // (covers `collect_pattern`'s `if recurse` both ways).
+        assert_eq!(root.get_files_pattern("*.m2ts").expect("shallow").len(), 0);
+        assert_eq!(
+            root.get_files_pattern_option("*.m2ts", SearchOption::AllDirectories)
+                .expect("deep")
+                .len(),
+            1
+        );
+        // A top-level match is found by either search.
+        assert_eq!(root.get_files_pattern("*.bdmv").expect("top match").len(), 1);
+    }
+
+    #[test]
+    fn render_disc_renders_then_errors_without_bdmv() {
+        use bdinfo_rs_core::bdrom::disc::ScanProgress;
+
+        use super::{MemFile, Node, build_tree, render_disc};
+
+        // One progress sink — a fn pointer, so it is generic over the progress
+        // lifetime (a shared closure would pin it and fail to type-check across
+        // the two calls). The good render drives it so its body is covered; the
+        // unopenable tree (no BDMV/CLIPINF/PLAYLIST) then makes render_disc hit
+        // the `?` early-return, the arm the parity `Ok` flow never reaches.
+        let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
+        render_disc(&build_tree(&fixture_blob()), &mut sink).expect("the fixture opens");
+        let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
+        assert!(render_disc(&empty, &mut sink).is_err());
     }
 
     #[test]

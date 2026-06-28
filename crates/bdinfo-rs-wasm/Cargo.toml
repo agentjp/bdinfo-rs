@@ -52,25 +52,46 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Calibrated lint gate — PROPORTIONATE, not the core's posture. This crate is the
-# thin browser shim that lives OUTSIDE the workspace `forbid(unsafe_code)` bar
-# (wasm-bindgen's generated glue + the one `unsafe impl Send` need it), so:
-#   - `unsafe_code` is ALLOWED here (and ONLY here);
-#   - clippy `all` + `pedantic` are denied (a real bar), with a SHORT allow-list
-#     for the lints that are intrinsic to the JS/web boundary rather than bugs.
-# `nursery` is deliberately left off (unstable + noisy — calibration, not laxity).
+# Maximal-FEASIBLE strictness (Posture B). This crate is the thin browser shim
+# that lives OUTSIDE the workspace `forbid(unsafe_code)` bar (wasm-bindgen's
+# generated glue + the one `unsafe impl Send` need it), so `unsafe` is allowed
+# here and ONLY here. Everywhere else it is held to the core's posture: clippy
+# all/pedantic/nursery/cargo + the core's hostile-input restriction picks, with a
+# SHORT allow-list for the lints intrinsic to the JS/web boundary, not bugs.
 [lints.rust]
 unsafe_code = "allow"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
-# Web APIs take/return byte offsets as `f64` and js_sys lengths as `u32`; every
-# crossing here is bounded by the surrounding `saturating_*`/`min` arithmetic, so
-# the cast itself is not where truncation/precision/sign would bite.
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Restriction picks — the same bug classes the core guards: out-of-bounds index
+# panics, UTF-8 slice panics, silent wrap on byte/offset math, and panics.
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+unwrap_used = "deny"
+panic = "deny"
+# Harden the one unsafe seam: every unsafe item carries a SAFETY proof and does
+# exactly one unsafe op.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+# ── allow-list: each is intrinsic to the JS/web boundary, not a latent bug ──
+# Web APIs hand byte offsets across as `f64` and js_sys lengths as `u32`; every
+# cast is bounded by the surrounding saturating_*/min/try_from, so the cast site
+# is not where truncation/precision/sign would bite. (cast_* are pedantic; they
+# must be re-allowed alongside the restriction-level as_conversions.)
+as_conversions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 # `#[wasm_bindgen]` exports must take their args by value — the generated ABI
 # moves them across the JS boundary.
 needless_pass_by_value = "allow"
+# `cargo` group on a publish=false in-tree shim: it carries no keywords/categories
+# (it is not a crates.io package) and the version dups live in the transitive
+# wasm-bindgen/web-sys tree (not resolvable from a leaf crate). Both are noise.
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
