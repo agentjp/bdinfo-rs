@@ -24,8 +24,12 @@
   },
   "exports": {
     ".": {
-      "types": "./pkg/bdinfo_rs_wasm.d.ts",
+      "types": "./dist/analyze.d.ts",
       "import": "./dist/analyze.js"
+    },
+    "./wasm": {
+      "types": "./pkg/bdinfo_rs_wasm.d.ts",
+      "import": "./pkg/bdinfo_rs_wasm.js"
     }
   },
   "files": [
