@@ -73,7 +73,7 @@ const LAYOUT = [
 async function main() {
   const golden = await readFile(goldenPath);
 
-  const { initSync, scan_files } = await import("../pkg/bdinfo_rs_wasm.js");
+  const { initSync, scan_files, list_playlists } = await import("../pkg/bdinfo_rs_wasm.js");
   initSync({ module: await readFile(wasmPath) });
 
   const paths = [];
@@ -86,11 +86,33 @@ async function main() {
     files.push(new ShimFile(bytes, name));
   }
 
-  const report = scan_files(paths, files);
+  const report = scan_files(paths, files, []);
   const got = Buffer.from(report, "utf8");
 
-  if (got.equals(golden)) {
-    console.log(`PASS — Node measured scan matches the golden (${golden.length} bytes).`);
+  // The new CLI-parity exports: the structural list, and a by-name selective
+  // scan. On this single-playlist fixture, selecting the only playlist measures
+  // the same bytes as `--whole`, so its report must equal the golden too.
+  const rows = JSON.parse(list_playlists(paths, files));
+  const selReport = Buffer.from(scan_files(paths, files, ["00000.MPLS"]), "utf8");
+  const listOk =
+    Array.isArray(rows) &&
+    rows.length === 1 &&
+    rows[0].name === "00000.MPLS" &&
+    rows[0].position === 1;
+  const selOk = selReport.equals(golden);
+  if (!listOk) {
+    console.error(`FAIL — list_playlists rows unexpected: ${JSON.stringify(rows)}`);
+  }
+  if (!selOk) {
+    console.error(
+      `FAIL — selective scan (${selReport.length} bytes) diverged from golden (${golden.length} bytes).`,
+    );
+  }
+
+  if (got.equals(golden) && listOk && selOk) {
+    console.log(
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + selection OK.`,
+    );
     process.exit(0);
   }
 

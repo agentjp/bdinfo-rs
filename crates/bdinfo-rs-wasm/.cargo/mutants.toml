@@ -19,6 +19,7 @@ exclude_re = [
     "for JsValue", # impl From<TreeError> for JsValue
     "build_web_tree", # &js_sys::Array -> Node<WebFile>
     "scan_files", # the #[wasm_bindgen] streaming export
+    "list_playlists", # the #[wasm_bindgen] structural-listing export
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).

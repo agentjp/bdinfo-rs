@@ -38,14 +38,22 @@
 // NON-test build, so gate them to where they live to stay dead-code-clean.
 // `Read`/`Seek`/`JsCast`/`JsValue` are named only by the wasm32 browser glue.
 #[cfg(any(target_arch = "wasm32", test))]
+use std::collections::BTreeSet;
+#[cfg(any(target_arch = "wasm32", test))]
 use std::io::SeekFrom;
 use std::io::{self, BufRead, BufReader, Cursor};
 #[cfg(target_arch = "wasm32")]
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
+#[cfg(any(target_arch = "wasm32", test))]
+use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
+#[cfg(any(target_arch = "wasm32", test))]
+use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+#[cfg(any(target_arch = "wasm32", test))]
+use bdinfo_rs_core::bdrom::order::presentation_groups;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
@@ -613,6 +621,224 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 
 // ── shared render path ──────────────────────────────────────────────────────
 
+// ── selection (CLI parity) ──────────────────────────────────────────────────
+//
+// The browser surfaces the CLI's flow: a structural scan lists the playlists
+// ([`list_playlists`]), the user picks some, and a measured scan reads only the
+// picked playlists' stream files ([`scan_files`] with a selection). These
+// helpers mirror the selection logic of the `bdinfo-rs` binary — which this
+// crate cannot import — over the public core types, so the browser behaves
+// exactly like `--mpls` / the picker. They are `cfg(any(wasm32, test))`: the
+// wasm exports use them and the native test build covers + mutates them, while a
+// native non-test build omits them (so neither tier shows dead code).
+
+/// One selection-table row — the machine-readable form of the CLI's
+/// `#`/Group/Playlist File/Length/Estimated Bytes table, for the browser to
+/// render as a checklist. Measured bytes are omitted: a [`list_playlists`] scan
+/// is structural, so they would always be `-`.
+#[cfg(any(target_arch = "wasm32", test))]
+struct PlaylistRow {
+    /// 1-based position in the table — the handle the user picks.
+    position: usize,
+    /// Shared-clip group number (1-based), the CLI's `Group` column.
+    group: usize,
+    /// The playlist file name, e.g. `00000.MPLS`.
+    name: String,
+    /// `hh:mm:ss` total length, truncated like the CLI table.
+    length: String,
+    /// Estimated bytes — interleaved `*.ssif` size, else `*.m2ts` size, else
+    /// `None` (the `-` cell).
+    estimated_bytes: Option<u64>,
+    /// Whether the playlist hides any stream (the CLI's `(*)` note).
+    has_hidden_streams: bool,
+}
+
+/// The playlist table rows as `(group number, playlist index)` pairs in table
+/// order: the standard filtered set (short and looping playlists dropped),
+/// grouped by shared clips, each group longest-first. Mirrors the CLI's
+/// `table_rows`.
+#[cfg(any(target_arch = "wasm32", test))]
+fn table_rows(playlists: &[PlaylistSummary]) -> Vec<(usize, usize)> {
+    presentation_groups(playlists, &PlaylistFilter::default())
+        .into_iter()
+        .enumerate()
+        .flat_map(|(group, members)| {
+            members.into_iter().map(move |index| (group.saturating_add(1), index))
+        })
+        .collect()
+}
+
+/// `hh:mm:ss` from playlist seconds, truncated to the tick like the CLI table
+/// (hours wrap at 24; no day component).
+#[cfg(any(target_arch = "wasm32", test))]
+fn table_length(seconds: f64) -> String {
+    let total = seconds_to_ticks(seconds).max(0).checked_div(10_000_000).unwrap_or(0);
+    let h = total.checked_div(3600).and_then(|h| h.checked_rem(24)).unwrap_or(0);
+    let m = total.checked_div(60).and_then(|m| m.checked_rem(60)).unwrap_or(0);
+    let s = total.checked_rem(60).unwrap_or(0);
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// The estimated byte size shown for a playlist: the interleaved `*.ssif` size
+/// when known, else the `*.m2ts` size, else `None`.
+#[cfg(any(target_arch = "wasm32", test))]
+const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
+    if playlist.interleaved_file_size > 0 {
+        Some(playlist.interleaved_file_size)
+    } else if playlist.file_size > 0 {
+        Some(playlist.file_size)
+    } else {
+        None
+    }
+}
+
+/// Builds the selection-table rows over the standard filtered set.
+#[cfg(any(target_arch = "wasm32", test))]
+fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
+    table_rows(playlists)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, (group, index))| {
+            playlists.get(index).map(|playlist| PlaylistRow {
+                position: position.saturating_add(1),
+                group,
+                name: playlist.name.clone(),
+                length: table_length(playlist.total_length),
+                estimated_bytes: estimated_bytes(playlist),
+                has_hidden_streams: playlist.has_hidden_streams(),
+            })
+        })
+        .collect()
+}
+
+/// Appends `value` to `out` as a JSON string body (the surrounding quotes are
+/// the caller's), escaping the characters JSON requires.
+#[cfg(any(target_arch = "wasm32", test))]
+fn json_escape(value: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if u32::from(control) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", u32::from(control));
+            }
+            other => out.push(other),
+        }
+    }
+}
+
+/// Serializes the selection rows to a JSON array string — the [`list_playlists`]
+/// return value the browser `JSON.parse`s into its checklist model.
+#[cfg(any(target_arch = "wasm32", test))]
+fn rows_to_json(rows: &[PlaylistRow]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("[");
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"position\":{},\"group\":{},\"name\":\"", row.position, row.group);
+        json_escape(&row.name, &mut out);
+        out.push_str("\",\"length\":\"");
+        json_escape(&row.length, &mut out);
+        out.push_str("\",\"estimatedBytes\":");
+        match row.estimated_bytes {
+            Some(bytes) => {
+                let _ = write!(out, "{bytes}");
+            }
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"hasHidden\":");
+        out.push_str(if row.has_hidden_streams { "true" } else { "false" });
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// Normalizes a requested playlist name to the model's spelling: upper-cased,
+/// with `.MPLS` appended when no extension was given. Mirrors the CLI.
+#[cfg(any(target_arch = "wasm32", test))]
+fn normalize_playlist_name(name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    if upper.contains('.') { upper } else { format!("{upper}.MPLS") }
+}
+
+/// Resolves the requested names against the disc, in the given order, first
+/// occurrence wins, unknown names skipped — the CLI's `--mpls` selection.
+#[cfg(any(target_arch = "wasm32", test))]
+fn named_selection(playlists: &[PlaylistSummary], requested: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for raw in requested {
+        let name = normalize_playlist_name(raw);
+        if playlists.iter().any(|playlist| playlist.name == name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The stream files a selection's packet scan reads: every clip of every
+/// selected playlist.
+#[cfg(any(target_arch = "wasm32", test))]
+fn selection_stream_files(playlists: &[PlaylistSummary], selection: &[String]) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for name in selection {
+        if let Some(playlist) = playlists.iter().find(|playlist| &playlist.name == name) {
+            files.extend(playlist.clips.iter().map(|clip| clip.name.clone()));
+        }
+    }
+    files
+}
+
+/// The report's playlist order for a selection: the selection order mapped to
+/// indices into the scanned disc's playlists.
+#[cfg(any(target_arch = "wasm32", test))]
+fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<usize> {
+    selection
+        .iter()
+        .filter_map(|name| playlists.iter().position(|playlist| &playlist.name == name))
+        .collect()
+}
+
+/// Runs the **measured** scan over just the playlists named in `selection` and
+/// renders the classic report in selection order — the browser equivalent of
+/// `bdinfo-rs <disc> --mpls A,B`.
+///
+/// A cheap structural scan (no packet scan) resolves the names to their stream
+/// files first; the measured scan is then narrowed to those files, so an
+/// unselected (possibly multi-GB) playlist is never demuxed. Names match
+/// unfiltered — a short or looping playlist the `--whole` filter drops is still
+/// selectable by name.
+///
+/// # Errors
+/// The [`BdError`] from either open when the structure is too damaged to scan.
+#[cfg(any(target_arch = "wasm32", test))]
+fn render_selection(
+    root: &dyn BdDir,
+    selection: &[String],
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+) -> Result<String, BdError> {
+    let structural = BdRom::open_resilient(root, false)?;
+    let names = named_selection(&structural.bdrom.playlists, selection);
+    let files = selection_stream_files(&structural.bdrom.playlists, &names);
+    // The measured scan re-opens the same tree, narrowed to the selected clips.
+    // It locates the same `BDMV`/`CLIPINF`/`PLAYLIST` the structural open just
+    // found, so it cannot hit the only hard error (`StructureNotFound`); on that
+    // unreachable failure it degrades to the structural disc (zero measured
+    // tallies) rather than erroring.
+    let measured =
+        BdRom::open_resilient_with(root, true, Some(&files), progress).unwrap_or(structural);
+    let order = selection_order(&measured.bdrom.playlists, &names);
+    Ok(text::render_with(&measured.bdrom, &order, &measured.errors))
+}
+
+// ── shared render path ──────────────────────────────────────────────────────
+
 /// Runs the full **measured** scan over `root` and renders the classic disc
 /// report.
 ///
@@ -667,7 +893,9 @@ pub fn scan_report(data: &[u8]) -> String {
 /// synchronously at byte offsets through [`web_sys::FileReaderSync`]. This MUST
 /// run in a Web Worker (the only scope where `FileReaderSync` exists). When
 /// `on_progress` is supplied it is called as `(file, done, total)` after each
-/// demux read.
+/// demux read. A non-empty `selection` names the playlists to measure (CLI
+/// `--mpls` semantics — unfiltered, in order); an empty `selection` measures the
+/// standard `--whole` set.
 ///
 /// # Errors
 /// Returns a `JsValue` if `paths` and `files` differ in length, any `files`
@@ -679,6 +907,7 @@ pub fn scan_report(data: &[u8]) -> String {
 pub fn scan_files(
     paths: Vec<String>,
     files: js_sys::Array,
+    selection: Vec<String>,
     on_progress: Option<js_sys::Function>,
 ) -> Result<String, JsValue> {
     let root = build_web_tree(&paths, &files)?;
@@ -692,8 +921,35 @@ pub fn scan_files(
             );
         }
     };
-    render_disc(&root, &mut observe)
-        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+    let rendered = if selection.is_empty() {
+        render_disc(&root, &mut observe)
+    } else {
+        render_selection(&root, &selection, &mut observe)
+    };
+    rendered.map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+}
+
+/// The structural-scan entry point: the playlist selection table as JSON.
+///
+/// Hand it a `webkitdirectory`-selected BDMV folder and get back the rows the
+/// browser renders as a multi-select checklist before the measured scan,
+/// mirroring the CLI's playlist table.
+///
+/// Runs only the **structural** scan — no packet demux — so it is fast: it reads
+/// the playlist/clip metadata, not the multi-GB stream files. Each element is
+/// `{ position, group, name, length, estimatedBytes, hasHidden }`; pass the
+/// chosen `name`s back to [`scan_files`] to measure just those playlists.
+///
+/// # Errors
+/// As [`scan_files`]: `paths`/`files` length mismatch, a non-`File` entry, an
+/// incoherent selection, or no readable Blu-ray structure.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String, JsValue> {
+    let root = build_web_tree(&paths, &files)?;
+    let report = BdRom::open_resilient(&root, false)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }
 
 #[cfg(test)]
@@ -1098,6 +1354,293 @@ mod tests {
             u64::MAX
         );
         assert_eq!(seek_target(SeekFrom::Current(i64::MAX), u64::MAX, 0).expect("sat"), u64::MAX);
+    }
+
+    /// CLI-parity selection helpers (Tier A): the structural playlist listing
+    /// and the by-name measured scan, native-tested to the core bar.
+    mod selection {
+        use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
+
+        use crate::{
+            PlaylistRow, estimated_bytes, json_escape, named_selection, normalize_playlist_name,
+            playlist_rows, rows_to_json, selection_order, selection_stream_files, table_length,
+            table_rows,
+        };
+
+        /// A `ClipSummary` carrying just a name + length (the fields the
+        /// selection helpers read); the measured tallies stay zero.
+        fn sample_clip(name: &str, length: f64) -> ClipSummary {
+            ClipSummary {
+                name: name.to_owned(),
+                display_name: name.to_owned(),
+                angle_index: 0,
+                relative_time_in: 0.0,
+                length,
+                payload_bytes: 0,
+                packet_count: 0,
+                packet_seconds: 0.0,
+                file_seconds: 0.0,
+                streams: Vec::new(),
+            }
+        }
+
+        /// A `PlaylistSummary` carrying just what the selection/table helpers
+        /// read: name, length, the two file sizes, and its clip names.
+        fn sample_playlist(
+            name: &str,
+            total_length: f64,
+            file_size: u64,
+            interleaved_file_size: u64,
+            clips: &[&str],
+        ) -> PlaylistSummary {
+            PlaylistSummary {
+                name: name.to_owned(),
+                total_length,
+                file_size,
+                interleaved_file_size,
+                chapter_count: 0,
+                stream_count: 0,
+                angle_count: 0,
+                has_loops: false,
+                streams: Vec::new(),
+                clips: clips.iter().map(|clip| sample_clip(clip, total_length)).collect(),
+                chapters: Vec::new(),
+            }
+        }
+
+        /// A four-playlist disc: 00000 (100 s) shares clip A with 00001 (50 s) →
+        /// group 1; 00002 (70 s, clip B) → group 2; 00003 (5 s) is dropped by
+        /// the short filter.
+        fn disc() -> [PlaylistSummary; 4] {
+            [
+                sample_playlist("00000.MPLS", 100.0, 1000, 0, &["A.M2TS"]),
+                sample_playlist("00001.MPLS", 50.0, 500, 0, &["A.M2TS"]),
+                sample_playlist("00002.MPLS", 70.0, 0, 2000, &["B.M2TS"]),
+                sample_playlist("00003.MPLS", 5.0, 100, 0, &["C.M2TS"]),
+            ]
+        }
+
+        #[test]
+        fn table_rows_groups_and_filters_like_the_cli() {
+            // Sorted by length desc, grouped by shared clip, the short row dropped.
+            assert_eq!(table_rows(&disc()), [(1, 0), (1, 1), (2, 2)]);
+        }
+
+        #[test]
+        fn playlist_rows_carry_the_table_columns() {
+            let rows = playlist_rows(&disc());
+            let view: Vec<_> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.position,
+                        row.group,
+                        row.name.as_str(),
+                        row.length.as_str(),
+                        row.estimated_bytes,
+                        row.has_hidden_streams,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                view,
+                [
+                    (1, 1, "00000.MPLS", "00:01:40", Some(1000), false),
+                    (2, 1, "00001.MPLS", "00:00:50", Some(500), false),
+                    // group 2; the interleaved size is preferred over the m2ts size.
+                    (3, 2, "00002.MPLS", "00:01:10", Some(2000), false),
+                ]
+            );
+        }
+
+        #[test]
+        fn table_length_truncates_and_wraps_the_day() {
+            assert_eq!(table_length(0.0), "00:00:00");
+            assert_eq!(table_length(3661.0), "01:01:01");
+            assert_eq!(table_length(-5.0), "00:00:00"); // a negative length clamps to zero
+            assert_eq!(table_length(90_061.0), "01:01:01"); // 25h01m01s wraps the day
+        }
+
+        #[test]
+        fn estimated_bytes_prefers_interleaved_then_m2ts_then_none() {
+            assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 500, 2000, &[])), Some(2000));
+            assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 500, 0, &[])), Some(500));
+            assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 0, 0, &[])), None);
+        }
+
+        #[test]
+        fn normalize_playlist_name_uppercases_and_appends_mpls() {
+            assert_eq!(normalize_playlist_name("00000"), "00000.MPLS");
+            assert_eq!(normalize_playlist_name("00000.mpls"), "00000.MPLS");
+            assert_eq!(normalize_playlist_name("feature.m2ts"), "FEATURE.M2TS");
+        }
+
+        #[test]
+        fn named_selection_normalizes_dedupes_and_keeps_order() {
+            let playlists = [
+                sample_playlist("00000.MPLS", 1.0, 0, 0, &[]),
+                sample_playlist("00002.MPLS", 1.0, 0, 0, &[]),
+            ];
+            // unknown skipped, duplicate skipped, order preserved, name normalized.
+            assert_eq!(
+                named_selection(
+                    &playlists,
+                    &[
+                        "00002".to_owned(),
+                        "00000.mpls".to_owned(),
+                        "99999".to_owned(),
+                        "00002".to_owned(),
+                    ],
+                ),
+                ["00002.MPLS", "00000.MPLS"]
+            );
+            assert!(named_selection(&playlists, &[]).is_empty());
+        }
+
+        #[test]
+        fn selection_stream_files_collects_every_selected_clip() {
+            let playlists = [
+                sample_playlist("00000.MPLS", 1.0, 0, 0, &["A.M2TS", "B.M2TS"]),
+                sample_playlist("00001.MPLS", 1.0, 0, 0, &["C.M2TS"]),
+            ];
+            let files = selection_stream_files(&playlists, &["00000.MPLS".to_owned()]);
+            assert_eq!(files.into_iter().collect::<Vec<_>>(), ["A.M2TS", "B.M2TS"]);
+            // an unknown name contributes nothing.
+            assert!(selection_stream_files(&playlists, &["99999.MPLS".to_owned()]).is_empty());
+        }
+
+        #[test]
+        fn selection_order_maps_names_to_indices_in_order() {
+            let playlists = [
+                sample_playlist("00000.MPLS", 1.0, 0, 0, &[]),
+                sample_playlist("00001.MPLS", 1.0, 0, 0, &[]),
+                sample_playlist("00002.MPLS", 1.0, 0, 0, &[]),
+            ];
+            assert_eq!(
+                selection_order(&playlists, &["00002.MPLS".to_owned(), "00000.MPLS".to_owned()]),
+                [2, 0]
+            );
+            // an unknown name maps to nothing.
+            assert!(selection_order(&playlists, &["99999.MPLS".to_owned()]).is_empty());
+        }
+
+        #[test]
+        fn json_escape_escapes_quotes_backslashes_controls_but_not_space() {
+            let mut out = String::new();
+            json_escape("a\"\\\n\t\r \u{1f}\u{0}z", &mut out);
+            assert_eq!(out, "a\\\"\\\\\\n\\t\\r \\u001f\\u0000z");
+        }
+
+        #[test]
+        fn rows_to_json_serializes_rows_commas_and_nulls() {
+            let rows = [
+                PlaylistRow {
+                    position: 1,
+                    group: 1,
+                    name: "00000.MPLS".to_owned(),
+                    length: "00:01:40".to_owned(),
+                    estimated_bytes: Some(1000),
+                    has_hidden_streams: false,
+                },
+                PlaylistRow {
+                    position: 2,
+                    group: 2,
+                    name: "00001.MPLS".to_owned(),
+                    length: "00:00:50".to_owned(),
+                    estimated_bytes: None,
+                    has_hidden_streams: true,
+                },
+            ];
+            assert_eq!(
+                rows_to_json(&rows),
+                "[{\"position\":1,\"group\":1,\"name\":\"00000.MPLS\",\"length\":\"00:01:40\",\"estimatedBytes\":1000,\"hasHidden\":false},\
+                 {\"position\":2,\"group\":2,\"name\":\"00001.MPLS\",\"length\":\"00:00:50\",\"estimatedBytes\":null,\"hasHidden\":true}]"
+            );
+            assert_eq!(rows_to_json(&[]), "[]");
+        }
+
+        #[test]
+        fn render_selection_measures_only_the_named_playlists() {
+            use std::sync::Arc;
+
+            use bdinfo_rs_core::bdrom::disc::ScanProgress;
+
+            use crate::{MemFile, Node, assemble_tree, path_components, render_selection};
+
+            const INDEX: &[u8] =
+                include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
+            const MOVIE: &[u8] =
+                include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/MovieObject.bdmv");
+            const MPLS: &[u8] = include_bytes!(
+                "../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/PLAYLIST/00000.mpls"
+            );
+            const CLPI: &[u8] = include_bytes!(
+                "../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/CLIPINF/00000.clpi"
+            );
+            const M2TS: &[u8] = include_bytes!(
+                "../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/STREAM/00000.m2ts"
+            );
+
+            // A second playlist over the same clip, patched to ~10 s — `--whole`
+            // would drop it, but a by-name selection keeps it (unfiltered).
+            let mut short = MPLS.to_vec();
+            short
+                .get_mut(86..90)
+                .expect("the fixture playlist has an OUT_time at offset 86")
+                .copy_from_slice(&(27_000_000_u32 + 45_000 * 10).to_be_bytes());
+
+            let files: [(&str, Vec<u8>); 6] = [
+                ("DISC/BDMV/index.bdmv", INDEX.to_vec()),
+                ("DISC/BDMV/MovieObject.bdmv", MOVIE.to_vec()),
+                ("DISC/BDMV/PLAYLIST/00000.mpls", MPLS.to_vec()),
+                ("DISC/BDMV/PLAYLIST/00001.mpls", short),
+                ("DISC/BDMV/CLIPINF/00000.clpi", CLPI.to_vec()),
+                ("DISC/BDMV/STREAM/00000.m2ts", M2TS.to_vec()),
+            ];
+            let tree = assemble_tree(
+                files
+                    .iter()
+                    .map(|(path, data)| {
+                        let comps = path_components(path);
+                        let name = (*comps.last().expect("a file name")).to_owned();
+                        (
+                            comps,
+                            MemFile {
+                                name,
+                                full: (*path).to_owned(),
+                                data: Arc::from(data.clone()),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .expect("assemble the two-playlist disc");
+
+            // One progress sink for every call — a fn pointer so it is generic
+            // over the progress lifetime; the real demux below drives it (so it
+            // is covered), and the unopenable case reuses it without firing it.
+            let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
+
+            // Selecting only the feature renders it and drops the short sibling.
+            let feature = render_selection(&tree, &["00000.MPLS".to_owned()], &mut sink)
+                .expect("render the feature");
+            assert!(feature.contains("00000.MPLS"), "the selected feature must be rendered");
+            assert!(!feature.contains("00001.MPLS"), "an unselected playlist must not be rendered");
+
+            // Selecting the short playlist by name keeps it — unfiltered, unlike
+            // `--whole`; and only the named playlist is rendered.
+            let short_only = render_selection(&tree, &["00001".to_owned()], &mut sink)
+                .expect("render the short");
+            assert!(short_only.contains("00001.MPLS"), "a by-name short playlist is kept");
+            assert!(!short_only.contains("00000.MPLS"), "only the named playlist is rendered");
+
+            // An unopenable tree (no BDMV) propagates the structural open's error.
+            let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
+            assert!(
+                render_selection(&empty, &["00000.MPLS".to_owned()], &mut sink).is_err(),
+                "a structure with no BDMV must error"
+            );
+        }
     }
 
     // The reader math is panic-safety-critical, so amplify the unit cases with

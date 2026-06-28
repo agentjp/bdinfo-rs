@@ -14,8 +14,11 @@ headless Chrome and Firefox.
 
 ## Usage
 
+The two calls mirror the CLI flow — list the playlists, pick some, then measure
+them (all in the browser, off the main thread):
+
 ```ts
-import { analyze } from "@bdinfo-rs/wasm";
+import { analyze, listPlaylists } from "@bdinfo-rs/wasm";
 
 // `files`: the (relativePath, File) pairs from a <input type="file" webkitdirectory>.
 const picked = [...input.files].map((file) => ({
@@ -23,15 +26,28 @@ const picked = [...input.files].map((file) => ({
   file,
 }));
 
-const report = await analyze(picked, ({ file, done, total }) => {
-  console.log(`${file}: ${done}/${total}`);
-});
+// 1. Fast STRUCTURAL scan → the playlist selection table (like `--list`).
+const playlists = await listPlaylists(picked);
+for (const row of playlists) {
+  console.log(`${row.position}. ${row.name}  ${row.length}  ${row.estimatedBytes ?? "-"} bytes`);
+}
+
+// 2. FULL measured scan. Pass `selection` (playlist names, like `--mpls`) to
+//    measure only chosen playlists; omit it to measure the `--whole` set.
+const report = await analyze(
+  picked,
+  ({ file, done, total }) => console.log(`${file}: ${done}/${total}`),
+  { selection: [playlists[0].name] },
+);
 
 console.log(report); // the classic BDInfo-style disc report
 ```
 
-`analyze` spawns the scan Worker, relays demux progress, and resolves with the
-report string. See `demo.html` for a complete vanilla example.
+`listPlaylists` resolves with the selection-table rows (`position`, `group`,
+`name`, `length`, `estimatedBytes`, `hasHidden`); `analyze` spawns the scan
+Worker, relays demux progress, and resolves with the report string. Omit both
+`onProgress` and `selection` for the simplest whole-disc scan. See `demo.html`
+for a complete vanilla example.
 
 ## Bundler support
 
