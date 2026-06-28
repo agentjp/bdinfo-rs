@@ -321,6 +321,29 @@ The parser core is a separate crate, `bdinfo-rs-core`: disc discovery, MPLS/CLPI
 parsing, M2TS demux, the codec scanners, the UDF 2.50 reader, and the report renderer,
 all reusable behind a documented API. The CLI is a thin front-end over it.
 
+## 🌐 In the browser (WebAssembly)
+
+The same analyzer also compiles to WebAssembly and runs **entirely in the browser** as the
+npm package [`@bdinfo-rs/wasm`](https://www.npmjs.com/package/@bdinfo-rs/wasm). Point it at a
+disc's `BDMV` folder and it runs the **full measured scan** — M2TS demux + per-stream /
+per-chapter statistics — off the main thread in a Web Worker. The files are read
+synchronously at byte offsets via `FileReaderSync`, so a multi-GB stream never has to fit in
+memory, and **no bytes leave the page**. The rendered report is byte-for-byte the classic
+disc report, pinned to the same golden the native end-to-end test uses.
+
+```ts
+import { analyze } from "@bdinfo-rs/wasm";
+
+const picked = [...input.files].map((file) => ({ path: file.webkitRelativePath, file }));
+const report = await analyze(picked, ({ file, done, total }) => {
+  console.log(`${file}: ${done}/${total}`);
+});
+console.log(report); // the classic BDInfo-style disc report
+```
+
+The package source lives in `crates/bdinfo-rs-wasm/` (`web/demo.html` is a complete
+vanilla example).
+
 ## 🔒 Quality & security
 
 Every push and pull request runs the full gate in CI:
