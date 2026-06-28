@@ -38,8 +38,14 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
+// The read-ahead pipeline runs on a scoped worker thread on every native target;
+// `wasm32-unknown-unknown` has no threads, so the wasm build takes a sequential
+// read-then-parse path instead (see `scan_chunked`) and never names these.
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 
 use super::interleaved::TsInterleavedFile;
@@ -478,6 +484,16 @@ impl TsStreamFile {
     /// on a scoped worker thread fed whole chunks through a bounded channel —
     /// the next chunk is read while the previous one is parsed. Spent buffers
     /// flow back on a second channel, so at most three are ever allocated.
+    /// `wasm32-unknown-unknown` has no threads, so the wasm build collapses this
+    /// to a sequential read-then-parse loop that drives `parse_chunk` over the
+    /// identical chunks in the identical order — byte-for-byte the same demux.
+    #[cfg_attr(
+        not(target_arch = "wasm32"),
+        expect(
+            clippy::too_many_lines,
+            reason = "one function carries both the threaded and the sequential read-ahead paths under cfg; splitting it would duplicate the shared per-clip setup"
+        )
+    )]
     pub(crate) fn scan_chunked(
         &mut self,
         reader: &mut dyn Read,
@@ -510,78 +526,122 @@ impl TsStreamFile {
             .filter(|p| p.stream_clips.iter().any(|c| c.name == file_name))
             .collect();
 
-        // Set when the reader fails: the worker then skips the bitrate tail,
-        // abandoning the scan exactly where the classic sequential loop would.
-        let read_failed = AtomicBool::new(false);
-        // Set when a non-full scan finishes early: the classic loop returned
-        // `Ok` there without reading any further, so a read-ahead failure past
-        // that point must not surface either.
-        let finished_early = AtomicBool::new(false);
-        let mut read_result: Result<(), BdError> = Ok(());
-        let this = &mut *self;
-        let (full_tx, full_rx) = mpsc::sync_channel::<Vec<u8>>(1);
-        let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(3);
-        thread::scope(|scope| {
-            let read_failed = &read_failed;
-            let finished_early = &finished_early;
-            scope.spawn(move || {
-                while let Ok(buffer) = full_rx.recv() {
-                    if this.parse_chunk(&buffer, &mut parser, &mut relevant, is_full_scan, observe)
-                    {
-                        // The early finish: dropping the receiver stops the
-                        // reader, and the bitrate tail is skipped — the classic
-                        // mid-scan return.
-                        finished_early.store(true, Ordering::SeqCst);
+        // Native targets run the read-ahead pipeline on a scoped worker thread;
+        // `wasm32-unknown-unknown` has no threads, so it takes the sequential
+        // read-then-parse path below. Both feed `parse_chunk` the very same
+        // chunks in the very same order and call `finish_scan` under the very
+        // same condition, so the demux output is byte-for-byte identical — the
+        // threads only overlap the reader's IO with the parser's CPU.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Set when the reader fails: the worker then skips the bitrate tail,
+            // abandoning the scan exactly where the classic sequential loop would.
+            let read_failed = AtomicBool::new(false);
+            // Set when a non-full scan finishes early: the classic loop returned
+            // `Ok` there without reading any further, so a read-ahead failure past
+            // that point must not surface either.
+            let finished_early = AtomicBool::new(false);
+            let mut read_result: Result<(), BdError> = Ok(());
+            let this = &mut *self;
+            let (full_tx, full_rx) = mpsc::sync_channel::<Vec<u8>>(1);
+            let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(3);
+            thread::scope(|scope| {
+                let read_failed = &read_failed;
+                let finished_early = &finished_early;
+                scope.spawn(move || {
+                    while let Ok(buffer) = full_rx.recv() {
+                        if this.parse_chunk(
+                            &buffer,
+                            &mut parser,
+                            &mut relevant,
+                            is_full_scan,
+                            observe,
+                        ) {
+                            // The early finish: dropping the receiver stops the
+                            // reader, and the bitrate tail is skipped — the classic
+                            // mid-scan return.
+                            finished_early.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        // Hand the spent buffer back for reuse (a no-op if the
+                        // reader is already gone).
+                        drop(free_tx.send(buffer));
+                    }
+                    if read_failed.load(Ordering::SeqCst) {
                         return;
                     }
-                    // Hand the spent buffer back for reuse (a no-op if the
-                    // reader is already gone).
-                    drop(free_tx.send(buffer));
-                }
-                if read_failed.load(Ordering::SeqCst) {
-                    return;
-                }
-                this.finish_scan(&mut relevant);
-            });
-            // Three fresh buffers prime the pipeline; afterwards each iteration
-            // blocks on a recycled one (a closed channel means the worker
-            // finished early — stop reading).
-            let mut fresh: u8 = 3;
-            loop {
-                let mut buffer = if fresh > 0 {
-                    fresh = fresh.wrapping_sub(1);
-                    vec![0_u8; chunk_size]
-                } else {
-                    match free_rx.recv() {
-                        Ok(recycled) => recycled,
-                        Err(_) => break,
+                    this.finish_scan(&mut relevant);
+                });
+                // Three fresh buffers prime the pipeline; afterwards each iteration
+                // blocks on a recycled one (a closed channel means the worker
+                // finished early — stop reading).
+                let mut fresh: u8 = 3;
+                loop {
+                    let mut buffer = if fresh > 0 {
+                        fresh = fresh.wrapping_sub(1);
+                        vec![0_u8; chunk_size]
+                    } else {
+                        match free_rx.recv() {
+                            Ok(recycled) => recycled,
+                            Err(_) => break,
+                        }
+                    };
+                    buffer.resize(chunk_size, 0);
+                    match fill_buffer(reader, &mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buffer.truncate(n);
+                            // A send failure means the worker finished early; the
+                            // next recv above then breaks the loop.
+                            drop(full_tx.send(buffer));
+                        }
+                        Err(e) => {
+                            read_failed.store(true, Ordering::SeqCst);
+                            read_result = Err(e);
+                            break;
+                        }
                     }
-                };
-                buffer.resize(chunk_size, 0);
+                }
+                drop(full_tx); // end-of-stream for the worker
+            });
+            if finished_early.load(Ordering::SeqCst) {
+                // The scan finished before the reader did; any read-ahead error
+                // happened past the classic stop point and never existed for the
+                // sequential flow.
+                return Ok(());
+            }
+            read_result
+        }
+        // The wasm path: no thread, no channels, no buffer recycling — read one
+        // chunk, parse it, repeat. `parse_chunk` returning `true` is the early
+        // finish (the threaded worker's `finished_early` → `Ok`); a read error
+        // is the threaded `read_failed` → return it without the bitrate tail;
+        // a clean EOF runs `finish_scan` exactly as the worker does on a closed
+        // channel with no read failure.
+        #[cfg(target_arch = "wasm32")]
+        {
+            loop {
+                let mut buffer = vec![0_u8; chunk_size];
                 match fill_buffer(reader, &mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
                         buffer.truncate(n);
-                        // A send failure means the worker finished early; the
-                        // next recv above then breaks the loop.
-                        drop(full_tx.send(buffer));
+                        if self.parse_chunk(
+                            &buffer,
+                            &mut parser,
+                            &mut relevant,
+                            is_full_scan,
+                            observe,
+                        ) {
+                            return Ok(());
+                        }
                     }
-                    Err(e) => {
-                        read_failed.store(true, Ordering::SeqCst);
-                        read_result = Err(e);
-                        break;
-                    }
+                    Err(e) => return Err(e),
                 }
             }
-            drop(full_tx); // end-of-stream for the worker
-        });
-        if finished_early.load(Ordering::SeqCst) {
-            // The scan finished before the reader did; any read-ahead error
-            // happened past the classic stop point and never existed for the
-            // sequential flow.
-            return Ok(());
+            self.finish_scan(&mut relevant);
+            Ok(())
         }
-        read_result
     }
 
     /// Walks one read chunk through the per-byte packet state machine,
