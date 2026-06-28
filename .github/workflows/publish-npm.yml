@@ -1,0 +1,107 @@
+name: publish-npm
+
+# Publish @bdinfo-rs/wasm (the in-browser package, crates/bdinfo-rs-wasm/web) to
+# npm on a vX.Y.Z tag, using npm OIDC Trusted Publishing: a short-lived,
+# repo/workflow-scoped token is minted at run time, so NO long-lived npm token is
+# stored. The npm analog of publish-crates.yml; SEPARATE from cargo-dist.
+#
+# Runs ONLY on v* tags — never on a PR or a branch push. Builds the artifact fresh
+# (no build cache) so the --provenance attestation covers exactly what is shipped.
+#
+# One-time human bootstrap (cannot be automated):
+#   1. Reserve the npm name: publish @bdinfo-rs/wasm once by hand (or create the
+#      @bdinfo-rs org/scope) so the package exists.
+#   2. On npmjs.com -> the package -> Settings -> Trusted Publisher -> GitHub
+#      Actions: repository `agentjp/bdinfo-rs`, workflow `publish-npm.yml`.
+#      Thereafter every v* tag republishes with provenance and NO stored token.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: npm publish (OIDC Trusted Publishing)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # mint the short-lived npm OIDC token (no stored token)
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly rustfmt
+        run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt
+
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli (pinned to the crate version)
+        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+
+      # Node 24 bundles npm >= 11.5.1 (the OIDC trusted-publishing floor), so no
+      # ad-hoc global npm upgrade is needed. The published wasm bytes are fixed by
+      # the pinned rustc / wasm-bindgen / binaryen, independent of the Node version.
+      #
+      # zizmor flags setup-node in this tag-triggered (publishing) workflow as a
+      # cache-poisoning vector, but no `cache:` input is set, so it neither restores
+      # nor saves any cache — there is nothing to poison. setup-node is required to
+      # get a modern Node/npm for OIDC, and the tag trigger is intrinsic to a
+      # publish workflow, so this is an unavoidable false positive (cf. the inline
+      # ref-version-mismatch ignore documented in .github/zizmor.yml).
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0 # zizmor: ignore[cache-poisoning]
+        with:
+          node-version: "24"
+
+      - name: Verify Node >= 22.14 and npm >= 11.5.1
+        shell: pwsh
+        run: |
+          $node = (& node --version).TrimStart('v')
+          $npm = (& npm --version)
+          Write-Host "node $node / npm $npm"
+          if ([version]$node -lt [version]'22.14.0') { throw "Node $node is below the 22.14 floor" }
+          if ([version]$npm -lt [version]'11.5.1') { throw "npm $npm is below the 11.5.1 OIDC floor" }
+
+      # npm publishes whatever version is in package.json, not the tag — fail fast
+      # if a tag was cut that does not match the workspace + package versions
+      # (mirrors the guard in publish-crates.yml).
+      - name: Verify the tag matches the workspace + package versions
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
+            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
+          }
+          $base = $Matches['base']
+          $inWp = $false; $ws = $null
+          foreach ($line in (Get-Content Cargo.toml)) {
+            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
+            if ($line -match '^\[') { $inWp = $false; continue }
+            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $ws = $Matches[1]; break }
+          }
+          if (-not $ws) { throw 'No [workspace.package] version found in Cargo.toml' }
+          if ($base -ne $ws) { throw "Tag $tag (base $base) does not match workspace version $ws" }
+          $pkg = (Get-Content crates/bdinfo-rs-wasm/web/package.json -Raw | ConvertFrom-Json).version
+          if ($base -ne $pkg) { throw "Tag $tag (base $base) does not match web/package.json version $pkg" }
+
+      - name: Install the web toolchain
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm ci
+
+      - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run build
+
+      - name: Publish @bdinfo-rs/wasm (provenance, public)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm publish --provenance --access public

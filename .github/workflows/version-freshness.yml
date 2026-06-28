@@ -11,6 +11,10 @@ name: version-freshness
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
+#   - wasm-bindgen-cli (the `wasm-bindgen-cli@X` pin in wasm.yml + publish-npm.yml
+#     — must equal the wasm-bindgen crate it generates glue for; wasm-pack is not
+#     used), and binaryen (the `"binaryen"` pin in web/package.json — wasm-opt's
+#     version is coupled to the committed wasm size budget),
 #   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) — the ONE
 #     action SHA watched here: it pins a TAGLESS repo's `master`, so Dependabot
 #     (which bumps toward releases) can't move it, and zizmor's ref-version-mismatch
@@ -80,6 +84,17 @@ jobs:
               $resp = Invoke-RestMethod -Uri "https://crates.io/api/v1/crates/$crate" `
                 -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
               return $resp.crate.max_stable_version
+            }
+            catch { return $null }
+          }
+
+          # The latest published version of an npm package (registry metadata), or
+          # $null on failure.
+          function Latest-Npm($pkg) {
+            try {
+              $resp = Invoke-RestMethod -Uri "https://registry.npmjs.org/$pkg/latest" `
+                -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
+              return $resp.version
             }
             catch { return $null }
           }
@@ -163,6 +178,39 @@ jobs:
             $problems += "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
           }
 
+          # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
+          # The browser package builds with `wasm-bindgen-cli@X` (taiki-e); X MUST
+          # equal the wasm-bindgen crate it generates glue for, so it is pinned and
+          # nothing else watches it. (wasm-pack is NOT used — the build is plain
+          # cargo + the CLI + wasm-opt.) The two workflow pins must also agree.
+          $wbGate = Read-Pin '.github/workflows/wasm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          $wbPub  = Read-Pin '.github/workflows/publish-npm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          if (-not $wbGate) { throw 'No wasm-bindgen-cli pin in wasm.yml' }
+          if (-not $wbPub)  { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
+          if ($wbGate -ne $wbPub) {
+            $problems += "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` but publish-npm.yml has ``$wbPub`` — they must be identical"
+          }
+          $wbLatest = Latest-CratesIo 'wasm-bindgen-cli'
+          if (-not $wbLatest) {
+            $problems += '- could not query the latest wasm-bindgen-cli release (crates.io)'
+          } elseif ([version]$wbLatest -gt [version]$wbGate) {
+            $problems += "- wasm-bindgen-cli pin ``$wbGate`` (wasm.yml + publish-npm.yml) is behind the latest release ``$wbLatest`` — bump both pins AND the wasm-bindgen crate dep together"
+          }
+
+          # --- binaryen (wasm-opt): web/package.json pin vs npm ----------------
+          # wasm-opt -Oz shrinks the shipped payload; its version is coupled to the
+          # committed size budget (wasm-size-budget.txt), so it is pinned (the
+          # devDependency + lockfile) and watched here like the other size/format
+          # tools.
+          $binPin = Read-Pin 'crates/bdinfo-rs-wasm/web/package.json' '"binaryen"\s*:\s*"\^?([0-9.]+)"'
+          if (-not $binPin) { throw 'No binaryen pin in crates/bdinfo-rs-wasm/web/package.json' }
+          $binLatest = Latest-Npm 'binaryen'
+          if (-not $binLatest) {
+            $problems += '- could not query the latest binaryen release (npm)'
+          } elseif ([version]$binLatest -gt [version]$binPin) {
+            $problems += "- binaryen pin ``$binPin`` (web/package.json) is behind the latest release ``$binLatest`` — bump it, rebuild, and re-check the wasm size budget"
+          }
+
           # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
           # SHA-pinned to a TAGLESS repo's master branch, so Dependabot can't bump it
           # (no release to target) and zizmor's ref-version-mismatch is inline-ignored
@@ -179,7 +227,7 @@ jobs:
           $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
           $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  brew: $brewPinShort (head $brewHeadShort)"
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  brew: $brewPinShort (head $brewHeadShort)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
