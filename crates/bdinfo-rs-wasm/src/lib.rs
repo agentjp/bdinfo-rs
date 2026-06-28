@@ -395,57 +395,136 @@ fn path_components(path: &str) -> Vec<&str> {
     path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
 }
 
-/// Inserts `file` under the directory chain `dirs` (relative to `node`),
-/// creating intermediate [`Node`]s as needed.
-fn insert_file(node: &mut Node<WebFile>, dirs: &[&str], file: WebFile) {
-    match dirs.split_first() {
-        None => node.files.push(file),
-        Some((head, rest)) => {
-            let full = format!("{}/{head}", node.full);
-            let idx = if let Some(i) = node.dirs.iter().position(|d| d.name == *head) {
-                i
-            } else {
-                node.dirs.push(Node::dir(head, &full));
-                node.dirs.len() - 1
-            };
-            insert_file(&mut node.dirs[idx], rest, file);
+/// Why a `(relativePath, File)` selection could not be assembled into a disc
+/// tree. Surfaced to the caller (see [`scan_files`]) so a wrong pick reads as a
+/// clear error rather than a silent empty scan.
+#[derive(Debug, PartialEq, Eq)]
+enum TreeError {
+    /// A relative path named only a file, with no wrapping folder — it cannot be
+    /// placed under a shared disc root.
+    BareFile(String),
+    /// Two entries disagreed on the first path component. A `webkitdirectory`
+    /// pick always shares one wrapping folder, so a mismatch means the inputs
+    /// are not one coherent selection.
+    MixedRoots(String, String),
+    /// No usable entries at all (every path was empty, or the list was empty).
+    Empty,
+}
+
+impl TreeError {
+    fn message(&self) -> String {
+        match self {
+            Self::BareFile(path) => {
+                format!("path {path:?} has no directory component; select a disc folder")
+            }
+            Self::MixedRoots(first, other) => {
+                format!("selection spans more than one root folder ({first:?} and {other:?})")
+            }
+            Self::Empty => "no files to scan".to_owned(),
         }
     }
 }
 
-/// Builds the file-backed disc tree from the parallel `(relativePath, File)`
-/// lists. The first path component becomes the disc-root directory name (its
-/// disc label); every file is inserted at its relative path.
+impl From<TreeError> for JsValue {
+    fn from(error: TreeError) -> Self {
+        Self::from_str(&error.message())
+    }
+}
+
+/// The deepest directory chain the tree builder descends. A real disc tree is
+/// `disc/BDMV/<dir>/<sub>` — single digits deep — so this only bites a crafted
+/// path list, capping the tree depth so the (recursive) [`Node::collect_pattern`]
+/// walk over it can never overflow the stack.
+const MAX_TREE_DEPTH: usize = 64;
+
+/// Assembles a synthetic disc tree from parsed `(components, file)` entries —
+/// the backend-agnostic core of [`build_web_tree`], unit-tested on its own.
+///
+/// `components` is a relative path already split by [`path_components`]: the
+/// last element is the file name, the first is the shared disc-root folder.
+/// Validates that every entry shares one root folder and names a directory, then
+/// inserts each file iteratively (no recursion on caller-controlled depth).
 ///
 /// # Errors
-/// Returns a `JsValue` if the two lists differ in length or any entry is not a
-/// `File`.
+/// [`TreeError`] when the entries span more than one root folder, a path is a
+/// bare file name, or there are no usable entries.
+fn assemble_tree<F>(entries: Vec<(Vec<&str>, F)>) -> Result<Node<F>, TreeError> {
+    let mut shared_root: Option<&str> = None;
+    for (comps, _) in &entries {
+        let Some((_, dirs)) = comps.split_last() else { continue };
+        let Some((&first, _)) = dirs.split_first() else {
+            return Err(TreeError::BareFile(comps.join("/")));
+        };
+        match shared_root {
+            None => shared_root = Some(first),
+            Some(root) if root == first => {}
+            Some(root) => return Err(TreeError::MixedRoots(root.to_owned(), first.to_owned())),
+        }
+    }
+    let Some(shared_root) = shared_root else { return Err(TreeError::Empty) };
+
+    let mut root = Node::dir(shared_root, shared_root);
+    for (comps, file) in entries {
+        let Some((_, dirs)) = comps.split_last() else { continue };
+        // The first component is the root itself; only the components between it
+        // and the file name are intermediate directories.
+        let chain = dirs.split_first().map_or(&[][..], |(_, rest)| rest);
+        insert_file(&mut root, chain, file);
+    }
+    Ok(root)
+}
+
+/// Inserts `file` at `chain` (the directory names below `root`), creating
+/// intermediate [`Node`]s as needed. Iterative — it descends in a loop so a
+/// crafted deep path list cannot overflow the stack — and bounded by
+/// [`MAX_TREE_DEPTH`]: a path deeper than any real disc is dropped rather than
+/// growing the tree without limit.
+fn insert_file<F>(root: &mut Node<F>, chain: &[&str], file: F) {
+    if chain.len() > MAX_TREE_DEPTH {
+        return;
+    }
+    let mut node = root;
+    for &dir in chain {
+        let idx = if let Some(i) = node.dirs.iter().position(|d| d.name == dir) {
+            i
+        } else {
+            let full = format!("{}/{dir}", node.full);
+            node.dirs.push(Node::dir(dir, &full));
+            node.dirs.len().saturating_sub(1)
+        };
+        let Some(next) = node.dirs.get_mut(idx) else { return };
+        node = next;
+    }
+    node.files.push(file);
+}
+
+/// Builds the file-backed disc tree from the parallel `(relativePath, File)`
+/// lists: each file's `webkitRelativePath` is split into components and handed
+/// with its [`WebFile`] to [`assemble_tree`].
+///
+/// # Errors
+/// Returns a `JsValue` if the two lists differ in length, any entry is not a
+/// `File`, or the paths do not form one coherent disc selection (see
+/// [`TreeError`]).
 fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFile>, JsValue> {
     let count = paths.len();
     if count != files.length() as usize {
         return Err(JsValue::from_str("paths and files differ in length"));
     }
 
-    let mut root: Option<Node<WebFile>> = None;
+    let mut entries: Vec<(Vec<&str>, WebFile)> = Vec::with_capacity(count);
     for (i, path) in paths.iter().enumerate() {
         let comps = path_components(path);
-        let Some((name, dirs)) = comps.split_last() else { continue };
-        let root_name = *comps.first().unwrap_or(name);
-
+        let Some(&name) = comps.last() else { continue };
         let value = files.get(i as u32);
         let file: web_sys::File =
             value.dyn_into().map_err(|_| JsValue::from_str("entry is not a File"))?;
         let length = file.size() as u64;
-        let web_file = WebFile { name: (*name).to_owned(), full: path.clone(), file, length };
-
-        let tree = root.get_or_insert_with(|| Node::dir(root_name, root_name));
-        // The first component is the root itself; only the components between it
-        // and the file name are intermediate directories.
-        let inner = dirs.split_first().map_or(&[][..], |(_, rest)| rest);
-        insert_file(tree, inner, web_file);
+        let web_file = WebFile { name: name.to_owned(), full: path.clone(), file, length };
+        entries.push((comps, web_file));
     }
 
-    Ok(root.unwrap_or_else(|| Node::dir("WASMDISC", "WASMDISC")))
+    assemble_tree(entries).map_err(JsValue::from)
 }
 
 // ── shared render path ──────────────────────────────────────────────────────
