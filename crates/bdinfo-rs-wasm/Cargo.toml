@@ -22,10 +22,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bdinfo-rs-core = { path = "../bdinfo-rs-core" }
-js-sys = "0.3"
+# All-target: `#[wasm_bindgen]` on `scan_report` expands on every target (the
+# native rlib parity test links it), so the macro crate must be present natively.
 wasm-bindgen = "0.2"
+
+# js-sys / web-sys are referenced ONLY under #[cfg(target_arch = "wasm32")] (the
+# WebReader/WebFile FileReaderSync seam + scan_files/build_web_tree), so they are
+# wasm-only — a native `cargo build` / parity build never compiles them.
 # `File`/`Blob`/`FileReaderSync` back the streaming `scan_files` seam: synchronous
 # byte-offset reads in a Worker (no JSPI/Asyncify); `console` is the scan log.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync", "console"] }
 
 [dev-dependencies]

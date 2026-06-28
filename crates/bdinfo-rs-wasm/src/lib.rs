@@ -31,21 +31,30 @@
 //! real-scale `*.m2ts` stream file (megabytes) fits in a section. A missing or
 //! truncated section leaves its file empty (the resilient-open absence path).
 
-use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
+// `BdmvDir` is named only by `assemble_tree` (web-path logic) — tested natively
+// but absent from a native NON-test build, so gate it to where it lives to stay
+// dead-code-clean. `Read`/`Seek`/`SeekFrom`/`JsCast`/`JsValue` are named only by
+// the wasm32 browser glue.
+use std::io::{self, BufRead, BufReader, Cursor};
+#[cfg(target_arch = "wasm32")]
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+#[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
 /// The read-ahead window each [`WebReader`] fill pulls from `FileReaderSync` in
 /// one go, so a front-to-back demux crosses the JS boundary once per MiB rather
 /// than once per small parser read.
+#[cfg(target_arch = "wasm32")]
 const READ_WINDOW: usize = 1 << 20;
 
 /// A node in a synthetic disc tree — a directory holding sub-directories and
@@ -251,6 +260,7 @@ fn build_tree(data: &[u8]) -> Node<MemFile> {
 /// cursor in a [`READ_WINDOW`]-sized [`BufReader`] (see
 /// [`WebFile::open_read`]) coalesces the parser's small reads into one
 /// `FileReaderSync` call per window.
+#[cfg(target_arch = "wasm32")]
 struct WebReader {
     file: web_sys::File,
     reader: web_sys::FileReaderSync,
@@ -264,6 +274,7 @@ struct WebReader {
 /// whose `message` property carries the human-readable text (e.g. a
 /// `NotFoundError` from a revoked `File`), so reach for that before falling
 /// back to a generic label.
+#[cfg(target_arch = "wasm32")]
 fn js_message(value: &JsValue) -> String {
     if let Some(text) = value.as_string() {
         return text;
@@ -277,6 +288,7 @@ fn js_message(value: &JsValue) -> String {
     "JavaScript exception".to_owned()
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Read for WebReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() || self.pos >= self.len {
@@ -299,6 +311,7 @@ impl Read for WebReader {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl Seek for WebReader {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         let target: i128 = match from {
@@ -319,6 +332,7 @@ impl Seek for WebReader {
 /// A file backed by a browser `File` handle — the [`BdFile`] backend for the
 /// `webkitdirectory` streaming path. Bytes are read on demand through
 /// [`WebReader`]; only metadata (name, full path, length) is held eagerly.
+#[cfg(target_arch = "wasm32")]
 #[derive(Clone)]
 struct WebFile {
     name: String,
@@ -349,6 +363,7 @@ compile_error!(
      workers is undefined behavior. Revisit the FileReaderSync seam before enabling threads."
 );
 
+#[cfg(target_arch = "wasm32")]
 impl WebFile {
     fn open(&self) -> io::Result<WebReader> {
         let reader = web_sys::FileReaderSync::new().map_err(|e| {
@@ -361,6 +376,7 @@ impl WebFile {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl BdFile for WebFile {
     fn name(&self) -> &str {
         &self.name
@@ -393,6 +409,7 @@ impl BdFile for WebFile {
 
 /// Splits a `webkitRelativePath` into its non-empty components, tolerating both
 /// `/` and `\` separators.
+#[cfg(any(target_arch = "wasm32", test))]
 fn path_components(path: &str) -> Vec<&str> {
     path.split(['/', '\\']).filter(|s| !s.is_empty()).collect()
 }
@@ -400,6 +417,7 @@ fn path_components(path: &str) -> Vec<&str> {
 /// Why a `(relativePath, File)` selection could not be assembled into a disc
 /// tree. Surfaced to the caller (see [`scan_files`]) so a wrong pick reads as a
 /// clear error rather than a silent empty scan.
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum TreeError {
     /// A relative path named only a file, with no wrapping folder — it cannot be
@@ -413,6 +431,7 @@ enum TreeError {
     Empty,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl TreeError {
     fn message(&self) -> String {
         match self {
@@ -427,6 +446,7 @@ impl TreeError {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 impl From<TreeError> for JsValue {
     fn from(error: TreeError) -> Self {
         Self::from_str(&error.message())
@@ -437,6 +457,7 @@ impl From<TreeError> for JsValue {
 /// `disc/BDMV/<dir>/<sub>` — single digits deep — so this only bites a crafted
 /// path list, capping the tree depth so the (recursive) [`Node::collect_pattern`]
 /// walk over it can never overflow the stack.
+#[cfg(any(target_arch = "wasm32", test))]
 const MAX_TREE_DEPTH: usize = 64;
 
 /// Assembles a synthetic disc tree from parsed `(components, file)` entries —
@@ -453,6 +474,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// # Errors
 /// [`TreeError`] when the entries span more than one root folder, a path is a
 /// bare file name, or there are no usable entries.
+#[cfg(any(target_arch = "wasm32", test))]
 fn assemble_tree<F>(entries: Vec<(Vec<&str>, F)>) -> Result<Node<F>, TreeError> {
     let mut shared_root: Option<&str> = None;
     for (comps, _) in &entries {
@@ -492,6 +514,7 @@ fn assemble_tree<F>(entries: Vec<(Vec<&str>, F)>) -> Result<Node<F>, TreeError> 
 /// crafted deep path list cannot overflow the stack — and bounded by
 /// [`MAX_TREE_DEPTH`]: a path deeper than any real disc is dropped rather than
 /// growing the tree without limit.
+#[cfg(any(target_arch = "wasm32", test))]
 fn insert_file<F>(root: &mut Node<F>, chain: &[&str], file: F) {
     if chain.len() > MAX_TREE_DEPTH {
         return;
@@ -519,6 +542,7 @@ fn insert_file<F>(root: &mut Node<F>, chain: &[&str], file: F) {
 /// Returns a `JsValue` if the two lists differ in length, any entry is not a
 /// `File`, or the paths do not form one coherent disc selection (see
 /// [`TreeError`]).
+#[cfg(target_arch = "wasm32")]
 fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFile>, JsValue> {
     let count = paths.len();
     if count != files.length() as usize {
@@ -602,6 +626,7 @@ pub fn scan_report(data: &[u8]) -> String {
 /// entry is not a `File`, the paths do not form one coherent disc selection, or
 /// no readable Blu-ray structure is found (so a wrong folder pick is reported
 /// rather than silently returning an empty report).
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn scan_files(
     paths: Vec<String>,
@@ -711,6 +736,20 @@ mod tests {
         );
         let empty: Vec<(Vec<&str>, usize)> = Vec::new();
         assert_eq!(assemble_tree(empty).err(), Some(TreeError::Empty));
+    }
+
+    #[test]
+    fn tree_error_messages_describe_each_variant() {
+        // `message` is consumed natively only here: its `From<TreeError> for
+        // JsValue` caller is wasm32-only, so this is the test that keeps it both
+        // live and covered on the native (Tier-A) build.
+        assert!(TreeError::BareFile("loose.mpls".to_owned()).message().contains("loose.mpls"));
+        assert!(
+            TreeError::MixedRoots("A".to_owned(), "B".to_owned())
+                .message()
+                .contains("more than one root")
+        );
+        assert_eq!(TreeError::Empty.message(), "no files to scan");
     }
 
     #[test]
