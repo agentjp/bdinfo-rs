@@ -37,7 +37,8 @@
     "pkg",
     "src",
     "demo.html",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build:wasm": "node build.mjs",
