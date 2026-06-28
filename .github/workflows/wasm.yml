@@ -6,8 +6,9 @@ name: wasm
 # bar is: it formats, lints clean (calibrated set, -D warnings), builds for
 # wasm32, the wasm-opt'd payload stays under the committed size budget, the TS is
 # type-clean + biome-clean, and the FULL measured scan renders BYTE-IDENTICAL to
-# the same golden the native CLI e2e test pins — proven in Node and in real
-# headless browsers (Chrome + Firefox via wasm-bindgen-test).
+# this crate's own golden (rendered from the same Big Buck Bunny fixture the
+# native CLI e2e test scans) — proven in Node and in real headless browsers
+# (Chrome + Firefox via wasm-bindgen-test).
 #
 # This file is the GATE only (push to a branch + PRs) — deliberately NOT triggered
 # on tags, so its build caches are never a publishing-time cache-poisoning vector.

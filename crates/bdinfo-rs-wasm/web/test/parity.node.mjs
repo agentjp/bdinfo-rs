@@ -6,8 +6,9 @@
 // drives the SAME production export the Worker uses — `scan_files` over a
 // `(relativePath, File)` list built from the committed Big Buck Bunny BD-ROM
 // fixture. It then asserts the rendered report is BYTE-IDENTICAL to the pinned
-// golden (`tests/golden_report.txt`) — the very golden the native CLI e2e test
-// and the in-browser parity test both pin. So this ties the wasm channel to the
+// golden (`tests/golden_report.txt`) — the crate's own golden, rendered from the
+// same Big Buck Bunny fixture the native CLI e2e test scans and pinned by the
+// native and in-browser parity tests alike. So this ties the wasm channel to the
 // locked-output contract on every gate run, with only Node + the built wasm.
 //
 // Prereq: `npm run build` (emits pkg/). Run with `npm run test:node`.
