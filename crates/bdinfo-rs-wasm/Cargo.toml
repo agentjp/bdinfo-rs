@@ -95,3 +95,11 @@ needless_pass_by_value = "allow"
 # wasm-bindgen/web-sys tree (not resolvable from a leaf crate). Both are noise.
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
+
+# rustdoc — the gate's `dc` step runs `cargo doc --document-private-items` with
+# RUSTDOCFLAGS=-D warnings, so the internal docs intentionally link to private
+# helpers (Node/WebReader/render_disc/...); those links resolve in our
+# private-items doc build. This lint targets public-only doc builds, where such
+# links break — it does not apply here (the same carve-out the workspace makes).
+[lints.rustdoc]
+private_intra_doc_links = "allow"

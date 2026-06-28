@@ -38,8 +38,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install pinned nightly rustfmt
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
+      - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt --component llvm-tools-preview
 
       - name: Add the wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -53,6 +53,11 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.126
 
+      - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
+        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        with:
+          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,typos-cli
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -61,17 +66,73 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm ci
 
+      - name: Unsafe tripwire (exactly one unsafe token in lib.rs)
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        run: |
+          $code = (Get-Content -LiteralPath src/lib.rs) -replace '//.*$', ''
+          $n = ([regex]::Matches(($code -join "`n"), '\bunsafe\b')).Count
+          if ($n -ne 1) { Write-Host "expected exactly 1 unsafe token (the cfg-gated impl Send), found $n"; exit 1 }
+          Write-Host "ok: $n unsafe token (cfg-gated impl Send)"
+
       - name: Format (nightly rustfmt)
         working-directory: crates/bdinfo-rs-wasm
         run: cargo +${{ env.NIGHTLY }} fmt --check
 
-      - name: Clippy (calibrated, -D warnings)
+      - name: Typos
+        working-directory: crates/bdinfo-rs-wasm
+        run: typos
+
+      - name: Machete (unused deps)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo machete
+
+      - name: Shear (unused deps, AST)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo shear
+
+      - name: Clippy (wasm32, calibrated, -D warnings)
         working-directory: crates/bdinfo-rs-wasm
         run: cargo clippy --target wasm32-unknown-unknown --all-targets --release -- -D warnings
+
+      - name: Clippy (native, -D warnings)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build (wasm32, release)
         working-directory: crates/bdinfo-rs-wasm
         run: cargo build --target wasm32-unknown-unknown --release
+
+      - name: Doc (wasm32, warnings = errors)
+        working-directory: crates/bdinfo-rs-wasm
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items
+
+      - name: Coverage (llvm-cov nextest, native — Tier A 100% lines/regions/functions)
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        env:
+          NIGHTLY: ${{ env.NIGHTLY }}
+        run: |
+          $json = Join-Path $env:RUNNER_TEMP 'wasm-cov.json'
+          cargo "+$env:NIGHTLY" llvm-cov nextest --locked --no-tests=fail --json --output-path $json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @((Get-Content -Raw $json | ConvertFrom-Json).data[0].files |
+              Where-Object { $_.filename -match 'bdinfo-rs-wasm[\\/]src[\\/]' })
+          if (-not $files.Count) { Write-Host 'no wasm src files in the coverage report'; exit 1 }
+          $fail = @()
+          foreach ($m in 'lines', 'regions', 'functions') {
+            $covered = (@($files | ForEach-Object { $_.summary.$m.covered }) | Measure-Object -Sum).Sum
+            $count = (@($files | ForEach-Object { $_.summary.$m.count }) | Measure-Object -Sum).Sum
+            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, (100.0 * $covered / $count), $covered, $count)
+            if ($covered -lt $count) { $fail += "$m $covered/$count" }
+          }
+          if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
+
+      - name: Mutants (native — Tier A 0 missed)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo mutants --in-place
 
       - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
         working-directory: crates/bdinfo-rs-wasm/web
