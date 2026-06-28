@@ -13,12 +13,12 @@
 # Tier-A reader math `read_window`/`seek_target` is #[cfg(any(wasm32, test))] —
 # present on the native test build — so it is deliberately NOT excluded.
 exclude_re = [
-    "js_message",     # JsValue -> String
-    "WebReader",      # impl Read/Seek for WebReader (the FileReaderSync I/O)
-    "WebFile",        # WebFile::open + impl BdFile for WebFile
-    "for JsValue",    # impl From<TreeError> for JsValue
+    "js_message", # JsValue -> String
+    "WebReader", # impl Read/Seek for WebReader (the FileReaderSync I/O)
+    "WebFile", # WebFile::open + impl BdFile for WebFile
+    "for JsValue", # impl From<TreeError> for JsValue
     "build_web_tree", # &js_sys::Array -> Node<WebFile>
-    "scan_files",     # the #[wasm_bindgen] streaming export
+    "scan_files", # the #[wasm_bindgen] streaming export
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).
