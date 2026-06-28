@@ -57,7 +57,7 @@ use wasm_bindgen::{JsCast, JsValue};
 /// one go, so a front-to-back demux crosses the JS boundary once per MiB rather
 /// than once per small parser read.
 #[cfg(target_arch = "wasm32")]
-const READ_WINDOW: usize = 1 << 20;
+const READ_WINDOW: usize = 1_048_576; // 1 MiB
 
 /// A node in a synthetic disc tree — a directory holding sub-directories and
 /// files of one concrete [`BdFile`] backend (`F`).
@@ -210,13 +210,12 @@ fn split_sections(data: &[u8]) -> Vec<Vec<u8>> {
         let Some((len_bytes, tail)) = rest.split_first_chunk::<4>() else { break };
         let want = u32::from_be_bytes(*len_bytes) as usize;
         let take = want.min(tail.len());
-        // `take <= tail.len()`, so `split_at` cannot panic.
+        // `take <= tail.len()`, so `split_at` cannot panic. A truncated section
+        // (`take < want`) consumes the rest of the buffer, so the next iteration
+        // finds no further 4-byte prefix and the loop ends — no explicit break.
         let (head, next) = tail.split_at(take);
         sections.push(head.to_vec());
         rest = next;
-        if take < want {
-            break;
-        }
     }
     sections
 }
@@ -956,6 +955,21 @@ mod tests {
         let tree = assemble_tree(vec![(path_components(&deep), 0_usize)]).expect("assemble");
         assert_eq!(tree.name, "DISC");
         assert!(tree.dirs.is_empty(), "the over-deep file should be dropped");
+    }
+
+    #[test]
+    fn assemble_keeps_a_path_exactly_at_the_depth_cap() {
+        // A chain exactly MAX_TREE_DEPTH deep is kept; the over-deep test above
+        // drops one past it. Together they pin the exact `chain.len() > cap`
+        // boundary (a `>=` would wrongly drop the at-cap path).
+        let at_cap = std::iter::once("DISC".to_owned())
+            .chain((0..MAX_TREE_DEPTH).map(|i| format!("d{i}")))
+            .chain(std::iter::once("file.m2ts".to_owned()))
+            .collect::<Vec<_>>()
+            .join("/");
+        let kept =
+            assemble_tree(vec![(path_components(&at_cap), 0_usize)]).expect("assemble at cap");
+        assert!(!kept.dirs.is_empty(), "a path at the depth cap must be kept");
     }
 
     #[test]

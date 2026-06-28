@@ -1,0 +1,25 @@
+# cargo-mutants policy for the wasm shim (its own workspace; the root
+# .cargo/mutants.toml is NOT inherited). Tier A — the target-agnostic logic, which
+# is compiled on the native `cargo test` build cargo-mutants runs — is held to
+# 0 missed.
+#
+# Tier B is the #[cfg(target_arch = "wasm32")] browser glue. cargo-mutants does
+# not evaluate cfg, so on a native run it still emits mutants inside that cfg'd-out
+# code; with the function absent from the native build the mutation produces a
+# byte-identical binary, the suite passes, and it reads as a FALSE "missed".
+# (Same reason the root config excludes the cfg(not(windows)) fs arm.) Tier B is
+# verified instead by the byte-exact multi-runtime parity tests (Node + headless
+# Chrome/Firefox), so exclude it here by its wasm32-only item names. NB: the
+# Tier-A reader math `read_window`/`seek_target` is #[cfg(any(wasm32, test))] —
+# present on the native test build — so it is deliberately NOT excluded.
+exclude_re = [
+    "js_message",     # JsValue -> String
+    "WebReader",      # impl Read/Seek for WebReader (the FileReaderSync I/O)
+    "WebFile",        # WebFile::open + impl BdFile for WebFile
+    "for JsValue",    # impl From<TreeError> for JsValue
+    "build_web_tree", # &js_sys::Array -> Node<WebFile>
+    "scan_files",     # the #[wasm_bindgen] streaming export
+]
+
+# Enforce the committed lockfile on every mutant build (mirrors CI).
+additional_cargo_args = ["--locked"]
