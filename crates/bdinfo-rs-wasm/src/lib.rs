@@ -293,7 +293,9 @@ impl Seek for WebReader {
         if target < 0 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start of file"));
         }
-        self.pos = target as u64;
+        // A pathological End/Current offset can exceed `u64::MAX`; saturate
+        // past-EOF (the next `read` returns 0) rather than wrapping.
+        self.pos = u64::try_from(target).unwrap_or(u64::MAX);
         Ok(self.pos)
     }
 }
