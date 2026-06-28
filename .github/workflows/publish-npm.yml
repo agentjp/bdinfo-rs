@@ -27,8 +27,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Refuse to publish a tag that is not on master — the same ancestry gate
+  # release.yml uses, via the same reusable workflow. A vX.Y.Z tag pushed onto a
+  # side branch (so it never passed the gate) cannot ship to npm: the publish job
+  # `needs:` this one.
+  guard-ancestor:
+    uses: ./.github/workflows/guard-ancestor.yml
+    # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
+    # `git merge-base` ancestry check), so inheriting them is needless privilege
+    # (and zizmor's secrets-inherit audit flags it). release.yml's generated copy
+    # carries `secrets: inherit`, but this hand-maintained workflow is hardened in
+    # place rather than suppressed.
+    permissions:
+      contents: read
+
   publish:
     name: npm publish (OIDC Trusted Publishing)
+    needs: guard-ancestor
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -102,6 +117,27 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm run build
 
-      - name: Publish @bdinfo-rs/wasm (provenance, public)
+      # Verify the freshly-built artifact before it ships: the wasm-opt'd payload
+      # stays under the committed size budget, and the measured scan still renders
+      # byte-identical to the golden (the same two checks the gate runs). A
+      # regression in either blocks the publish.
+      - name: Size budget (optimized .wasm)
         working-directory: crates/bdinfo-rs-wasm/web
-        run: npm publish --provenance --access public
+        run: npm run --silent size
+
+      - name: Node golden-parity (scan_files == golden, byte-exact)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent test:node
+
+      - name: Publish @bdinfo-rs/wasm (provenance; prerelease -> dist-tag next)
+        working-directory: crates/bdinfo-rs-wasm/web
+        shell: pwsh
+        run: |
+          # A prerelease tag (vX.Y.Z-rc.1 — carries a `-` suffix) must NOT take the
+          # `latest` dist-tag that a bare `npm install @bdinfo-rs/wasm` resolves;
+          # ship it under `next` instead. Stable vX.Y.Z tags publish to `latest`.
+          $tag = $env:GITHUB_REF_NAME
+          $distTag = if ($tag -match '-') { 'next' } else { 'latest' }
+          Write-Host "publishing $tag to npm dist-tag '$distTag'"
+          npm publish --provenance --access public --tag $distTag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
