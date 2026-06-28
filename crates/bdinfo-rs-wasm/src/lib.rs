@@ -257,8 +257,22 @@ struct WebReader {
 }
 
 /// Renders a `JsValue` error to a short message for an [`io::Error`].
+///
+/// A thrown string comes back directly; an `Error`/`DOMException` is an object
+/// whose `message` property carries the human-readable text (e.g. a
+/// `NotFoundError` from a revoked `File`), so reach for that before falling
+/// back to a generic label.
 fn js_message(value: &JsValue) -> String {
-    value.as_string().unwrap_or_else(|| "JavaScript exception".to_owned())
+    if let Some(text) = value.as_string() {
+        return text;
+    }
+    if let Ok(message) = js_sys::Reflect::get(value, &JsValue::from_str("message"))
+        && let Some(text) = message.as_string()
+        && !text.is_empty()
+    {
+        return text;
+    }
+    "JavaScript exception".to_owned()
 }
 
 impl Read for WebReader {
