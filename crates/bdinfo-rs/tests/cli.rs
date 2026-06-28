@@ -426,7 +426,7 @@ fn a_subcommand_style_invocation_is_just_a_bad_path() {
 
 // --- Real-disc end-to-end: the same scan on every platform ---------------------
 //
-// The two fixtures under `tests/fixtures/` are tiny but REAL BD-ROM discs: a ~5 s
+// The two fixtures under `tests/fixtures/` are tiny but REAL BD-ROM discs: a ~30 s
 // Big Buck Bunny clip (CC BY 3.0 — see that dir's README) authored with tsMuxeR
 // into a 1080p H.264 video track plus an LPCM audio track. One is a BDMV folder,
 // the other the same disc as a UDF `.iso`. We scan each with the built binary and
@@ -479,4 +479,47 @@ fn a_real_bdmv_folder_scan_matches_the_golden_byte_for_byte() {
 fn a_real_iso_scan_matches_the_golden_byte_for_byte() {
     let got = scan_report(&real_fixture("BigBuckBunny.iso"), "Blu-Ray", "iso");
     assert_eq!(got, include_str!("fixtures/golden/iso.txt"), "iso report drifted from golden");
+}
+
+// The clip is ~30 s — past the default 20 s playlist filter — so the default
+// presentation path (no `-m`) is exercisable on a real disc, which the old ~5 s
+// clip could not reach. The filtered table here is exactly `[00000.MPLS]`, so
+// `--whole` selects the same lone playlist `-m 00000` does and must produce the
+// identical bytes, and `--list` shows that table and exits.
+
+#[test]
+fn a_real_whole_folder_scan_matches_the_golden_byte_for_byte() {
+    let disc = real_fixture("BigBuckBunny");
+    let dest = std::env::temp_dir().join(format!("bdinfo-rs-real-whole-{}", std::process::id()));
+    std::fs::create_dir_all(&dest).expect("create dest");
+    let output = bdinfo_rs()
+        .args([disc.as_os_str(), dest.as_os_str(), "-w".as_ref()])
+        .output()
+        .expect("spawn bdinfo-rs");
+    let report = std::fs::read(dest.join("BDINFO.BigBuckBunny.txt")).expect("read the report");
+    let _ = std::fs::remove_dir_all(&dest).is_ok();
+    assert!(output.status.success(), "scan failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        String::from_utf8(report).expect("the report is valid UTF-8"),
+        include_str!("fixtures/golden/folder.txt"),
+        "the default `--whole` selection drifted from the `-m 00000` golden"
+    );
+}
+
+#[test]
+fn a_real_list_shows_the_filtered_table_without_writing_a_report() {
+    let disc = real_fixture("BigBuckBunny");
+    let output =
+        bdinfo_rs().args([disc.as_os_str(), "--list".as_ref()]).output().expect("spawn bdinfo-rs");
+    assert!(output.status.success(), "scan failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("#   Group  Playlist File  Length    Estimated Bytes Measured Bytes"),
+        "table header: {stdout}"
+    );
+    assert!(stdout.contains("1   1      00000.MPLS     00:00:30"), "the 30 s row: {stdout}");
+    assert!(
+        !disc.join("BDINFO.BigBuckBunny.txt").exists(),
+        "--list writes no report file into the disc folder"
+    );
 }

@@ -23,11 +23,14 @@ The audio/video content is **_Big Buck Bunny_ © 2008 Blender Foundation**
 (<https://peach.blender.org>), licensed **Creative Commons Attribution 3.0**
 (<https://creativecommons.org/licenses/by/3.0/>).
 
-A short clip was re-encoded to a Blu-ray-compliant H.264 1080p video track and a
-48 kHz/16-bit stereo **LPCM** audio track (the only freely redistributable Blu-ray
-audio — AC-3/DTS are patent-encumbered), then muxed into the BD-ROM structures above
-with [tsMuxeR](https://tsmuxer.com/). The visual content is irrelevant to the test;
-only the disc structure and stream metadata are exercised.
+A ~30-second clip (`00000.MPLS`, `00:00:30.113`) was re-encoded to a Blu-ray-compliant
+H.264 1080p video track and a 48 kHz/16-bit stereo **LPCM** audio track (the only freely
+redistributable Blu-ray audio — AC-3/DTS are patent-encumbered), then muxed into the
+BD-ROM structures above with [tsMuxeR](https://tsmuxer.com/). The visual content is
+irrelevant to the test; only the disc structure and stream metadata are exercised. The
+length is deliberate: it clears the default 20-second playlist filter, so the table-driven
+presentation path (`--list` / `--whole` / the picker) is exercised end-to-end, not just the
+`-m 00000` direct selection.
 
 ## Regenerating
 
