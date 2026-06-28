@@ -85,7 +85,7 @@ types:
 # its scope here. NOTE: convco 0.6.4 applies scopeRegex only in the `convco commit`
 # wizard, not in `convco check`, so this documents/guides the vocabulary rather
 # than hard-gating it; the CI gate enforces TYPE, not scope. See CONTRIBUTING.md.
-scopeRegex: ^(core|cli|vfs|udf|bitstream|bytes|stream|bdrom|mpls|clpi|m2ts|index|discovery|codec|report|deps|ci|release|docker|fuzz|packaging|gate)$
+scopeRegex: ^(core|cli|vfs|udf|bitstream|bytes|stream|bdrom|mpls|clpi|m2ts|index|discovery|codec|report|deps|ci|release|docker|fuzz|wasm|packaging|gate)$
 
 # Require a real description (no terse "fix" / "wip"), matching the house rule
 # that a subject reads as a full release-note sentence.
