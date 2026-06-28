@@ -1,0 +1,37 @@
+[package]
+name = "bdinfo-rs-wasm"
+version = "1.0.1"
+publish = false
+edition = "2024"
+rust-version = "1.96"
+license = "LGPL-2.1-only"
+authors = ["bdinfo-rs contributors"]
+repository = "https://github.com/agentjp/bdinfo-rs"
+description = "WebAssembly browser bindings for the bdinfo-rs Blu-ray analyzer (full measured scan)."
+
+# INDEPENDENT workspace — keeps wasm-bindgen + web-sys (and the `unsafe` glue the
+# `#[wasm_bindgen]` macro emits) OUT of the main workspace's gate and out of the
+# `forbid(unsafe_code)` posture of crates/bdinfo-rs{-core,}. The root Cargo.toml
+# also `exclude`s this directory (exactly like `fuzz/`).
+[workspace]
+
+[lib]
+# `cdylib` is the wasm artifact wasm-bindgen post-processes; `rlib` lets the
+# native parity test link the crate and call the export directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bdinfo-rs-core = { path = "../bdinfo-rs-core" }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# Size-tuned, mirroring the CLI's shipped binary: the browser payload should be
+# as small as the analyzer's single static binary is.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
