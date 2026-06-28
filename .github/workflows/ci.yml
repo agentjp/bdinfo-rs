@@ -300,7 +300,13 @@ jobs:
           "$bin" -m 00000 "$fix/BigBuckBunny.iso" "$out"
           cmp "$out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
           cmp "$out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
-          echo "OK — both reports byte-identical to the golden"
+          # The 30 s playlist clears the default filter, so the default
+          # selection path is real-disc-testable: `--whole` (no `-m`) must
+          # produce the very bytes `-m 00000` does.
+          whole="$RUNNER_TEMP/out-whole"; mkdir -p "$whole"
+          "$bin" -w "$fix/BigBuckBunny" "$whole"
+          cmp "$whole/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          echo "OK — both reports byte-identical to the golden (incl. --whole)"
 
   # The "drop one file, it runs" proof, as its OWN job (not a step wedged into the
   # e2e matrix): build the shipped static musl binary, bake it into an EMPTY `FROM
@@ -346,4 +352,9 @@ jobs:
           docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny.iso /out
           cmp "$ctx/out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
           cmp "$ctx/out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
-          echo "OK — scanned both discs FROM scratch, byte-identical to golden"
+          # The 30 s playlist clears the default filter, so the default `--whole`
+          # selection is testable too — FROM scratch, into a fresh out dir.
+          mkdir -p "$ctx/out-whole"
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out-whole:/out" bdinfo-scratch -w /fix/BigBuckBunny /out
+          cmp "$ctx/out-whole/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          echo "OK — scanned both discs FROM scratch, byte-identical to golden (incl. --whole)"
