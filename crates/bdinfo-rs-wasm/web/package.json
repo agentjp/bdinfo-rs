@@ -22,6 +22,8 @@
     "access": "public",
     "provenance": true
   },
+  "module": "./dist/analyze.js",
+  "types": "./dist/analyze.d.ts",
   "exports": {
     ".": {
       "types": "./dist/analyze.d.ts",
