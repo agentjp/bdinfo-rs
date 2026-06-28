@@ -31,6 +31,43 @@ console.log(report); // the classic BDInfo-style disc report
 `analyze` spawns the scan Worker, relays demux progress, and resolves with the
 report string. See `demo.html` for a complete vanilla example.
 
+## Bundler support
+
+This is an **ES-modules-only**, browser-only package (no CommonJS build). It runs
+the scan off the main thread, so it ships **two assets the analyzer loads at
+runtime**: the Web Worker (`dist/worker.js`) and the WebAssembly module
+(`pkg/bdinfo_rs_wasm_bg.wasm`, fetched by the Worker). Your toolchain must emit
+both as addressable assets.
+
+`analyze` spawns the Worker with the standard
+
+```ts
+new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+```
+
+pattern. Any bundler that understands it works out of the box:
+
+- **Vite** — handled natively (it rewrites the `new URL(..., import.meta.url)`
+  worker reference and emits the `.wasm` as an asset).
+- **webpack 5** — handled natively (the same worker/asset detection).
+- **Native ES modules** (no bundler — served straight from the package on a
+  static host or via an import map) — works as published.
+
+If your bundler can't follow that pattern, host `dist/worker.js` and
+`pkg/bdinfo_rs_wasm_bg.wasm` yourself and pass the worker URL explicitly:
+
+```ts
+import workerUrl from "./worker.js?worker&url"; // however your bundler exposes it
+
+await analyze(picked, onProgress, { workerUrl });
+```
+
+The raw wasm-bindgen module is also exported directly for advanced use:
+
+```ts
+import init, { scan_files } from "@bdinfo-rs/wasm/wasm";
+```
+
 ## License
 
-LGPL-2.1-only.
+LGPL-2.1-only. The full license text ships in the package (`LICENSE`).

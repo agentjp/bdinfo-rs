@@ -23,6 +23,19 @@ export interface ScanProgress {
 /** A progress observer, called repeatedly as the scan demuxes. */
 export type ProgressFn = (progress: ScanProgress) => void;
 
+/** Optional overrides for {@link analyze}. */
+export interface AnalyzeOptions {
+  /**
+   * The URL of the scan Worker module to spawn. Defaults to
+   * `new URL("./worker.js", import.meta.url)`, which any bundler that follows
+   * the `new Worker(new URL(..., import.meta.url))` convention (Vite, webpack 5,
+   * native ESM) rewrites to the emitted asset. Set this when your toolchain
+   * can't follow that pattern and you host `worker.js` (and the `.wasm` it
+   * loads) yourself — pass the URL your bundler produced for `worker.js`.
+   */
+  workerUrl?: string | URL;
+}
+
 type WorkerMessage =
   | ({ type: "progress" } & ScanProgress)
   | { type: "done"; report: string }
@@ -31,12 +44,18 @@ type WorkerMessage =
 /**
  * Runs the full measured Blu-ray scan over `files` in a Worker and resolves with
  * the classic disc report. `onProgress`, if given, is called as the scan demuxes.
+ * `options.workerUrl` overrides where the scan Worker is loaded from (see
+ * {@link AnalyzeOptions}); the default suits any bundler-aware setup.
  *
  * Everything runs locally: no bytes leave the page.
  */
-export function analyze(files: BdmvFile[], onProgress?: ProgressFn): Promise<string> {
+export function analyze(
+  files: BdmvFile[],
+  onProgress?: ProgressFn,
+  options?: AnalyzeOptions,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const worker = new Worker(new URL("./worker.js", import.meta.url), {
+    const worker = new Worker(options?.workerUrl ?? new URL("./worker.js", import.meta.url), {
       type: "module",
     });
 
