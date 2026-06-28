@@ -35,7 +35,6 @@
   "files": [
     "dist",
     "pkg",
-    "src",
     "demo.html",
     "README.md",
     "LICENSE"
