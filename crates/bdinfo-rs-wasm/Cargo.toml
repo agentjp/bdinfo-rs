@@ -22,8 +22,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bdinfo-rs-core = { path = "../bdinfo-rs-core" }
+js-sys = "0.3"
 wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ["console"] }
+# `File`/`Blob`/`FileReaderSync` back the streaming `scan_files` seam: synchronous
+# byte-offset reads in a Worker (no JSPI/Asyncify); `console` is the scan log.
+web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync", "console"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

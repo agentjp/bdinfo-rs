@@ -32,6 +32,7 @@ name = "bdinfo-rs-wasm"
 version = "1.0.1"
 dependencies = [
  "bdinfo-rs-core",
+ "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-sys",
