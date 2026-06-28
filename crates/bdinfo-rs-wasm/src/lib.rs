@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -442,8 +443,11 @@ const MAX_TREE_DEPTH: usize = 64;
 ///
 /// `components` is a relative path already split by [`path_components`]: the
 /// last element is the file name, the first is the shared disc-root folder.
-/// Validates that every entry shares one root folder and names a directory, then
-/// inserts each file iteratively (no recursion on caller-controlled depth).
+/// Validates that every entry shares one root folder and names a directory,
+/// synthesizes a wrapper root above a picked `BDMV` folder (so the core's
+/// disc-root walk-up resolves — selecting `BDMV` directly is the README's
+/// primary instruction), then inserts each file iteratively (no recursion on
+/// caller-controlled depth).
 ///
 /// # Errors
 /// [`TreeError`] when the entries span more than one root folder, a path is a
@@ -463,12 +467,20 @@ fn assemble_tree<F>(entries: Vec<(Vec<&str>, F)>) -> Result<Node<F>, TreeError> 
     }
     let Some(shared_root) = shared_root else { return Err(TreeError::Empty) };
 
-    let mut root = Node::dir(shared_root, shared_root);
+    // A `webkitdirectory` pick of the `BDMV` folder itself yields paths rooted
+    // at `BDMV`; the core resolves the disc root by walking *up* from `BDMV`, so
+    // wrap it in a synthetic disc root (mirroring the in-memory `WASMDISC`) and
+    // let `BDMV` become the root's first child.
+    let wrap = BdmvDir::from_name(shared_root) == Some(BdmvDir::Bdmv);
+    let root_name = if wrap { "WASMDISC" } else { shared_root };
+    let mut root = Node::dir(root_name, root_name);
     for (comps, file) in entries {
         let Some((_, dirs)) = comps.split_last() else { continue };
-        // The first component is the root itself; only the components between it
-        // and the file name are intermediate directories.
-        let chain = dirs.split_first().map_or(&[][..], |(_, rest)| rest);
+        // The directories to descend from the root to the file's parent: when
+        // wrapping, the shared root (`BDMV`) is the first child of the synthetic
+        // root; otherwise the shared root *is* the root, so only the components
+        // between it and the file name are intermediate directories.
+        let chain = if wrap { dirs } else { dirs.split_first().map_or(&[][..], |(_, rest)| rest) };
         insert_file(&mut root, chain, file);
     }
     Ok(root)
@@ -599,4 +611,36 @@ pub fn scan_files(
         }
     };
     Ok(render_disc(&root, &mut observe))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{assemble_tree, path_components};
+
+    /// Parses path strings into the `(components, id)` entries `assemble_tree`
+    /// takes, tagging each file with its index so placement stays checkable.
+    fn entries<'a>(paths: &[&'a str]) -> Vec<(Vec<&'a str>, usize)> {
+        paths.iter().enumerate().map(|(i, path)| (path_components(path), i)).collect()
+    }
+
+    #[test]
+    fn assemble_wraps_a_bdmv_rooted_selection() {
+        // Picking the BDMV folder itself yields paths rooted at BDMV; the
+        // builder wraps it in a synthetic disc root so the core's walk-up
+        // resolves, with BDMV as the root's first child.
+        let tree = assemble_tree(entries(&["BDMV/index.bdmv", "BDMV/PLAYLIST/00000.mpls"]))
+            .expect("assemble a BDMV-rooted selection");
+        assert_eq!(tree.name, "WASMDISC");
+        assert_eq!(tree.dirs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["BDMV"]);
+    }
+
+    #[test]
+    fn assemble_keeps_a_disc_rooted_selection() {
+        // A disc-root pick already wraps BDMV, so its folder name is kept as the
+        // disc label verbatim.
+        let tree = assemble_tree(entries(&["MyDisc/BDMV/index.bdmv"]))
+            .expect("assemble a disc-rooted selection");
+        assert_eq!(tree.name, "MyDisc");
+        assert_eq!(tree.dirs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["BDMV"]);
+    }
 }
