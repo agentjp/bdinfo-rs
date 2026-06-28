@@ -38,6 +38,12 @@ web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync", "cons
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
+# The reader-math proptests run only on the native (Tier-A) build: proptest's
+# fork/timeout backend does not build for wasm32, where the parity tests use
+# wasm-bindgen-test instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
 # Size-tuned, mirroring the CLI's shipped binary: the browser payload should be
 # as small as the analyzer's single static binary is.
 [profile.release]

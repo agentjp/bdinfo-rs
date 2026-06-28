@@ -31,13 +31,15 @@
 //! real-scale `*.m2ts` stream file (megabytes) fits in a section. A missing or
 //! truncated section leaves its file empty (the resilient-open absence path).
 
-// `BdmvDir` is named only by `assemble_tree` (web-path logic) — tested natively
-// but absent from a native NON-test build, so gate it to where it lives to stay
-// dead-code-clean. `Read`/`Seek`/`SeekFrom`/`JsCast`/`JsValue` are named only by
-// the wasm32 browser glue.
+// `BdmvDir`/`SeekFrom` are named only by the web-path logic and the reader math
+// (`assemble_tree`/`seek_target`) — tested natively, but absent from a native
+// NON-test build, so gate them to where they live to stay dead-code-clean.
+// `Read`/`Seek`/`JsCast`/`JsValue` are named only by the wasm32 browser glue.
+#[cfg(any(target_arch = "wasm32", test))]
+use std::io::SeekFrom;
 use std::io::{self, BufRead, BufReader, Cursor};
 #[cfg(target_arch = "wasm32")]
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 use std::sync::Arc;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
@@ -288,16 +290,55 @@ fn js_message(value: &JsValue) -> String {
     "JavaScript exception".to_owned()
 }
 
+/// The byte window `[start, end)` a [`WebReader`] read of `buf_len` bytes at
+/// `pos` should slice off a `len`-byte blob, or `None` when there is nothing to
+/// read (an empty caller buffer, or a cursor at/after EOF).
+///
+/// The panic-safety-critical arithmetic split out of the `FileReaderSync` I/O so
+/// the off-by-one and EOF-clamp edges are exercised on the native (Tier-A)
+/// build. `end` is clamped to `len`, so a window that would cross EOF is
+/// shortened rather than over-reading the caller's `buf`.
+#[cfg(any(target_arch = "wasm32", test))]
+fn read_window(pos: u64, buf_len: usize, len: u64) -> Option<(u64, u64)> {
+    if buf_len == 0 || pos >= len {
+        return None;
+    }
+    let end = pos.saturating_add(buf_len as u64).min(len);
+    Some((pos, end))
+}
+
+/// Resolves a [`SeekFrom`] against a cursor at `pos` over a `len`-byte file to an
+/// absolute offset, rejecting a target before byte 0 and saturating a target
+/// past `u64::MAX` to `u64::MAX` (the next read then returns 0) rather than
+/// wrapping.
+///
+/// The `i128` intermediate cannot overflow — `len`/`pos` are `u64` and the
+/// offset is `i64`, whose sum is far inside `i128` — so `wrapping_add` is exact.
+///
+/// # Errors
+/// [`io::ErrorKind::InvalidInput`] when the resolved target is before the start.
+#[cfg(any(target_arch = "wasm32", test))]
+fn seek_target(from: SeekFrom, pos: u64, len: u64) -> io::Result<u64> {
+    let target: i128 = match from {
+        SeekFrom::Start(n) => i128::from(n),
+        SeekFrom::End(n) => i128::from(len).wrapping_add(i128::from(n)),
+        SeekFrom::Current(n) => i128::from(pos).wrapping_add(i128::from(n)),
+    };
+    if target < 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start of file"));
+    }
+    Ok(u64::try_from(target).unwrap_or(u64::MAX))
+}
+
 #[cfg(target_arch = "wasm32")]
 impl Read for WebReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() || self.pos >= self.len {
+        let Some((start, end)) = read_window(self.pos, buf.len(), self.len) else {
             return Ok(0);
-        }
-        let end = self.pos.saturating_add(buf.len() as u64).min(self.len);
+        };
         let blob = self
             .file
-            .slice_with_f64_and_f64(self.pos as f64, end as f64)
+            .slice_with_f64_and_f64(start as f64, end as f64)
             .map_err(|e| io::Error::other(js_message(&e)))?;
         let array = self
             .reader
@@ -314,17 +355,7 @@ impl Read for WebReader {
 #[cfg(target_arch = "wasm32")]
 impl Seek for WebReader {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        let target: i128 = match from {
-            SeekFrom::Start(n) => i128::from(n),
-            SeekFrom::End(n) => i128::from(self.len) + i128::from(n),
-            SeekFrom::Current(n) => i128::from(self.pos) + i128::from(n),
-        };
-        if target < 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "seek before start of file"));
-        }
-        // A pathological End/Current offset can exceed `u64::MAX`; saturate
-        // past-EOF (the next `read` returns 0) rather than wrapping.
-        self.pos = u64::try_from(target).unwrap_or(u64::MAX);
+        self.pos = seek_target(from, self.pos, self.len)?;
         Ok(self.pos)
     }
 }
@@ -650,9 +681,11 @@ pub fn scan_files(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, SeekFrom};
+
     use super::{
         MAX_TREE_DEPTH, TreeError, assemble_tree, extension_of, glob_match, path_components,
-        split_sections,
+        read_window, seek_target, split_sections,
     };
 
     /// Parses path strings into the `(components, id)` entries `assemble_tree`
@@ -871,5 +904,118 @@ mod tests {
         let tree = assemble_tree(vec![(path_components(&deep), 0_usize)]).expect("assemble");
         assert_eq!(tree.name, "DISC");
         assert!(tree.dirs.is_empty(), "the over-deep file should be dropped");
+    }
+
+    #[test]
+    fn read_window_is_none_on_empty_buffer_or_at_eof() {
+        assert_eq!(read_window(0, 0, 100), None); // empty buf at start (the `||`, not `&&`)
+        assert_eq!(read_window(50, 0, 100), None); // empty buf mid-file
+        assert_eq!(read_window(100, 8, 100), None); // pos == len (boundary: `>=`, not `>`)
+        assert_eq!(read_window(101, 8, 100), None); // pos > len
+    }
+
+    #[test]
+    fn read_window_clamps_to_eof() {
+        assert_eq!(read_window(0, 8, 100), Some((0, 8))); // fully inside
+        assert_eq!(read_window(10, 8, 100), Some((10, 18)));
+        assert_eq!(read_window(99, 8, 100), Some((99, 100))); // one byte left
+        assert_eq!(read_window(96, 8, 100), Some((96, 100))); // crosses EOF -> clamped to len
+    }
+
+    #[test]
+    fn seek_target_resolves_each_anchor() {
+        let ok = |from| seek_target(from, 5, 100).expect("a non-negative target");
+        assert_eq!(ok(SeekFrom::Start(0)), 0);
+        assert_eq!(ok(SeekFrom::Start(42)), 42);
+        assert_eq!(ok(SeekFrom::End(0)), 100);
+        assert_eq!(ok(SeekFrom::End(-10)), 90);
+        assert_eq!(ok(SeekFrom::End(10)), 110); // past EOF is allowed
+        assert_eq!(ok(SeekFrom::Current(0)), 5);
+        assert_eq!(ok(SeekFrom::Current(20)), 25);
+        assert_eq!(ok(SeekFrom::Current(-5)), 0);
+    }
+
+    #[test]
+    fn seek_target_allows_zero_but_rejects_before_start() {
+        // Landing exactly on byte 0 is valid (boundary: `< 0`, not `<= 0`).
+        assert_eq!(seek_target(SeekFrom::End(-100), 0, 100).expect("zero is valid"), 0);
+        assert_eq!(seek_target(SeekFrom::Current(-5), 5, 100).expect("zero is valid"), 0);
+        for from in [SeekFrom::End(-101), SeekFrom::Current(-6)] {
+            let err = seek_target(from, 5, 100).expect_err("a pre-start target must error");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn seek_target_saturates_a_past_u64_target() {
+        // try_from succeeds at exactly u64::MAX (the success-at-max path)...
+        assert_eq!(seek_target(SeekFrom::Start(u64::MAX), 0, 0).expect("max"), u64::MAX);
+        // ...and the i128 sum can exceed u64::MAX, exercising the unwrap_or(u64::MAX) fallback.
+        assert_eq!(
+            seek_target(SeekFrom::End(i64::MAX), u64::MAX, u64::MAX).expect("sat"),
+            u64::MAX
+        );
+        assert_eq!(seek_target(SeekFrom::Current(i64::MAX), u64::MAX, 0).expect("sat"), u64::MAX);
+    }
+
+    // The reader math is panic-safety-critical, so amplify the unit cases with
+    // property tests. proptest's backend does not build for wasm32, so these run
+    // only on the native (Tier-A) build.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod prop {
+        use std::io::{self, SeekFrom};
+
+        use proptest::prelude::*;
+
+        use crate::{read_window, seek_target};
+
+        proptest! {
+            #[test]
+            fn read_window_is_a_bounded_nonempty_slice(pos: u64, buf_len in 0_usize..=4096, len: u64) {
+                match read_window(pos, buf_len, len) {
+                    None => prop_assert!(buf_len == 0 || pos >= len),
+                    Some((start, end)) => {
+                        prop_assert!(buf_len != 0 && pos < len);
+                        prop_assert_eq!(start, pos);
+                        prop_assert!(start < end); // non-empty
+                        prop_assert!(end <= len); // never past EOF
+                        let want = u64::try_from(buf_len).unwrap_or(u64::MAX);
+                        prop_assert!(end.saturating_sub(start) <= want); // <= requested
+                        // ...and took as much as possible (all the way, or hit EOF).
+                        prop_assert!(end == len || end.saturating_sub(start) == want);
+                    }
+                }
+            }
+
+            #[test]
+            fn seek_target_errs_iff_target_is_negative(
+                pos: u64,
+                len: u64,
+                kind in 0_u8..3,
+                off: i64,
+                start: u64,
+            ) {
+                let from = match kind {
+                    0 => SeekFrom::Start(start),
+                    1 => SeekFrom::End(off),
+                    _ => SeekFrom::Current(off),
+                };
+                let target: i128 = match from {
+                    SeekFrom::Start(n) => i128::from(n),
+                    SeekFrom::End(n) => i128::from(len).wrapping_add(i128::from(n)),
+                    SeekFrom::Current(n) => i128::from(pos).wrapping_add(i128::from(n)),
+                };
+                match seek_target(from, pos, len) {
+                    Err(e) => {
+                        prop_assert!(target < 0);
+                        prop_assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+                    }
+                    Ok(got) => {
+                        prop_assert!(target >= 0);
+                        prop_assert_eq!(got, u64::try_from(target).unwrap_or(u64::MAX));
+                    }
+                }
+            }
+        }
     }
 }
