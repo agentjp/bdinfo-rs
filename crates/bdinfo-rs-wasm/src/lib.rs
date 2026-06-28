@@ -624,12 +624,56 @@ pub fn scan_files(
 
 #[cfg(test)]
 mod tests {
-    use super::{assemble_tree, path_components};
+    use super::{
+        MAX_TREE_DEPTH, TreeError, assemble_tree, extension_of, glob_match, path_components,
+        split_sections,
+    };
 
     /// Parses path strings into the `(components, id)` entries `assemble_tree`
     /// takes, tagging each file with its index so placement stays checkable.
     fn entries<'a>(paths: &[&'a str]) -> Vec<(Vec<&'a str>, usize)> {
         paths.iter().enumerate().map(|(i, path)| (path_components(path), i)).collect()
+    }
+
+    #[test]
+    fn glob_match_is_literal_anchored_and_case_insensitive() {
+        assert!(glob_match(b"00000.MPLS", b"00000.mpls"));
+        assert!(glob_match(b"*.mpls", b"00000.MPLS"));
+        assert!(glob_match(b"00???.clpi", b"00012.clpi"));
+        assert!(glob_match(b"*", b""));
+        assert!(glob_match(b"", b""));
+        assert!(!glob_match(b"*.mpls", b"00000.m2ts"));
+        assert!(!glob_match(b"?", b""));
+        assert!(!glob_match(b"a", b""));
+    }
+
+    #[test]
+    fn split_sections_frames_up_to_six_and_stops_on_truncation() {
+        // Two whole one-byte sections.
+        assert_eq!(split_sections(&[0, 0, 0, 1, b'A', 0, 0, 0, 1, b'B']), [vec![b'A'], vec![b'B']]);
+        // A length that overruns truncates to what is present, then stops.
+        assert_eq!(split_sections(&[0, 0, 0, 4, b'X', b'Y']), [vec![b'X', b'Y']]);
+        // No 4-byte length prefix at all yields no sections.
+        assert!(split_sections(&[0, 0]).is_empty());
+        // Never more than six sections, even with more length-prefixed data.
+        let many: Vec<u8> = std::iter::repeat_n(0_u8, 4 * 8).collect();
+        assert_eq!(split_sections(&many).len(), 6);
+    }
+
+    #[test]
+    fn path_components_splits_on_both_separators_and_drops_empties() {
+        assert_eq!(path_components("BDMV/PLAYLIST/00000.mpls"), ["BDMV", "PLAYLIST", "00000.mpls"]);
+        assert_eq!(path_components("BDMV\\STREAM\\00000.m2ts"), ["BDMV", "STREAM", "00000.m2ts"]);
+        assert_eq!(path_components("//a///b//"), ["a", "b"]);
+        assert!(path_components("").is_empty());
+    }
+
+    #[test]
+    fn extension_of_returns_the_dotted_suffix_or_empty() {
+        assert_eq!(extension_of("00000.mpls"), ".mpls");
+        assert_eq!(extension_of("archive.tar.gz"), ".gz");
+        assert_eq!(extension_of("noext"), "");
+        assert_eq!(extension_of(".hidden"), ".hidden");
     }
 
     #[test]
@@ -651,5 +695,35 @@ mod tests {
             .expect("assemble a disc-rooted selection");
         assert_eq!(tree.name, "MyDisc");
         assert_eq!(tree.dirs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["BDMV"]);
+    }
+
+    #[test]
+    fn assemble_rejects_an_incoherent_selection() {
+        // `Node` is not `Debug`, so compare via `.err()` rather than `expect_err`.
+        assert_eq!(
+            assemble_tree(entries(&["A/BDMV/x", "B/BDMV/y"])).err(),
+            Some(TreeError::MixedRoots("A".to_owned(), "B".to_owned()))
+        );
+        assert_eq!(
+            assemble_tree(entries(&["loose.mpls"])).err(),
+            Some(TreeError::BareFile("loose.mpls".to_owned()))
+        );
+        let empty: Vec<(Vec<&str>, usize)> = Vec::new();
+        assert_eq!(assemble_tree(empty).err(), Some(TreeError::Empty));
+    }
+
+    #[test]
+    fn assemble_drops_a_pathologically_deep_path_without_overflowing() {
+        // A path far deeper than any real disc is dropped rather than grown into
+        // the tree — and the iterative descent returns instead of recursing to a
+        // stack overflow.
+        let deep = std::iter::once("DISC".to_owned())
+            .chain((0..MAX_TREE_DEPTH + 100).map(|i| format!("d{i}")))
+            .chain(std::iter::once("file.m2ts".to_owned()))
+            .collect::<Vec<_>>()
+            .join("/");
+        let tree = assemble_tree(vec![(path_components(&deep), 0_usize)]).expect("assemble");
+        assert_eq!(tree.name, "DISC");
+        assert!(tree.dirs.is_empty(), "the over-deep file should be dropped");
     }
 }

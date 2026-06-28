@@ -53,6 +53,10 @@ fn check() {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use std::io::{self, Read};
+
+    use bdinfo_rs_core::bdrom::m2ts::TsStreamFile;
+    use bdinfo_rs_core::bdrom::mpls::TsPlaylistFile;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -60,6 +64,28 @@ mod wasm {
     #[wasm_bindgen_test]
     fn measured_scan_matches_golden() {
         super::check();
+    }
+
+    /// A reader that fails on the first read — exercises the wasm sequential
+    /// demux's read-error arm (`scan_chunked`'s `Err(e) => return Err(e)`),
+    /// which only the `cfg(wasm32)` path runs and no other test reaches.
+    struct Faulting;
+
+    impl Read for Faulting {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated read failure"))
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn scan_surfaces_a_reader_error() {
+        let mut stream = TsStreamFile::new("00000.m2ts");
+        let mut playlists =
+            [TsPlaylistFile::scan("00000.mpls", super::MPLS).expect("parse the fixture playlist")];
+        let err = stream
+            .scan(&mut Faulting, &mut playlists, true)
+            .expect_err("the sequential demux must surface the reader's error");
+        assert!(err.to_string().contains("io error"), "unexpected error: {err}");
     }
 }
 
