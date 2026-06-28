@@ -713,6 +713,58 @@ mod tests {
     }
 
     #[test]
+    fn a_bdmv_rooted_selection_renders_like_the_canonical_framing() {
+        use std::sync::Arc;
+
+        use super::{MemFile, build_tree, render_disc};
+
+        // The committed fixture's files — the same bytes the parity golden is
+        // built from.
+        const INDEX: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
+        const MOVIE: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/MovieObject.bdmv");
+        const MPLS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/PLAYLIST/00000.mpls");
+        const CLPI: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/CLIPINF/00000.clpi");
+        const M2TS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/STREAM/00000.m2ts");
+
+        // The canonical in-memory framing (`WASMDISC`-rooted) the golden pins.
+        let mut blob = Vec::new();
+        for section in [INDEX, MOVIE, MPLS, CLPI, M2TS, &[][..]] {
+            blob.extend_from_slice(&(section.len() as u32).to_be_bytes());
+            blob.extend_from_slice(section);
+        }
+        let framed = render_disc(&build_tree(&blob), &mut |_| {}).expect("framed render");
+
+        // The same disc handed over as a `webkitdirectory` pick of the BDMV
+        // folder itself: the wrapper root makes it render identically.
+        let picked: [(&str, &[u8]); 5] = [
+            ("BDMV/index.bdmv", INDEX),
+            ("BDMV/MovieObject.bdmv", MOVIE),
+            ("BDMV/PLAYLIST/00000.mpls", MPLS),
+            ("BDMV/CLIPINF/00000.clpi", CLPI),
+            ("BDMV/STREAM/00000.m2ts", M2TS),
+        ];
+        let tree = assemble_tree(
+            picked
+                .iter()
+                .map(|(path, data)| {
+                    let comps = path_components(path);
+                    let name = (*comps.last().expect("a file name")).to_owned();
+                    (comps, MemFile { name, full: (*path).to_owned(), data: Arc::from(*data) })
+                })
+                .collect(),
+        )
+        .expect("assemble the BDMV-rooted selection");
+        let from_bdmv = render_disc(&tree, &mut |_| {}).expect("BDMV-rooted render");
+
+        assert_eq!(framed, from_bdmv, "a BDMV-rooted pick must render like the canonical framing");
+    }
+
+    #[test]
     fn assemble_drops_a_pathologically_deep_path_without_overflowing() {
         // A path far deeper than any real disc is dropped rather than grown into
         // the tree — and the iterative descent returns instead of recursing to a
