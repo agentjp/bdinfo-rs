@@ -546,9 +546,10 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 /// report.
 ///
 /// This is the byte-for-byte core shared by every export and the native parity
-/// test: [`BdRom::open_resilient_with`] with the packet scan **on**, every
-/// parsed playlist kept ([`PlaylistFilter::everything`] — the CLI's `--whole`),
-/// then [`text`] rendering. `progress` observes the demux.
+/// test: [`BdRom::open_resilient_with`] with the packet scan **on**, the CLI's
+/// `--whole` selection ([`PlaylistFilter::default`] — the standard filtered set,
+/// dropping playlists shorter than 20 s and looping ones), then [`text`]
+/// rendering. `progress` observes the demux.
 ///
 /// # Errors
 /// Returns the [`BdError`] from [`BdRom::open_resilient_with`] when the
@@ -559,7 +560,7 @@ fn render_disc(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, BdError> {
     let report = BdRom::open_resilient_with(root, true, None, progress)?;
-    let order = report.bdrom.presentation_order(&PlaylistFilter::everything());
+    let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
 
@@ -762,6 +763,60 @@ mod tests {
         let from_bdmv = render_disc(&tree, &mut |_| {}).expect("BDMV-rooted render");
 
         assert_eq!(framed, from_bdmv, "a BDMV-rooted pick must render like the canonical framing");
+    }
+
+    #[test]
+    fn the_render_drops_a_short_playlist_like_whole() {
+        use std::sync::Arc;
+
+        use super::{MemFile, render_disc};
+
+        const INDEX: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
+        const MOVIE: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/MovieObject.bdmv");
+        const MPLS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/PLAYLIST/00000.mpls");
+        const CLPI: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/CLIPINF/00000.clpi");
+        const M2TS: &[u8] =
+            include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/STREAM/00000.m2ts");
+
+        // A second playlist over the same clip, patched to ~10 s so the `--whole`
+        // filter (`PlaylistFilter::default`) drops it: the first PlayItem's
+        // OUT_time is a u32-BE at file offset 86 (IN_time is 27_000_000 at 82).
+        let mut short = MPLS.to_vec();
+        short[86..90].copy_from_slice(&(27_000_000_u32 + 45_000 * 10).to_be_bytes());
+
+        let files: [(&str, Vec<u8>); 6] = [
+            ("DISC/BDMV/index.bdmv", INDEX.to_vec()),
+            ("DISC/BDMV/MovieObject.bdmv", MOVIE.to_vec()),
+            ("DISC/BDMV/PLAYLIST/00000.mpls", MPLS.to_vec()),
+            ("DISC/BDMV/PLAYLIST/00001.mpls", short),
+            ("DISC/BDMV/CLIPINF/00000.clpi", CLPI.to_vec()),
+            ("DISC/BDMV/STREAM/00000.m2ts", M2TS.to_vec()),
+        ];
+        let tree = assemble_tree(
+            files
+                .iter()
+                .map(|(path, data)| {
+                    let comps = path_components(path);
+                    let name = (*comps.last().expect("a file name")).to_owned();
+                    (
+                        comps,
+                        MemFile { name, full: (*path).to_owned(), data: Arc::from(data.clone()) },
+                    )
+                })
+                .collect(),
+        )
+        .expect("assemble the two-playlist disc");
+        let report = render_disc(&tree, &mut |_| {}).expect("render");
+
+        assert!(report.contains("00000.MPLS"), "the 30s feature playlist must be kept");
+        assert!(
+            !report.contains("00001.MPLS"),
+            "the 10s playlist must be dropped by the --whole filter"
+        );
     }
 
     #[test]
