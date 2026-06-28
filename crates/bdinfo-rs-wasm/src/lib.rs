@@ -315,7 +315,21 @@ struct WebFile {
 // supertrait on `BdFile` is satisfied for the type system but never exercised
 // across a real thread boundary. The handle is only ever touched on the Worker
 // thread that created it.
+//
+// The impl is gated to the single-threaded wasm build. Enable wasm threads
+// (`+atomics`, shared memory, a worker pool) and that premise collapses — a
+// `web_sys::File` moved across workers would be UB — so the `compile_error!`
+// below forces this seam to be revisited rather than silently miscompiling. On
+// native (the `rlib` the parity test links) the demux path that needs `Send` is
+// never reached, so no hand-written impl is required there.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 unsafe impl Send for WebFile {}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+compile_error!(
+    "WebFile's Send impl is unsound with wasm threads (+atomics): a web_sys::File moved across \
+     workers is undefined behavior. Revisit the FileReaderSync seam before enabling threads."
+);
 
 impl WebFile {
     fn open(&self) -> io::Result<WebReader> {
