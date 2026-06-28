@@ -56,7 +56,7 @@ jobs:
       - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
-          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,typos-cli
+          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,cargo-deny,typos-cli
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -91,23 +91,32 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm
         run: cargo shear
 
+      # Supply-chain audit of the wasm crate's OWN dependency tree (js-sys /
+      # wasm-bindgen / web-sys — compiled into the shipped `.wasm` but invisible to
+      # the root audit, which `exclude`s this independent workspace). Uses the
+      # crate-local crates/bdinfo-rs-wasm/deny.toml, which mirrors the root
+      # allowlist + posture; cargo-deny discovers it from the target manifest's
+      # workspace root. Run from the repo root so the manifest path resolves.
+      - name: cargo-deny (wasm dep audit — advisories / licenses / bans / sources)
+        run: cargo deny --manifest-path crates/bdinfo-rs-wasm/Cargo.toml check
+
       - name: Clippy (wasm32, calibrated, -D warnings)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo clippy --target wasm32-unknown-unknown --all-targets --release -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets --release --locked -- -D warnings
 
       - name: Clippy (native, -D warnings)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Build (wasm32, release)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: cargo build --target wasm32-unknown-unknown --release --locked
 
       - name: Doc (wasm32, warnings = errors)
         working-directory: crates/bdinfo-rs-wasm
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items
+        run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items --locked
 
       - name: Coverage (llvm-cov nextest, native — Tier A 100% lines/regions/functions)
         working-directory: crates/bdinfo-rs-wasm
@@ -151,9 +160,35 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm run --silent typecheck
 
+      # Published type-surface guard, run on the just-built dist/ + pkg/: publint
+      # validates package.json's exports / files / types wiring, and attw packs the
+      # tarball and type-checks every resolution so the consumer-facing type
+      # surface can't silently regress. The package is intentionally ESM-only, so
+      # attw runs the `esm-only` profile — the default profile's node10 / CJS
+      # "failures" are inherent to ESM-only (a dynamic import is required from CJS),
+      # not a regression. Both float to latest like the other advisory linters.
+      - name: Published package type guard (publint + attw)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: |
+          npx --yes publint
+          npx --yes @arethetypeswrong/cli --pack --profile esm-only
+
       - name: Node golden-parity (scan_files == golden, byte-exact)
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm run --silent test:node
+
+      # Real-browser STREAMING path: the production Worker + FileReaderSync
+      # scan_files seam (web/test/parity.chrome.mjs) driven by playwright-core
+      # against the runner's system Google Chrome (preinstalled on ubuntu-latest),
+      # over the committed fixture handed in as in-browser File objects. Same
+      # measured scan as the Node parity step, but exercising the REAL
+      # off-main-thread Worker byte-offset reads end to end and asserting the report
+      # byte-identical to the golden — the only step that runs the shipped
+      # scan_files path in a browser (the wasm-bindgen-test steps below run
+      # tests/parity.rs via the wasm-bindgen harness, not the Worker seam).
+      - name: Real-browser Worker parity (Chrome — scan_files streaming)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent test:chrome
 
       # Real-browser execution: the SAME measured-scan parity test (tests/parity.rs)
       # run headless via wasm-bindgen-test. The runner picks the browser from the
@@ -164,11 +199,11 @@ jobs:
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
           GECKODRIVER: ${{ env.GECKOWEBDRIVER }}/geckodriver
-        run: cargo test --target wasm32-unknown-unknown --release --test parity
+        run: cargo test --target wasm32-unknown-unknown --release --locked --test parity
 
       - name: wasm-bindgen-test (Chrome)
         working-directory: crates/bdinfo-rs-wasm
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
           CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
-        run: cargo test --target wasm32-unknown-unknown --release --test parity
+        run: cargo test --target wasm32-unknown-unknown --release --locked --test parity

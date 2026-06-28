@@ -1,0 +1,75 @@
+# cargo-deny policy for the INDEPENDENT in-browser wasm crate. This crate is its
+# own workspace, `exclude`d from the root audit graph, so the root deny.toml never
+# sees js-sys / wasm-bindgen / web-sys — yet those Rust deps ARE compiled into the
+# shipped `.wasm`. This file audits them with the SAME posture as the root
+# deny.toml (advisories / permissive-license allowlist / crates.io-only / no-C
+# static-binary guard); the only deltas from root are spelled out and justified
+# below. Run: cargo deny --manifest-path crates/bdinfo-rs-wasm/Cargo.toml check
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Add advisory IDs here ONLY with a comment explaining why the risk is accepted.
+ignore = []
+
+[licenses]
+version = 2
+unused-allowed-license = "allow"
+# Permissive-only allowlist — identical to the root deny.toml. A dependency whose
+# SPDX expression isn't satisfied here is a hard error.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+# Our own crates are LGPL-2.1 (the browser shim + the core lib it links in). These
+# scoped exceptions permit LGPL ONLY for our crates; an LGPL *dependency* still
+# fails. (The root deny.toml carries the same shape for bdinfo-rs-core/bdinfo-rs;
+# this crate's tree contains bdinfo-rs-wasm + bdinfo-rs-core, not the CLI binary.)
+[[licenses.exceptions]]
+name = "bdinfo-rs-wasm"
+allow = ["LGPL-2.1-only"]
+
+[[licenses.exceptions]]
+name = "bdinfo-rs-core"
+allow = ["LGPL-2.1-only"]
+
+[bans]
+# The transitive wasm-bindgen / web-sys / wasm-bindgen-test trees legitimately
+# carry duplicate versions of low-level crates that no leaf shim can deduplicate
+# (the same reason the crate's clippy config allows `multiple_crate_versions`), so
+# dup-detection is advisory here rather than a hard error.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Single-static-binary / no-C guard — same intent as the root deny.toml: a crate
+# pulling external C breaks the "pure-Rust, no C toolchain" guarantee. The shipped
+# `.wasm` is `cargo build --target wasm32-unknown-unknown` (no dev-deps, no C).
+# `cc` is allowed ONLY as a dependency of `minicov` — the coverage shim of
+# `wasm-bindgen-test`, a DEV-dependency used by the headless-browser parity tests;
+# its `cc` builds the native test harness and is NEVER compiled into the shipped
+# `.wasm`. Any OTHER path to `cc` (or any cmake/bindgen/pkg-config/vcpkg) still
+# fails, so the guard keeps its teeth.
+deny = [
+    { crate = "cc", wrappers = ["minicov"] },
+    { crate = "cmake" },
+    { crate = "bindgen" },
+    { crate = "pkg-config" },
+    { crate = "vcpkg" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

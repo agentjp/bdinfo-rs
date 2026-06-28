@@ -18,7 +18,7 @@ const bg = resolve(pkg, "bdinfo_rs_wasm_bg.wasm");
 // it sidesteps Node's refusal to spawn the `.cmd` shim without `shell: true`.
 const wasmOpt = resolve(here, "node_modules/binaryen/bin/wasm-opt");
 
-execSync("cargo build --release --target wasm32-unknown-unknown", { cwd: crate, stdio: "inherit" });
+execSync("cargo build --release --target wasm32-unknown-unknown --locked", { cwd: crate, stdio: "inherit" });
 execSync(`wasm-bindgen --target web --out-dir "${pkg}" --out-name bdinfo_rs_wasm "${wasm}"`, {
   stdio: "inherit",
 });
