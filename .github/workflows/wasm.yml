@@ -125,7 +125,8 @@ jobs:
           foreach ($m in 'lines', 'regions', 'functions') {
             $covered = (@($files | ForEach-Object { $_.summary.$m.covered }) | Measure-Object -Sum).Sum
             $count = (@($files | ForEach-Object { $_.summary.$m.count }) | Measure-Object -Sum).Sum
-            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, (100.0 * $covered / $count), $covered, $count)
+            $pct = if ($count) { 100.0 * $covered / $count } else { 100.0 }
+            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, $pct, $covered, $count)
             if ($covered -lt $count) { $fail += "$m $covered/$count" }
           }
           if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
