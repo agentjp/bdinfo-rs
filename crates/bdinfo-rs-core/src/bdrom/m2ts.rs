@@ -620,8 +620,12 @@ impl TsStreamFile {
         // channel with no read failure.
         #[cfg(target_arch = "wasm32")]
         {
+            // One buffer for the whole scan, grown back to `chunk_size` each
+            // iteration (mirroring the native worker's recycle of a single
+            // `Vec`), so the sequential demux allocates once, not per chunk.
+            let mut buffer = vec![0_u8; chunk_size];
             loop {
-                let mut buffer = vec![0_u8; chunk_size];
+                buffer.resize(chunk_size, 0);
                 match fill_buffer(reader, &mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
