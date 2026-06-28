@@ -37,6 +37,7 @@ use std::sync::Arc;
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 use bdinfo_rs_core::discovery::BdmvDir;
+use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -542,27 +543,32 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 // ── shared render path ──────────────────────────────────────────────────────
 
 /// Runs the full **measured** scan over `root` and renders the classic disc
-/// report, or an empty string if the structure is too damaged to open at all
-/// (no `BDMV`/`CLIPINF`/`PLAYLIST`).
+/// report.
 ///
 /// This is the byte-for-byte core shared by every export and the native parity
 /// test: [`BdRom::open_resilient_with`] with the packet scan **on**, every
 /// parsed playlist kept ([`PlaylistFilter::everything`] — the CLI's `--whole`),
 /// then [`text`] rendering. `progress` observes the demux.
-fn render_disc(root: &dyn BdDir, progress: &mut dyn FnMut(ScanProgress<'_>)) -> String {
-    match BdRom::open_resilient_with(root, true, None, progress) {
-        Ok(report) => {
-            let order = report.bdrom.presentation_order(&PlaylistFilter::everything());
-            text::render_with(&report.bdrom, &order, &report.errors)
-        }
-        Err(_) => String::new(),
-    }
+///
+/// # Errors
+/// Returns the [`BdError`] from [`BdRom::open_resilient_with`] when the
+/// structure is too damaged to open at all (no `BDMV`/`CLIPINF`/`PLAYLIST`) —
+/// the caller decides whether that is an empty disc or an error to report.
+fn render_disc(
+    root: &dyn BdDir,
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+) -> Result<String, BdError> {
+    let report = BdRom::open_resilient_with(root, true, None, progress)?;
+    let order = report.bdrom.presentation_order(&PlaylistFilter::everything());
+    Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
 
-/// Renders the synthetic in-memory tree built from `data` (no progress).
+/// Renders the synthetic in-memory tree built from `data` (no progress); an
+/// unopenable structure renders as the empty string, the resilient-open absence
+/// path the `parse_report` fuzz target and the parity test expect.
 #[must_use]
 pub fn run_report(data: &[u8]) -> String {
-    render_disc(&build_tree(data), &mut |_| {})
+    render_disc(&build_tree(data), &mut |_| {}).unwrap_or_default()
 }
 
 /// The Phase 1 in-memory entry point: feed it BDMV bytes (the six `u32`-BE
@@ -591,8 +597,10 @@ pub fn scan_report(data: &[u8]) -> String {
 /// demux read.
 ///
 /// # Errors
-/// Returns a `JsValue` if `paths` and `files` differ in length, or any `files`
-/// entry is not a `File`.
+/// Returns a `JsValue` if `paths` and `files` differ in length, any `files`
+/// entry is not a `File`, the paths do not form one coherent disc selection, or
+/// no readable Blu-ray structure is found (so a wrong folder pick is reported
+/// rather than silently returning an empty report).
 #[wasm_bindgen]
 pub fn scan_files(
     paths: Vec<String>,
@@ -610,7 +618,8 @@ pub fn scan_files(
             );
         }
     };
-    Ok(render_disc(&root, &mut observe))
+    render_disc(&root, &mut observe)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
 }
 
 #[cfg(test)]
