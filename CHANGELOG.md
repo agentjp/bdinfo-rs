@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-chapter statistics) entirely in the browser — off the main thread in a Web
   Worker, reading a `webkitdirectory`-picked `BDMV` folder synchronously at byte
   offsets via `FileReaderSync`, so a multi-GB stream never has to fit in memory.
-  The rendered report is byte-for-byte the classic disc report, pinned to the same
-  golden the native end-to-end test uses (verified in Node and in headless Chrome
-  and Firefox). No bytes leave the page.
+  The rendered report is byte-for-byte the classic disc report, pinned to its own
+  golden rendered from the same Big Buck Bunny fixture the native end-to-end test
+  scans (held byte-identical across native, Node, and headless Chrome and Firefox).
+  No bytes leave the page.
 
 ### Changed
 

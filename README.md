@@ -329,7 +329,9 @@ disc's `BDMV` folder and it runs the **full measured scan** — M2TS demux + per
 per-chapter statistics — off the main thread in a Web Worker. The files are read
 synchronously at byte offsets via `FileReaderSync`, so a multi-GB stream never has to fit in
 memory, and **no bytes leave the page**. The rendered report is byte-for-byte the classic
-disc report, pinned to the same golden the native end-to-end test uses.
+disc report, pinned to its own golden — rendered from the same Big Buck Bunny fixture the
+native end-to-end test scans, and held byte-identical across native, Node, and headless
+Chrome and Firefox.
 
 ```ts
 import { analyze } from "@bdinfo-rs/wasm";

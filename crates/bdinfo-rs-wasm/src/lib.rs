@@ -14,7 +14,9 @@
 //!
 //! Both build a [`Node`] tree behind the [`BdDir`]/[`BdFile`] seam and feed it to
 //! one shared [`render_disc`] — so the in-memory and the file-backed paths render
-//! byte-for-byte identically, and the same pinned golden pins both.
+//! byte-for-byte identically, and one golden (this crate's own
+//! `tests/golden_report.txt`, rendered from the same Big Buck Bunny fixture the
+//! native end-to-end test scans) pins both.
 //!
 //! It is an INDEPENDENT workspace (see `Cargo.toml`): wasm-bindgen's generated
 //! glue uses `unsafe`, so this crate sits OUTSIDE the `forbid(unsafe_code)`

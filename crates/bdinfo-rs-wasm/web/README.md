@@ -8,7 +8,9 @@ bytes leave the page**, and a multi-GB `*.m2ts` never has to fit in memory — t
 files are read synchronously at byte offsets via `FileReaderSync`.
 
 The rendered report is byte-for-byte the classic disc report the native CLI
-writes — pinned to the same golden the native end-to-end test uses.
+writes — pinned to its own golden, rendered from the same Big Buck Bunny fixture
+the native end-to-end test scans and held byte-identical across native, Node, and
+headless Chrome and Firefox.
 
 ## Usage
 
@@ -67,6 +69,32 @@ The raw wasm-bindgen module is also exported directly for advanced use:
 ```ts
 import init, { scan_files } from "@bdinfo-rs/wasm/wasm";
 ```
+
+## Browser support
+
+The scan needs two browser capabilities: **`<input type="file" webkitdirectory>`**
+for the folder pick and **`FileReaderSync`** for synchronous byte-range reads
+inside a Worker. Both are available on **desktop Chrome / Edge, desktop Firefox,
+and Android Chrome**. The package's parity suite runs on **headless Chrome and
+Firefox** (plus Node), so those are the verified engines; desktop **Safari**
+exposes the same APIs but is **untested**. `FileReaderSync` is Worker-only by
+design, which is why `analyze` always runs the scan in a Web Worker and never on
+the main thread.
+
+**iOS is the one known gap:** iOS WebKit could not pick a folder on iOS ≤ 18.3
+(the `webkitdirectory` bit was unimplemented; it shipped in iOS 18.4). Treat the
+folder pick as progressive enhancement — when `webkitdirectory` is unavailable,
+degrade gracefully to a plain multi-file picker (`<input type="file" multiple>`)
+or drag-and-drop, and tell the user to select the disc's files individually or
+update to iOS 18.4+.
+
+## Content Security Policy
+
+A `--target web` wasm module is compiled and instantiated at runtime, so a page
+that sets a `script-src` (or `default-src`) CSP must allow WebAssembly with
+**`'wasm-unsafe-eval'`** (the broader `'unsafe-eval'` also works); otherwise the
+module is blocked. With no CSP, wasm runs freely. The scan itself must run in a
+Web Worker — `analyze` handles that for you.
 
 ## License
 
