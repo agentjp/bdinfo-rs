@@ -3,16 +3,14 @@
 //! This crate exposes the library's whole **measured** scan pipeline to the
 //! browser. There are two entry points onto the very same render path:
 //!
-//! - [`scan_report`] — the Phase 1 in-memory export: BDMV bytes are framed into
-//!   a synthetic disc tree (six `u32`-BE sections), opened with
-//!   [`BdRom::open_resilient`] (packet scan **on**), and rendered to the classic
-//!   report. Used by the native ⇄ in-browser byte-parity test.
-//! - [`scan_files`] — the Phase 2 streaming export: a `webkitdirectory`-selected
-//!   BDMV folder arrives as a flat list of `(relativePath, File)` pairs. The
-//!   files stay on disk; their bytes are read **synchronously** at byte offsets
-//!   through [`web_sys::FileReaderSync`] (no JSPI, no Asyncify), so a multi-GB
-//!   `*.m2ts` never has to fit in memory. The export runs inside a Web Worker
-//!   (the only scope where `FileReaderSync` exists).
+//! - [`scan_report`] — the Phase 1 in-memory export: BDMV bytes are framed into a synthetic disc
+//!   tree (six `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and
+//!   rendered to the classic report. Used by the native ⇄ in-browser byte-parity test.
+//! - [`scan_files`] — the Phase 2 streaming export: a `webkitdirectory`-selected BDMV folder
+//!   arrives as a flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes
+//!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
+//!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
+//!   Worker (the only scope where `FileReaderSync` exists).
 //!
 //! Both build a [`Node`] tree behind the [`BdDir`]/[`BdFile`] seam and feed it to
 //! one shared [`render_disc`] — so the in-memory and the file-backed paths render
@@ -374,12 +372,11 @@ fn insert_file(node: &mut Node<WebFile>, dirs: &[&str], file: WebFile) {
         None => node.files.push(file),
         Some((head, rest)) => {
             let full = format!("{}/{head}", node.full);
-            let idx = match node.dirs.iter().position(|d| d.name == *head) {
-                Some(i) => i,
-                None => {
-                    node.dirs.push(Node::dir(head, &full));
-                    node.dirs.len() - 1
-                }
+            let idx = if let Some(i) = node.dirs.iter().position(|d| d.name == *head) {
+                i
+            } else {
+                node.dirs.push(Node::dir(head, &full));
+                node.dirs.len() - 1
             };
             insert_file(&mut node.dirs[idx], rest, file);
         }
@@ -409,8 +406,7 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
         let file: web_sys::File =
             value.dyn_into().map_err(|_| JsValue::from_str("entry is not a File"))?;
         let length = file.size() as u64;
-        let web_file =
-            WebFile { name: (*name).to_owned(), full: path.clone(), file, length };
+        let web_file = WebFile { name: (*name).to_owned(), full: path.clone(), file, length };
 
         let tree = root.get_or_insert_with(|| Node::dir(root_name, root_name));
         // The first component is the root itself; only the components between it

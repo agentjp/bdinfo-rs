@@ -1,10 +1,27 @@
 {
   "name": "@bdinfo-rs/wasm",
   "version": "1.0.1",
-  "private": true,
   "type": "module",
   "description": "In-browser Blu-ray disc analyzer — the bdinfo-rs measured scan compiled to WebAssembly, run off the main thread in a Web Worker over a webkitdirectory-picked BDMV folder.",
   "license": "LGPL-2.1-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentjp/bdinfo-rs.git",
+    "directory": "crates/bdinfo-rs-wasm/web"
+  },
+  "homepage": "https://github.com/agentjp/bdinfo-rs#readme",
+  "bugs": "https://github.com/agentjp/bdinfo-rs/issues",
+  "keywords": [
+    "blu-ray",
+    "bdinfo",
+    "bdmv",
+    "wasm",
+    "webassembly"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "exports": {
     ".": {
       "types": "./pkg/bdinfo_rs_wasm.d.ts",
@@ -15,19 +32,23 @@
     "dist",
     "pkg",
     "src",
-    "demo.html"
+    "demo.html",
+    "README.md"
   ],
   "scripts": {
     "build:wasm": "node build.mjs",
     "build:ts": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "build": "npm run build:wasm && npm run build:ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
+    "size": "node check-size.mjs",
     "check": "biome check .",
     "format": "biome check --write .",
+    "test:node": "node test/parity.node.mjs",
     "test:chrome": "node test/parity.chrome.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2",
+    "binaryen": "^130.0.0",
     "playwright-core": "^1",
     "typescript": "^5"
   }

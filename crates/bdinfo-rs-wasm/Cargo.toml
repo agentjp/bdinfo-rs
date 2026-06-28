@@ -38,3 +38,26 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# Calibrated lint gate — PROPORTIONATE, not the core's posture. This crate is the
+# thin browser shim that lives OUTSIDE the workspace `forbid(unsafe_code)` bar
+# (wasm-bindgen's generated glue + the one `unsafe impl Send` need it), so:
+#   - `unsafe_code` is ALLOWED here (and ONLY here);
+#   - clippy `all` + `pedantic` are denied (a real bar), with a SHORT allow-list
+#     for the lints that are intrinsic to the JS/web boundary rather than bugs.
+# `nursery` is deliberately left off (unstable + noisy — calibration, not laxity).
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Web APIs take/return byte offsets as `f64` and js_sys lengths as `u32`; every
+# crossing here is bounded by the surrounding `saturating_*`/`min` arithmetic, so
+# the cast itself is not where truncation/precision/sign would bite.
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# `#[wasm_bindgen]` exports must take their args by value — the generated ABI
+# moves them across the JS boundary.
+needless_pass_by_value = "allow"
