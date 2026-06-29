@@ -21,9 +21,19 @@ additional_cargo_args = ["--locked"]
 # Run the suite under nextest's `mutants` profile (.config/nextest.toml): the
 # same strictness with a tighter 10s×2 slow-timeout, so a loop-guard mutation
 # that hangs a wave of tests is terminated (and thereby CAUGHT) in 20s waves
-# instead of the dev gate's 60s — the single biggest wall-time lever for a
-# full run.
-additional_cargo_test_args = ["--profile", "mutants"]
+# instead of the dev gate's 60s.
+#
+# `--fail-fast`: stop at the FIRST failing/terminated test. A mutant is "caught"
+# the moment any one test fails, so running the whole suite is wasted work — and
+# worse, a hang-prone loop-guard mutation hangs EVERY demux test, each killed at
+# the 20s slow-timeout in ceil(hung / cores) waves: ~5 on a 24-core dev box
+# (~100s, just under the floor below) but ~30 on a 4-core CI runner (~600s, well
+# OVER it) — a false TIMEOUT that fails the per-PR `--in-diff` slice. fail-fast
+# bounds the wall to ONE terminate (~20s) on ANY core count, so CI catches the
+# mutant exactly like the local sweep (verified: scan_chunked's hang went from a
+# CI timeout to caught in 48s). The caught/missed verdict is unchanged — a missed
+# mutant still fails no test, so nextest runs the whole suite as before.
+additional_cargo_test_args = ["--profile", "mutants", "--fail-fast"]
 
 # Every mutant faces the WHOLE workspace suite, not just the mutated crate's:
 # library mutants are then also defended by the CLI's end-to-end fixture flow
