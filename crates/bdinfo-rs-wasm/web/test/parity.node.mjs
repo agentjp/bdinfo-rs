@@ -57,6 +57,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixtures = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV");
 const goldenPath = resolve(here, "../../tests/golden_report.txt");
 const wasmPath = resolve(here, "../pkg/bdinfo_rs_wasm_bg.wasm");
+// The same disc as a UDF `.iso`, and its native `.iso` golden (the report
+// `bdinfo-rs <disc>.iso` writes). The only line that differs from the folder
+// golden is `Disc Label:` — an `.iso` reads the real UDF volume label `Blu-Ray`.
+const isoPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
+const isoGoldenPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/golden/iso.txt");
 
 // The fixture's six files at the synthetic disc paths the golden was built from:
 // root `WASMDISC` → disc label `WASMDISC`. `bdmt_eng.xml` is empty, mirroring the
@@ -73,7 +78,9 @@ const LAYOUT = [
 async function main() {
   const golden = await readFile(goldenPath);
 
-  const { initSync, scan_files, list_playlists } = await import("../pkg/bdinfo_rs_wasm.js");
+  const { initSync, scan_files, list_playlists, scan_iso, list_iso_playlists } = await import(
+    "../pkg/bdinfo_rs_wasm.js"
+  );
   initSync({ module: await readFile(wasmPath) });
 
   const paths = [];
@@ -109,9 +116,50 @@ async function main() {
     );
   }
 
-  if (got.equals(golden) && listOk && selOk) {
+  // The streaming `.iso` path: the same disc opened through the UDF reader as one
+  // `File`. scan_iso (whole + by-name) and list_iso_playlists must match the
+  // native `.iso` golden / table, exercising WebIso's FileReaderSync windowed
+  // reads through the same shims scan_files uses.
+  const isoGolden = await readFile(isoGoldenPath);
+  const isoFile = new ShimFile(new Uint8Array(await readFile(isoPath)), "BigBuckBunny.iso");
+  const isoReport = Buffer.from(scan_iso(isoFile, []), "utf8");
+  const isoRows = JSON.parse(list_iso_playlists(isoFile));
+  const isoSelReport = Buffer.from(scan_iso(isoFile, ["00000.MPLS"]), "utf8");
+  const isoOk = isoReport.equals(isoGolden);
+  const isoListOk =
+    Array.isArray(isoRows) &&
+    isoRows.length === 1 &&
+    isoRows[0].name === "00000.MPLS" &&
+    isoRows[0].position === 1;
+  const isoSelOk = isoSelReport.equals(isoGolden);
+  if (!isoListOk) {
+    console.error(`FAIL — list_iso_playlists rows unexpected: ${JSON.stringify(isoRows)}`);
+  }
+  if (!isoSelOk) {
+    console.error(
+      `FAIL — selective .iso scan (${isoSelReport.length} bytes) diverged from the iso golden (${isoGolden.length} bytes).`,
+    );
+  }
+  if (!isoOk) {
+    console.error(
+      `FAIL — .iso scan (${isoReport.length} bytes) diverged from the iso golden (${isoGolden.length} bytes).`,
+    );
+    const lim = Math.min(isoReport.length, isoGolden.length);
+    for (let i = 0; i < lim; i++) {
+      if (isoReport[i] !== isoGolden[i]) {
+        const ctx = (buf) =>
+          JSON.stringify(buf.slice(Math.max(0, i - 30), i + 30).toString("utf8"));
+        console.error(`  first .iso diff at byte ${i}:`);
+        console.error(`    golden: ${ctx(isoGolden)}`);
+        console.error(`    got:    ${ctx(isoReport)}`);
+        break;
+      }
+    }
+  }
+
+  if (got.equals(golden) && listOk && selOk && isoOk && isoListOk && isoSelOk) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + selection OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + selection + .iso OK.`,
     );
     process.exit(0);
   }

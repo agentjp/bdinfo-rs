@@ -1,4 +1,4 @@
-//! WASM ⇄ native byte-parity for the measured-scan export.
+//! WASM ⇄ native byte-parity for the measured-scan exports.
 //!
 //! Frames the committed Big Buck Bunny BD-ROM fixture (the CC-BY disc the CLI's
 //! end-to-end test scans) into the export's six-section layout, runs the full
@@ -6,10 +6,23 @@
 //! per-stream/per-chapter statistics, the classic report — and asserts the
 //! bytes equal the pinned golden.
 //!
-//! The same `check()` runs on both targets: natively (the threaded
-//! `scan_chunked` read-ahead path) and in headless Chrome (the
+//! [`check_iso`] does the same for the `.iso` path: it drives
+//! [`bdinfo_rs_wasm::run_iso_report`] over an in-memory [`IsoReader`] backed by
+//! the committed `.iso` of the same disc, and asserts the bytes equal the
+//! native `.iso` golden — so the read-only UDF reader → report wiring is proven
+//! to run, and render identically, on the wasm target too (the browser `WebIso`
+//! `FileReaderSync` glue is irreducible and covered by the Node/Chrome parity).
+//!
+//! The same `check()`/`check_iso()` run on both targets: natively (the threaded
+//! `scan_chunked` read-ahead path) and in headless Chrome/Firefox (the
 //! single-threaded wasm path). Identical golden ⇒ the wasm demux is
 //! byte-for-byte the native demux.
+
+use std::io::Cursor;
+use std::sync::Arc;
+
+use bdinfo_rs_core::vfs::ReadSeek;
+use bdinfo_rs_core::vfs::udf::source::IsoReader;
 
 const INDEX: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
 const MOVIE: &[u8] =
@@ -51,6 +64,35 @@ fn check() {
     );
 }
 
+/// The committed Big Buck Bunny `.iso` (the disc the CLI's end-to-end test scans
+/// as an `.iso`) and its pinned native golden — UDF volume label `Blu-Ray`, the
+/// one report line that differs from the folder scan's directory-name label.
+const ISO: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
+const ISO_GOLDEN: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/golden/iso.txt");
+
+/// A trivially `Send + Sync` in-memory [`IsoReader`] over the `.iso` bytes — the
+/// browser-free stand-in for `WebIso`, so the UDF reader → report wiring is
+/// exercised on every target without `web_sys`.
+#[derive(Debug)]
+struct MemIso(Arc<[u8]>);
+
+impl IsoReader for MemIso {
+    fn open(&self) -> std::io::Result<Box<dyn ReadSeek>> {
+        Ok(Box::new(Cursor::new(Arc::clone(&self.0))))
+    }
+}
+
+fn check_iso() {
+    let report = bdinfo_rs_wasm::run_iso_report(Box::new(MemIso(Arc::from(ISO))));
+    assert_eq!(
+        report.as_bytes(),
+        ISO_GOLDEN,
+        "`.iso` measured-scan report diverged from the native golden (len {} vs {})",
+        report.len(),
+        ISO_GOLDEN.len()
+    );
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use std::io::{self, Read};
@@ -64,6 +106,11 @@ mod wasm {
     #[wasm_bindgen_test]
     fn measured_scan_matches_golden() {
         super::check();
+    }
+
+    #[wasm_bindgen_test]
+    fn iso_scan_matches_golden() {
+        super::check_iso();
     }
 
     /// A reader that fails on the first read — exercises the wasm sequential
@@ -94,5 +141,10 @@ mod native {
     #[test]
     fn measured_scan_matches_golden() {
         super::check();
+    }
+
+    #[test]
+    fn iso_scan_matches_golden() {
+        super::check_iso();
     }
 }
