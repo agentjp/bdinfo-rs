@@ -158,6 +158,14 @@ jobs:
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks,typos
 
+      # House rules with no clippy equivalent (big-endian-only + no HashMap/HashSet
+      # in the deterministic output path), mirrored from the local gate via the
+      # shared script so local and CI enforce the SAME rule. pwsh ships on the
+      # ubuntu runner.
+      - name: Source rules (big-endian + determinism)
+        shell: pwsh
+        run: ./.github/scripts/source-rules.ps1
+
       - name: Format (nightly rustfmt)
         run: cargo +${{ env.NIGHTLY }} fmt --all --check
 
