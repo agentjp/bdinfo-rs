@@ -69,6 +69,6 @@
     "@biomejs/biome": "^2",
     "binaryen": "^130.0.0",
     "playwright-core": "^1",
-    "typescript": "^5"
+    "typescript": "^6"
   }
 }
