@@ -28,8 +28,16 @@ name: packages
 #   - Scoop     -> the agentjp/scoop-bucket repo (Excavator auto-update bot)
 #
 # Secrets required (configure before the first release, or the jobs fail):
-#   WINGET_TOKEN - classic PAT (public_repo) on the bot account that forked winget-pkgs
-#   AUR_SSH_KEY  - private SSH key whose public half is on the aur.archlinux.org account
+#   WINGET_TOKEN       - classic PAT (public_repo) on the bot account that forked winget-pkgs
+#   AUR_SSH_KEY        - private SSH key whose public half is on the aur.archlinux.org account
+#   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the active deb/rpm jobs)
+#
+# These three publish secrets live on the `release` ENVIRONMENT (not as repo secrets), so
+# only a release run can read them — a workflow on any other branch is structurally locked
+# out. GOTCHA: this workflow fires on `workflow_run` (after Release), where github.ref is
+# the DEFAULT BRANCH (master), NOT the release tag. So the `release` environment must allow
+# deployments from the `master` branch for the jobs below to read the secrets. (The tag
+# `v*` rule on that same environment is what admits the tag-triggered homebrew.yml instead.)
 #
 # NOTE: the deb/rpm CONTENTS (assets, metadata, the cargo-deb / cargo-generate-rpm
 # invocation) live in build-linux-packages.sh + [package.metadata.{deb,generate-rpm}]
@@ -83,6 +91,7 @@ jobs:
   winget:
     name: WinGet
     runs-on: ubuntu-latest
+    environment: release # WINGET_TOKEN is an env secret on `release` (see header)
     # GATED OFF (2026-06-23): winget-releaser UPDATES an existing package — it bases
     # the new manifest on the package's prior version already in microsoft/winget-pkgs.
     # The first submission (agentjp.bdinfo-rs 1.0.0) is still an open New-Package PR
@@ -112,6 +121,7 @@ jobs:
   aur:
     name: AUR (bdinfo-rs-bin)
     runs-on: ubuntu-latest
+    environment: release # AUR_SSH_KEY is an env secret on `release` (see header)
     # ON HOLD (2026-06-19): aur.archlinux.org account registration is currently
     # disabled, so there is no AUR account/package to push to yet. Re-enable by
     # setting the repo variable AUR_ENABLED=true (after registering the account and
@@ -149,6 +159,7 @@ jobs:
   deb:
     name: .deb (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
+    environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
     needs: gate
     if: needs.gate.outputs.stable == 'true'
     # contents: read (inherited) is enough — the .deb is already a release asset; this
@@ -208,6 +219,7 @@ jobs:
   rpm:
     name: .rpm (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
+    environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
     needs: gate
     if: needs.gate.outputs.stable == 'true'
     # contents: read (inherited) is enough — see the .deb job; this uploads nothing back.
