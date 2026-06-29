@@ -23,8 +23,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Refuse to publish a tag that is not on master — the same ancestry gate
+  # release.yml and publish-npm.yml use, via the same reusable workflow. A vX.Y.Z
+  # tag pushed onto a side branch (so it never passed CI on master) cannot ship to
+  # crates.io: the publish job `needs:` this one. crates.io publishing is LIVE and
+  # IRREVERSIBLE (a version can be yanked but never re-uploaded), so the off-master
+  # guard matters most here — the tag==version check alone is satisfiable by any
+  # crafted Cargo.toml on any branch.
+  guard-ancestor:
+    uses: ./.github/workflows/guard-ancestor.yml
+    # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
+    # `git merge-base` ancestry check), so inheriting them is needless privilege
+    # (and zizmor's secrets-inherit audit flags it).
+    permissions:
+      contents: read
+
   publish:
     name: cargo publish --workspace (crates.io)
+    needs: guard-ancestor
     runs-on: ubuntu-latest
     permissions:
       contents: read
