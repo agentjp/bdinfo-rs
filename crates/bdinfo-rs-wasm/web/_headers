@@ -1,0 +1,9 @@
+# Cloudflare Pages headers for the deployed demo (assembled into site/ by
+# deploy-pages.yml). Cloudflare already serves .wasm as application/wasm; this is
+# belt-and-suspenders for WebAssembly.instantiateStreaming plus a long immutable
+# cache on the content-hashed wasm. No COOP/COEP: the scan is single-threaded
+# FileReaderSync in a Worker, not SharedArrayBuffer, so cross-origin isolation is
+# neither needed nor wanted (it would break cross-origin loads for no benefit).
+/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: public, max-age=31536000, immutable
