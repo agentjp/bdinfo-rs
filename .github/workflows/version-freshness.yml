@@ -76,6 +76,12 @@ jobs:
         run: |
           $problems = @()
 
+          # Record one finding: $tag is a short package->version summary for the issue
+          # TITLE, $line the full markdown bullet for the body.
+          function Add-Problem($tag, $line) {
+            $script:problems += [pscustomobject]@{ tag = $tag; line = $line }
+          }
+
           # First pin matched by $regex (group 1) in $path, or $null.
           function Read-Pin($path, $regex) {
             foreach ($line in (Get-Content $path)) {
@@ -132,9 +138,9 @@ jobs:
           if (-not $stablePin) { throw 'No pinned stable channel in rust-toolchain.toml' }
           $stableLatest = Latest-Semver 'rust-lang/rust'
           if (-not $stableLatest) {
-            $problems += '- could not query the latest Rust stable release (rust-lang/rust)'
+            Add-Problem 'Rust stable (query failed)' '- could not query the latest Rust stable release (rust-lang/rust)'
           } elseif ([version]$stableLatest -gt [version]$stablePin) {
-            $problems += "- stable Rust pin ``$stablePin`` (rust-toolchain.toml) is behind the latest release ``$stableLatest``"
+            Add-Problem "Rust stable $stablePin->$stableLatest" "- stable Rust pin ``$stablePin`` (rust-toolchain.toml) is behind the latest release ``$stableLatest``"
           }
 
           # --- Rust nightly: age of the ci.yml NIGHTLY pin ---------------------
@@ -142,13 +148,12 @@ jobs:
           if (-not $nightlyPin) { throw 'No NIGHTLY pin in ci.yml' }
           $nightlyAgeDays = [int]((Get-Date) - [datetime]::ParseExact($nightlyPin, 'yyyy-MM-dd', $null)).TotalDays
           if ($nightlyAgeDays -gt 30) {
-            $problems += "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY + scripts/_common.ps1) is $nightlyAgeDays days old"
+            Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY) is $nightlyAgeDays days old"
           }
           # The nightly is hardcoded in FOUR places (ci.yml/fuzz.yml/wasm.yml NIGHTLY
           # env + publish-npm.yml's rustup install) that Dependabot can't see, so a
           # bump to one silently drifts the rest. Cross-check they AGREE (like the
-          # cargo-dist / wasm-bindgen-cli / Node pin agreements); _common.ps1 is the
-          # cockpit twin kept in lockstep by hand.
+          # cargo-dist / wasm-bindgen-cli / Node pin agreements).
           $nightlyFuzz = Read-Pin '.github/workflows/fuzz.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
           $nightlyWasm = Read-Pin '.github/workflows/wasm.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
           $nightlyNpm  = Read-Pin '.github/workflows/publish-npm.yml' 'install nightly-(\d{4}-\d{2}-\d{2})'
@@ -156,7 +161,7 @@ jobs:
           if (-not $nightlyWasm) { throw 'No NIGHTLY pin in wasm.yml' }
           if (-not $nightlyNpm)  { throw 'No nightly install pin in publish-npm.yml' }
           if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyNpm)) {
-            $problems += "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / publish-npm.yml ``$nightlyNpm`` — all must be identical (and match scripts/_common.ps1)"
+            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
           }
 
           # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
@@ -165,13 +170,13 @@ jobs:
           if (-not $distCfg) { throw 'No cargo-dist-version in dist-workspace.toml' }
           if (-not $distCi)  { throw 'No cargo-dist@<version> install in ci.yml' }
           if ($distCfg -ne $distCi) {
-            $problems += "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but ci.yml installs ``$distCi`` — they must be identical"
+            Add-Problem 'cargo-dist pins disagree' "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but ci.yml installs ``$distCi`` — they must be identical"
           }
           $distLatest = Latest-Semver 'axodotdev/cargo-dist'
           if (-not $distLatest) {
-            $problems += '- could not query the latest cargo-dist release (axodotdev/cargo-dist)'
+            Add-Problem 'cargo-dist (query failed)' '- could not query the latest cargo-dist release (axodotdev/cargo-dist)'
           } elseif ([version]$distLatest -gt [version]$distCfg) {
-            $problems += "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
+            Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
           }
 
           # --- cargo-vet: audit.yml vs mozilla/cargo-vet -----------------------
@@ -179,9 +184,9 @@ jobs:
           if (-not $vetPin) { throw 'No cargo-vet --version pin in audit.yml' }
           $vetLatest = Latest-Semver 'mozilla/cargo-vet'
           if (-not $vetLatest) {
-            $problems += '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
+            Add-Problem 'cargo-vet (query failed)' '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
           } elseif ([version]$vetLatest -gt [version]$vetPin) {
-            $problems += "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
+            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
           }
 
           # --- ryl: ci.yml YAML-lint pin vs crates.io --------------------------
@@ -191,9 +196,9 @@ jobs:
           if (-not $rylPin) { throw 'No `cargo install ryl --version` pin in ci.yml' }
           $rylLatest = Latest-CratesIo 'ryl'
           if (-not $rylLatest) {
-            $problems += '- could not query the latest ryl release (crates.io)'
+            Add-Problem 'ryl (query failed)' '- could not query the latest ryl release (crates.io)'
           } elseif ([version]$rylLatest -gt [version]$rylPin) {
-            $problems += "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
+            Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
           }
 
           # --- taplo: toml.yml `tool: taplo-cli@X` pin vs crates.io -------------
@@ -203,9 +208,9 @@ jobs:
           if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in toml.yml' }
           $taploLatest = Latest-CratesIo 'taplo-cli'
           if (-not $taploLatest) {
-            $problems += '- could not query the latest taplo release (crates.io taplo-cli)'
+            Add-Problem 'taplo (query failed)' '- could not query the latest taplo release (crates.io taplo-cli)'
           } elseif ([version]$taploLatest -gt [version]$taploPin) {
-            $problems += "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
+            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
           }
 
           # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
@@ -215,9 +220,9 @@ jobs:
           if (-not $convcoPin) { throw 'No `tool: convco@<version>` pin in conventional.yml' }
           $convcoLatest = Latest-CratesIo 'convco'
           if (-not $convcoLatest) {
-            $problems += '- could not query the latest convco release (crates.io)'
+            Add-Problem 'convco (query failed)' '- could not query the latest convco release (crates.io)'
           } elseif ([version]$convcoLatest -gt [version]$convcoPin) {
-            $problems += "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
+            Add-Problem "convco $convcoPin->$convcoLatest" "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
           }
 
           # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
@@ -232,13 +237,13 @@ jobs:
           if (-not $wbPub)    { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
           if (-not $wbDeploy) { throw 'No wasm-bindgen-cli pin in deploy-pages.yml' }
           if (($wbGate -ne $wbPub) -or ($wbGate -ne $wbDeploy)) {
-            $problems += "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` / publish-npm.yml has ``$wbPub`` / deploy-pages.yml has ``$wbDeploy`` — all three must be identical"
+            Add-Problem 'wasm-bindgen-cli pins disagree' "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` / publish-npm.yml has ``$wbPub`` / deploy-pages.yml has ``$wbDeploy`` — all three must be identical"
           }
           $wbLatest = Latest-CratesIo 'wasm-bindgen-cli'
           if (-not $wbLatest) {
-            $problems += '- could not query the latest wasm-bindgen-cli release (crates.io)'
+            Add-Problem 'wasm-bindgen-cli (query failed)' '- could not query the latest wasm-bindgen-cli release (crates.io)'
           } elseif ([version]$wbLatest -gt [version]$wbGate) {
-            $problems += "- wasm-bindgen-cli pin ``$wbGate`` (wasm.yml + publish-npm.yml) is behind the latest release ``$wbLatest`` — bump both pins AND the wasm-bindgen crate dep together"
+            Add-Problem "wasm-bindgen-cli $wbGate->$wbLatest" "- wasm-bindgen-cli pin ``$wbGate`` (wasm.yml + publish-npm.yml) is behind the latest release ``$wbLatest`` — bump both pins AND the wasm-bindgen crate dep together"
           }
 
           # --- binaryen (wasm-opt): web/package.json pin vs npm ----------------
@@ -250,9 +255,9 @@ jobs:
           if (-not $binPin) { throw 'No binaryen pin in crates/bdinfo-rs-wasm/web/package.json' }
           $binLatest = Latest-Npm 'binaryen'
           if (-not $binLatest) {
-            $problems += '- could not query the latest binaryen release (npm)'
+            Add-Problem 'binaryen (query failed)' '- could not query the latest binaryen release (npm)'
           } elseif ([version]$binLatest -gt [version]$binPin) {
-            $problems += "- binaryen pin ``$binPin`` (web/package.json) is behind the latest release ``$binLatest`` — bump it, rebuild, and re-check the wasm size budget"
+            Add-Problem "binaryen $binPin->$binLatest" "- binaryen pin ``$binPin`` (web/package.json) is behind the latest release ``$binLatest`` — bump it, rebuild, and re-check the wasm size budget"
           }
 
           # --- biome: biome.json $schema must match the installed @biomejs/biome -
@@ -271,9 +276,9 @@ jobs:
                 ConvertFrom-Json -AsHashtable).packages.'node_modules/@biomejs/biome'.version
           } catch { }
           if (-not $biomeLock) {
-            $problems += '- could not read the @biomejs/biome version from web/package-lock.json'
+            Add-Problem 'biome (version unreadable)' '- could not read the @biomejs/biome version from web/package-lock.json'
           } elseif ($biomeSchema -ne $biomeLock) {
-            $problems += "- biome.json schema URL is pinned to ``$biomeSchema`` but the lockfile installs @biomejs/biome ``$biomeLock`` — bump the schema URL in biome.json to match"
+            Add-Problem "biome schema $biomeSchema vs $biomeLock" "- biome.json schema URL is pinned to ``$biomeSchema`` but the lockfile installs @biomejs/biome ``$biomeLock`` — bump the schema URL in biome.json to match"
           }
 
           # --- Node: the 3 workflow pins must AGREE, vs nodejs.org/dist ----------
@@ -290,14 +295,14 @@ jobs:
           if (-not $nodeDeploy) { throw 'No node-version pin in deploy-pages.yml' }
           if (-not $nodePub) { throw 'No node-version pin in publish-npm.yml' }
           if (($nodeWasm -ne $nodeDeploy) -or ($nodeWasm -ne $nodePub)) {
-            $problems += "- Node pin mismatch: wasm.yml ``$nodeWasm`` / deploy-pages.yml ``$nodeDeploy`` / publish-npm.yml ``$nodePub`` — they must be identical"
+            Add-Problem 'Node pins disagree' "- Node pin mismatch: wasm.yml ``$nodeWasm`` / deploy-pages.yml ``$nodeDeploy`` / publish-npm.yml ``$nodePub`` — they must be identical"
           }
           $nodePin = $nodeWasm
           $nodePinMajor = [int]($nodePin.Split('.')[0])
           $nodeLatestOnMajor = $null; $nodeNewestEven = $null
           $nodeRel = Get-NodeReleases
           if (-not $nodeRel) {
-            $problems += '- could not query the Node release list (nodejs.org/dist/index.json)'
+            Add-Problem 'Node (query failed)' '- could not query the Node release list (nodejs.org/dist/index.json)'
           } else {
             $nodeParsed = @($nodeRel | ForEach-Object {
                 if ($_.version -match '^v(\d+)\.(\d+)\.(\d+)$') {
@@ -306,11 +311,11 @@ jobs:
               })
             $nodeLatestOnMajor = (@($nodeParsed | Where-Object { $_.major -eq $nodePinMajor }) | Sort-Object ver -Descending | Select-Object -First 1).ver
             if ($nodeLatestOnMajor -and [version]$nodePin -lt $nodeLatestOnMajor) {
-              $problems += "- Node pin ``$nodePin`` (wasm.yml + deploy-pages.yml + publish-npm.yml) is behind the latest $nodePinMajor.x release ``$nodeLatestOnMajor`` — bump all three pins together"
+              Add-Problem "Node $nodePin->$nodeLatestOnMajor" "- Node pin ``$nodePin`` (wasm.yml + deploy-pages.yml + publish-npm.yml) is behind the latest $nodePinMajor.x release ``$nodeLatestOnMajor`` — bump all three pins together"
             }
             $nodeNewestEven = (@($nodeParsed | Where-Object { $_.major % 2 -eq 0 }) | Sort-Object major -Descending | Select-Object -First 1).major
             if ($nodeNewestEven -and $nodeNewestEven -gt $nodePinMajor) {
-              $problems += "- a newer even (LTS-bound) Node line ``$nodeNewestEven.x`` has shipped; the pins are on ``$nodePinMajor.x`` — plan the move (update all three pins together)"
+              Add-Problem "Node $nodeNewestEven.x available" "- a newer even (LTS-bound) Node line ``$nodeNewestEven.x`` has shipped; the pins are on ``$nodePinMajor.x`` — plan the move (update all three pins together)"
             }
           }
 
@@ -322,9 +327,9 @@ jobs:
           if (-not $npmPin) { throw 'No `npm install -g npm@<version>` pin in publish-npm.yml' }
           $npmLatest = Latest-Npm 'npm'
           if (-not $npmLatest) {
-            $problems += '- could not query the latest npm release (npm registry)'
+            Add-Problem 'npm (query failed)' '- could not query the latest npm release (npm registry)'
           } elseif ([version]$npmLatest -gt [version]$npmPin) {
-            $problems += "- npm pin ``$npmPin`` (publish-npm.yml) is behind the latest release ``$npmLatest``"
+            Add-Problem "npm $npmPin->$npmLatest" "- npm pin ``$npmPin`` (publish-npm.yml) is behind the latest release ``$npmLatest``"
           }
 
           # --- wrangler: deploy-pages.yml `npx wrangler@X` vs the npm registry ----
@@ -333,9 +338,9 @@ jobs:
           if (-not $wranglerPin) { throw 'No `wrangler@<version>` pin in deploy-pages.yml' }
           $wranglerLatest = Latest-Npm 'wrangler'
           if (-not $wranglerLatest) {
-            $problems += '- could not query the latest wrangler release (npm)'
+            Add-Problem 'wrangler (query failed)' '- could not query the latest wrangler release (npm)'
           } elseif ([version]$wranglerLatest -gt [version]$wranglerPin) {
-            $problems += "- wrangler pin ``$wranglerPin`` (deploy-pages.yml) is behind the latest release ``$wranglerLatest``"
+            Add-Problem "wrangler $wranglerPin->$wranglerLatest" "- wrangler pin ``$wranglerPin`` (deploy-pages.yml) is behind the latest release ``$wranglerLatest``"
           }
 
           # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
@@ -347,9 +352,9 @@ jobs:
           if (-not $brewPin) { throw 'No Homebrew/actions/setup-homebrew SHA pin in install-smoke-test.yml' }
           $brewHead = gh api repos/Homebrew/actions/branches/master --jq '.commit.sha' 2>$null
           if ($LASTEXITCODE -ne 0 -or -not $brewHead) {
-            $problems += '- could not query Homebrew/actions master HEAD (GitHub API)'
+            Add-Problem 'Homebrew/actions (query failed)' '- could not query Homebrew/actions master HEAD (GitHub API)'
           } elseif ($brewPin -ne $brewHead) {
-            $problems += "- Homebrew/actions/setup-homebrew pin ``$($brewPin.Substring(0, 12))`` (install-smoke-test.yml) is behind master HEAD ``$($brewHead.Substring(0, 12))`` — re-pin deliberately (the repo ships no tags, so the SHA is frozen on purpose)"
+            Add-Problem 'setup-homebrew SHA drifted' "- Homebrew/actions/setup-homebrew pin ``$($brewPin.Substring(0, 12))`` (install-smoke-test.yml) is behind master HEAD ``$($brewHead.Substring(0, 12))`` — re-pin deliberately (the repo ships no tags, so the SHA is frozen on purpose)"
           }
           $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
           $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
@@ -366,9 +371,9 @@ jobs:
           if (-not $wingetPin) { throw 'No winget-releaser SHA pin in packages.yml' }
           $wingetHead = gh api repos/vedantmgoyal9/winget-releaser/commits/v2 --jq '.sha' 2>$null
           if ($LASTEXITCODE -ne 0 -or -not $wingetHead) {
-            $problems += '- could not query winget-releaser v2 tag HEAD (GitHub API)'
+            Add-Problem 'winget-releaser (query failed)' '- could not query winget-releaser v2 tag HEAD (GitHub API)'
           } elseif ($wingetPin -ne $wingetHead) {
-            $problems += "- winget-releaser pin ``$($wingetPin.Substring(0, 12))`` (packages.yml) no longer matches the v2 tag HEAD ``$($wingetHead.Substring(0, 12))`` — the moving major drifted; re-pin the SHA (keep the # v2 comment) deliberately"
+            Add-Problem 'winget-releaser SHA drifted' "- winget-releaser pin ``$($wingetPin.Substring(0, 12))`` (packages.yml) no longer matches the v2 tag HEAD ``$($wingetHead.Substring(0, 12))`` — the moving major drifted; re-pin the SHA (keep the # v2 comment) deliberately"
           }
           $wingetPinShort = if ($wingetPin) { $wingetPin.Substring(0, 12) } else { '?' }
           $wingetHeadShort = if ($wingetHead) { $wingetHead.Substring(0, 12) } else { '?' }
@@ -376,20 +381,41 @@ jobs:
           Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  winget: $wingetPinShort (head $wingetHeadShort)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
-          $title = 'Pinned versions are stale'
+          $bodyLines = @($problems | ForEach-Object { $_.line })
+          $tags = @($problems | ForEach-Object { $_.tag })
+
+          # Descriptive title: name the stale package(s) and the version move so the
+          # subject says WHAT is stale, not a fixed string. Cap the list so the title
+          # stays readable when several pins rot at once.
+          $maxShown = 3
+          if ($tags.Count -le $maxShown) {
+            $summary = $tags -join ', '
+          }
+          else {
+            $summary = (@($tags | Select-Object -First $maxShown) -join ', ') + " (+$($tags.Count - $maxShown) more)"
+          }
+          $title = if ($tags.Count -eq 1) { "Stale pin: $summary" } else { "Stale pins: $summary" }
+
           $body = @(
             'The daily version-freshness check found:'
             ''
-            $problems
+            $bodyLines
             ''
-            'Bump deliberately: update the pin(s), run the full local gate (`pwsh scripts/compliance.ps1 -Full`), keep ci.yml''s NIGHTLY in lockstep with scripts/_common.ps1, and re-run `dist generate` after any cargo-dist bump.'
+            'Bump deliberately: update the pin(s) in the file(s) named above, keep the four NIGHTLY pins (ci.yml / fuzz.yml / wasm.yml / publish-npm.yml) identical, and re-run `dist generate` after any cargo-dist bump. CI re-validates on the next push.'
           ) -join "`n"
 
-          $existing = gh issue list --state open --search 'Pinned versions are stale in:title' --json number --jq '.[0].number'
+          # One rolling issue, tracked by a stable label (the title now varies, so it
+          # can no longer be matched on the title). Adopt a pre-existing issue from the
+          # old fixed-title scheme on the first run after this change.
+          gh label create version-freshness --color ededed --description 'Stale or inconsistent pinned tool/toolchain versions' --force | Out-Null
+          $existing = gh issue list --state open --label version-freshness --json number --jq '.[0].number'
+          if (-not $existing) {
+            $existing = gh issue list --state open --search 'Pinned versions are stale in:title' --json number --jq '.[0].number'
+          }
           if ($existing) {
-            gh issue edit $existing --body $body
+            gh issue edit $existing --title $title --body $body --add-label version-freshness | Out-Null
             Write-Host "Updated existing issue #$existing"
           }
           else {
-            gh issue create --title $title --body $body
+            gh issue create --title $title --body $body --label version-freshness | Out-Null
           }
