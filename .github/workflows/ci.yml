@@ -3,7 +3,9 @@ name: CI
 # Build and test on every supported OS. The pinned stable toolchain installs
 # itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
 # compile time, so a green build is also the memory-safety guarantee. Every
-# cargo call is --locked for reproducible builds.
+# dependency-resolving cargo call is --locked for reproducible builds (the one
+# exception is cargo-semver-checks, which builds its own baseline + current
+# checkouts and takes no --locked flag).
 
 on:
   push:
@@ -158,6 +160,14 @@ jobs:
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks,typos
 
+      # House rules with no clippy equivalent (big-endian-only + no HashMap/HashSet
+      # in the deterministic output path), mirrored from the local gate via the
+      # shared script so local and CI enforce the SAME rule. pwsh ships on the
+      # ubuntu runner.
+      - name: Source rules (big-endian + determinism)
+        shell: pwsh
+        run: ./.github/scripts/source-rules.ps1
+
       - name: Format (nightly rustfmt)
         run: cargo +${{ env.NIGHTLY }} fmt --all --check
 
@@ -191,8 +201,13 @@ jobs:
   # bound functions with `#[cfg_attr(coverage_nightly, coverage(off))]`, and that
   # cfg is only set by cargo-llvm-cov on a nightly toolchain. On stable those
   # exclusions are inert, so the off-Windows platform arms count as uncovered and
-  # the floor can't be met on Linux. The branch floors (also nightly-only) stay
-  # in the local gate.
+  # the floor can't be met on Linux. The 97%/91% branch floors stay in the LOCAL
+  # gate (scripts/compliance.ps1) — NOT because they need nightly (this job is
+  # already on nightly) but because branch coverage is platform-VARIANT: the
+  # library carries #[cfg(windows)] arms (e.g. vfs/fs.rs) whose branch count
+  # differs by OS, so one CI floor calibrated on a single platform would misfire
+  # on another. CI gates the platform-INVARIANT 100% line/region/function floor;
+  # the contributor's local gate enforces the branch floors on their own platform.
   coverage:
     name: coverage (100% lines/regions/functions)
     runs-on: ubuntu-latest
@@ -220,6 +235,14 @@ jobs:
   # (cargo mutants --in-diff) is fast. It reads the tracked .cargo/mutants.toml
   # policy and the `mutants` nextest profile (.config/nextest.toml) — both now
   # published, so CI mutates exactly as the local gate does.
+  #
+  # ADVISORY, by design: this job is intentionally NOT in branch protection's
+  # required status checks. cargo-mutants --in-diff can false-TIMEOUT on the
+  # 4-core hosted runners (a hang-prone loop-guard mutant runs in ceil(n/cores)
+  # nextest-terminate waves), so gating merges on it would let an environment
+  # artifact block an unrelated PR. The AUTHORITATIVE "0 missed mutants" gate is
+  # the local full sweep run before each release (per CLAUDE.md); this surfaces
+  # regressions early but does not block. Keep it out of the required set.
   mutants:
     name: mutation testing (PR diff)
     if: github.event_name == 'pull_request'

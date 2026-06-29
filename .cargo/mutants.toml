@@ -104,31 +104,34 @@ exclude_re = [
     "mpeg2\\.rs:49:\\d+: replace > with >= in scan",
 
     # ── 2026-06-11 audit: PES/PAT/PMT window guards proven equivalent ─────────
-    # (all line-pinned like the entries above; re-pin on file drift)
+    # (all line-pinned; re-pin on file drift — last re-pinned 2026-06-29 after a
+    # ~73-line shift. These CANNOT be de-line-pinned to the bare fn name: each of
+    # parse_chunk/parse_pat/parse_pmt holds many other `>` guards that are NOT
+    # equivalent and must stay killable, so the line:col is the only disambiguator.)
 
     # `parse_chunk` branch A guard `state.packet_length > 0` vs `>=`: a bounded
     # transfer closes the instant packet_length reaches 0 (transfer_state goes
     # false), and a PES declaring zero length sets the variable flag, failing the
     # branch's `!packet_length_variable` conjunct — the disputed `== 0` case is
     # unreachable with the flag clear.
-    "m2ts\\.rs:705:\\d+: replace > with >= in TsStreamFile::parse_chunk",
+    "m2ts\\.rs:778:\\d+: replace > with >= in TsStreamFile::parse_chunk",
 
     # `parse_chunk` branch B guard `parser.packet_length > 0` (all comparison
     # mutants): the conjunct is redundant under the clamp two lines later
     # (`if parser.packet_length <= offset { offset = parser.packet_length }`) —
     # whenever B's reach condition holds, the C-then-clamp fallback computes the
     # identical offset, so taking or skipping branch B changes nothing.
-    "m2ts\\.rs:710:\\d+: replace > with (==|<|>=) in TsStreamFile::parse_chunk",
+    "m2ts\\.rs:783:\\d+: replace > with (==|<|>=) in TsStreamFile::parse_chunk",
 
     # `parse_pat` transfer window `>` vs `>=`: at `bl - i == section_length` both
     # branches assign the same offset.
-    "m2ts\\.rs:1006:\\d+: replace > with >= in TsStreamFile::parse_pat",
+    "m2ts\\.rs:1079:\\d+: replace > with >= in TsStreamFile::parse_pat",
 
     # `parse_pat` post-section guard `pat_section_parse > 0` vs `>=`: the countdown
     # is a u32 that the mutant only ever decrements from the wrapped u32::MAX, so
     # the acting arms (1, 0) are ~4 GiB of PID-0 bytes away, and the corrupted
     # pat_section_length is only read under those arms.
-    "m2ts\\.rs:1077:\\d+: replace > with >= in TsStreamFile::parse_pat",
+    "m2ts\\.rs:1150:\\d+: replace > with >= in TsStreamFile::parse_pat",
 
     # `parse_pmt` program-info guard `pmt_program_info_length > 0` vs `>=`: the dead
     # branch decrements pmt_section_length and the program-info countdown in
@@ -137,7 +140,7 @@ exclude_re = [
     # transfer is zero-length and the stale section re-walk is idempotent
     # (create_stream is keyed on contains_key). Traced and verified empirically
     # with a 357-padding-packet stream.
-    "m2ts\\.rs:1231:\\d+: replace > with >= in TsStreamFile::parse_pmt",
+    "m2ts\\.rs:1304:\\d+: replace > with >= in TsStreamFile::parse_pmt",
 
     # ── 2026-06-11 audit: environment/platform probes no test process can observe ──
 

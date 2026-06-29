@@ -32,6 +32,13 @@ jobs:
   homebrew:
     name: publish the Homebrew formula (with man page + completions)
     runs-on: ubuntu-latest
+    # HOMEBREW_TAP_TOKEN is an ENVIRONMENT secret on `release` (not a repo secret), so
+    # only a release run can read it. release.yml is tag-triggered, so this reusable
+    # job's github.ref is the `vX.Y.Z` tag → the environment's `v*` tag deployment rule
+    # admits it. The caller already passes `secrets: inherit`; with `environment:` set
+    # here at the job level, the env secret resolves — the documented reusable-workflow
+    # path (an env secret can't be passed via on.workflow_call, only resolved this way).
+    environment: release
     env:
       # GITHUB_TOKEN downloads the formula from THIS repo's release; the push to
       # the tap uses HOMEBREW_TAP_TOKEN (the checkout credentials), not this.

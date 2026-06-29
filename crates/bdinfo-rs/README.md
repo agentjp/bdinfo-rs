@@ -14,8 +14,9 @@ single statically-linked binary — no runtime, no DLLs, no install.
 cargo install bdinfo-rs
 ```
 
-OS package managers (winget / Homebrew / apt / pacman) are planned once tagged
-releases ship prebuilt binaries.
+Also available via Homebrew, Scoop, `cargo binstall`, and `.deb`/`.rpm` repositories — see the
+[project README](https://github.com/agentjp/bdinfo-rs) for every install route. A WinGet package
+and an Arch Linux AUR package are on the way.
 
 ## Usage
 

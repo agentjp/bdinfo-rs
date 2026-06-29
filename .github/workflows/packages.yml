@@ -1,13 +1,23 @@
 name: packages
 
 # Fan-out package publishing, run AFTER release.yml ("Release") has built and
-# uploaded the GitHub Release archives. release.yml (cargo-dist) creates that
-# release with the default GITHUB_TOKEN, and GitHub suppresses the
-# `release: released` event for token-created releases — so a `release`-triggered
-# workflow never fires (this is why v1.0.0's .deb/.rpm had to be uploaded by hand).
-# Instead we chain off release.yml's completion via `workflow_run` (which DOES
-# fire), and expose a manual `workflow_dispatch` for re-runs / backfills. Every job
-# runs on a Linux runner; every action is SHA-pinned.
+# uploaded the GitHub Release. release.yml (cargo-dist) creates that release with
+# the default GITHUB_TOKEN, and GitHub suppresses the `release: released` event for
+# token-created releases — so a `release`-triggered workflow never fires. Instead
+# we chain off release.yml's completion via `workflow_run` (which DOES fire), and
+# expose a manual `workflow_dispatch` for re-runs / backfills. Every job runs on a
+# Linux runner; every action is SHA-pinned.
+#
+# The .deb/.rpm packages are now BUILT INSIDE the release (dist `extra-artifacts`
+# -> .github/build-linux-packages.sh), so they are attached to the Release at
+# creation, before it is published. This workflow therefore only DOWNLOADS those
+# already-attached packages to install-verify them on a native-arch runner and push
+# them to Cloudsmith — it no longer builds them, and (crucially) no longer uploads
+# anything back to the Release. That post-publication `gh release upload` was the
+# one thing incompatible with GitHub "immutable releases" (a release's assets freeze
+# at publication); with it gone, immutability can be enabled. As a bonus the deb/rpm
+# jobs now need only `contents: read`, resolving the two job-level `contents: write`
+# Token-Permissions residuals (alerts #78/#79).
 #
 # Stable-only: the `gate` job skips prerelease tags (anything but a bare vX.Y.Z),
 # matching the old `released`-event semantics and Homebrew's default.
@@ -18,11 +28,20 @@ name: packages
 #   - Scoop     -> the agentjp/scoop-bucket repo (Excavator auto-update bot)
 #
 # Secrets required (configure before the first release, or the jobs fail):
-#   WINGET_TOKEN - classic PAT (public_repo) on the bot account that forked winget-pkgs
-#   AUR_SSH_KEY  - private SSH key whose public half is on the aur.archlinux.org account
+#   WINGET_TOKEN       - classic PAT (public_repo) on the bot account that forked winget-pkgs
+#   AUR_SSH_KEY        - private SSH key whose public half is on the aur.archlinux.org account
+#   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the active deb/rpm jobs)
 #
-# NOTE: the deb/rpm jobs repackage the prebuilt musl binaries; tweak the cargo-deb
-# / cargo-generate-rpm invocation here (not the binary) if a path needs adjusting.
+# These three publish secrets live on the `release` ENVIRONMENT (not as repo secrets), so
+# only a release run can read them — a workflow on any other branch is structurally locked
+# out. GOTCHA: this workflow fires on `workflow_run` (after Release), where github.ref is
+# the DEFAULT BRANCH (master), NOT the release tag. So the `release` environment must allow
+# deployments from the `master` branch for the jobs below to read the secrets. (The tag
+# `v*` rule on that same environment is what admits the tag-triggered homebrew.yml instead.)
+#
+# NOTE: the deb/rpm CONTENTS (assets, metadata, the cargo-deb / cargo-generate-rpm
+# invocation) live in build-linux-packages.sh + [package.metadata.{deb,generate-rpm}]
+# in crates/bdinfo-rs/Cargo.toml; tweak packaging there, not here.
 
 on:  # zizmor: ignore[dangerous-triggers] repackages published release assets; checks out master at the tag, never PR code
   workflow_run:
@@ -72,6 +91,7 @@ jobs:
   winget:
     name: WinGet
     runs-on: ubuntu-latest
+    environment: release # WINGET_TOKEN is an env secret on `release` (see header)
     # GATED OFF (2026-06-23): winget-releaser UPDATES an existing package — it bases
     # the new manifest on the package's prior version already in microsoft/winget-pkgs.
     # The first submission (agentjp.bdinfo-rs 1.0.0) is still an open New-Package PR
@@ -101,6 +121,7 @@ jobs:
   aur:
     name: AUR (bdinfo-rs-bin)
     runs-on: ubuntu-latest
+    environment: release # AUR_SSH_KEY is an env secret on `release` (see header)
     # ON HOLD (2026-06-19): aur.archlinux.org account registration is currently
     # disabled, so there is no AUR account/package to push to yet. Re-enable by
     # setting the repo variable AUR_ENABLED=true (after registering the account and
@@ -138,10 +159,13 @@ jobs:
   deb:
     name: .deb (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
+    environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
     needs: gate
     if: needs.gate.outputs.stable == 'true'
-    permissions:
-      contents: write # gh release upload
+    # contents: read (inherited) is enough — the .deb is already a release asset; this
+    # job downloads + verifies + pushes to Cloudsmith and uploads nothing back. (The
+    # old job needed contents: write for `gh release upload`; dropping it resolves the
+    # #78/#79 Token-Permissions residuals.)
     env:
       VERSION: ${{ needs.gate.outputs.version }}
     strategy:
@@ -153,38 +177,19 @@ jobs:
           - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install cargo-deb
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
-        with:
-          tool: cargo-deb
-
-      - name: Stage the prebuilt binary + completion/man assets
+      # The package was built + attached to the release by dist `extra-artifacts`
+      # (.github/build-linux-packages.sh); just pull it back to verify + republish.
+      - name: Download the .deb attached to the release
         shell: bash
-        run: |
-          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.tar.gz" -D dl
-          tar xzf "dl/bdinfo-rs-${{ matrix.triple }}.tar.gz" -C dl
-          d="dl/bdinfo-rs-${{ matrix.triple }}"
-          mkdir -p "target/${{ matrix.triple }}/release" release-assets crates/bdinfo-rs/release-assets
-          cp "$d/bdinfo-rs" "target/${{ matrix.triple }}/release/bdinfo-rs"
-          for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do
-            cp "$d/$f" release-assets/
-            cp "$d/$f" crates/bdinfo-rs/release-assets/
-          done
+        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.deb" -D dl
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build the .deb
-        run: cargo deb --no-build --no-strip --target ${{ matrix.triple }} -p bdinfo-rs
 
       - name: Verify the .deb (install + run + man/completions on the native arch)
         shell: bash
         run: |
           set -euo pipefail
-          deb=$(ls target/${{ matrix.triple }}/debian/*.deb)
+          deb="dl/bdinfo-rs-${{ matrix.triple }}.deb"
           echo "== $deb =="; dpkg-deb --contents "$deb"
           sudo dpkg -i "$deb"
           bdinfo-rs --version
@@ -199,30 +204,25 @@ jobs:
           grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
           echo "${{ matrix.triple }} .deb: installs, runs, and ships man + completions + DEP-5 copyright"
 
-      - name: Upload the .deb to the release
-        shell: bash
-        run: gh release upload "$VERSION" target/${{ matrix.triple }}/debian/*.deb --repo "$GITHUB_REPOSITORY" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Publish to the Cloudsmith apt repo so users can `apt install bdinfo-rs` by
-      # name (one `any-distro/any-version` upload serves every Debian-family distro).
+      # Publish the SAME bytes to the Cloudsmith apt repo so users can `apt install
+      # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
+      # Debian-family distro).
       - name: Publish the .deb to Cloudsmith
         shell: bash
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           pipx install cloudsmith-cli==1.19.0
-          cloudsmith push deb bdinfo-rs/bdinfo-rs/any-distro/any-version target/${{ matrix.triple }}/debian/*.deb
+          cloudsmith push deb bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.deb
 
   # ── Fedora/RHEL: .rpm attached to the release (x64 + arm64) ────────────────
   rpm:
     name: .rpm (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
+    environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
     needs: gate
     if: needs.gate.outputs.stable == 'true'
-    permissions:
-      contents: write # gh release upload
+    # contents: read (inherited) is enough — see the .deb job; this uploads nothing back.
     env:
       VERSION: ${{ needs.gate.outputs.version }}
     strategy:
@@ -234,32 +234,13 @@ jobs:
           - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install cargo-generate-rpm
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
-        with:
-          tool: cargo-generate-rpm
-
-      - name: Stage the prebuilt binary + completion/man assets
+      # The package was built + attached to the release by dist `extra-artifacts`
+      # (.github/build-linux-packages.sh); just pull it back to verify + republish.
+      - name: Download the .rpm attached to the release
         shell: bash
-        run: |
-          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.tar.gz" -D dl
-          tar xzf "dl/bdinfo-rs-${{ matrix.triple }}.tar.gz" -C dl
-          d="dl/bdinfo-rs-${{ matrix.triple }}"
-          mkdir -p "target/${{ matrix.triple }}/release" release-assets crates/bdinfo-rs/release-assets
-          cp "$d/bdinfo-rs" "target/${{ matrix.triple }}/release/bdinfo-rs"
-          for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do
-            cp "$d/$f" release-assets/
-            cp "$d/$f" crates/bdinfo-rs/release-assets/
-          done
+        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.rpm" -D dl
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build the .rpm
-        run: cargo generate-rpm -p crates/bdinfo-rs --target ${{ matrix.triple }}
 
       - name: Verify the .rpm (install + run + man/completions on the native arch)
         shell: bash
@@ -267,7 +248,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq rpm
           sudo rpm --initdb 2>/dev/null || true
-          rpmf=$(ls target/${{ matrix.triple }}/generate-rpm/*.rpm)
+          rpmf="dl/bdinfo-rs-${{ matrix.triple }}.rpm"
           echo "== $rpmf =="; rpm -qpl "$rpmf"
           # rpm tool on Ubuntu lays the package's files onto the filesystem; --nodeps
           # (the binary is static, no deps) and --ignorearch (rpm's host-arch string
@@ -281,21 +262,16 @@ jobs:
           done
           echo "${{ matrix.triple }} .rpm: installs (rpm -i), runs, and ships man + completions"
 
-      - name: Upload the .rpm to the release
-        shell: bash
-        run: gh release upload "$VERSION" target/${{ matrix.triple }}/generate-rpm/*.rpm --repo "$GITHUB_REPOSITORY" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Publish to the Cloudsmith yum repo so users can `dnf install bdinfo-rs` by
-      # name (one `any-distro/any-version` upload serves every RPM-family distro).
+      # Publish the SAME bytes to the Cloudsmith yum repo so users can `dnf install
+      # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
+      # RPM-family distro).
       - name: Publish the .rpm to Cloudsmith
         shell: bash
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           pipx install cloudsmith-cli==1.19.0
-          cloudsmith push rpm bdinfo-rs/bdinfo-rs/any-distro/any-version target/${{ matrix.triple }}/generate-rpm/*.rpm
+          cloudsmith push rpm bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.rpm
 
   # ── Verify the PUBLISHED Cloudsmith repo: install bdinfo-rs BY NAME and confirm
   # ── the binary + man + completions all land — on both arches, native runners, no

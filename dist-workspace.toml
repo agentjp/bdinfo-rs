@@ -119,6 +119,26 @@ publish-jobs = ["./homebrew"]
 # survives `dist generate --check`.
 plan-jobs = ["./guard-ancestor"]
 
+# Build the Linux distro packages (.deb + .rpm, x86_64 + aarch64) as PART of the
+# release so they are attached to the GitHub Release AT CREATION — before it is
+# published. That keeps the release compatible with GitHub "immutable releases"
+# (a release's assets freeze at publication, so an after-the-fact `gh release
+# upload` is rejected); the old packages.yml built+uploaded them AFTER the
+# release, which immutability forbids. The build runs in dist's global-artifacts
+# job, repackaging the musl binaries dist already built — see
+# .github/build-linux-packages.sh. extra-artifacts takes no globs, so the four
+# stable (triple-based) output paths are listed literally. packages.yml now only
+# DOWNLOADS these same assets to install-verify them on a native runner and push
+# them to Cloudsmith; it no longer builds or uploads them.
+[[dist.extra-artifacts]]
+build = ["bash", ".github/build-linux-packages.sh"]
+artifacts = [
+    "dist-extra/bdinfo-rs-x86_64-unknown-linux-musl.deb",
+    "dist-extra/bdinfo-rs-aarch64-unknown-linux-musl.deb",
+    "dist-extra/bdinfo-rs-x86_64-unknown-linux-musl.rpm",
+    "dist-extra/bdinfo-rs-aarch64-unknown-linux-musl.rpm",
+]
+
 [dist.github-custom-job-permissions.guard-ancestor]
 contents = "read"
 

@@ -83,7 +83,7 @@ jobs:
           node-version: "26.4.0"
 
       # Staged publishing (`npm stage publish`) needs npm >= 11.15.0. Node 26.4.0
-      # already bundles 11.17.0 (>= the floor), so this is not strictly required
+      # already bundles an npm >= the floor, so this is not strictly required
       # today — but pin npm explicitly anyway, so the publish runs on a
       # deterministic, version-freshness-watched npm independent of which npm a
       # given Node 26.x patch happens to bundle (the repo's pin-everything posture).
@@ -92,7 +92,7 @@ jobs:
       # runtime install; pinning npm (from the official registry) carries a scoped
       # inline ignore. Keep this pin in lockstep with version-freshness.yml.
       - name: Pin npm to a staged-publishing-capable version
-        run: npm install -g npm@11.17.0 # zizmor: ignore[adhoc-packages]
+        run: npm install -g npm@11.18.0 # zizmor: ignore[adhoc-packages]
 
       - name: Verify Node >= 26 and npm >= 11.15.0
         shell: pwsh

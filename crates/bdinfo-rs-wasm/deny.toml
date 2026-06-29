@@ -5,6 +5,15 @@
 # deny.toml (advisories / permissive-license allowlist / crates.io-only / no-C
 # static-binary guard); the only deltas from root are spelled out and justified
 # below. Run: cargo deny --manifest-path crates/bdinfo-rs-wasm/Cargo.toml check
+#
+# DELIBERATELY deny-only, NOT cargo-vet'd: the root workspace carries a cargo-vet
+# audit store (supply-chain/), but this excluded crate does not. Standing up a
+# second vet store would duplicate the imports + per-crate exemptions for the
+# standard, widely-used wasm-bindgen / js-sys / web-sys tree, for marginal added
+# assurance — and this artifact never ships in the CLI/library distribution (it is
+# a separate wasm32 npm package). deny (here) + Dependabot freshness (the
+# `/crates/bdinfo-rs-wasm` cargo entry) cover this tree; cargo-vet's audit trail is
+# reserved for the shipped root workspace.
 
 [graph]
 all-features = true

@@ -12,6 +12,10 @@ all-features = true
 version = 2
 # Add advisory IDs here ONLY with a comment explaining why the risk is accepted.
 ignore = []
+# A yanked crate version defaults to a WARN in advisories v2 (so it would pass
+# `cargo deny check` silently). A yanked dep is one the publisher pulled — treat it
+# as a hard error so it cannot slip through the audit the gate claims to cover.
+yanked = "deny"
 
 [licenses]
 version = 2
