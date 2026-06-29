@@ -77,12 +77,18 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      - name: Verify the committed fuzz lockfile is in sync
+        # cargo-fuzz's `run` has no --locked flag (it forwards everything after
+        # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
+        # cargo command up front; this also pre-fetches the deps for the build.
+        run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
+
       - name: Replay the committed corpus through every target
         run: |
           fail=0
           for t in $TARGETS; do
             echo "::group::replay $t"
-            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" --locked -- -runs=0 $GUARDS || fail=1
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
             echo "::endgroup::"
           done
           exit $fail
@@ -118,12 +124,18 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      - name: Verify the committed fuzz lockfile is in sync
+        # cargo-fuzz's `run` has no --locked flag (it forwards everything after
+        # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
+        # cargo command up front; this also pre-fetches the deps for the build.
+        run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
+
       - name: Fresh-fuzz every target (120s each)
         run: |
           fail=0
           for t in $TARGETS; do
             echo "::group::fuzz $t"
-            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" --locked -- -max_total_time=120 $GUARDS -print_final_stats=1 || fail=1
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -max_total_time=120 $GUARDS -print_final_stats=1 || fail=1
             echo "::endgroup::"
           done
           exit $fail
