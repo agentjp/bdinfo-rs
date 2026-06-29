@@ -1,0 +1,117 @@
+name: linux-packages
+
+# PR-time smoke test for the .deb / .rpm packaging. The packages are now built
+# INSIDE the release (dist `extra-artifacts` -> .github/build-linux-packages.sh),
+# and a build failure there ABORTS the whole release (dist fail-fast) — so a broken
+# package metadata change must be caught BEFORE a tag, not at release time. This job
+# does exactly that: it builds the musl binary, runs the SAME cargo-deb /
+# cargo-generate-rpm invocations the release uses (reading the same
+# [package.metadata.{deb,generate-rpm}] config), installs the resulting packages and
+# asserts the binary + man page + completions (+ DEP-5 copyright) land. It does not
+# go through the archive-extraction in build-linux-packages.sh (there are no dist
+# archives on a PR) — that glue is exercised at release time — but it covers the real
+# risk surface: the packaging metadata and the tools producing installable packages.
+#
+# Scoped by `paths` to packaging-relevant files to stay frugal on CI minutes. Not a
+# required status check (yet) — it is a fast pre-tag warning, complementing the
+# post-release native-arch verification in packages.yml.
+
+on:
+  pull_request:
+    paths:
+      - .github/build-linux-packages.sh
+      - .github/workflows/linux-packages.yml
+      - dist-workspace.toml
+      - crates/bdinfo-rs/Cargo.toml
+      - crates/bdinfo-rs/debian/copyright
+      - Cargo.lock
+  push:
+    branches: [master]
+    paths:
+      - .github/build-linux-packages.sh
+      - .github/workflows/linux-packages.yml
+      - dist-workspace.toml
+      - crates/bdinfo-rs/Cargo.toml
+      - crates/bdinfo-rs/debian/copyright
+      - Cargo.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: build + install .deb/.rpm (x86_64)
+    runs-on: ubuntu-latest
+    # Build the HOST gnu triple, not musl: this job verifies the PACKAGING (metadata,
+    # the cargo-deb/cargo-generate-rpm `--target` path rewrite, install + contents),
+    # for which the binary's libc is irrelevant — and gnu is the runner's native
+    # target, so there is no musl-linker friction to make the smoke test flaky. The
+    # static musl binaries themselves are e2e-tested on musl elsewhere (ci.yml).
+    env:
+      TRIPLE: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # build.rs writes the shell completions + man page into OUT_DIR during the build;
+      # passing the host triple explicitly nests output under target/<triple>/ so the
+      # `--target` path rewrite in cargo-deb/cargo-generate-rpm is exercised too.
+      # --locked keeps the smoke build honest against the committed lockfile.
+      - name: Build the binary (generates completions + man page)
+        run: cargo build --release --locked --target "$TRIPLE" -p bdinfo-rs
+
+      - name: Install cargo-deb + cargo-generate-rpm
+        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+
+      # Stage exactly where [package.metadata.deb]/[generate-rpm] expect (the same
+      # layout build-linux-packages.sh produces): the binary under
+      # target/<triple>/release/ and the man page + completions under release-assets/
+      # (cargo-deb resolves those relative to the crate dir, hence the second copy).
+      - name: Stage the binary + completion/man assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$(dirname "$(ls target/"$TRIPLE"/release/build/bdinfo-rs-*/out/assets/bdinfo-rs.1 | head -n1)")"
+          mkdir -p release-assets crates/bdinfo-rs/release-assets
+          for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do
+            cp "$assets/$f" release-assets/
+            cp "$assets/$f" crates/bdinfo-rs/release-assets/
+          done
+
+      - name: Build + install + verify the .deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo deb --no-build --no-strip --target "$TRIPLE" -p bdinfo-rs
+          deb=$(ls target/"$TRIPLE"/debian/*.deb)
+          echo "== $deb =="; dpkg-deb --contents "$deb"
+          sudo dpkg -i "$deb"
+          bdinfo-rs --version
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+          done
+          grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
+          sudo dpkg -r bdinfo-rs
+          echo ".deb OK"
+
+      - name: Build + install + verify the .rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          sudo rpm --initdb 2>/dev/null || true
+          cargo generate-rpm -p crates/bdinfo-rs --target "$TRIPLE"
+          rpmf=$(ls target/"$TRIPLE"/generate-rpm/*.rpm)
+          echo "== $rpmf =="; rpm -qpl "$rpmf"
+          sudo rpm -i --nodeps --ignorearch --force "$rpmf"
+          bdinfo-rs --version
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+          done
+          echo ".rpm OK"
