@@ -805,6 +805,34 @@ fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<u
         .collect()
 }
 
+/// Why a by-name [`render_selection`] could not produce a report.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug)]
+enum SelectionError {
+    /// The disc structure could not be opened at all (no `BDMV`/`CLIPINF`/`PLAYLIST`).
+    Open(BdError),
+    /// `selection` was non-empty but named no playlist present on the disc — the
+    /// CLI's `--mpls` "No matching playlists found on BD".
+    NoMatch,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl From<BdError> for SelectionError {
+    fn from(err: BdError) -> Self {
+        Self::Open(err)
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl std::fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open(err) => write!(f, "no readable Blu-ray structure ({err})"),
+            Self::NoMatch => f.write_str("No matching playlists found on BD"),
+        }
+    }
+}
+
 /// Runs the **measured** scan over just the playlists named in `selection` and
 /// renders the classic report in selection order — the browser equivalent of
 /// `bdinfo-rs <disc> --mpls A,B`.
@@ -816,15 +844,21 @@ fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<u
 /// selectable by name.
 ///
 /// # Errors
-/// The [`BdError`] from either open when the structure is too damaged to scan.
+/// [`SelectionError::Open`] if the structure is too damaged to scan, or
+/// [`SelectionError::NoMatch`] if `selection` names no playlist on the disc
+/// (mirroring the CLI's `--mpls`, which exits with "No matching playlists found
+/// on BD" rather than rendering a header-only report).
 #[cfg(any(target_arch = "wasm32", test))]
 fn render_selection(
     root: &dyn BdDir,
     selection: &[String],
     progress: &mut dyn FnMut(ScanProgress<'_>),
-) -> Result<String, BdError> {
+) -> Result<String, SelectionError> {
     let structural = BdRom::open_resilient(root, false)?;
     let names = named_selection(&structural.bdrom.playlists, selection);
+    if names.is_empty() {
+        return Err(SelectionError::NoMatch);
+    }
     let files = selection_stream_files(&structural.bdrom.playlists, &names);
     // The measured scan re-opens the same tree, narrowed to the selected clips.
     // It locates the same `BDMV`/`CLIPINF`/`PLAYLIST` the structural open just
@@ -899,9 +933,10 @@ pub fn scan_report(data: &[u8]) -> String {
 ///
 /// # Errors
 /// Returns a `JsValue` if `paths` and `files` differ in length, any `files`
-/// entry is not a `File`, the paths do not form one coherent disc selection, or
+/// entry is not a `File`, the paths do not form one coherent disc selection,
 /// no readable Blu-ray structure is found (so a wrong folder pick is reported
-/// rather than silently returning an empty report).
+/// rather than silently returning an empty report), or a non-empty `selection`
+/// names no playlist on the disc (the CLI's "No matching playlists found on BD").
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn scan_files(
@@ -921,12 +956,13 @@ pub fn scan_files(
             );
         }
     };
-    let rendered = if selection.is_empty() {
+    if selection.is_empty() {
         render_disc(&root, &mut observe)
+            .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
     } else {
         render_selection(&root, &selection, &mut observe)
-    };
-    rendered.map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+            .map_err(|err| JsValue::from_str(&err.to_string()))
+    }
 }
 
 /// The structural-scan entry point: the playlist selection table as JSON.
@@ -1634,12 +1670,22 @@ mod tests {
             assert!(short_only.contains("00001.MPLS"), "a by-name short playlist is kept");
             assert!(!short_only.contains("00000.MPLS"), "only the named playlist is rendered");
 
-            // An unopenable tree (no BDMV) propagates the structural open's error.
+            // An unopenable tree (no BDMV) surfaces the structural open's error,
+            // formatted through SelectionError's Display (the same text the wasm
+            // `scan_files` export emits — which is what reads the inner error).
             let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
+            let open_err = render_selection(&empty, &["00000.MPLS".to_owned()], &mut sink)
+                .expect_err("a structure with no BDMV must error");
             assert!(
-                render_selection(&empty, &["00000.MPLS".to_owned()], &mut sink).is_err(),
-                "a structure with no BDMV must error"
+                open_err.to_string().starts_with("no readable Blu-ray structure"),
+                "the open failure formats as a structure error"
             );
+
+            // A non-empty selection that names no playlist on the disc errors like
+            // the CLI's `--mpls`, rather than rendering a header-only report.
+            let no_match = render_selection(&tree, &["99999.MPLS".to_owned()], &mut sink)
+                .expect_err("an all-unknown selection must error");
+            assert_eq!(no_match.to_string(), "No matching playlists found on BD");
         }
     }
 
