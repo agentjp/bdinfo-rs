@@ -78,25 +78,29 @@ jobs:
       # ref-version-mismatch ignore documented in .github/zizmor.yml).
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0 # zizmor: ignore[cache-poisoning]
         with:
-          node-version: "24"
+          # The active Node line (26 -> LTS Oct 2026); kept in lockstep with
+          # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).
+          node-version: "26.4.0"
 
-      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0, but Node 24
-      # still bundles 11.13.0 — upgrade npm in place, pinned (not @latest) so the
-      # publish is reproducible; bump deliberately. The published wasm bytes are
-      # fixed by the pinned rustc / wasm-bindgen / binaryen, independent of npm.
-      # zizmor's adhoc-packages audit flags any runtime install; upgrading npm
-      # itself (pinned, from the official registry) is the only way to clear the
-      # 11.15.0 floor, so it carries a scoped inline ignore.
-      - name: Upgrade npm to a staged-publishing-capable version
+      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0. Node 26.4.0
+      # already bundles 11.17.0 (>= the floor), so this is not strictly required
+      # today — but pin npm explicitly anyway, so the publish runs on a
+      # deterministic, version-freshness-watched npm independent of which npm a
+      # given Node 26.x patch happens to bundle (the repo's pin-everything posture).
+      # The published wasm bytes are fixed by the pinned rustc / wasm-bindgen /
+      # binaryen, independent of npm. zizmor's adhoc-packages audit flags any
+      # runtime install; pinning npm (from the official registry) carries a scoped
+      # inline ignore. Keep this pin in lockstep with version-freshness.yml.
+      - name: Pin npm to a staged-publishing-capable version
         run: npm install -g npm@11.17.0 # zizmor: ignore[adhoc-packages]
 
-      - name: Verify Node >= 22.14 and npm >= 11.15.0
+      - name: Verify Node >= 26 and npm >= 11.15.0
         shell: pwsh
         run: |
           $node = (& node --version).TrimStart('v')
           $npm = (& npm --version)
           Write-Host "node $node / npm $npm"
-          if ([version]$node -lt [version]'22.14.0') { throw "Node $node is below the 22.14 floor" }
+          if ([version]$node -lt [version]'26.0.0') { throw "Node $node is below the 26 floor" }
           if ([version]$npm -lt [version]'11.15.0') { throw "npm $npm is below the 11.15.0 staged-publishing floor" }
 
       # npm publishes whatever version is in package.json, not the tag — fail fast

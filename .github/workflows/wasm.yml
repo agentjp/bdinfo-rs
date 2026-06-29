@@ -28,7 +28,7 @@ concurrency:
 
 env:
   NIGHTLY: nightly-2026-06-05 # keep in lockstep with scripts/_common.ps1 + ci.yml
-  NODE_VERSION: "22.14.0"     # Node >= 22.14
+  NODE_VERSION: "26.4.0"      # the active Node line (26 -> LTS Oct 2026); watched by version-freshness.yml
 
 jobs:
   gate:
