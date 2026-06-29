@@ -1,19 +1,25 @@
 name: publish-npm
 
-# Publish @bdinfo-rs/wasm (the in-browser package, crates/bdinfo-rs-wasm/web) to
-# npm on a vX.Y.Z tag, using npm OIDC Trusted Publishing: a short-lived,
+# STAGE-publish @bdinfo-rs/wasm (the in-browser package, crates/bdinfo-rs-wasm/web)
+# to npm on a vX.Y.Z tag, using npm OIDC Trusted Publishing: a short-lived,
 # repo/workflow-scoped token is minted at run time, so NO long-lived npm token is
 # stored. The npm analog of publish-crates.yml; SEPARATE from cargo-dist.
 #
 # Runs ONLY on v* tags — never on a PR or a branch push. Builds the artifact fresh
 # (no build cache) so the --provenance attestation covers exactly what is shipped.
+# CI only STAGES the package; it is not installable until a maintainer approves it
+# with `npm stage approve` (2FA — OIDC cannot approve), so a compromised CI run can
+# never ship a live version. Approve after pushing the tag — see the job summary.
 #
 # One-time human bootstrap (cannot be automated):
 #   1. Reserve the npm name: publish @bdinfo-rs/wasm once by hand (or create the
 #      @bdinfo-rs org/scope) so the package exists.
 #   2. On npmjs.com -> the package -> Settings -> Trusted Publisher -> GitHub
 #      Actions: repository `agentjp/bdinfo-rs`, workflow `publish-npm.yml`.
-#      Thereafter every v* tag republishes with provenance and NO stored token.
+#      Thereafter every v* tag STAGES a provenance-signed release with NO stored
+#      token, awaiting a maintainer's `npm stage approve` (2FA) to go live. For the
+#      strongest posture, grant the trusted publisher ONLY `npm stage publish` (not
+#      `npm publish`), so CI can never do a direct live publish.
 
 on:
   push:
@@ -64,10 +70,6 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.126
 
-      # Node 24 bundles npm >= 11.5.1 (the OIDC trusted-publishing floor), so no
-      # ad-hoc global npm upgrade is needed. The published wasm bytes are fixed by
-      # the pinned rustc / wasm-bindgen / binaryen, independent of the Node version.
-      #
       # zizmor flags setup-node in this tag-triggered (publishing) workflow as a
       # cache-poisoning vector, but no `cache:` input is set, so it neither restores
       # nor saves any cache — there is nothing to poison. setup-node is required to
@@ -78,14 +80,24 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Verify Node >= 22.14 and npm >= 11.5.1
+      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0, but Node 24
+      # still bundles 11.13.0 — upgrade npm in place, pinned (not @latest) so the
+      # publish is reproducible; bump deliberately. The published wasm bytes are
+      # fixed by the pinned rustc / wasm-bindgen / binaryen, independent of npm.
+      # zizmor's adhoc-packages audit flags any runtime install; upgrading npm
+      # itself (pinned, from the official registry) is the only way to clear the
+      # 11.15.0 floor, so it carries a scoped inline ignore.
+      - name: Upgrade npm to a staged-publishing-capable version
+        run: npm install -g npm@11.17.0 # zizmor: ignore[adhoc-packages]
+
+      - name: Verify Node >= 22.14 and npm >= 11.15.0
         shell: pwsh
         run: |
           $node = (& node --version).TrimStart('v')
           $npm = (& npm --version)
           Write-Host "node $node / npm $npm"
           if ([version]$node -lt [version]'22.14.0') { throw "Node $node is below the 22.14 floor" }
-          if ([version]$npm -lt [version]'11.5.1') { throw "npm $npm is below the 11.5.1 OIDC floor" }
+          if ([version]$npm -lt [version]'11.15.0') { throw "npm $npm is below the 11.15.0 staged-publishing floor" }
 
       # npm publishes whatever version is in package.json, not the tag — fail fast
       # if a tag was cut that does not match the workspace + package versions
@@ -140,15 +152,36 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm run --silent test:node
 
-      - name: Publish @bdinfo-rs/wasm (provenance; prerelease -> dist-tag next)
+      # STAGED publish: CI only stages the tarball (OIDC supports `npm stage
+      # publish`); it is NOT installable until a maintainer reviews and approves it
+      # with `npm stage approve` (2FA, proof-of-presence — OIDC cannot approve). So
+      # even a fully compromised CI run can produce only a staged package, never a
+      # live one, and the real artifact is inspectable before it ships.
+      - name: Stage publish @bdinfo-rs/wasm (provenance; prerelease -> dist-tag next)
         working-directory: crates/bdinfo-rs-wasm/web
         shell: pwsh
         run: |
           # A prerelease tag (vX.Y.Z-rc.1 — carries a `-` suffix) must NOT take the
           # `latest` dist-tag that a bare `npm install @bdinfo-rs/wasm` resolves;
-          # ship it under `next` instead. Stable vX.Y.Z tags publish to `latest`.
+          # ship it under `next` instead. Stable vX.Y.Z tags stage under `latest`.
+          # The dist-tag is immutable on a staged package (reject + re-stage to change).
           $tag = $env:GITHUB_REF_NAME
           $distTag = if ($tag -match '-') { 'next' } else { 'latest' }
-          Write-Host "publishing $tag to npm dist-tag '$distTag'"
-          npm publish --provenance --access public --tag $distTag
+          Write-Host "staging $tag to npm dist-tag '$distTag'"
+          npm stage publish --provenance --access public --tag $distTag
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The staged version is NOT live yet — the maintainer must approve it (2FA).
+      # Surface the exact commands in the run's job summary + log.
+      - name: Remind to approve the staged release
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          Write-Host "Staged $tag with provenance. It is NOT live until approved (2FA):"
+          Write-Host "  npm stage view @bdinfo-rs/wasm"
+          Write-Host "  npm stage download @bdinfo-rs/wasm"
+          Write-Host "  npm stage approve @bdinfo-rs/wasm     (or npm stage reject)"
+          Write-Host "Or approve at npmjs.com -> the package -> Staged."
+          if ($env:GITHUB_STEP_SUMMARY) {
+            "@bdinfo-rs/wasm $tag is STAGED (not live). Approve with: npm stage approve @bdinfo-rs/wasm (2FA), or on npmjs.com." | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          }
