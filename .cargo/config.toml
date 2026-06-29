@@ -39,9 +39,10 @@ dn = "deny check"
 # actuals — any regression exits non-zero. Ratchet UP as coverage rises; never
 # relax to dodge a fix. This stable alias covers lines/regions/functions for
 # quick local runs; the GATE (scripts/compliance.ps1) runs the authoritative
-# check on the pinned nightly with the extra `--branch --fail-under-branches`
-# dimension (branch coverage is nightly-only, so an alias — which can't carry
-# `+toolchain` — can't express it).
+# check on the pinned nightly with the extra `--branch` dimension, exporting the
+# LLVM JSON and enforcing the branch floors itself (cargo-llvm-cov has NO
+# `--fail-under-branches` flag; branch coverage is also nightly-only, so an alias —
+# which can't carry `+toolchain` — can't express it).
 cov = "llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
 
 # --- Periodic / pre-release (installed by setup.ps1) -----------------------
