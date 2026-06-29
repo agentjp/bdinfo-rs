@@ -30,10 +30,10 @@ wasm-bindgen = "0.2"
 # WebReader/WebFile FileReaderSync seam + scan_files/build_web_tree), so they are
 # wasm-only — a native `cargo build` / parity build never compiles them.
 # `File`/`Blob`/`FileReaderSync` back the streaming `scan_files` seam: synchronous
-# byte-offset reads in a Worker (no JSPI/Asyncify); `console` is the scan log.
+# byte-offset reads in a Worker (no JSPI/Asyncify).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync", "console"] }
+web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
