@@ -88,9 +88,17 @@ type WorkerMessage =
 
 /** Spawns the scan Worker (a module worker by the bundler-aware convention). */
 function spawnWorker(options?: AnalyzeOptions): Worker {
-  return new Worker(options?.workerUrl ?? new URL("./worker.js", import.meta.url), {
-    type: "module",
-  });
+  // The default path MUST stay a bare `new Worker(new URL("./worker.js",
+  // import.meta.url), …)` literal: that exact shape is what Vite and webpack 5
+  // statically detect to compile the Worker into a chunk and emit the `.wasm` it
+  // loads as an asset. Folding it into `options?.workerUrl ?? new URL(...)` makes
+  // the first argument an expression rather than a `new URL(...)` node, which
+  // defeats that detection (the bundler then ships a broken worker and no wasm),
+  // so the override is a separate branch that keeps the default literal intact.
+  if (options?.workerUrl) {
+    return new Worker(options.workerUrl, { type: "module" });
+  }
+  return new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 }
 
 /** The `(relativePath, File)` lists the Worker takes, from `files`. */
