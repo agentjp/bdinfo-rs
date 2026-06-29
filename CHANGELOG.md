@@ -12,19 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
-## [Unreleased]
+## [v1.1.0](https://github.com/agentjp/bdinfo-rs/compare/v1.0.1...v1.1.0) (2026-06-29)
 
 ### Features
 
 * **wasm:** publish an in-browser build of the analyzer as the npm package
   `@bdinfo-rs/wasm`. It runs the FULL measured scan (M2TS demux + per-stream /
   per-chapter statistics) entirely in the browser — off the main thread in a Web
-  Worker, reading a `webkitdirectory`-picked `BDMV` folder synchronously at byte
-  offsets via `FileReaderSync`, so a multi-GB stream never has to fit in memory.
-  The rendered report is byte-for-byte the classic disc report, pinned to its own
-  golden rendered from the same Big Buck Bunny fixture the native end-to-end test
-  scans (held byte-identical across native, Node, and headless Chrome and Firefox).
-  No bytes leave the page.
+  Worker, reading a `webkitdirectory`-picked `BDMV` folder, or a single `.iso`
+  image, synchronously at byte offsets via `FileReaderSync`, so a multi-GB stream
+  never has to fit in memory. The rendered report is byte-for-byte the classic disc
+  report, pinned to its own golden rendered from the same Big Buck Bunny fixture the
+  native end-to-end test scans (held byte-identical across native, Node, and
+  headless Chrome and Firefox). No bytes leave the page. (#41)
+
+### Bug Fixes
+
+* **wasm:** spawn the scan Web Worker through a statically analyzable
+  `new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })`, so
+  bundlers (Vite, webpack) detect and emit the worker chunk instead of breaking at
+  runtime. (#45)
+* **packaging:** ship a complete machine-readable DEP-5 `copyright` in the `.deb`
+  (every bundled license enumerated), satisfying Debian policy. (#31)
 
 ### Changed
 
@@ -32,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LGPL 2.1 version only), matching the upstream BDInfo per-file source headers
   ("either version 2.1 of the License, or (at your option) any later version"). This
   is a documentation/metadata correction: no code changes, and downstream terms are
-  unchanged except that the "or later" option is now explicitly granted.
+  unchanged except that the "or later" option is now explicitly granted. (#40)
 
 ### Added
 
@@ -40,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bdinfo-rs is a Rust port of, and derivative work based on, BDInfo (© 2010 Cinema
   Squid, LGPL-2.1-or-later) — with the report/analysis baseline ported from
   [UniqProject/BDInfo](https://github.com/UniqProject/BDInfo) and the console flow
-  following [tetrahydroc/BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI).
+  following [tetrahydroc/BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI). (#40)
 
 ## [v1.0.1](https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...218dab463b7973086ae318e8d38da945787dd458) (2026-06-22)
 
