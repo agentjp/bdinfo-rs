@@ -10,3 +10,18 @@
 /*.wasm
   Content-Type: application/wasm
   Cache-Control: public, max-age=0, must-revalidate
+
+# Security headers for every response (so the document AND the same-origin module
+# Worker — /* also covers worker.js, whose CSP is delivered by its own response —
+# both get the policy). The scan needs WebAssembly compilation, which requires
+# 'wasm-unsafe-eval' in script-src (the project's documented CSP posture).
+# Everything else is same-origin: external module scripts ('self'), the scan
+# Worker ('self', a `new Worker(new URL("./worker.js", import.meta.url))` literal),
+# index.html's one inline <style> ('unsafe-inline' for STYLES only — never
+# scripts), data: images, and blob: for the in-page report download
+# (URL.createObjectURL). No COOP/COEP (single-threaded FileReaderSync, no
+# SharedArrayBuffer) — see the note above.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
