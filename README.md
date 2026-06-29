@@ -177,7 +177,7 @@ shell, no libc, nothing to patch, about 1 MB. The tags match the repo's versions
 (`1.0.0`, plus rolling `1.0` and `1`):
 
 ```sh
-docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :1.0.0
+docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :1.0.1
 ```
 
 Mount the disc and pass its in-container path. `-it` gives the interactive playlist
@@ -416,7 +416,7 @@ each layer:
   [libbluray](https://code.videolan.org/videolan/libbluray) and [FFmpeg](https://ffmpeg.org/)
   to fix bugs in the original (see [Differences from BDInfo](#-differences-from-bdinfo)).
 - **UDF reader** — validated against [libudfread](https://code.videolan.org/videolan/libudfread)
-  and the OSTA UDF 2.60 specification.
+  and the OSTA UDF 2.50 specification.
 
 ## 📄 License
 
