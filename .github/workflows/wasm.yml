@@ -54,6 +54,23 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.126
 
+      # The pinned wasm-bindgen-cli MUST equal the wasm-bindgen version resolved in
+      # Cargo.lock — wasm-bindgen hard-errors on any crate<->CLI mismatch. A
+      # Dependabot bump of the wasm-bindgen crate moves the lockfile but not the
+      # `tool: wasm-bindgen-cli@X` pins (here + publish-npm.yml + deploy-pages.yml),
+      # so catch the drift early with the exact fix (or run scripts/wasm-sync.ps1).
+      - name: wasm-bindgen CLI matches the lockfile
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        run: |
+          $lock = [regex]::Match((Get-Content -Raw Cargo.lock), '(?m)^name = "wasm-bindgen"\r?\nversion = "([^"]+)"').Groups[1].Value
+          if (-not $lock) { throw 'could not read the wasm-bindgen version from Cargo.lock' }
+          $cli = [regex]::Match((& wasm-bindgen --version), '([0-9]+\.[0-9]+\.[0-9]+)').Value
+          Write-Host "Cargo.lock wasm-bindgen $lock / CLI $cli"
+          if ($lock -ne $cli) {
+            throw "wasm-bindgen mismatch: Cargo.lock=$lock CLI=$cli. Set wasm-bindgen-cli@$lock in wasm.yml + publish-npm.yml + deploy-pages.yml (or run: pwsh scripts/wasm-sync.ps1)."
+          }
+
       - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
