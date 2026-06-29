@@ -35,9 +35,10 @@
     }
   },
   "files": [
-    "dist",
+    "dist/analyze.js",
+    "dist/analyze.d.ts",
+    "dist/worker.js",
     "pkg",
-    "index.html",
     "README.md",
     "LICENSE"
   ],
@@ -45,6 +46,7 @@
     "build:wasm": "node build.mjs",
     "build:ts": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "build": "npm run build:wasm && npm run build:ts",
+    "dev": "node dev.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit",
     "size": "node check-size.mjs",
     "check": "biome check .",

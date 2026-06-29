@@ -47,7 +47,8 @@ console.log(report); // the classic BDInfo-style disc report
 `name`, `length`, `estimatedBytes`, `hasHidden`); `analyze` spawns the scan
 Worker, relays demux progress, and resolves with the report string. Omit both
 `onProgress` and `selection` for the simplest whole-disc scan. See `index.html`
-for a complete vanilla example.
+in the source repository for a complete vanilla example (the demo is not shipped
+in the npm package).
 
 ## Bundler support
 
