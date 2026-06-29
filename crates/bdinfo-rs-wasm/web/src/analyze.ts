@@ -126,6 +126,39 @@ export function listPlaylists(files: BdmvFile[], options?: AnalyzeOptions): Prom
 }
 
 /**
+ * Lists a single Blu-ray `.iso`'s playlists via the fast structural scan,
+ * resolving with the selection-table rows (see {@link PlaylistRow}) — the `.iso`
+ * counterpart of {@link listPlaylists}. The image is opened through the UDF
+ * reader; no stream data is demuxed, so it returns quickly. Hand the chosen
+ * names to {@link analyzeIso}'s `options.selection`.
+ *
+ * Everything runs locally: no bytes leave the page.
+ */
+export function listPlaylistsIso(file: File, options?: AnalyzeOptions): Promise<PlaylistRow[]> {
+  return new Promise<PlaylistRow[]>((resolve, reject) => {
+    const worker = spawnWorker(options);
+
+    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      const message = event.data;
+      if (message.type === "rows") {
+        worker.terminate();
+        resolve(JSON.parse(message.rows) as PlaylistRow[]);
+      } else if (message.type === "error") {
+        worker.terminate();
+        reject(new Error(message.message));
+      }
+    };
+
+    worker.onerror = (event: ErrorEvent) => {
+      worker.terminate();
+      reject(new Error(event.message || "scan worker failed"));
+    };
+
+    worker.postMessage({ kind: "list-iso", file });
+  });
+}
+
+/**
  * Runs the full measured Blu-ray scan in a Worker and resolves with the classic
  * disc report. `onProgress`, if given, is called as the scan demuxes;
  * `options.selection` measures only the named playlists (see
@@ -167,5 +200,51 @@ export function analyze(
     };
 
     worker.postMessage({ kind: "scan", ...payload(files), selection: options?.selection ?? [] });
+  });
+}
+
+/**
+ * Runs the full measured Blu-ray scan of a single `.iso` `File` in a Worker and
+ * resolves with the classic disc report — the browser equivalent of
+ * `bdinfo-rs <disc>.iso`. The image is opened through the read-only UDF reader
+ * and streamed (its bytes are read on demand at byte offsets), never loaded
+ * whole, so a multi-GB `.iso` is fine. `onProgress` and `options` behave exactly
+ * as in {@link analyze}.
+ *
+ * Everything runs locally: no bytes leave the page.
+ */
+export function analyzeIso(
+  file: File,
+  onProgress?: ProgressFn,
+  options?: AnalyzeOptions,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const worker = spawnWorker(options);
+
+    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      const message = event.data;
+      switch (message.type) {
+        case "progress":
+          onProgress?.(message);
+          break;
+        case "done":
+          worker.terminate();
+          resolve(message.report);
+          break;
+        case "error":
+          worker.terminate();
+          reject(new Error(message.message));
+          break;
+        default:
+          break;
+      }
+    };
+
+    worker.onerror = (event: ErrorEvent) => {
+      worker.terminate();
+      reject(new Error(event.message || "scan worker failed"));
+    };
+
+    worker.postMessage({ kind: "scan-iso", file, selection: options?.selection ?? [] });
   });
 }

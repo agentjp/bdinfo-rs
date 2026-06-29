@@ -239,6 +239,24 @@
         color: var(--muted);
         font-size: 0.85rem;
       }
+      .or-iso {
+        margin: -0.4rem 1.1rem 0.2rem;
+        text-align: center;
+      }
+      .iso-link {
+        font-size: 0.85rem;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .iso-link:hover {
+        color: var(--accent);
+      }
+      .iso-link code,
+      .dz-hint code {
+        font-family: var(--mono);
+        font-size: 0.82em;
+        color: var(--text);
+      }
       .picked {
         display: flex;
         align-items: center;
@@ -536,14 +554,20 @@
               <path d="m9 14 3-3 3 3" />
             </svg>
             <span class="dz-title">Choose a BDMV folder</span>
-            <span class="dz-hint">or the disc root — drop it here, or click to browse</span>
+            <span class="dz-hint">or the disc root — drop it (or an <code>.iso</code>) here, or click to browse</span>
             <input id="picker" type="file" webkitdirectory multiple hidden />
           </label>
+          <div class="or-iso">
+            <label class="iso-link" id="iso-link">
+              or analyze a single <code>.iso</code> image
+              <input id="iso-picker" type="file" accept=".iso,application/x-iso9660-image" hidden />
+            </label>
+          </div>
           <div class="picked" id="picked" hidden>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 6 9 17l-5-5" />
             </svg>
-            <span><span class="pill" id="picked-name">disc</span> — <span id="picked-count">0</span> files</span>
+            <span><span class="pill" id="picked-name">disc</span> — <span id="picked-count">0 files</span></span>
           </div>
           <div class="listing" id="listing" hidden>
             <span class="spinner" aria-hidden="true"></span>

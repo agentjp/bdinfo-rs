@@ -20,6 +20,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(here, ".."); // crates/bdinfo-rs-wasm/web
 const fixtures = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV");
 const goldenPath = resolve(here, "../../tests/golden_report.txt");
+// The same disc as a UDF `.iso` + its native `.iso` golden. The image lives
+// outside webRoot, so the server serves it from one fixed route (`/__fixture.iso`)
+// that the page `fetch`es into a `File` — no multi-MB base64 round-trip.
+const isoPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
+const isoGoldenPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/golden/iso.txt");
 
 // The fixture's six files at the synthetic disc paths the in-memory golden was
 // built from: root `WASMDISC` → disc label `WASMDISC`. `bdmt_eng.xml` is empty,
@@ -45,6 +50,12 @@ function startServer() {
   const server = createServer(async (req, res) => {
     try {
       const urlPath = decodeURIComponent((req.url ?? "/").split("?")[0]);
+      // The `.iso` fixture lives outside webRoot; serve it from one fixed route.
+      if (urlPath === "/__fixture.iso") {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(await readFile(isoPath));
+        return;
+      }
       const safe = join(webRoot, urlPath).replace(/[\\/]+$/, "");
       if (!safe.startsWith(webRoot)) {
         res.writeHead(403).end();
@@ -64,6 +75,7 @@ function startServer() {
 
 async function main() {
   const golden = await readFile(goldenPath);
+  const isoGolden = await readFile(isoGoldenPath);
 
   // Read fixture bytes and base64-frame them for the in-page File construction.
   const entries = [];
@@ -83,6 +95,7 @@ async function main() {
   });
 
   let report;
+  let isoReport;
   try {
     const page = await browser.newPage();
     page.on("console", (msg) => console.log(`  [page] ${msg.text()}`));
@@ -91,6 +104,7 @@ async function main() {
     await page.goto(`${base}/test/harness.html`);
     await page.waitForFunction(() => window.__ready === true, { timeout: 30000 });
 
+    // The folder path: the fixture handed in as a `(relativePath, File)` list.
     report = await page.evaluate(async (items) => {
       const files = items.map((item) => {
         const binary = atob(item.b64);
@@ -103,31 +117,45 @@ async function main() {
       });
       return await window.__analyze(files);
     }, entries);
+
+    // The `.iso` path: the same disc fetched as one `File` and opened through the
+    // UDF reader — the real-browser Worker + FileReaderSync `scan_iso` seam.
+    isoReport = await page.evaluate(async () => {
+      const buf = await (await fetch("/__fixture.iso")).arrayBuffer();
+      const file = new File([new Uint8Array(buf)], "BigBuckBunny.iso");
+      return await window.__analyzeIso(file);
+    });
   } finally {
     await browser.close();
     server.close();
   }
 
-  const got = Buffer.from(report, "utf8");
-  if (got.equals(golden)) {
-    console.log(`PASS — Worker measured scan matches the golden (${golden.length} bytes).`);
-    process.exit(0);
+  function compare(label, text, want) {
+    const got = Buffer.from(text, "utf8");
+    if (got.equals(want)) {
+      console.log(`PASS — Worker ${label} matches the golden (${want.length} bytes).`);
+      return true;
+    }
+    console.error(
+      `FAIL — ${label} (${got.length} bytes) diverged from golden (${want.length} bytes).`,
+    );
+    const limit = Math.min(got.length, want.length);
+    for (let i = 0; i < limit; i++) {
+      if (got[i] !== want[i]) {
+        const ctx = (buf) =>
+          JSON.stringify(buf.slice(Math.max(0, i - 30), i + 30).toString("utf8"));
+        console.error(`  first diff at byte ${i}:`);
+        console.error(`    golden: ${ctx(want)}`);
+        console.error(`    got:    ${ctx(got)}`);
+        break;
+      }
+    }
+    return false;
   }
 
-  console.error(
-    `FAIL — report (${got.length} bytes) diverged from golden (${golden.length} bytes).`,
-  );
-  const limit = Math.min(got.length, golden.length);
-  for (let i = 0; i < limit; i++) {
-    if (got[i] !== golden[i]) {
-      const ctx = (buf) => JSON.stringify(buf.slice(Math.max(0, i - 30), i + 30).toString("utf8"));
-      console.error(`  first diff at byte ${i}:`);
-      console.error(`    golden: ${ctx(golden)}`);
-      console.error(`    got:    ${ctx(got)}`);
-      break;
-    }
-  }
-  process.exit(1);
+  const folderOk = compare("measured scan", report, golden);
+  const isoOk = compare(".iso scan", isoReport, isoGolden);
+  process.exit(folderOk && isoOk ? 0 : 1);
 }
 
 main().catch((err) => {

@@ -8,7 +8,12 @@
 // Worker scope), so a multi-GB stream never has to fit in memory. Progress is
 // forwarded to the main thread as it demuxes; the rendered report (or the table
 // rows) is posted back when done.
-import init, { list_playlists, scan_files } from "../pkg/bdinfo_rs_wasm.js";
+import init, {
+  list_iso_playlists,
+  list_playlists,
+  scan_files,
+  scan_iso,
+} from "../pkg/bdinfo_rs_wasm.js";
 
 /** List the playlists (structural scan) of the picked BDMV folder. */
 interface ListRequest {
@@ -25,7 +30,20 @@ interface ScanRequest {
   selection: string[];
 }
 
-type Request = ListRequest | ScanRequest;
+/** List the playlists (structural scan) of a single picked `.iso`. */
+interface ListIsoRequest {
+  kind: "list-iso";
+  file: File;
+}
+
+/** Measure a single picked `.iso` (`selection` by name; empty = `--whole`). */
+interface ScanIsoRequest {
+  kind: "scan-iso";
+  file: File;
+  selection: string[];
+}
+
+type Request = ListRequest | ScanRequest | ListIsoRequest | ScanIsoRequest;
 
 let ready: Promise<unknown> | null = null;
 
@@ -38,19 +56,28 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     await ready;
 
     const data = event.data;
-    if (data.kind === "list") {
-      const rows = list_playlists(data.paths, data.files);
-      self.postMessage({ type: "rows", rows });
-    } else {
-      const report = scan_files(
-        data.paths,
-        data.files,
-        data.selection,
-        (file: string, done: number, total: number) => {
-          self.postMessage({ type: "progress", file, done, total });
-        },
-      );
-      self.postMessage({ type: "done", report });
+    const onProgress = (file: string, done: number, total: number) => {
+      self.postMessage({ type: "progress", file, done, total });
+    };
+    switch (data.kind) {
+      case "list":
+        self.postMessage({ type: "rows", rows: list_playlists(data.paths, data.files) });
+        break;
+      case "list-iso":
+        self.postMessage({ type: "rows", rows: list_iso_playlists(data.file) });
+        break;
+      case "scan":
+        self.postMessage({
+          type: "done",
+          report: scan_files(data.paths, data.files, data.selection, onProgress),
+        });
+        break;
+      case "scan-iso":
+        self.postMessage({
+          type: "done",
+          report: scan_iso(data.file, data.selection, onProgress),
+        });
+        break;
     }
   } catch (error) {
     self.postMessage({
