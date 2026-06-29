@@ -25,10 +25,12 @@ name: version-freshness
 #     — the staged-publishing floor), and wrangler (`npx wrangler@X` in
 #     deploy-pages.yml) — the last two are npx/setup-node inputs, NOT package.json
 #     deps, so Dependabot's npm scan cannot see them,
-#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) — the ONE
-#     action SHA watched here: it pins a TAGLESS repo's `master`, so Dependabot
-#     (which bumps toward releases) can't move it, and zizmor's ref-version-mismatch
-#     is inline-ignored for it; without this nag nothing would tell us it drifted.
+#   - two action SHAs whose comment tags MOVE (so Dependabot can't bump them and
+#     zizmor's ref-version-mismatch would red-X a PR once they drift): the
+#     Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) pins a TAGLESS
+#     repo's `master`, and vedantmgoyal9/winget-releaser (packages.yml) pins a SHA
+#     with a moving-major `# v2` comment (no patch tag at that commit). Both are
+#     nagged here when they drift past the pinned SHA, so re-pinning stays deliberate.
 # (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
 # binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
@@ -352,7 +354,26 @@ jobs:
           $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
           $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)"
+          # --- vedantmgoyal9/winget-releaser: packages.yml SHA vs the v2 tag HEAD ---
+          # SHA-pinned with a MOVING-major `# v2` comment (no patch tag exists at that
+          # commit, so it can't be pinned more precisely). When upstream re-points the
+          # v2 tag to a new commit, our SHA stays put and the `# v2` comment then
+          # mismatches the resolved tag — zizmor's ref-version-mismatch would red-X
+          # every PR. Watch it like setup-homebrew: nag (don't fail) when v2 drifts so
+          # re-pinning stays deliberate. (The winget publish step is GATED OFF today,
+          # but its `uses:` line is still scanned on every PR.)
+          $wingetPin = Read-Pin '.github/workflows/packages.yml' 'winget-releaser@([0-9a-f]{40})'
+          if (-not $wingetPin) { throw 'No winget-releaser SHA pin in packages.yml' }
+          $wingetHead = gh api repos/vedantmgoyal9/winget-releaser/commits/v2 --jq '.sha' 2>$null
+          if ($LASTEXITCODE -ne 0 -or -not $wingetHead) {
+            $problems += '- could not query winget-releaser v2 tag HEAD (GitHub API)'
+          } elseif ($wingetPin -ne $wingetHead) {
+            $problems += "- winget-releaser pin ``$($wingetPin.Substring(0, 12))`` (packages.yml) no longer matches the v2 tag HEAD ``$($wingetHead.Substring(0, 12))`` — the moving major drifted; re-pin the SHA (keep the # v2 comment) deliberately"
+          }
+          $wingetPinShort = if ($wingetPin) { $wingetPin.Substring(0, 12) } else { '?' }
+          $wingetHeadShort = if ($wingetHead) { $wingetHead.Substring(0, 12) } else { '?' }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  winget: $wingetPinShort (head $wingetHeadShort)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
