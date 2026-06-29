@@ -16,10 +16,15 @@ exclude_re = [
     "js_message", # JsValue -> String
     "WebReader", # impl Read/Seek for WebReader (the FileReaderSync I/O)
     "WebFile", # WebFile::open + impl BdFile for WebFile
+    "open_web_reader", # the shared FileReaderSync WebReader constructor
+    "WebIso", # impl IsoReader for WebIso (the .iso FileReaderSync factory)
     "for JsValue", # impl From<TreeError> for JsValue
     "build_web_tree", # &js_sys::Array -> Node<WebFile>
+    "render_root", # the wasm32 scan_files/scan_iso render dispatch -> JsValue
     "scan_files", # the #[wasm_bindgen] streaming export
+    "scan_iso", # the #[wasm_bindgen] .iso streaming export
     "list_playlists", # the #[wasm_bindgen] structural-listing export
+    "list_iso_playlists", # the #[wasm_bindgen] .iso structural-listing export
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).

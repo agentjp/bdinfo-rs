@@ -1,7 +1,7 @@
 //! WebAssembly browser bindings for the bdinfo-rs Blu-ray analyzer.
 //!
 //! This crate exposes the library's whole **measured** scan pipeline to the
-//! browser. There are two entry points onto the very same render path:
+//! browser. Several entry points feed the very same render path:
 //!
 //! - [`scan_report`] — the Phase 1 in-memory export: BDMV bytes are framed into a synthetic disc
 //!   tree (six `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and
@@ -11,6 +11,11 @@
 //!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
 //!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
 //!   Worker (the only scope where `FileReaderSync` exists).
+//! - [`scan_iso`] / [`list_iso_playlists`] — the streaming `.iso` exports: a single OS-picked
+//!   `.iso` `File` is opened through the core read-only UDF 2.50 reader ([`UdfSource`]) over the
+//!   same windowed [`web_sys::FileReaderSync`] cursor ([`WebIso`] is the [`IsoReader`] factory), so
+//!   a multi-GB disc image is never staged in memory either — then rendered through the identical
+//!   path, producing the classic report `bdinfo-rs <disc>.iso` writes.
 //!
 //! Both build a [`Node`] tree behind the [`BdDir`]/[`BdFile`] seam and feed it to
 //! one shared [`render_disc`] — so the in-memory and the file-backed paths render
@@ -58,6 +63,7 @@ use bdinfo_rs_core::bdrom::order::presentation_groups;
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
@@ -407,20 +413,35 @@ unsafe impl Send for WebFile {}
 
 #[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
 compile_error!(
-    "WebFile's Send impl is unsound with wasm threads (+atomics): a web_sys::File moved across \
-     workers is undefined behavior. Revisit the FileReaderSync seam before enabling threads."
+    "WebFile's Send and WebIso's Send + Sync impls are unsound with wasm threads (+atomics): a \
+     web_sys::File moved across workers is undefined behavior. Revisit the FileReaderSync seam \
+     before enabling threads."
 );
+
+/// Opens a [`WebReader`] over `file` (a `length`-byte blob).
+///
+/// The one place a `FileReaderSync` is acquired, shared by
+/// [`WebFile::open_read`] (folder input) and [`WebIso::open`] (`.iso` input) so
+/// there is no duplicated I/O setup.
+///
+/// # Errors
+/// [`io::Error`] when `FileReaderSync` is unavailable — i.e. the call is not on a
+/// Worker thread, the only scope the API exists in.
+#[cfg(target_arch = "wasm32")]
+fn open_web_reader(file: &web_sys::File, length: u64) -> io::Result<WebReader> {
+    let reader = web_sys::FileReaderSync::new().map_err(|e| {
+        io::Error::other(format!(
+            "FileReaderSync unavailable (run the scan in a Worker): {}",
+            js_message(&e)
+        ))
+    })?;
+    Ok(WebReader { file: file.clone(), reader, pos: 0, len: length })
+}
 
 #[cfg(target_arch = "wasm32")]
 impl WebFile {
     fn open(&self) -> io::Result<WebReader> {
-        let reader = web_sys::FileReaderSync::new().map_err(|e| {
-            io::Error::other(format!(
-                "FileReaderSync unavailable (run the scan in a Worker): {}",
-                js_message(&e)
-            ))
-        })?;
-        Ok(WebReader { file: self.file.clone(), reader, pos: 0, len: self.length })
+        open_web_reader(&self.file, self.length)
     }
 }
 
@@ -452,6 +473,52 @@ impl BdFile for WebFile {
 
     fn open_text(&self) -> io::Result<Box<dyn BufRead>> {
         Ok(Box::new(BufReader::with_capacity(READ_WINDOW, self.open()?)))
+    }
+}
+
+/// The [`IsoReader`] factory backing the `.iso` streaming path.
+///
+/// The `.iso` counterpart of [`WebFile`]: it wraps one browser `File` (the
+/// picked `.iso`) and its byte length; each [`open`](IsoReader::open) yields a
+/// fresh [`READ_WINDOW`]-buffered [`WebReader`] cursor over it (via the shared
+/// [`open_web_reader`]), so the core UDF reader streams the image through
+/// `FileReaderSync` windowed reads — a multi-GB `.iso` never has to fit in memory.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone)]
+struct WebIso {
+    /// The picked `.iso` `File`; its bytes are read lazily, never staged.
+    file: web_sys::File,
+    /// The image length in bytes (`File.size`).
+    length: u64,
+}
+
+// SAFETY: the same single-threaded-wasm argument as [`WebFile`]'s `Send` impl
+// above. `wasm32-unknown-unknown` in the browser is single-threaded, so the
+// `web_sys::File` a `WebIso` holds is never moved to, or shared with, another
+// thread. [`IsoReader`] requires `Send + Sync` (a `UdfSource` keeps its factory
+// behind an `Arc` so every file handle reopens through it), and a
+// `web_sys::File` — wrapping a `!Send`/`!Sync` `JsValue` — is neither by default;
+// on the single-threaded target both marker impls are vacuously sound. The handle
+// is only ever touched on the Worker thread that created it.
+//
+// Both impls are gated to the single-threaded wasm build; the `+atomics`
+// `compile_error!` above forces this seam (and `WebFile`'s) to be revisited
+// before threads are enabled, rather than silently miscompiling.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Send for WebIso {}
+// SAFETY: as for the `Send` impl directly above — the `web_sys::File` is never
+// touched off the single Worker thread, so `Sync` is vacuously sound on the
+// single-threaded wasm target (and gated to it).
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Sync for WebIso {}
+
+#[cfg(target_arch = "wasm32")]
+impl IsoReader for WebIso {
+    fn open(&self) -> io::Result<Box<dyn ReadSeek>> {
+        Ok(Box::new(BufReader::with_capacity(
+            READ_WINDOW,
+            open_web_reader(&self.file, self.length)?,
+        )))
     }
 }
 
@@ -895,6 +962,31 @@ fn render_disc(
     Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
 
+/// Renders a measured scan of `root`, mapping any failure to a `JsValue`.
+///
+/// Dispatches to the whole-disc ([`render_disc`]) or by-name
+/// ([`render_selection`]) path — the shared tail of the [`scan_files`] (folder)
+/// and [`scan_iso`] (`.iso`) streaming exports, which differ only in how they
+/// obtain `root`.
+///
+/// # Errors
+/// A `JsValue` carrying the structure-open failure (empty `selection`) or the
+/// [`SelectionError`] text (named `selection`).
+#[cfg(target_arch = "wasm32")]
+fn render_root(
+    root: &dyn BdDir,
+    selection: &[String],
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+) -> Result<String, JsValue> {
+    if selection.is_empty() {
+        render_disc(root, progress)
+            .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+    } else {
+        render_selection(root, selection, progress)
+            .map_err(|err| JsValue::from_str(&err.to_string()))
+    }
+}
+
 /// Renders the synthetic in-memory tree built from `data` (no progress).
 ///
 /// An unopenable structure renders as the empty string — the resilient-open
@@ -902,6 +994,23 @@ fn render_disc(
 #[must_use]
 pub fn run_report(data: &[u8]) -> String {
     render_disc(&build_tree(data), &mut |_| {}).unwrap_or_default()
+}
+
+/// Opens `reader` as a UDF `.iso` and renders the whole-disc report.
+///
+/// No selection and no progress — the backend-agnostic `.iso` entry the native
+/// and in-browser parity tests drive over an in-memory image. Mirrors
+/// [`run_report`] for the streaming `.iso` path; [`scan_iso`] is the
+/// `wasm_bindgen` export that adds progress, selection, and error reporting
+/// around the same wiring.
+///
+/// An image that is not a readable UDF volume, or that opens but holds no
+/// `BDMV` structure, renders as the empty string — matching [`run_report`]'s
+/// resilient-open absence path.
+#[must_use]
+pub fn run_iso_report(reader: Box<dyn IsoReader>) -> String {
+    let Ok(source) = UdfSource::open_resilient(reader) else { return String::new() };
+    render_disc(&source.root(), &mut |_| {}).unwrap_or_default()
 }
 
 /// The Phase 1 in-memory entry point: feed it BDMV bytes (the six `u32`-BE
@@ -956,13 +1065,49 @@ pub fn scan_files(
             );
         }
     };
-    if selection.is_empty() {
-        render_disc(&root, &mut observe)
-            .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
-    } else {
-        render_selection(&root, &selection, &mut observe)
-            .map_err(|err| JsValue::from_str(&err.to_string()))
-    }
+    render_root(&root, &selection, &mut observe)
+}
+
+/// The streaming `.iso` entry point: hand it a single OS-picked Blu-ray `.iso`
+/// `File` and get back the classic disc report.
+///
+/// Opens the image through the core read-only UDF 2.50 reader ([`UdfSource`]),
+/// reading its bytes synchronously at byte offsets through
+/// [`web_sys::FileReaderSync`] ([`WebIso`] is the [`IsoReader`] factory), so a
+/// multi-GB `.iso` never has to fit in memory. It then runs the **full measured**
+/// scan and renders the same report `bdinfo-rs <disc>.iso` writes. Like
+/// [`scan_files`], this MUST run in a Web Worker (the only scope where
+/// `FileReaderSync` exists); `on_progress`, when supplied, is called as
+/// `(file, done, total)`; a non-empty `selection` measures only the named
+/// playlists (CLI `--mpls` semantics, unfiltered, in order), an empty one the
+/// standard `--whole` set.
+///
+/// # Errors
+/// Returns a `JsValue` if the image is not a readable UDF `.iso`, no readable
+/// Blu-ray structure is found inside it, or a non-empty `selection` names no
+/// playlist on the disc (the CLI's "No matching playlists found on BD").
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn scan_iso(
+    file: web_sys::File,
+    selection: Vec<String>,
+    on_progress: Option<js_sys::Function>,
+) -> Result<String, JsValue> {
+    let length = file.size() as u64;
+    let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
+        .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
+    let root = source.root();
+    let mut observe = |p: ScanProgress<'_>| {
+        if let Some(callback) = on_progress.as_ref() {
+            let _ = callback.call3(
+                &JsValue::NULL,
+                &JsValue::from_str(p.file),
+                &JsValue::from_f64(p.done as f64),
+                &JsValue::from_f64(p.total as f64),
+            );
+        }
+    };
+    render_root(&root, &selection, &mut observe)
 }
 
 /// The structural-scan entry point: the playlist selection table as JSON.
@@ -984,6 +1129,28 @@ pub fn scan_files(
 pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String, JsValue> {
     let root = build_web_tree(&paths, &files)?;
     let report = BdRom::open_resilient(&root, false)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
+}
+
+/// The structural-scan `.iso` entry point: the playlist selection table as JSON.
+///
+/// Hand it a single OS-picked Blu-ray `.iso` `File` and get back the same rows
+/// [`list_playlists`] returns for a folder pick — opened through the UDF reader
+/// ([`UdfSource`]) instead of a `(relativePath, File)` list. Runs only the
+/// **structural** scan (no packet demux), so it is fast; pass the chosen
+/// `name`s back to [`scan_iso`] to measure just those playlists.
+///
+/// # Errors
+/// Returns a `JsValue` if the image is not a readable UDF `.iso`, or holds no
+/// readable Blu-ray structure.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn list_iso_playlists(file: web_sys::File) -> Result<String, JsValue> {
+    let length = file.size() as u64;
+    let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
+        .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
+    let report = BdRom::open_resilient(&source.root(), false)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }
@@ -1338,6 +1505,46 @@ mod tests {
         render_disc(&build_tree(&fixture_blob()), &mut sink).expect("the fixture opens");
         let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
         assert!(render_disc(&empty, &mut sink).is_err());
+    }
+
+    #[test]
+    fn run_iso_report_renders_the_iso_golden_and_empties_a_bad_image() {
+        use std::io::Cursor;
+        use std::sync::Arc;
+
+        use bdinfo_rs_core::vfs::ReadSeek;
+        use bdinfo_rs_core::vfs::udf::source::IsoReader;
+
+        use super::run_iso_report;
+
+        /// A trivially `Send + Sync` in-memory [`IsoReader`] over a shared byte
+        /// buffer — the `.iso` analogue of `MemFile`, proving the UDF-reader →
+        /// report wiring with no `web_sys` (the browser `WebIso` is irreducible
+        /// glue, held by the parity tests instead).
+        #[derive(Debug)]
+        struct MemIso(Arc<[u8]>);
+        impl IsoReader for MemIso {
+            fn open(&self) -> std::io::Result<Box<dyn ReadSeek>> {
+                Ok(Box::new(Cursor::new(Arc::clone(&self.0))))
+            }
+        }
+
+        // The committed BigBuckBunny `.iso` the native CLI e2e test scans, with
+        // its pinned golden (UDF volume label `Blu-Ray`). Read through the UDF
+        // reader, the report must be byte-identical to what `bdinfo-rs <disc>.iso`
+        // writes — the same render path the folder input renders through.
+        const ISO: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
+        const ISO_GOLDEN: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/golden/iso.txt");
+
+        let report = run_iso_report(Box::new(MemIso(Arc::from(ISO))));
+        assert_eq!(report.as_bytes(), ISO_GOLDEN, "the .iso wiring must match the native golden");
+
+        // A buffer that is not a UDF volume opens to nothing — the resilient-open
+        // absence path (the `else { String::new() }` arm).
+        assert!(
+            run_iso_report(Box::new(MemIso(Arc::from(vec![0_u8; 1 << 16])))).is_empty(),
+            "a non-UDF image renders as the empty string"
+        );
     }
 
     #[test]

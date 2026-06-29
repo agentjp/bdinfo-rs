@@ -100,14 +100,17 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm ci
 
-      - name: Unsafe tripwire (exactly one unsafe token in lib.rs)
+      - name: Unsafe tripwire (exactly three unsafe tokens in lib.rs)
         working-directory: crates/bdinfo-rs-wasm
         shell: pwsh
+        # Three cfg-gated marker impls: `unsafe impl Send for WebFile` (folder
+        # backend) + `unsafe impl Send`/`Sync for WebIso` (the .iso backend —
+        # IsoReader requires Send + Sync, so the marker needs both impls).
         run: |
           $code = (Get-Content -LiteralPath src/lib.rs) -replace '//.*$', ''
           $n = ([regex]::Matches(($code -join "`n"), '\bunsafe\b')).Count
-          if ($n -ne 1) { Write-Host "expected exactly 1 unsafe token (the cfg-gated impl Send), found $n"; exit 1 }
-          Write-Host "ok: $n unsafe token (cfg-gated impl Send)"
+          if ($n -ne 3) { Write-Host "expected exactly 3 unsafe tokens (cfg-gated WebFile Send + WebIso Send/Sync), found $n"; exit 1 }
+          Write-Host "ok: $n unsafe tokens (cfg-gated WebFile Send + WebIso Send/Sync)"
 
       - name: Format (nightly rustfmt)
         working-directory: crates/bdinfo-rs-wasm
