@@ -22,4 +22,14 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: low
+          # License policy: block a PR introducing a strong-copyleft dependency
+          # that would force us to relicense the whole static binary (incompatible
+          # with our LGPL-2.1-or-later distribution). deny.toml's [licenses] allow
+          # list remains the AUTHORITATIVE full policy (enforced by the required
+          # `cargo deny check`); this denylist is a low-false-positive PR-time
+          # backstop targeting only the genuinely incompatible families.
+          deny-licenses: >-
+            GPL-2.0-only, GPL-2.0-or-later,
+            GPL-3.0-only, GPL-3.0-or-later,
+            AGPL-3.0-only, AGPL-3.0-or-later
           comment-summary-in-pr: on-failure
