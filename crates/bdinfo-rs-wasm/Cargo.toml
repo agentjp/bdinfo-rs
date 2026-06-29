@@ -1,0 +1,105 @@
+[package]
+name = "bdinfo-rs-wasm"
+version = "1.0.1"
+publish = false
+edition = "2024"
+rust-version = "1.96"
+license = "LGPL-2.1-or-later"
+authors = ["bdinfo-rs contributors"]
+repository = "https://github.com/agentjp/bdinfo-rs"
+description = "WebAssembly browser bindings for the bdinfo-rs Blu-ray analyzer (full measured scan)."
+
+# INDEPENDENT workspace — keeps wasm-bindgen + web-sys (and the `unsafe` glue the
+# `#[wasm_bindgen]` macro emits) OUT of the main workspace's gate and out of the
+# `forbid(unsafe_code)` posture of crates/bdinfo-rs{-core,}. The root Cargo.toml
+# also `exclude`s this directory (exactly like `fuzz/`).
+[workspace]
+
+[lib]
+# `cdylib` is the wasm artifact wasm-bindgen post-processes; `rlib` lets the
+# native parity test link the crate and call the export directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bdinfo-rs-core = { path = "../bdinfo-rs-core" }
+# All-target: `#[wasm_bindgen]` on `scan_report` expands on every target (the
+# native rlib parity test links it), so the macro crate must be present natively.
+wasm-bindgen = "0.2"
+
+# js-sys / web-sys are referenced ONLY under #[cfg(target_arch = "wasm32")] (the
+# WebReader/WebFile FileReaderSync seam + scan_files/build_web_tree), so they are
+# wasm-only — a native `cargo build` / parity build never compiles them.
+# `File`/`Blob`/`FileReaderSync` back the streaming `scan_files` seam: synchronous
+# byte-offset reads in a Worker (no JSPI/Asyncify); `console` is the scan log.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync", "console"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# The reader-math proptests run only on the native (Tier-A) build: proptest's
+# fork/timeout backend does not build for wasm32, where the parity tests use
+# wasm-bindgen-test instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = "1"
+
+# Size-tuned, mirroring the CLI's shipped binary: the browser payload should be
+# as small as the analyzer's single static binary is.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# Maximal-FEASIBLE strictness (Posture B). This crate is the thin browser shim
+# that lives OUTSIDE the workspace `forbid(unsafe_code)` bar (wasm-bindgen's
+# generated glue + the one `unsafe impl Send` need it), so `unsafe` is allowed
+# here and ONLY here. Everywhere else it is held to the core's posture: clippy
+# all/pedantic/nursery/cargo + the core's hostile-input restriction picks, with a
+# SHORT allow-list for the lints intrinsic to the JS/web boundary, not bugs.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Restriction picks — the same bug classes the core guards: out-of-bounds index
+# panics, UTF-8 slice panics, silent wrap on byte/offset math, and panics.
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+unwrap_used = "deny"
+panic = "deny"
+# Harden the one unsafe seam: every unsafe item carries a SAFETY proof and does
+# exactly one unsafe op.
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+# ── allow-list: each is intrinsic to the JS/web boundary, not a latent bug ──
+# Web APIs hand byte offsets across as `f64` and js_sys lengths as `u32`; every
+# cast is bounded by the surrounding saturating_*/min/try_from, so the cast site
+# is not where truncation/precision/sign would bite. (cast_* are pedantic; they
+# must be re-allowed alongside the restriction-level as_conversions.)
+as_conversions = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# `#[wasm_bindgen]` exports must take their args by value — the generated ABI
+# moves them across the JS boundary.
+needless_pass_by_value = "allow"
+# `cargo` group on a publish=false in-tree shim: it carries no keywords/categories
+# (it is not a crates.io package) and the version dups live in the transitive
+# wasm-bindgen/web-sys tree (not resolvable from a leaf crate). Both are noise.
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
+
+# rustdoc — the gate's `dc` step runs `cargo doc --document-private-items` with
+# RUSTDOCFLAGS=-D warnings, so the internal docs intentionally link to private
+# helpers (Node/WebReader/render_disc/...); those links resolve in our
+# private-items doc build. This lint targets public-only doc builds, where such
+# links break — it does not apply here (the same carve-out the workspace makes).
+[lints.rustdoc]
+private_intra_doc_links = "allow"

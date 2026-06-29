@@ -59,6 +59,7 @@ jobs:
             --exclude-path Cargo.lock
             --exclude-path fuzz/corpus
             --exclude-path crates/bdinfo-rs/tests/fixtures/golden
+            --exclude-path crates/bdinfo-rs-wasm/tests/golden_report.txt
             .
           fail: true
         env:

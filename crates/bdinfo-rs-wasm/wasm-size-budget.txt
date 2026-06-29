@@ -1,0 +1,12 @@
+# Size budget (bytes) for the optimized browser payload
+# (web/pkg/bdinfo_rs_wasm_bg.wasm, after `wasm-opt -Oz`).
+#
+# A RATCHET: the gate (scripts/wasm-compliance.ps1) and CI (wasm.yml) fail if the
+# optimized .wasm exceeds this. Lower it deliberately when the figure drops;
+# NEVER raise it without a written reason in the commit. Current optimized size
+# is ~400,697 B (rustc 1.96.0 + wasm-bindgen 0.2.126 + binaryen 130) — up from
+# ~362,471 B after linking the read-only UDF 2.50 reader for `.iso` input (the
+# scan_iso / list_iso_playlists exports + WebIso); the core was previously
+# dead-code-eliminated out because nothing called it. The ceiling (400 KiB)
+# carries a small headroom for patch-level toolchain drift (binaryen is ^130.x).
+409600

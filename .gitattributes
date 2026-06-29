@@ -22,3 +22,7 @@ fuzz/corpus/** binary
 crates/bdinfo-rs/tests/fixtures/BigBuckBunny/** binary
 crates/bdinfo-rs/tests/fixtures/*.iso binary
 crates/bdinfo-rs/tests/fixtures/golden/*.txt -text diff
+
+# The wasm crate's measured-scan parity golden carries the same locked CRLF
+# report bytes; keep them verbatim (the wasm test compares raw bytes).
+crates/bdinfo-rs-wasm/tests/*.txt -text diff

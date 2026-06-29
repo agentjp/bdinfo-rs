@@ -41,3 +41,36 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+
+  # The in-browser wasm crate (crates/bdinfo-rs-wasm) is an INDEPENDENT workspace
+  # (its own Cargo.lock, `exclude`d from the root), so the `/` cargo entry above
+  # never sees its deps — yet wasm-bindgen / js-sys / web-sys are compiled into the
+  # shipped `.wasm`. Watch them here with the same `build(deps):` no-bump subject
+  # (cargo deps are build inputs), so the squash subject + commit pass the gate.
+  - package-ecosystem: cargo
+    directory: "/crates/bdinfo-rs-wasm"
+    schedule:
+      interval: daily
+    groups:
+      wasm-cargo-dependencies:
+        patterns: ["*"]
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+
+  # The browser package's npm devDependencies (binaryen / typescript / biome /
+  # playwright-core) — the toolchain that builds, lints, and parity-tests the
+  # published @bdinfo-rs/wasm package. `build(deps):` (no-bump) keeps the squash
+  # subject + every commit conventional, exactly like the cargo entries.
+  - package-ecosystem: npm
+    directory: "/crates/bdinfo-rs-wasm/web"
+    schedule:
+      interval: daily
+    groups:
+      wasm-web-dependencies:
+        patterns: ["*"]
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope

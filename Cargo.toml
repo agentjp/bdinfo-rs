@@ -11,9 +11,11 @@
 resolver = "3"
 members = ["crates/bdinfo-rs-core", "crates/bdinfo-rs"]
 # fuzz/ is an INDEPENDENT workspace (its libfuzzer-sys harness uses `unsafe` and
-# needs nightly + Linux). Excluded so it never enters `cargo ck`/`lt --workspace`
-# or touches the forbid(unsafe_code) posture of the two first-party crates.
-exclude = ["fuzz"]
+# needs nightly + Linux). crates/bdinfo-rs-wasm is likewise INDEPENDENT (a
+# wasm-bindgen `cdylib` for the browser, OUTSIDE the forbid(unsafe_code) posture
+# of the two published crates). Both are excluded so they never enter
+# `cargo ck`/`lt --workspace`, the deny/vet audit, or the static-binary gate.
+exclude = ["fuzz", "crates/bdinfo-rs-wasm"]
 
 [workspace.package]
 version = "1.0.1"

@@ -9,3 +9,8 @@
 # verifies every other link, including the badges, /releases, and installer URLs.
 https://github\.com/agentjp/bdinfo-rs/releases/tag/v
 https://github\.com/agentjp/bdinfo-rs/compare/v
+
+# The npm package @bdinfo-rs/wasm is published only on a v* tag (publish-npm.yml),
+# so its npmjs.com page 404s until the first release lands -- exclude it like our
+# own release-tag URLs above so the Check links gate stays green meanwhile.
+https://www\.npmjs\.com/package/@bdinfo-rs/wasm

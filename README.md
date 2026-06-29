@@ -16,7 +16,7 @@
 [![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 
-[Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Footprint](#-footprint) · [Library](#-library) · [Security](#-quality--security)
+[Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Footprint](#-footprint) · [Library](#-library) · [Browser](#-in-the-browser-webassembly) · [Security](#-quality--security)
 
 </div>
 
@@ -43,6 +43,7 @@ runtime, no DLLs, no install — drop the file anywhere and it runs.
 - [⚡ Performance](#-performance)
 - [🪶 Footprint](#-footprint)
 - [📚 Library](#-library)
+- [🌐 In the browser (WebAssembly)](#-in-the-browser-webassembly)
 - [🔒 Quality & security](#-quality--security)
 - [🔀 Differences from BDInfo](#-differences-from-bdinfo)
 - [🧬 Lineage](#-lineage)
@@ -320,6 +321,46 @@ macOS binaries are in the same ≈1 MB ballpark.</sub>
 The parser core is a separate crate, `bdinfo-rs-core`: disc discovery, MPLS/CLPI/index
 parsing, M2TS demux, the codec scanners, the UDF 2.50 reader, and the report renderer,
 all reusable behind a documented API. The CLI is a thin front-end over it.
+
+## 🌐 In the browser (WebAssembly)
+
+**▶ Try it live — [bdinfo.hyperslop.dev](https://bdinfo.hyperslop.dev).** No install, and
+nothing is uploaded.
+
+The same analyzer also compiles to WebAssembly and runs **entirely in the browser** as the
+npm package [`@bdinfo-rs/wasm`](https://www.npmjs.com/package/@bdinfo-rs/wasm). Point it at a
+disc's `BDMV` folder — or a single `.iso` — and it runs the **full measured scan** — M2TS
+demux + per-stream / per-chapter statistics — off the main thread in a Web Worker. The files
+are read synchronously at byte offsets via `FileReaderSync`, so a multi-GB stream never has to
+fit in memory, and **no bytes leave the page** (there is no server). The rendered report is
+byte-for-byte the classic disc report, pinned to its own golden — rendered from the same Big
+Buck Bunny fixture the native end-to-end test scans, and held byte-identical across native,
+Node, and headless Chrome and Firefox.
+
+```ts
+import { analyze } from "@bdinfo-rs/wasm";
+
+const picked = [...input.files].map((file) => ({ path: file.webkitRelativePath, file }));
+const report = await analyze(picked, ({ file, done, total }) => {
+  console.log(`${file}: ${done}/${total}`);
+});
+console.log(report); // the classic BDInfo-style disc report
+```
+
+It mirrors the CLI: `listPlaylists` returns the selection table and `analyze` scans the chosen
+playlists, with `listPlaylistsIso` / `analyzeIso` doing the same for a single `.iso`. The
+parser core, codecs, and report are identical to the native binary; only the browser sandbox
+imposes a few differences:
+
+- The report is **returned as a string** (the demo shows it on the page) rather than written
+  back into the disc folder — a browser can't write to a picked directory.
+- A folder scan needs a browser with the **directory picker** (Chromium and Firefox; on iOS
+  Safari before 18.4 it is unavailable — use the `.iso` path there).
+- As with the native CLI, a folder scan's disc label is the **picked directory's name**, while
+  an `.iso` reads the real UDF volume label.
+
+The package source lives in `crates/bdinfo-rs-wasm/`, and `web/index.html` is a complete
+vanilla example — it is the source of the live demo above.
 
 ## 🔒 Quality & security
 

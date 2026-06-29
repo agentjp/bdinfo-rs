@@ -1,0 +1,5 @@
+# Build output for this independent workspace (the root /target/ rule is anchored
+# to the repo root, so it does not cover this crate's own target dir).
+/target/
+# wasm-pack's generated npm package dir.
+/pkg/

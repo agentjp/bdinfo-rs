@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bdinfo-rs — in-browser Blu-ray analyzer</title>
+    <meta
+      name="description"
+      content="Analyze a Blu-ray disc (BDMV) entirely in your browser. No upload — the bdinfo-rs measured scan, compiled to WebAssembly."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234cc2ff' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --bg-glow: #11161d;
+        --surface: #14171c;
+        --surface-2: #1b1f27;
+        --border: #262b33;
+        --border-strong: #333a45;
+        --text: #e7eaef;
+        --muted: #8b94a1;
+        --faint: #5b636e;
+        --accent: #4cc2ff;
+        --accent-strong: #2aa8f0;
+        --accent-dim: rgba(76, 194, 255, 0.12);
+        --danger: #ff6b6b;
+        --ok: #46d18a;
+        --radius: 12px;
+        --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.55;
+        color: var(--text);
+        background:
+          radial-gradient(1200px 600px at 50% -10%, var(--bg-glow), transparent 70%),
+          var(--bg);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        color: #7ad2ff;
+      }
+
+      .wrap {
+        max-width: 72rem;
+        margin: 0 auto;
+        padding: 1.5rem 1.25rem 1.5rem;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── top bar ─────────────────────────────────────────────── */
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.25rem 0 1.75rem;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .brand .logo {
+        color: var(--accent);
+        filter: drop-shadow(0 0 10px rgba(76, 194, 255, 0.35));
+      }
+      .brand h1 {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+      }
+      .brand .tagline {
+        margin: 0;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .topbar .links {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+
+      /* main fills the space between the header and footer; the empty landing
+         state centers its single card vertically. */
+      main {
+        flex: 1 0 auto;
+      }
+      main.landing {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      /* ── icon buttons / links ────────────────────────────────── */
+      .iconlink,
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        font: inherit;
+        font-size: 0.85rem;
+        font-weight: 550;
+        color: var(--text);
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 0.45rem 0.75rem;
+        cursor: pointer;
+        transition:
+          background 0.15s ease,
+          border-color 0.15s ease,
+          color 0.15s ease,
+          transform 0.05s ease;
+      }
+      .iconlink:hover,
+      .btn:hover {
+        background: var(--surface-2);
+        border-color: var(--border-strong);
+        color: var(--text);
+      }
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #06121b;
+        font-weight: 650;
+      }
+      .btn.primary:hover:not(:disabled) {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+        color: #06121b;
+      }
+      .btn.small {
+        padding: 0.35rem 0.6rem;
+        font-size: 0.8rem;
+      }
+      svg {
+        flex: none;
+      }
+
+      /* ── cards ───────────────────────────────────────────────── */
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-bottom: 1.1rem;
+        overflow: hidden;
+        animation: rise 0.28s ease both;
+      }
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+      }
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.85rem 1.1rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .card-head h2 {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 600;
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+      }
+      .toolbar {
+        display: flex;
+        gap: 0.4rem;
+      }
+
+      /* ── dropzone ────────────────────────────────────────────── */
+      .dropzone {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.4rem;
+        text-align: center;
+        padding: 2.4rem 1.25rem;
+        margin: 1.1rem;
+        border: 1.5px dashed var(--border-strong);
+        border-radius: 11px;
+        background: var(--surface-2);
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          background 0.15s ease;
+      }
+      .dropzone:hover,
+      .dropzone.drag {
+        border-color: var(--accent);
+        background: var(--accent-dim);
+      }
+      .dropzone .dz-icon {
+        color: var(--accent);
+        margin-bottom: 0.35rem;
+      }
+      .dropzone .dz-title {
+        font-weight: 600;
+        font-size: 1rem;
+      }
+      .dropzone .dz-hint {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .or-iso {
+        margin: -0.4rem 1.1rem 0.2rem;
+        text-align: center;
+      }
+      .iso-link {
+        font-size: 0.85rem;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .iso-link:hover {
+        color: var(--accent);
+      }
+      .iso-link code,
+      .dz-hint code {
+        font-family: var(--mono);
+        font-size: 0.82em;
+        color: var(--text);
+      }
+      .picked {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0 1.1rem 0.6rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .picked svg {
+        color: var(--ok);
+      }
+      .picked .pill {
+        font-family: var(--mono);
+        color: var(--text);
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.1rem 0.45rem;
+      }
+      .listing {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0 1.1rem 0.9rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .spinner {
+        width: 14px;
+        height: 14px;
+        border: 2px solid var(--border-strong);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .privacy {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin: 0;
+        padding: 0 1.1rem 1rem;
+        color: var(--faint);
+        font-size: 0.8rem;
+      }
+      .privacy svg {
+        color: var(--ok);
+      }
+
+      /* ── playlist table ──────────────────────────────────────── */
+      .table-wrap {
+        overflow-x: auto;
+        max-height: 24rem;
+        overflow-y: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.875rem;
+      }
+      thead th {
+        position: sticky;
+        top: 0;
+        background: var(--surface);
+        text-align: left;
+        font-weight: 550;
+        font-size: 0.74rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        padding: 0.55rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      tbody td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      tbody tr {
+        cursor: pointer;
+        transition: background 0.1s ease;
+      }
+      tbody tr:hover {
+        background: var(--surface-2);
+      }
+      tbody tr.sel {
+        background: var(--accent-dim);
+      }
+      .col-check {
+        width: 2.5rem;
+        text-align: center;
+      }
+      .num {
+        text-align: right;
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+      td.name {
+        font-family: var(--mono);
+        color: var(--text);
+      }
+      td.name .star {
+        color: var(--accent);
+        font-weight: 700;
+        margin-left: 0.2rem;
+      }
+      input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      .card-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.8rem 1.1rem;
+        border-top: 1px solid var(--border);
+      }
+
+      /* ── progress ────────────────────────────────────────────── */
+      .progress-card .body {
+        padding: 1.1rem;
+      }
+      .progress-row {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+      }
+      progress {
+        flex: 1;
+        appearance: none;
+        height: 8px;
+        border: none;
+        border-radius: 99px;
+        background: var(--surface-2);
+        overflow: hidden;
+      }
+      progress::-webkit-progress-bar {
+        background: var(--surface-2);
+        border-radius: 99px;
+      }
+      progress::-webkit-progress-value {
+        background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+        border-radius: 99px;
+        transition: width 0.2s ease;
+      }
+      progress::-moz-progress-bar {
+        background: var(--accent);
+        border-radius: 99px;
+      }
+      .pct {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.85rem;
+        color: var(--text);
+        min-width: 2.8rem;
+        text-align: right;
+      }
+      .progress-text {
+        margin: 0.7rem 0 0;
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* ── report ──────────────────────────────────────────────── */
+      .report {
+        margin: 0;
+        padding: 1.1rem 1.25rem;
+        font-family: var(--mono);
+        font-size: 0.8rem;
+        line-height: 1.5;
+        color: #cdd3da;
+        white-space: pre;
+        overflow: auto;
+        max-height: 60vh;
+        background: #08090b;
+      }
+      .copied {
+        color: var(--ok) !important;
+        border-color: var(--ok) !important;
+      }
+
+      /* ── error ───────────────────────────────────────────────── */
+      .error {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.8rem 1rem;
+        margin-bottom: 1.1rem;
+        font-size: 0.88rem;
+        color: #ffd7d7;
+        background: rgba(255, 107, 107, 0.08);
+        border: 1px solid rgba(255, 107, 107, 0.35);
+        border-radius: 10px;
+      }
+      .error svg {
+        color: var(--danger);
+      }
+
+      /* ── footer ──────────────────────────────────────────────── */
+      .footer {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-top: 2rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--border);
+        color: var(--faint);
+        font-size: 0.8rem;
+      }
+      .footer a {
+        color: var(--muted);
+      }
+      .footer a:hover {
+        color: var(--accent);
+      }
+      .foot-links {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      @media (max-width: 560px) {
+        .brand .tagline {
+          display: none;
+        }
+        .wrap {
+          padding: 1rem 0.85rem 1rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="logo" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" />
+            <circle cx="12" cy="12" r="2.4" />
+            <path d="M12 2a10 10 0 0 1 8.5 4.7" opacity="0.55" />
+          </svg>
+          <div>
+            <h1>bdinfo-rs</h1>
+            <p class="tagline">In-browser Blu-ray disc analyzer</p>
+          </div>
+        </div>
+        <nav class="links">
+          <a class="iconlink" href="https://github.com/agentjp/bdinfo-rs" target="_blank" rel="noopener">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
+              <path d="M9 18c-4.51 2-5-2-7-2" />
+            </svg>
+            GitHub
+          </a>
+        </nav>
+      </header>
+
+      <main class="landing" id="main">
+        <div id="error" class="error" hidden>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" x2="12" y1="8" y2="12" />
+            <line x1="12" x2="12.01" y1="16" y2="16" />
+          </svg>
+          <span id="error-text"></span>
+        </div>
+
+        <!-- step 1: source -->
+        <section class="card" id="source-card">
+          <label class="dropzone" id="dropzone">
+            <svg class="dz-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+              <path d="M12 11v6" />
+              <path d="m9 14 3-3 3 3" />
+            </svg>
+            <span class="dz-title">Choose a BDMV folder</span>
+            <span class="dz-hint">or the disc root — drop it (or an <code>.iso</code>) here, or click to browse</span>
+            <input id="picker" type="file" webkitdirectory multiple hidden />
+          </label>
+          <div class="or-iso">
+            <label class="iso-link" id="iso-link">
+              or analyze a single <code>.iso</code> image
+              <input id="iso-picker" type="file" accept=".iso,application/x-iso9660-image" hidden />
+            </label>
+          </div>
+          <div class="picked" id="picked" hidden>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+            <span><span class="pill" id="picked-name">disc</span> — <span id="picked-count">0 files</span></span>
+          </div>
+          <div class="listing" id="listing" hidden>
+            <span class="spinner" aria-hidden="true"></span>
+            Reading playlists…
+          </div>
+          <p class="privacy">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+              <path d="m9 12 2 2 4-4" />
+            </svg>
+            Runs entirely in your browser. No bytes are uploaded — nothing leaves your machine.
+          </p>
+        </section>
+
+        <!-- step 2: playlists -->
+        <section class="card" id="playlists-card" hidden>
+          <div class="card-head">
+            <h2>Playlists <span class="muted" id="disc-label"></span></h2>
+            <div class="toolbar">
+              <button class="btn small" id="select-all" type="button">Select all</button>
+              <button class="btn small" id="clear-sel" type="button">Clear</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="col-check"></th>
+                  <th>#</th>
+                  <th>Playlist</th>
+                  <th>Group</th>
+                  <th>Length</th>
+                  <th class="num">Est. Size</th>
+                </tr>
+              </thead>
+              <tbody id="playlist-body"></tbody>
+            </table>
+          </div>
+          <div class="card-foot">
+            <span class="muted" id="sel-count">0 selected</span>
+            <button class="btn primary" id="scan-btn" type="button" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+              </svg>
+              Scan selected
+            </button>
+          </div>
+        </section>
+
+        <!-- step 3: progress -->
+        <section class="card progress-card" id="progress-card" hidden>
+          <div class="body">
+            <div class="progress-row">
+              <progress id="bar" max="100" value="0"></progress>
+              <span class="pct" id="pct">0%</span>
+              <button class="btn small" id="cancel-btn" type="button">Cancel</button>
+            </div>
+            <p class="progress-text" id="progress-text">Preparing…</p>
+          </div>
+        </section>
+
+        <!-- step 4: report -->
+        <section class="card report-card" id="report-card" hidden>
+          <div class="card-head">
+            <h2>Report</h2>
+            <div class="toolbar">
+              <button class="btn small" id="copy-btn" type="button">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+                </svg>
+                <span id="copy-label">Copy</span>
+              </button>
+              <button class="btn small" id="download-btn" type="button">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" x2="12" y1="15" y2="3" />
+                </svg>
+                Download
+              </button>
+            </div>
+          </div>
+          <pre class="report" id="report"></pre>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>bdinfo-rs · memory-safe Rust → WebAssembly</span>
+        <span class="foot-links">
+          <a href="https://github.com/agentjp/bdinfo-rs" target="_blank" rel="noopener">GitHub</a>
+          <span aria-hidden="true">·</span>
+          <a href="https://www.npmjs.com/package/@bdinfo-rs/wasm" target="_blank" rel="noopener">npm</a>
+          <span aria-hidden="true">·</span>
+          <a href="https://crates.io/crates/bdinfo-rs" target="_blank" rel="noopener">crates.io</a>
+        </span>
+      </footer>
+    </div>
+
+    <script type="module" src="./dist/demo.js"></script>
+  </body>
+</html>

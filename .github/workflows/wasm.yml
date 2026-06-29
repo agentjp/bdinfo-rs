@@ -1,0 +1,249 @@
+name: wasm
+
+# The PROPORTIONATE gate for the in-browser package (crates/bdinfo-rs-wasm +
+# web/), mirrored locally by scripts/wasm-compliance.ps1. NOT the core's
+# 100%-cov / 0-mutant bar (the parser core carries that, unchanged) — here the
+# bar is: it formats, lints clean (calibrated set, -D warnings), builds for
+# wasm32, the wasm-opt'd payload stays under the committed size budget, the TS is
+# type-clean + biome-clean, and the FULL measured scan renders BYTE-IDENTICAL to
+# this crate's own golden (rendered from the same Big Buck Bunny fixture the
+# native CLI e2e test scans) — proven in Node and in real headless browsers
+# (Chrome + Firefox via wasm-bindgen-test).
+#
+# This file is the GATE only (push to a branch + PRs) — deliberately NOT triggered
+# on tags, so its build caches are never a publishing-time cache-poisoning vector.
+# The tag-driven npm publish lives beside publish-crates.yml in publish-npm.yml.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NIGHTLY: nightly-2026-06-05 # keep in lockstep with scripts/_common.ps1 + ci.yml
+  NODE_VERSION: "26.4.0"      # the active Node line (26 -> LTS Oct 2026); watched by version-freshness.yml
+
+jobs:
+  gate:
+    name: wasm gate (build + size + parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The npm tarball ships web/ copies of the repo-root LICENSE + NOTICE (LGPL:
+      # the license text + use-notice must travel with the statically-linked
+      # code). They are MANUAL copies, so assert they still match root byte-for-byte
+      # and fail on drift (re-copy them). Cheap + dependency-free, so it runs first.
+      - name: LICENSE/NOTICE parity (web copies match the repo root)
+        shell: pwsh
+        run: |
+          foreach ($name in 'LICENSE', 'NOTICE') {
+            $root = (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash
+            $web = (Get-FileHash -LiteralPath "crates/bdinfo-rs-wasm/web/$name" -Algorithm SHA256).Hash
+            if ($root -ne $web) {
+              throw "$name drift: crates/bdinfo-rs-wasm/web/$name does not match the repo-root $name (re-copy it)."
+            }
+            Write-Host "ok: web/$name matches root"
+          }
+
+      - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt --component llvm-tools-preview
+
+      - name: Add the wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-wasm
+
+      - name: Install wasm-bindgen-cli (pinned to the crate version)
+        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+
+      # The pinned wasm-bindgen-cli MUST equal the wasm-bindgen version resolved in
+      # Cargo.lock — wasm-bindgen hard-errors on any crate<->CLI mismatch. A
+      # Dependabot bump of the wasm-bindgen crate moves the lockfile but not the
+      # `tool: wasm-bindgen-cli@X` pins (here + publish-npm.yml + deploy-pages.yml),
+      # so catch the drift early with the exact fix (or run scripts/wasm-sync.ps1).
+      - name: wasm-bindgen CLI matches the lockfile
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        run: |
+          $lock = [regex]::Match((Get-Content -Raw Cargo.lock), '(?m)^name = "wasm-bindgen"\r?\nversion = "([^"]+)"').Groups[1].Value
+          if (-not $lock) { throw 'could not read the wasm-bindgen version from Cargo.lock' }
+          $cli = [regex]::Match((& wasm-bindgen --version), '([0-9]+\.[0-9]+\.[0-9]+)').Value
+          Write-Host "Cargo.lock wasm-bindgen $lock / CLI $cli"
+          if ($lock -ne $cli) {
+            throw "wasm-bindgen mismatch: Cargo.lock=$lock CLI=$cli. Set wasm-bindgen-cli@$lock in wasm.yml + publish-npm.yml + deploy-pages.yml (or run: pwsh scripts/wasm-sync.ps1)."
+          }
+
+      - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
+        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        with:
+          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,cargo-deny,typos-cli
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the web toolchain (binaryen / biome / typescript / playwright-core)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm ci
+
+      - name: Unsafe tripwire (exactly three unsafe tokens in lib.rs)
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        # Three cfg-gated marker impls: `unsafe impl Send for WebFile` (folder
+        # backend) + `unsafe impl Send`/`Sync for WebIso` (the .iso backend —
+        # IsoReader requires Send + Sync, so the marker needs both impls).
+        run: |
+          $code = (Get-Content -LiteralPath src/lib.rs) -replace '//.*$', ''
+          $n = ([regex]::Matches(($code -join "`n"), '\bunsafe\b')).Count
+          if ($n -ne 3) { Write-Host "expected exactly 3 unsafe tokens (cfg-gated WebFile Send + WebIso Send/Sync), found $n"; exit 1 }
+          Write-Host "ok: $n unsafe tokens (cfg-gated WebFile Send + WebIso Send/Sync)"
+
+      - name: Format (nightly rustfmt)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo +${{ env.NIGHTLY }} fmt --check
+
+      - name: Typos
+        working-directory: crates/bdinfo-rs-wasm
+        run: typos
+
+      - name: Machete (unused deps)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo machete
+
+      - name: Shear (unused deps, AST)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo shear
+
+      # Supply-chain audit of the wasm crate's OWN dependency tree (js-sys /
+      # wasm-bindgen / web-sys — compiled into the shipped `.wasm` but invisible to
+      # the root audit, which `exclude`s this independent workspace). Uses the
+      # crate-local crates/bdinfo-rs-wasm/deny.toml, which mirrors the root
+      # allowlist + posture; cargo-deny discovers it from the target manifest's
+      # workspace root. Run from the repo root so the manifest path resolves.
+      - name: cargo-deny (wasm dep audit — advisories / licenses / bans / sources)
+        run: cargo deny --manifest-path crates/bdinfo-rs-wasm/Cargo.toml check
+
+      - name: Clippy (wasm32, calibrated, -D warnings)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo clippy --target wasm32-unknown-unknown --all-targets --release --locked -- -D warnings
+
+      - name: Clippy (native, -D warnings)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build (wasm32, release)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo build --target wasm32-unknown-unknown --release --locked
+
+      - name: Doc (wasm32, warnings = errors)
+        working-directory: crates/bdinfo-rs-wasm
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items --locked
+
+      - name: Coverage (llvm-cov nextest, native — Tier A 100% lines/regions/functions)
+        working-directory: crates/bdinfo-rs-wasm
+        shell: pwsh
+        env:
+          NIGHTLY: ${{ env.NIGHTLY }}
+        run: |
+          $json = Join-Path $env:RUNNER_TEMP 'wasm-cov.json'
+          cargo "+$env:NIGHTLY" llvm-cov nextest --locked --no-tests=fail --json --output-path $json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @((Get-Content -Raw $json | ConvertFrom-Json).data[0].files |
+              Where-Object { $_.filename -match 'bdinfo-rs-wasm[\\/]src[\\/]' })
+          if (-not $files.Count) { Write-Host 'no wasm src files in the coverage report'; exit 1 }
+          $fail = @()
+          foreach ($m in 'lines', 'regions', 'functions') {
+            $covered = (@($files | ForEach-Object { $_.summary.$m.covered }) | Measure-Object -Sum).Sum
+            $count = (@($files | ForEach-Object { $_.summary.$m.count }) | Measure-Object -Sum).Sum
+            $pct = if ($count) { 100.0 * $covered / $count } else { 100.0 }
+            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, $pct, $covered, $count)
+            if ($covered -lt $count) { $fail += "$m $covered/$count" }
+          }
+          if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
+
+      - name: Mutants (native — Tier A 0 missed)
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo mutants --in-place
+
+      - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run build
+
+      - name: Size budget (optimized .wasm)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent size
+
+      - name: biome check
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent check
+
+      - name: tsc --noEmit
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent typecheck
+
+      # Published type-surface guard, run on the just-built dist/ + pkg/: publint
+      # validates package.json's exports / files / types wiring, and attw packs the
+      # tarball and type-checks every resolution so the consumer-facing type
+      # surface can't silently regress. The package is intentionally ESM-only, so
+      # attw runs the `esm-only` profile — the default profile's node10 / CJS
+      # "failures" are inherent to ESM-only (a dynamic import is required from CJS),
+      # not a regression. Both float to latest like the other advisory linters.
+      - name: Published package type guard (publint + attw)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: |
+          npx --yes publint
+          npx --yes @arethetypeswrong/cli --pack --profile esm-only
+
+      - name: Node golden-parity (scan_files == golden, byte-exact)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent test:node
+
+      # Real-browser STREAMING path: the production Worker + FileReaderSync
+      # scan_files seam (web/test/parity.chrome.mjs) driven by playwright-core
+      # against the runner's system Google Chrome (preinstalled on ubuntu-latest),
+      # over the committed fixture handed in as in-browser File objects. Same
+      # measured scan as the Node parity step, but exercising the REAL
+      # off-main-thread Worker byte-offset reads end to end and asserting the report
+      # byte-identical to the golden — the only step that runs the shipped
+      # scan_files path in a browser (the wasm-bindgen-test steps below run
+      # tests/parity.rs via the wasm-bindgen harness, not the Worker seam).
+      - name: Real-browser Worker parity (Chrome — scan_files streaming)
+        working-directory: crates/bdinfo-rs-wasm/web
+        run: npm run --silent test:chrome
+
+      # Real-browser execution: the SAME measured-scan parity test (tests/parity.rs)
+      # run headless via wasm-bindgen-test. The runner picks the browser from the
+      # driver env var set for that step (geckodriver / chromedriver are preinstalled
+      # on ubuntu-latest; CHROMEWEBDRIVER / GECKOWEBDRIVER point at their dirs).
+      - name: wasm-bindgen-test (Firefox)
+        working-directory: crates/bdinfo-rs-wasm
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        # GECKOWEBDRIVER is a runner OS env var (the geckodriver dir), so it must be
+        # read in the shell ($GECKOWEBDRIVER) — the ${{ env.* }} context only sees
+        # workflow-level env: and resolves empty, yielding a bogus /geckodriver path.
+        run: GECKODRIVER="$GECKOWEBDRIVER/geckodriver" cargo test --target wasm32-unknown-unknown --release --locked --test parity
+
+      - name: wasm-bindgen-test (Chrome)
+        working-directory: crates/bdinfo-rs-wasm
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        # CHROMEWEBDRIVER is a runner OS env var (the chromedriver dir) — read it in
+        # the shell ($CHROMEWEBDRIVER); the ${{ env.* }} context resolves empty.
+        run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" cargo test --target wasm32-unknown-unknown --release --locked --test parity

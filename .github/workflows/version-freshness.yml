@@ -11,14 +11,31 @@ name: version-freshness
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
+#   - wasm-bindgen-cli (the `wasm-bindgen-cli@X` pin in wasm.yml + publish-npm.yml
+#     — must equal the wasm-bindgen crate it generates glue for; wasm-pack is not
+#     used), and binaryen (the `"binaryen"` pin in web/package.json — wasm-opt's
+#     version is coupled to the committed wasm size budget),
+#   - the Node version (the `NODE_VERSION`/`node-version` pins in wasm.yml +
+#     deploy-pages.yml + publish-npm.yml — the three must AGREE; the active line is
+#     26 -> LTS Oct 2026; checked for same-major patch drift AND for a newer
+#     even/LTS-bound line), the npm pin (`npm install -g npm@X` in publish-npm.yml
+#     — the staged-publishing floor), and wrangler (`npx wrangler@X` in
+#     deploy-pages.yml) — the last two are npx/setup-node inputs, NOT package.json
+#     deps, so Dependabot's npm scan cannot see them,
 #   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) — the ONE
 #     action SHA watched here: it pins a TAGLESS repo's `master`, so Dependabot
 #     (which bumps toward releases) can't move it, and zizmor's ref-version-mismatch
 #     is inline-ignored for it; without this nag nothing would tell us it drifted.
-# (Cargo deps/dev-deps and GitHub Action SHAs are already auto-bumped by
-# Dependabot — cargo + github-actions ecosystems — so they are deliberately NOT
-# re-checked here, EXCEPT the one tagless branch-pinned action noted above that
-# Dependabot cannot bump. The remaining gate tools — zizmor (a security linter, kept at
+# (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
+# binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
+# Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
+# NOT re-checked here, EXCEPT: the one tagless branch-pinned action noted above
+# that Dependabot cannot bump, the binaryen pin (re-checked anyway for its size-
+# budget coupling), the Node / npm / wrangler pins above (setup-node inputs and
+# npx invocations, invisible to Dependabot's package.json scan), and biome.json's
+# versioned schema URL (cross-checked against the bumped dep — Dependabot moves the
+# @biomejs/biome dep but leaves the schema URL behind). The remaining gate
+# tools — zizmor (a security linter, kept at
 # latest on purpose so new vuln checks land immediately), action-validator,
 # cargo-{machete,shear,semver-checks,llvm-cov,nextest,mutants,deny}, typos — are
 # installed at LATEST every run, so they self-update and have no pin to rot. The
@@ -80,6 +97,27 @@ jobs:
               $resp = Invoke-RestMethod -Uri "https://crates.io/api/v1/crates/$crate" `
                 -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
               return $resp.crate.max_stable_version
+            }
+            catch { return $null }
+          }
+
+          # The latest published version of an npm package (registry metadata), or
+          # $null on failure.
+          function Latest-Npm($pkg) {
+            try {
+              $resp = Invoke-RestMethod -Uri "https://registry.npmjs.org/$pkg/latest" `
+                -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
+              return $resp.version
+            }
+            catch { return $null }
+          }
+
+          # The Node release list (nodejs.org/dist/index.json, newest first), or
+          # $null on failure. Each entry carries `version` (`vX.Y.Z`), `npm`, `lts`.
+          function Get-NodeReleases() {
+            try {
+              return Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' `
+                -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
             }
             catch { return $null }
           }
@@ -163,6 +201,122 @@ jobs:
             $problems += "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
           }
 
+          # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
+          # The browser package builds with `wasm-bindgen-cli@X` (taiki-e); X MUST
+          # equal the wasm-bindgen crate it generates glue for, so it is pinned and
+          # nothing else watches it. (wasm-pack is NOT used — the build is plain
+          # cargo + the CLI + wasm-opt.) The two workflow pins must also agree.
+          $wbGate = Read-Pin '.github/workflows/wasm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          $wbPub  = Read-Pin '.github/workflows/publish-npm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          if (-not $wbGate) { throw 'No wasm-bindgen-cli pin in wasm.yml' }
+          if (-not $wbPub)  { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
+          if ($wbGate -ne $wbPub) {
+            $problems += "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` but publish-npm.yml has ``$wbPub`` — they must be identical"
+          }
+          $wbLatest = Latest-CratesIo 'wasm-bindgen-cli'
+          if (-not $wbLatest) {
+            $problems += '- could not query the latest wasm-bindgen-cli release (crates.io)'
+          } elseif ([version]$wbLatest -gt [version]$wbGate) {
+            $problems += "- wasm-bindgen-cli pin ``$wbGate`` (wasm.yml + publish-npm.yml) is behind the latest release ``$wbLatest`` — bump both pins AND the wasm-bindgen crate dep together"
+          }
+
+          # --- binaryen (wasm-opt): web/package.json pin vs npm ----------------
+          # wasm-opt -Oz shrinks the shipped payload; its version is coupled to the
+          # committed size budget (wasm-size-budget.txt), so it is pinned (the
+          # devDependency + lockfile) and watched here like the other size/format
+          # tools.
+          $binPin = Read-Pin 'crates/bdinfo-rs-wasm/web/package.json' '"binaryen"\s*:\s*"\^?([0-9.]+)"'
+          if (-not $binPin) { throw 'No binaryen pin in crates/bdinfo-rs-wasm/web/package.json' }
+          $binLatest = Latest-Npm 'binaryen'
+          if (-not $binLatest) {
+            $problems += '- could not query the latest binaryen release (npm)'
+          } elseif ([version]$binLatest -gt [version]$binPin) {
+            $problems += "- binaryen pin ``$binPin`` (web/package.json) is behind the latest release ``$binLatest`` — bump it, rebuild, and re-check the wasm size budget"
+          }
+
+          # --- biome: biome.json $schema must match the installed @biomejs/biome -
+          # Dependabot bumps the @biomejs/biome devDependency (npm ecosystem) but
+          # cannot touch biome.json's versioned schema URL, so the two silently
+          # drift on a biome bump. Cross-check them (a consistency check, like the
+          # cargo-dist / wasm-bindgen / Node pin agreements); freshness itself stays
+          # Dependabot's job. Read the resolved version from the lockfile, not the
+          # `^2` range. (`-AsHashtable`: npm lockfiles have a `""` root package key
+          # that plain ConvertFrom-Json rejects.)
+          $biomeSchema = Read-Pin 'crates/bdinfo-rs-wasm/web/biome.json' 'schemas/([0-9.]+)/schema'
+          if (-not $biomeSchema) { throw 'No schema-URL version in crates/bdinfo-rs-wasm/web/biome.json' }
+          $biomeLock = $null
+          try {
+            $biomeLock = (Get-Content -Raw 'crates/bdinfo-rs-wasm/web/package-lock.json' |
+                ConvertFrom-Json -AsHashtable).packages.'node_modules/@biomejs/biome'.version
+          } catch { }
+          if (-not $biomeLock) {
+            $problems += '- could not read the @biomejs/biome version from web/package-lock.json'
+          } elseif ($biomeSchema -ne $biomeLock) {
+            $problems += "- biome.json schema URL is pinned to ``$biomeSchema`` but the lockfile installs @biomejs/biome ``$biomeLock`` — bump the schema URL in biome.json to match"
+          }
+
+          # --- Node: the 3 workflow pins must AGREE, vs nodejs.org/dist ----------
+          # Pinned in wasm.yml (NODE_VERSION), deploy-pages.yml + publish-npm.yml
+          # (node-version); setup-node consumes these, so Dependabot never sees them.
+          # Two nags: same-major patch drift (stay current on the chosen line), and
+          # a newer even/LTS-bound major shipping (the cue to plan the next line, as
+          # 26 was adopted ahead of its Oct-2026 LTS). Odd "Current" majors never
+          # trigger the second nag — they are never LTS, so we do not chase them.
+          $nodeWasm = Read-Pin '.github/workflows/wasm.yml' 'NODE_VERSION:\s*"([0-9.]+)"'
+          $nodeDeploy = Read-Pin '.github/workflows/deploy-pages.yml' 'node-version:\s*"([0-9.]+)"'
+          $nodePub = Read-Pin '.github/workflows/publish-npm.yml' 'node-version:\s*"([0-9.]+)"'
+          if (-not $nodeWasm) { throw 'No NODE_VERSION pin in wasm.yml' }
+          if (-not $nodeDeploy) { throw 'No node-version pin in deploy-pages.yml' }
+          if (-not $nodePub) { throw 'No node-version pin in publish-npm.yml' }
+          if (($nodeWasm -ne $nodeDeploy) -or ($nodeWasm -ne $nodePub)) {
+            $problems += "- Node pin mismatch: wasm.yml ``$nodeWasm`` / deploy-pages.yml ``$nodeDeploy`` / publish-npm.yml ``$nodePub`` — they must be identical"
+          }
+          $nodePin = $nodeWasm
+          $nodePinMajor = [int]($nodePin.Split('.')[0])
+          $nodeLatestOnMajor = $null; $nodeNewestEven = $null
+          $nodeRel = Get-NodeReleases
+          if (-not $nodeRel) {
+            $problems += '- could not query the Node release list (nodejs.org/dist/index.json)'
+          } else {
+            $nodeParsed = @($nodeRel | ForEach-Object {
+                if ($_.version -match '^v(\d+)\.(\d+)\.(\d+)$') {
+                  [pscustomobject]@{ ver = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"; major = [int]$Matches[1] }
+                }
+              })
+            $nodeLatestOnMajor = (@($nodeParsed | Where-Object { $_.major -eq $nodePinMajor }) | Sort-Object ver -Descending | Select-Object -First 1).ver
+            if ($nodeLatestOnMajor -and [version]$nodePin -lt $nodeLatestOnMajor) {
+              $problems += "- Node pin ``$nodePin`` (wasm.yml + deploy-pages.yml + publish-npm.yml) is behind the latest $nodePinMajor.x release ``$nodeLatestOnMajor`` — bump all three pins together"
+            }
+            $nodeNewestEven = (@($nodeParsed | Where-Object { $_.major % 2 -eq 0 }) | Sort-Object major -Descending | Select-Object -First 1).major
+            if ($nodeNewestEven -and $nodeNewestEven -gt $nodePinMajor) {
+              $problems += "- a newer even (LTS-bound) Node line ``$nodeNewestEven.x`` has shipped; the pins are on ``$nodePinMajor.x`` — plan the move (update all three pins together)"
+            }
+          }
+
+          # --- npm: publish-npm.yml `npm install -g npm@X` vs the npm registry ----
+          # An `npm install -g` line, not a package.json dep, so Dependabot is blind
+          # to it. The staged-publishing floor; pinned so the publish stays on a
+          # deterministic npm independent of which npm a given Node 26.x bundles.
+          $npmPin = Read-Pin '.github/workflows/publish-npm.yml' 'npm install -g npm@([0-9.]+)'
+          if (-not $npmPin) { throw 'No `npm install -g npm@<version>` pin in publish-npm.yml' }
+          $npmLatest = Latest-Npm 'npm'
+          if (-not $npmLatest) {
+            $problems += '- could not query the latest npm release (npm registry)'
+          } elseif ([version]$npmLatest -gt [version]$npmPin) {
+            $problems += "- npm pin ``$npmPin`` (publish-npm.yml) is behind the latest release ``$npmLatest``"
+          }
+
+          # --- wrangler: deploy-pages.yml `npx wrangler@X` vs the npm registry ----
+          # An npx invocation (not a package.json dep), so Dependabot can't bump it.
+          $wranglerPin = Read-Pin '.github/workflows/deploy-pages.yml' 'wrangler@([0-9.]+)'
+          if (-not $wranglerPin) { throw 'No `wrangler@<version>` pin in deploy-pages.yml' }
+          $wranglerLatest = Latest-Npm 'wrangler'
+          if (-not $wranglerLatest) {
+            $problems += '- could not query the latest wrangler release (npm)'
+          } elseif ([version]$wranglerLatest -gt [version]$wranglerPin) {
+            $problems += "- wrangler pin ``$wranglerPin`` (deploy-pages.yml) is behind the latest release ``$wranglerLatest``"
+          }
+
           # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
           # SHA-pinned to a TAGLESS repo's master branch, so Dependabot can't bump it
           # (no release to target) and zizmor's ref-version-mismatch is inline-ignored
@@ -179,7 +333,7 @@ jobs:
           $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
           $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  brew: $brewPinShort (head $brewHeadShort)"
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $title = 'Pinned versions are stale'
