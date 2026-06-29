@@ -10,10 +10,10 @@ statistics) entirely in the browser, off the main thread in a Web Worker. **No
 bytes leave the page**, and a multi-GB `*.m2ts` never has to fit in memory — the
 files are read synchronously at byte offsets via `FileReaderSync`.
 
-The rendered report is byte-for-byte the classic disc report the native CLI
-writes — pinned to its own golden, rendered from the same Big Buck Bunny fixture
-the native end-to-end test scans and held byte-identical across native, Node, and
-headless Chrome and Firefox.
+The rendered report is byte-for-byte the classic disc report, pinned to its own
+golden — rendered from the same Big Buck Bunny fixture the native end-to-end test
+scans, and held byte-identical across native, Node, and headless Chrome and
+Firefox.
 
 ## Install
 

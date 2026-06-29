@@ -343,7 +343,7 @@ const report = await analyze(picked, ({ file, done, total }) => {
 console.log(report); // the classic BDInfo-style disc report
 ```
 
-The package source lives in `crates/bdinfo-rs-wasm/` (`web/demo.html` is a complete
+The package source lives in `crates/bdinfo-rs-wasm/` (`web/index.html` is a complete
 vanilla example).
 
 ## 🔒 Quality & security
