@@ -1021,10 +1021,7 @@ pub fn run_iso_report(reader: Box<dyn IsoReader>) -> String {
 #[wasm_bindgen]
 #[must_use]
 pub fn scan_report(data: &[u8]) -> String {
-    let report = run_report(data);
-    #[cfg(target_arch = "wasm32")]
-    web_sys::console::log_1(&format!("bdinfo-rs-wasm: rendered {} bytes", report.len()).into());
-    report
+    run_report(data)
 }
 
 /// The Phase 2 streaming entry point: hand it a `webkitdirectory`-selected BDMV

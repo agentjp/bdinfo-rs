@@ -21,9 +21,11 @@ Firefox.
 npm i @bdinfo-rs/wasm
 ```
 
-The published payload is **~360 KB of WebAssembly + ~5 KB of JS glue**, fetched
-lazily by the scan Worker — the main-thread entry is a few KB, and nothing else
-loads until you call `analyze` or `listPlaylists`.
+The published payload is **~360 KB of WebAssembly + ~22 KB of JS**. Only the
+main-thread entry you import (~4 KB) loads up front; the scan Worker (~2 KB) and
+the wasm-bindgen glue (~17 KB) that hosts the `.wasm` are fetched lazily inside
+the Worker, and nothing past the entry loads at all until you call `analyze` or
+`listPlaylists`.
 
 ## Usage
 
@@ -85,8 +87,14 @@ pattern. Any bundler that understands it works out of the box:
 - **Native ES modules** (no bundler — served straight from the package on a
   static host or via an import map) — works as published.
 
-If your bundler can't follow that pattern, host `dist/worker.js` and
-`pkg/bdinfo_rs_wasm_bg.wasm` yourself and pass the worker URL explicitly:
+If your bundler can't follow that pattern, host the Worker yourself and pass its
+URL explicitly. The package's `exports` map deliberately keeps the internals
+private (`dist/worker.js` and `pkg/` are not importable subpaths), so copy
+`dist/worker.js` **together with the `pkg/` directory** out of `node_modules`
+into your own source, preserving their relative layout — `worker.js` loads the
+wasm-bindgen glue and `.wasm` via `import "../pkg/bdinfo_rs_wasm.js"`, so `pkg/`
+must stay one level below it. Then pass the URL your bundler produces for the
+copied worker:
 
 ```ts
 import workerUrl from "./worker.js?worker&url"; // however your bundler exposes it
