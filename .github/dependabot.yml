@@ -18,6 +18,15 @@ updates:
     groups:
       cargo-dependencies:
         patterns: ["*"]
+    # Bump INDIRECT (transitive) deps too, not just the direct ones named in
+    # Cargo.toml. Dependabot's default version-update policy is direct-only
+    # (transitive deps move solely on a security advisory), so routine
+    # transitive-only Cargo.lock patch bumps (quote/syn/cc/memchr/wasip2…) drift
+    # silently between direct-dep PRs — neither this nor version-freshness.yml
+    # (which delegates cargo to Dependabot) would catch them. `all` = direct +
+    # indirect, folded into the same grouped PR.
+    allow:
+      - dependency-type: "all"
     labels: [dependencies]
     # master is squash-merged and the conventional gate (conventional.yml) lints
     # the PR title AND every commit, so Dependabot's default "Bump ..." subject is
@@ -54,6 +63,11 @@ updates:
     groups:
       wasm-cargo-dependencies:
         patterns: ["*"]
+    # Transitive deps too (see the root cargo entry): direct-only is the default,
+    # so the wasm-bindgen / js-sys / web-sys transitive tree would otherwise miss
+    # routine patch bumps. `all` = direct + indirect, in the same grouped PR.
+    allow:
+      - dependency-type: "all"
     labels: [dependencies]
     commit-message:
       prefix: build
