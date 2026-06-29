@@ -232,12 +232,15 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-          GECKODRIVER: ${{ env.GECKOWEBDRIVER }}/geckodriver
-        run: cargo test --target wasm32-unknown-unknown --release --locked --test parity
+        # GECKOWEBDRIVER is a runner OS env var (the geckodriver dir), so it must be
+        # read in the shell ($GECKOWEBDRIVER) — the ${{ env.* }} context only sees
+        # workflow-level env: and resolves empty, yielding a bogus /geckodriver path.
+        run: GECKODRIVER="$GECKOWEBDRIVER/geckodriver" cargo test --target wasm32-unknown-unknown --release --locked --test parity
 
       - name: wasm-bindgen-test (Chrome)
         working-directory: crates/bdinfo-rs-wasm
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-          CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
-        run: cargo test --target wasm32-unknown-unknown --release --locked --test parity
+        # CHROMEWEBDRIVER is a runner OS env var (the chromedriver dir) — read it in
+        # the shell ($CHROMEWEBDRIVER); the ${{ env.* }} context resolves empty.
+        run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" cargo test --target wasm32-unknown-unknown --release --locked --test parity
