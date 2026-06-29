@@ -3,7 +3,7 @@
   "version": "1.0.1",
   "type": "module",
   "description": "In-browser Blu-ray disc analyzer — the bdinfo-rs measured scan compiled to WebAssembly, run off the main thread in a Web Worker over a webkitdirectory-picked BDMV folder.",
-  "license": "LGPL-2.1-only",
+  "license": "LGPL-2.1-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/agentjp/bdinfo-rs.git",

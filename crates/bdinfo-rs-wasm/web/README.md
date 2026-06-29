@@ -115,4 +115,4 @@ Web Worker — `analyze` handles that for you.
 
 ## License
 
-LGPL-2.1-only. The full license text ships in the package (`LICENSE`).
+LGPL-2.1-or-later. The full license text ships in the package (`LICENSE`).

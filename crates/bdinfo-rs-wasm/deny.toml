@@ -33,17 +33,17 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-# Our own crates are LGPL-2.1 (the browser shim + the core lib it links in). These
+# Our own crates are LGPL-2.1-or-later (the browser shim + the core lib it links in). These
 # scoped exceptions permit LGPL ONLY for our crates; an LGPL *dependency* still
 # fails. (The root deny.toml carries the same shape for bdinfo-rs-core/bdinfo-rs;
 # this crate's tree contains bdinfo-rs-wasm + bdinfo-rs-core, not the CLI binary.)
 [[licenses.exceptions]]
 name = "bdinfo-rs-wasm"
-allow = ["LGPL-2.1-only"]
+allow = ["LGPL-2.1-or-later"]
 
 [[licenses.exceptions]]
 name = "bdinfo-rs-core"
-allow = ["LGPL-2.1-only"]
+allow = ["LGPL-2.1-or-later"]
 
 [bans]
 # The transitive wasm-bindgen / web-sys / wasm-bindgen-test trees legitimately
