@@ -1,9 +1,12 @@
 # Cloudflare Pages headers for the deployed demo (assembled into site/ by
-# deploy-pages.yml). Cloudflare already serves .wasm as application/wasm; this is
-# belt-and-suspenders for WebAssembly.instantiateStreaming plus a long immutable
-# cache on the content-hashed wasm. No COOP/COEP: the scan is single-threaded
-# FileReaderSync in a Worker, not SharedArrayBuffer, so cross-origin isolation is
-# neither needed nor wanted (it would break cross-origin loads for no benefit).
+# deploy-pages.yml). Cloudflare already serves .wasm as application/wasm; the
+# Content-Type here is belt-and-suspenders for WebAssembly.instantiateStreaming.
+# The wasm is NOT content-hashed (wasm-bindgen --out-name emits a stable
+# bdinfo_rs_wasm_bg.wasm), so it must REVALIDATE: a long immutable cache would pin
+# a redeploy's fresh glue against a year-stale wasm (the .js glue revalidates but
+# the wasm would not). No COOP/COEP: the scan is single-threaded FileReaderSync in
+# a Worker, not SharedArrayBuffer, so cross-origin isolation is neither needed nor
+# wanted (it would break cross-origin loads for no benefit).
 /*.wasm
   Content-Type: application/wasm
-  Cache-Control: public, max-age=31536000, immutable
+  Cache-Control: public, max-age=0, must-revalidate
