@@ -37,7 +37,7 @@
   "files": [
     "dist",
     "pkg",
-    "demo.html",
+    "index.html",
     "README.md",
     "LICENSE"
   ],
