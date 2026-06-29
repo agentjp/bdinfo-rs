@@ -70,6 +70,14 @@ export interface AnalyzeOptions {
    * {@link listPlaylists}.
    */
   selection?: string[];
+  /**
+   * An optional {@link AbortSignal} that cancels an in-progress measured scan
+   * ({@link analyze} / {@link analyzeIso}): when it aborts, the scan Worker is
+   * terminated and the returned promise rejects with the signal's reason (an
+   * `AbortError`). Ignored by {@link listPlaylists} — the structural scan is
+   * fast enough not to need it.
+   */
+  signal?: AbortSignal;
 }
 
 type WorkerMessage =
@@ -91,6 +99,18 @@ function payload(files: BdmvFile[]): { paths: string[]; files: File[] } {
     paths: files.map((entry) => entry.path),
     files: files.map((entry) => entry.file),
   };
+}
+
+/**
+ * The reject reason for a cancelled scan. Always an `AbortError` (the signal's
+ * own reason when present, else a fresh one), so callers can tell a user cancel
+ * from a real scan failure by its `name`.
+ */
+function cancelledError(signal?: AbortSignal): DOMException {
+  const reason = signal?.reason;
+  return reason instanceof DOMException && reason.name === "AbortError"
+    ? reason
+    : new DOMException("scan cancelled", "AbortError");
 }
 
 /**
@@ -173,7 +193,20 @@ export function analyze(
   options?: AnalyzeOptions,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      reject(cancelledError(signal));
+      return;
+    }
     const worker = spawnWorker(options);
+
+    // Cancel = terminate the Worker (its normal teardown path), just earlier.
+    const onAbort = () => {
+      worker.terminate();
+      reject(cancelledError(signal));
+    };
+    const unlisten = () => signal?.removeEventListener("abort", onAbort);
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
       const message = event.data;
@@ -182,10 +215,12 @@ export function analyze(
           onProgress?.(message);
           break;
         case "done":
+          unlisten();
           worker.terminate();
           resolve(message.report);
           break;
         case "error":
+          unlisten();
           worker.terminate();
           reject(new Error(message.message));
           break;
@@ -195,6 +230,7 @@ export function analyze(
     };
 
     worker.onerror = (event: ErrorEvent) => {
+      unlisten();
       worker.terminate();
       reject(new Error(event.message || "scan worker failed"));
     };
@@ -219,7 +255,20 @@ export function analyzeIso(
   options?: AnalyzeOptions,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      reject(cancelledError(signal));
+      return;
+    }
     const worker = spawnWorker(options);
+
+    // Cancel = terminate the Worker (its normal teardown path), just earlier.
+    const onAbort = () => {
+      worker.terminate();
+      reject(cancelledError(signal));
+    };
+    const unlisten = () => signal?.removeEventListener("abort", onAbort);
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
       const message = event.data;
@@ -228,10 +277,12 @@ export function analyzeIso(
           onProgress?.(message);
           break;
         case "done":
+          unlisten();
           worker.terminate();
           resolve(message.report);
           break;
         case "error":
+          unlisten();
           worker.terminate();
           reject(new Error(message.message));
           break;
@@ -241,6 +292,7 @@ export function analyzeIso(
     };
 
     worker.onerror = (event: ErrorEvent) => {
+      unlisten();
       worker.terminate();
       reject(new Error(event.message || "scan worker failed"));
     };

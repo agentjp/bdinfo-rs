@@ -36,6 +36,7 @@ const progressCard = el("progress-card");
 const bar = el<HTMLProgressElement>("bar");
 const pctLabel = el("pct");
 const progressText = el("progress-text");
+const cancelBtn = el<HTMLButtonElement>("cancel-btn");
 const reportCard = el("report-card");
 const reportPre = el("report");
 const copyBtn = el<HTMLButtonElement>("copy-btn");
@@ -54,6 +55,8 @@ type Source =
 let source: Source | null = null;
 let reportText = "";
 let discName = "disc";
+/** Aborts the in-progress measured scan; null when no scan is running. */
+let scanController: AbortController | null = null;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -299,6 +302,8 @@ async function runScan(): Promise<void> {
     return;
   }
   const src = source;
+  const controller = new AbortController();
+  scanController = controller;
   hide(errorBox);
   hide(reportCard);
   show(progressCard);
@@ -309,15 +314,22 @@ async function runScan(): Promise<void> {
     setProgress(percent, `Scanning ${file}`);
   };
   try {
+    const options = { selection, signal: controller.signal };
     reportText =
       src.kind === "folder"
-        ? await analyze(src.files, onProgress, { selection })
-        : await analyzeIso(src.file, onProgress, { selection });
+        ? await analyze(src.files, onProgress, options)
+        : await analyzeIso(src.file, onProgress, options);
     setProgress(100, "Done");
     showReport(reportText);
   } catch (error) {
-    showError(errMessage(error));
+    // A cancel is a user action, not a failure — reset quietly, no error shown.
+    const cancelled =
+      controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
+    if (!cancelled) {
+      showError(errMessage(error));
+    }
   } finally {
+    scanController = null;
     hide(progressCard);
     scanBtn.disabled = selectedNames().length === 0;
   }
@@ -406,6 +418,9 @@ clearBtn.addEventListener("click", () => {
 });
 scanBtn.addEventListener("click", () => {
   void runScan();
+});
+cancelBtn.addEventListener("click", () => {
+  scanController?.abort();
 });
 copyBtn.addEventListener("click", () => {
   void copyReport();
