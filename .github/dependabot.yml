@@ -88,3 +88,22 @@ updates:
     commit-message:
       prefix: build
       include: scope
+
+  # The fuzz harness (fuzz/) is ALSO an independent workspace (`exclude`d from the
+  # root, its own Cargo.lock), so the `/` cargo entry never sees libfuzzer-sys / arbitrary
+  # and their transitive tree. These never ship (dev-only adversarial amplifier) but
+  # still want advisory coverage + freshness like the wasm crate. `build(deps):`
+  # (no-bump) keeps the squash subject + commit conventional.
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: daily
+    groups:
+      fuzz-cargo-dependencies:
+        patterns: ["*"]
+    allow:
+      - dependency-type: "all"
+    labels: [dependencies, fuzz]
+    commit-message:
+      prefix: build
+      include: scope
