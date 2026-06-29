@@ -69,7 +69,7 @@ bin-dir = "{ bin }{ binary-ext }"
 # auto-generates a MINIMAL header-only copyright (no `Files:` stanza), which license
 # scanners/registries (e.g. Cloudsmith) skip → "no license data" (the .rpm is fine
 # because RPM has a first-class `License:` tag). So we ship our own complete, machine-
-# readable `debian/copyright` (header + `Files: *` `License: LGPL-2.1-only` stanza +
+# readable `debian/copyright` (header + `Files: *` `License: LGPL-2.1-or-later` stanza +
 # the license paragraph) as the canonical-path asset; cargo-deb uses it verbatim
 # instead of generating one. The path is resolved relative to this crate dir.
 [package.metadata.deb]

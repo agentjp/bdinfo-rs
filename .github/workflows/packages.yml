@@ -196,7 +196,7 @@ jobs:
           # Debian carries NO License field in control metadata — the license lives only in
           # the DEP-5 copyright, which is what license scanners (Cloudsmith) read. Assert the
           # copyright installed AND carries the machine-readable License short-name.
-          grep -q '^License: LGPL-2.1-only' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
+          grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
           echo "${{ matrix.triple }} .deb: installs, runs, and ships man + completions + DEP-5 copyright"
 
       - name: Upload the .deb to the release

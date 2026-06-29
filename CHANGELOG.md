@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [Unreleased]
+
+### Changed
+
+* **License:** relicensed to `LGPL-2.1-or-later` (previously declared as the single
+  LGPL 2.1 version only), matching the upstream BDInfo per-file source headers
+  ("either version 2.1 of the License, or (at your option) any later version"). This
+  is a documentation/metadata correction: no code changes, and downstream terms are
+  unchanged except that the "or later" option is now explicitly granted.
+
+### Added
+
+* **Attribution:** added a root `NOTICE` and clarified the README to record that
+  bdinfo-rs is a Rust port of, and derivative work based on, BDInfo (© 2010 Cinema
+  Squid, LGPL-2.1-or-later) — with the report/analysis baseline ported from
+  [UniqProject/BDInfo](https://github.com/UniqProject/BDInfo) and the console flow
+  following [tetrahydroc/BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI).
+
 ## [v1.0.1](https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...218dab463b7973086ae318e8d38da945787dd458) (2026-06-22)
 
 ### Features

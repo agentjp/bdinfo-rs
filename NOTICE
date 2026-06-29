@@ -1,0 +1,37 @@
+bdinfo-rs
+=========
+
+Copyright (C) 2026 bdinfo-rs contributors
+Licensed under the GNU Lesser General Public License, version 2.1 or (at your
+option) any later version (LGPL-2.1-or-later). See the LICENSE file for the full
+license text.
+
+This product is a derivative work
+---------------------------------
+
+bdinfo-rs is a Rust port of, and derivative work based on, BDInfo:
+
+  * BDInfo — Blu-ray Video and Audio Analysis Tool
+    Copyright (C) 2010 Cinema Squid
+    Licensed under the GNU Lesser General Public License, version 2.1 or (at
+    your option) any later version.
+
+    BDInfo's per-file source headers grant "the GNU Lesser General Public
+    License as published by the Free Software Foundation; either version 2.1 of
+    the License, or (at your option) any later version" — which is why bdinfo-rs
+    is distributed as LGPL-2.1-or-later.
+
+Upstream references
+-------------------
+
+  * UniqProject/BDInfo — https://github.com/UniqProject/BDInfo
+    The classic .NET BDInfo. bdinfo-rs's disc report and stream/codec analysis
+    were ported from this implementation as the baseline.
+
+  * tetrahydroc/BDInfoCLI — https://github.com/tetrahydroc/BDInfoCLI
+    A command-line build of BDInfo. bdinfo-rs's console flow (the playlist
+    selection table, the interactive picker, and the report epilogue) follows
+    this reference.
+
+bdinfo-rs is not affiliated with or endorsed by BDInfo, Cinema Squid,
+UniqProject, or tetrahydroc.

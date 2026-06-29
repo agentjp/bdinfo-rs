@@ -30,4 +30,4 @@ bdinfo-rs /path/to/bluray-folder --whole    # scan everything the table lists
 
 ## License
 
-LGPL-2.1-only.
+LGPL-2.1-or-later.
