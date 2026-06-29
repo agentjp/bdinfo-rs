@@ -27,6 +27,9 @@ on:
     branches: [master]
     paths:
       - crates/bdinfo-rs-wasm/**
+      # The wasm crate is a thin shim over bdinfo-rs-core (renderer, codecs,
+      # MPLS/CLPI/M2TS) — a core change alters the demo's output, so redeploy on it.
+      - crates/bdinfo-rs-core/**
 
 permissions:
   contents: read
@@ -78,12 +81,13 @@ jobs:
           Get-ChildItem -Recurse $site | ForEach-Object { $_.FullName }
 
       # Pages Direct Upload of the prebuilt site/. wrangler reads the token +
-      # account id from the env below; pinned via npx so no wrangler devDependency
-      # bloats the published package. --branch=master makes this the production
-      # deployment (the project's production branch must be `master`).
+      # account id from the env below; pinned to an EXACT version because it runs
+      # with the deploy token (the repo's pin-everything posture — bump it
+      # deliberately). --branch=master makes this the production deployment (the
+      # project's production branch must be `master`).
       - name: Deploy to Cloudflare Pages (Direct Upload)
         working-directory: crates/bdinfo-rs-wasm/web
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@4 pages deploy site --project-name=bdinfo-rs --branch=master
+        run: npx --yes wrangler@4.105.0 pages deploy site --project-name=bdinfo-rs --branch=master

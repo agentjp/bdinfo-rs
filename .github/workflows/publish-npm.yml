@@ -108,6 +108,17 @@ jobs:
           if ($base -ne $ws) { throw "Tag $tag (base $base) does not match workspace version $ws" }
           $pkg = (Get-Content crates/bdinfo-rs-wasm/web/package.json -Raw | ConvertFrom-Json).version
           if ($base -ne $pkg) { throw "Tag $tag (base $base) does not match web/package.json version $pkg" }
+          # The wasm crate is an excluded workspace with a literal [package] version
+          # (not version.workspace), so guard it too — `cargo set-version --workspace`
+          # does not reach it and a drifted literal would otherwise ship unnoticed.
+          $inPkg = $false; $wasm = $null
+          foreach ($line in (Get-Content crates/bdinfo-rs-wasm/Cargo.toml)) {
+            if ($line -match '^\[package\]') { $inPkg = $true; continue }
+            if ($line -match '^\[') { $inPkg = $false; continue }
+            if ($inPkg -and $line -match '^version\s*=\s*"([^"]+)"') { $wasm = $Matches[1]; break }
+          }
+          if (-not $wasm) { throw 'No [package] version in crates/bdinfo-rs-wasm/Cargo.toml' }
+          if ($base -ne $wasm) { throw "Tag $tag (base $base) does not match wasm crate version $wasm" }
 
       - name: Install the web toolchain
         working-directory: crates/bdinfo-rs-wasm/web
