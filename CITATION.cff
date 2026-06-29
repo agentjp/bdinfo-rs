@@ -10,6 +10,6 @@ authors:
     email: agent@fastmail.jp
 version: 1.0.0
 date-released: "2026-06-19"
-license: LGPL-2.1-only
+license: LGPL-2.1-or-later
 repository-code: https://github.com/agentjp/bdinfo-rs
 url: https://github.com/agentjp/bdinfo-rs

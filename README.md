@@ -13,7 +13,7 @@
 <br>
 [![release](https://img.shields.io/github/v/release/agentjp/bdinfo-rs?include_prereleases&sort=semver)](https://github.com/agentjp/bdinfo-rs/releases)
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue)](rust-toolchain.toml)
-[![license](https://img.shields.io/badge/license-LGPL--2.1--only-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 
 [Features](#-features) · [Install](#-installation) · [Usage](#-usage) · [Performance](#-performance) · [Footprint](#-footprint) · [Library](#-library) · [Security](#-quality--security)
@@ -358,8 +358,9 @@ intended behavior — not a compatibility regression.
 fields where bdinfo-rs and BDInfo disagree, and which ones you'll actually see on a normal
 disc. (Also summarized in the [changelog](CHANGELOG.md#differences-from-bdinfo).)
 
-bdinfo-rs is an independent reimplementation, not affiliated with or endorsed by BDInfo
-([UniqProject](https://github.com/UniqProject/BDInfo)).
+bdinfo-rs is derived from BDInfo — a Rust port of it — and is not affiliated with or
+endorsed by BDInfo ([UniqProject](https://github.com/UniqProject/BDInfo)). See
+[NOTICE](NOTICE) for upstream attribution.
 
 ## 🧬 Lineage
 
@@ -378,5 +379,7 @@ each layer:
 
 ## 📄 License
 
-[LGPL-2.1-only](LICENSE). The library can be used from applications under other licenses;
-changes to bdinfo-rs itself must be shared under the same terms.
+[LGPL-2.1-or-later](LICENSE). The library can be used from applications under other licenses;
+changes to bdinfo-rs itself must be shared under the same terms. bdinfo-rs is a derivative
+work of BDInfo (© 2010 Cinema Squid), also LGPL-2.1-or-later — see [NOTICE](NOTICE) for
+upstream attribution.

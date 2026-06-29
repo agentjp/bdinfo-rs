@@ -20,7 +20,7 @@ version = "1.0.1"
 edition = "2024"
 rust-version = "1.96"
 # LGPL (unlike GPL) permits use from other applications.
-license = "LGPL-2.1-only"
+license = "LGPL-2.1-or-later"
 authors = ["bdinfo-rs contributors"]
 repository = "https://github.com/agentjp/bdinfo-rs"
 homepage = "https://github.com/agentjp/bdinfo-rs"

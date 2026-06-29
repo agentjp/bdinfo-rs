@@ -19,4 +19,4 @@ cargo add bdinfo-rs-core
 
 ## License
 
-LGPL-2.1-only.
+LGPL-2.1-or-later.

@@ -35,16 +35,16 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-# Our own crates are LGPL-2.1. The allowlist above is for
+# Our own crates are LGPL-2.1-or-later. The allowlist above is for
 # dependencies (must be permissive); these scoped exceptions permit LGPL ONLY for
 # our crates, so an LGPL *dependency* would still be flagged.
 [[licenses.exceptions]]
 name = "bdinfo-rs-core"
-allow = ["LGPL-2.1-only"]
+allow = ["LGPL-2.1-or-later"]
 
 [[licenses.exceptions]]
 name = "bdinfo-rs"
-allow = ["LGPL-2.1-only"]
+allow = ["LGPL-2.1-or-later"]
 
 [bans]
 # A duplicate dependency tree (the same crate at two versions) bloats the binary

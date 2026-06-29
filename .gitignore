@@ -17,6 +17,7 @@
 # corpus-replay / extended-fuzz jobs in fuzz.yml).
 /scripts/
 /CLAUDE.md
+/.claude/
 
 # Mutation / coverage run output (regenerable).
 mutants.out/

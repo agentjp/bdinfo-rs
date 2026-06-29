@@ -171,7 +171,7 @@ Open a PR from a branch — never push to master, which is protected. Keep the b
 Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
 
 By contributing you agree that your contributions are licensed under the project's
-[LGPL-2.1-only](LICENSE) license.
+[LGPL-2.1-or-later](LICENSE) license.
 
 ## Cutting a release (maintainers)
 
