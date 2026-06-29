@@ -2,8 +2,13 @@
   "name": "@bdinfo-rs/wasm",
   "version": "1.0.1",
   "type": "module",
+  "sideEffects": [
+    "./dist/worker.js",
+    "./pkg/*.js"
+  ],
   "description": "In-browser Blu-ray disc analyzer — the bdinfo-rs measured scan compiled to WebAssembly, run off the main thread in a Web Worker over a webkitdirectory-picked BDMV folder.",
   "license": "LGPL-2.1-or-later",
+  "author": "bdinfo-rs contributors (https://github.com/agentjp/bdinfo-rs)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/agentjp/bdinfo-rs.git",
@@ -15,8 +20,12 @@
     "blu-ray",
     "bdinfo",
     "bdmv",
+    "m2ts",
     "wasm",
-    "webassembly"
+    "webassembly",
+    "browser",
+    "client-side",
+    "web-worker"
   ],
   "publishConfig": {
     "access": "public",
@@ -32,7 +41,8 @@
     "./wasm": {
       "types": "./pkg/bdinfo_rs_wasm.d.ts",
       "import": "./pkg/bdinfo_rs_wasm.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist/analyze.js",
@@ -40,7 +50,8 @@
     "dist/worker.js",
     "pkg",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "build:wasm": "node build.mjs",

@@ -1,5 +1,8 @@
 # @bdinfo-rs/wasm
 
+[![npm](https://img.shields.io/npm/v/@bdinfo-rs/wasm)](https://www.npmjs.com/package/@bdinfo-rs/wasm)
+[![license](https://img.shields.io/npm/l/@bdinfo-rs/wasm)](./LICENSE)
+
 In-browser [Blu-ray disc analyzer](https://github.com/agentjp/bdinfo-rs) — the
 **bdinfo-rs** measured scan compiled to WebAssembly. Point it at a disc's `BDMV`
 folder and it runs the full measured scan (M2TS demux + per-stream/per-chapter
@@ -11,6 +14,16 @@ The rendered report is byte-for-byte the classic disc report the native CLI
 writes — pinned to its own golden, rendered from the same Big Buck Bunny fixture
 the native end-to-end test scans and held byte-identical across native, Node, and
 headless Chrome and Firefox.
+
+## Install
+
+```sh
+npm i @bdinfo-rs/wasm
+```
+
+The published payload is **~360 KB of WebAssembly + ~5 KB of JS glue**, fetched
+lazily by the scan Worker — the main-thread entry is a few KB, and nothing else
+loads until you call `analyze` or `listPlaylists`.
 
 ## Usage
 
@@ -115,4 +128,14 @@ Web Worker — `analyze` handles that for you.
 
 ## License
 
-LGPL-2.1-or-later. The full license text ships in the package (`LICENSE`).
+**LGPL-2.1-or-later.** This package is a single WebAssembly module that
+statically links `bdinfo-rs-core` (itself a Rust port of, and derivative work
+based on, [BDInfo](https://github.com/UniqProject/BDInfo) © 2010 Cinema Squid),
+so the whole package is covered by the GNU Lesser General Public License,
+version 2.1 or (at your option) any later version.
+
+The tarball ships the full license text (`LICENSE`) and the attribution and
+derivative-work notice (`NOTICE`). The **complete corresponding source** for the
+linked code is the public repository at the matching release tag —
+`https://github.com/agentjp/bdinfo-rs` at `v<this package's version>` — from
+which the `.wasm` is built (`crates/bdinfo-rs-wasm`).
