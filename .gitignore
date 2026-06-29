@@ -10,6 +10,11 @@
 # `dist build`.
 /release-assets/
 
+# dist extra-artifacts staging: build-linux-packages.sh writes the .deb/.rpm here
+# for dist to attach to the release; a CI-only dir that may appear after a local
+# `dist build`.
+/dist-extra/
+
 # Local development plumbing (kept on disk, not published).
 # NOTE: deny.toml, supply-chain/, clippy.toml, typos.toml, .config/nextest.toml,
 # .cargo/mutants.toml, and fuzz/ ARE tracked — CI reads them (cargo deny + vet +
