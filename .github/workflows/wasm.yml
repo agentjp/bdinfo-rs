@@ -39,6 +39,22 @@ jobs:
         with:
           persist-credentials: false
 
+      # The npm tarball ships web/ copies of the repo-root LICENSE + NOTICE (LGPL:
+      # the license text + use-notice must travel with the statically-linked
+      # code). They are MANUAL copies, so assert they still match root byte-for-byte
+      # and fail on drift (re-copy them). Cheap + dependency-free, so it runs first.
+      - name: LICENSE/NOTICE parity (web copies match the repo root)
+        shell: pwsh
+        run: |
+          foreach ($name in 'LICENSE', 'NOTICE') {
+            $root = (Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash
+            $web = (Get-FileHash -LiteralPath "crates/bdinfo-rs-wasm/web/$name" -Algorithm SHA256).Hash
+            if ($root -ne $web) {
+              throw "$name drift: crates/bdinfo-rs-wasm/web/$name does not match the repo-root $name (re-copy it)."
+            }
+            Write-Host "ok: web/$name matches root"
+          }
+
       - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
         run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt --component llvm-tools-preview
 
