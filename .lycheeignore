@@ -7,10 +7,14 @@
 # fails on every release or version-bump PR. We exclude only our own tag and
 # compare URLs, so those PRs stay green with no per-PR step while lychee still
 # verifies every other link, including the badges, /releases, and installer URLs.
-https://github\.com/agentjp/bdinfo-rs/releases/tag/v
-https://github\.com/agentjp/bdinfo-rs/compare/v
+# The optional `ai\.` matches the ai.github.com SSH-config host alias too: if a
+# convco-generated link ever escapes the release-prep host-rewrite, lychee would
+# fail to resolve ai.github.com AND the github.com-only exclude would miss it.
+https://(ai\.)?github\.com/agentjp/bdinfo-rs/releases/tag/v
+https://(ai\.)?github\.com/agentjp/bdinfo-rs/compare/v
 
-# The npm package @bdinfo-rs/wasm is published only on a v* tag (publish-npm.yml),
-# so its npmjs.com page 404s until the first release lands -- exclude it like our
-# own release-tag URLs above so the Check links gate stays green meanwhile.
+# The npm package @bdinfo-rs/wasm IS published now (registry 200), but its
+# npmjs.com PAGE returns 403 to automated clients (npm's anti-bot), so lychee
+# cannot verify it regardless of publication -- a permanent exclusion, like other
+# bot-walled hosts, NOT the earlier "404 until first release" reason.
 https://www\.npmjs\.com/package/@bdinfo-rs/wasm
