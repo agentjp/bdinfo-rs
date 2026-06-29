@@ -2,7 +2,9 @@ name: version-freshness
 
 # Several versions in this repo are pinned for reproducibility but rot SILENTLY —
 # nothing else watches them:
-#   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY env in ci.yml),
+#   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY pin, which is
+#     hardcoded in ci.yml + fuzz.yml + wasm.yml + publish-npm.yml and cross-checked
+#     for agreement here so a bump to one can't silently drift the rest),
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
 #   - cargo-vet (the `--version` pin in audit.yml),
@@ -12,7 +14,8 @@ name: version-freshness
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
 #   - wasm-bindgen-cli (the `wasm-bindgen-cli@X` pin in wasm.yml + publish-npm.yml
-#     — must equal the wasm-bindgen crate it generates glue for; wasm-pack is not
+#     + deploy-pages.yml — all three must equal the wasm-bindgen crate they
+#     generate glue for; wasm-pack is not
 #     used), and binaryen (the `"binaryen"` pin in web/package.json — wasm-opt's
 #     version is coupled to the committed wasm size budget),
 #   - the Node version (the `NODE_VERSION`/`node-version` pins in wasm.yml +
@@ -139,6 +142,20 @@ jobs:
           if ($nightlyAgeDays -gt 30) {
             $problems += "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY + scripts/_common.ps1) is $nightlyAgeDays days old"
           }
+          # The nightly is hardcoded in FOUR places (ci.yml/fuzz.yml/wasm.yml NIGHTLY
+          # env + publish-npm.yml's rustup install) that Dependabot can't see, so a
+          # bump to one silently drifts the rest. Cross-check they AGREE (like the
+          # cargo-dist / wasm-bindgen-cli / Node pin agreements); _common.ps1 is the
+          # cockpit twin kept in lockstep by hand.
+          $nightlyFuzz = Read-Pin '.github/workflows/fuzz.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
+          $nightlyWasm = Read-Pin '.github/workflows/wasm.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
+          $nightlyNpm  = Read-Pin '.github/workflows/publish-npm.yml' 'install nightly-(\d{4}-\d{2}-\d{2})'
+          if (-not $nightlyFuzz) { throw 'No NIGHTLY pin in fuzz.yml' }
+          if (-not $nightlyWasm) { throw 'No NIGHTLY pin in wasm.yml' }
+          if (-not $nightlyNpm)  { throw 'No nightly install pin in publish-npm.yml' }
+          if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyNpm)) {
+            $problems += "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / publish-npm.yml ``$nightlyNpm`` — all must be identical (and match scripts/_common.ps1)"
+          }
 
           # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
           $distCfg = Read-Pin 'dist-workspace.toml' '^\s*cargo-dist-version\s*=\s*"([0-9.]+)"'
@@ -206,12 +223,14 @@ jobs:
           # equal the wasm-bindgen crate it generates glue for, so it is pinned and
           # nothing else watches it. (wasm-pack is NOT used — the build is plain
           # cargo + the CLI + wasm-opt.) The two workflow pins must also agree.
-          $wbGate = Read-Pin '.github/workflows/wasm.yml' 'wasm-bindgen-cli@([0-9.]+)'
-          $wbPub  = Read-Pin '.github/workflows/publish-npm.yml' 'wasm-bindgen-cli@([0-9.]+)'
-          if (-not $wbGate) { throw 'No wasm-bindgen-cli pin in wasm.yml' }
-          if (-not $wbPub)  { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
-          if ($wbGate -ne $wbPub) {
-            $problems += "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` but publish-npm.yml has ``$wbPub`` — they must be identical"
+          $wbGate   = Read-Pin '.github/workflows/wasm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          $wbPub    = Read-Pin '.github/workflows/publish-npm.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          $wbDeploy = Read-Pin '.github/workflows/deploy-pages.yml' 'wasm-bindgen-cli@([0-9.]+)'
+          if (-not $wbGate)   { throw 'No wasm-bindgen-cli pin in wasm.yml' }
+          if (-not $wbPub)    { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
+          if (-not $wbDeploy) { throw 'No wasm-bindgen-cli pin in deploy-pages.yml' }
+          if (($wbGate -ne $wbPub) -or ($wbGate -ne $wbDeploy)) {
+            $problems += "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` / publish-npm.yml has ``$wbPub`` / deploy-pages.yml has ``$wbDeploy`` — all three must be identical"
           }
           $wbLatest = Latest-CratesIo 'wasm-bindgen-cli'
           if (-not $wbLatest) {
