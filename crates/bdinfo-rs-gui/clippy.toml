@@ -1,0 +1,7 @@
+# The "Projection Booth" `Palette` is a ~280-byte `Copy` bundle of colour tokens,
+# deliberately threaded BY VALUE through the immediate-mode `view` tree and the
+# widget-style builders (cheap stack copies; passing `&Palette` would force a
+# borrow that cannot outlive the per-frame temporary the closures capture). Raise
+# `large_types_passed_by_value`'s limit just past it so that idiomatic by-value
+# threading is not flagged; every other size stays at the default.
+pass-by-value-size-limit = 320
