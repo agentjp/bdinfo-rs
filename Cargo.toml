@@ -13,9 +13,12 @@ members = ["crates/bdinfo-rs-core", "crates/bdinfo-rs"]
 # fuzz/ is an INDEPENDENT workspace (its libfuzzer-sys harness uses `unsafe` and
 # needs nightly + Linux). crates/bdinfo-rs-wasm is likewise INDEPENDENT (a
 # wasm-bindgen `cdylib` for the browser, OUTSIDE the forbid(unsafe_code) posture
-# of the two published crates). Both are excluded so they never enter
-# `cargo ck`/`lt --workspace`, the deny/vet audit, or the static-binary gate.
-exclude = ["fuzz", "crates/bdinfo-rs-wasm"]
+# of the two published crates). crates/bdinfo-rs-gui is the native desktop GUI —
+# also INDEPENDENT (the large iced/wgpu/winit tree stays out of the root gate +
+# audit), though it KEEPS forbid(unsafe_code). All three are excluded so they
+# never enter `cargo ck`/`lt --workspace`, the deny/vet audit, or the
+# static-binary gate.
+exclude = ["fuzz", "crates/bdinfo-rs-wasm", "crates/bdinfo-rs-gui"]
 
 [workspace.package]
 version = "1.2.0"
