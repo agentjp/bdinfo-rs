@@ -36,11 +36,16 @@ use iced::{Element, Length, Task};
 
 use crate::theme::{Palette, ThemePref};
 
-/// The window's initial and minimum logical size. Anchored on the classic
-/// `BDInfo` footprint (854×661 client) but taller, so the three stacked
-/// master-detail panes get room without an immediate resize.
-const WINDOW_SIZE: (f32, f32) = (1080.0, 940.0);
-const MIN_SIZE: (f32, f32) = (900.0, 680.0);
+/// The window's initial logical size — anchored on the classic `BDInfo`
+/// footprint (854×661 client) but taller and wider, so the three stacked
+/// master-detail panes get room while still fitting a standard ~900-tall work
+/// area. The layout is fully responsive (`Fill`/`FillPortion` + scrollable
+/// panes), so any size works.
+const WINDOW_SIZE: (f32, f32) = (1080.0, 860.0);
+/// The minimum size the window can be resized down to — low enough to fit a
+/// small screen, beyond which the panes scroll rather than disappear (so the
+/// window never gets stuck larger than a modest display).
+const MIN_SIZE: (f32, f32) = (720.0, 520.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
 
@@ -68,7 +73,7 @@ fn main() -> iced::Result {
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first
-/// frame already matches the desktop's light/dark setting.
+/// frame matches the desktop's light/dark setting.
 fn boot() -> (App, Task<Message>) {
     (App::default(), iced::system::theme().map(Message::OsTheme))
 }
