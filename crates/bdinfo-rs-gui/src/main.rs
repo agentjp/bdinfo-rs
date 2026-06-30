@@ -36,9 +36,11 @@ use iced::{Element, Length, Task};
 
 use crate::theme::{Palette, ThemePref};
 
-/// The window's initial and minimum logical size.
-const WINDOW_SIZE: (f32, f32) = (1180.0, 760.0);
-const MIN_SIZE: (f32, f32) = (900.0, 580.0);
+/// The window's initial and minimum logical size. Anchored on the classic
+/// `BDInfo` footprint (854×661 client) but taller, so the three stacked
+/// master-detail panes get room without an immediate resize.
+const WINDOW_SIZE: (f32, f32) = (1080.0, 940.0);
+const MIN_SIZE: (f32, f32) = (900.0, 680.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
 
