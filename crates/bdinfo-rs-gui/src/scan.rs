@@ -1,79 +1,177 @@
-//! The scan seam — folder input → a renderable [`ScanData`].
+//! The scan seam — a picked folder or `.iso` → the structural playlist list and,
+//! after a selection, the measured report.
 //!
-//! Turns a picked Blu-ray folder into the playlist table rows plus the rendered
-//! classic report by driving the identical `bdinfo-rs-core` API the CLI and wasm
-//! crate use (`FsDir` → [`BdRom::open_resilient_with`] → [`text::render_with`]).
-//! The pure formatting is the Tier-A [`crate::model`]; this module is the thin
-//! IO glue, verified by the golden-tie parity test (byte-exact report over the
-//! committed fixture) rather than line coverage.
+//! Drives the identical `bdinfo-rs-core` API the CLI (`main.rs`) and the wasm
+//! crate use, dispatching folder vs `.iso` input exactly like the CLI's
+//! `scan_disc` (`FsDir` / `UdfSource` → [`BdRom::open_resilient_with`] →
+//! [`text::render_with`]). The pure formatting / selection / progress math is the
+//! Tier-A [`crate::model`] / `selection` / [`crate::progress`]; this
+//! module is the thin IO glue, verified by the golden-tie parity test (byte-exact
+//! report over the committed fixture) rather than line coverage.
+//!
+//! The long, blocking measured scan ([`scan_measured`]) is what the iced shell
+//! runs on a worker thread, forwarding its [`ScanProgress`] callback over a
+//! channel; the structural scan ([`scan_structural`]) is fast (no demux).
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use bdinfo_rs_core::bdrom::disc::BdRom;
-use bdinfo_rs_core::bdrom::order::PlaylistFilter;
-use bdinfo_rs_core::error::BdError;
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::fs::FsDir;
+use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
 
-use crate::model::{self, TableRow};
+use crate::selection;
 
-/// The result of scanning one disc folder: the playlist table rows, the
-/// rendered classic report, the disc label, and whether to show the
-/// hidden-tracks footer note.
+/// The disc the user picked: a Blu-ray **folder** or a single `.iso` image.
+///
+/// A folder is read through `std::fs`, an `.iso` through the in-house UDF 2.50
+/// reader — the only branch that differs between the two scan backends. Both flow
+/// into the identical structural → measured pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    /// A disc folder: the disc root, its `BDMV` directory, or any directory
+    /// inside it (the scan walks up to the disc root). The label is the
+    /// directory name.
+    Folder(PathBuf),
+    /// A single `.iso` image. The label is the real UDF volume label.
+    Iso(PathBuf),
+}
+
+impl Input {
+    /// The picked path, whichever input it is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Folder(path) | Self::Iso(path) => path,
+        }
+    }
+
+    /// The path as a display string, for the "Scanning …" line.
+    #[must_use]
+    pub fn display(&self) -> String {
+        self.path().display().to_string()
+    }
+}
+
+/// The structural-scan result: enough to populate the playlist selection table
+/// without demuxing a single stream file.
 #[derive(Debug, Clone)]
-pub struct ScanData {
-    /// The playlist table rows (the `#`/Group/Playlist File/Length/Estimated
-    /// Bytes columns).
-    pub table_rows: Vec<TableRow>,
+pub struct Structural {
+    /// The disc label (the folder name, or the `.iso`'s UDF volume label).
+    pub label: String,
+    /// Every parsed playlist — the view-model builds the filtered table rows
+    /// from these, and the measured scan resolves the selection against them.
+    pub playlists: Vec<PlaylistSummary>,
+    /// Any failures recorded while reading the structure (a corrupt playlist,
+    /// an unreadable directory) — shown as a non-blocking warning banner.
+    pub warnings: Vec<String>,
+}
+
+/// The measured-scan result: the rendered classic report plus what the UI needs
+/// to save it and warn about partial reads.
+#[derive(Debug, Clone)]
+pub struct Measured {
     /// The rendered classic disc report (CRLF, UTF-8 no BOM — never re-encode).
     pub report: String,
-    /// The disc label (the folder name for folder input).
+    /// The disc label — the `BDINFO.{label}.txt` save name uses it.
     pub label: String,
-    /// Whether any listed playlist hides a stream (the CLI's footer note).
-    pub show_hidden_note: bool,
+    /// Any failures recorded during the measured scan — a non-empty list is the
+    /// CLI's resilient "completed with errors" posture (the report still saves).
+    pub errors: Vec<String>,
 }
 
-/// Opens `root` at the given scan depth, renders the whole-disc report, and
-/// builds the playlist table — merging the filesystem-enumeration failures into
-/// the report's errors. The shared body behind the structural ([`scan_folder`])
-/// and measured ([`scan_folder_measured`]) entry points.
+/// Opens `input` at the given scan depth, merging the backend's recorded
+/// failures (filesystem enumeration, or `.iso` bad-sector recordings) into the
+/// scan's own. The shared body behind both entry points — the one place folder
+/// vs `.iso` input diverges, mirroring the CLI's `scan_disc`.
+fn open(
+    input: &Input,
+    run_packet_scan: bool,
+    scan_files: Option<&BTreeSet<String>>,
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+) -> Result<(BdRom, Vec<ScanError>), BdError> {
+    match input {
+        Input::Folder(path) => {
+            let root = FsDir::new(path);
+            let report = BdRom::open_resilient_with(&root, run_packet_scan, scan_files, progress)?;
+            let mut errors = report.errors;
+            errors.extend(root.take_errors());
+            Ok((report.bdrom, errors))
+        }
+        Input::Iso(path) => {
+            let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
+            let report =
+                BdRom::open_resilient_with(&source.root(), run_packet_scan, scan_files, progress)?;
+            let mut errors = report.errors;
+            errors.extend(source.take_errors());
+            Ok((report.bdrom, errors))
+        }
+    }
+}
+
+/// Recorded scan failures as display strings, for the UI's warning surfaces.
+fn error_lines(errors: &[ScanError]) -> Vec<String> {
+    errors.iter().map(ToString::to_string).collect()
+}
+
+/// Runs the **structural** scan over `input` (fast — no M2TS demux) and returns
+/// the playlist list + label for the selection table.
 ///
 /// # Errors
-/// [`BdError`] when the structure is too damaged to open at all (no
-/// `BDMV`/`CLIPINF`/`PLAYLIST`).
-fn open_and_render(root: &FsDir, run_packet_scan: bool) -> Result<ScanData, BdError> {
-    let scanned = BdRom::open_resilient_with(root, run_packet_scan, None, &mut |_| {})?;
-    let mut errors = scanned.errors;
-    errors.extend(root.take_errors());
-    let bdrom = scanned.bdrom;
+/// A short message when the input holds no readable Blu-ray structure (no
+/// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
+pub fn scan_structural(input: &Input) -> Result<Structural, String> {
+    let (bdrom, errors) = open(input, false, None, &mut |_| {}).map_err(|err| err.to_string())?;
+    Ok(Structural {
+        label: bdrom.volume_label,
+        playlists: bdrom.playlists,
+        warnings: error_lines(&errors),
+    })
+}
 
-    let rows = model::playlist_rows(&bdrom.playlists);
-    let table_rows = model::display_rows(&rows);
-    let show_hidden_note = model::any_hidden(&rows);
-    let order = bdrom.presentation_order(&PlaylistFilter::default());
+/// Runs the **measured** scan over `input`, narrowed to the selected clips.
+///
+/// Streams progress through `progress` and renders the classic report in
+/// `selection` order — the GUI equivalent of `bdinfo-rs <disc> --mpls A,B`.
+///
+/// `selection` is the chosen playlist names in table order, and `scan_files` the
+/// matching clip set (`selection::selection_stream_files`), both derived from
+/// the structural scan. The packet scan reads only `scan_files`, so an unselected
+/// (possibly multi-GB) playlist is never demuxed. Runs on the iced shell's worker
+/// thread, where native demux keeps its `thread::scope` parallelism.
+///
+/// # Errors
+/// A short message when the structure is too damaged to open at all — the same
+/// hard error [`scan_structural`] surfaces (it cannot occur in practice, since
+/// the structural scan just located the same structure, but the result is
+/// reported rather than panicked).
+pub fn scan_measured(
+    input: &Input,
+    selection: &[String],
+    scan_files: &BTreeSet<String>,
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+) -> Result<Measured, String> {
+    let (bdrom, errors) =
+        open(input, true, Some(scan_files), progress).map_err(|err| err.to_string())?;
+    let order = selection::selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors);
-
-    Ok(ScanData { table_rows, report, label: bdrom.volume_label, show_hidden_note })
+    Ok(Measured { report, label: bdrom.volume_label, errors: error_lines(&errors) })
 }
 
-/// Runs the **structural** scan over the disc folder at `path` (fast — no M2TS
-/// demux) and builds the playlist table + report. The Phase-1 app entry point.
-///
-/// # Errors
-/// A short message when the folder holds no readable Blu-ray structure.
-pub fn scan_folder(path: &Path) -> Result<ScanData, String> {
-    open_and_render(&FsDir::new(path), false).map_err(|err| err.to_string())
-}
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
 
-/// Runs the **measured** scan over the disc folder at `path` and renders the
-/// report (full M2TS demux, the standard `--whole` filtered set).
-///
-/// Not yet wired into the Phase-1 UI — the measured scan moves onto a worker
-/// thread in Phase 2 — but the golden-tie test drives it now to lock the
-/// rendered-report contract early.
-///
-/// # Errors
-/// A short message when the folder holds no readable Blu-ray structure.
-pub fn scan_folder_measured(path: &Path) -> Result<ScanData, String> {
-    open_and_render(&FsDir::new(path), true).map_err(|err| err.to_string())
+    use super::Input;
+
+    #[test]
+    fn path_and_display_read_through() {
+        let folder = Input::Folder(PathBuf::from("a/b"));
+        assert_eq!(folder.path(), PathBuf::from("a/b"));
+        assert_eq!(folder.display(), PathBuf::from("a/b").display().to_string());
+        let iso = Input::Iso(PathBuf::from("x.iso"));
+        assert_eq!(iso.path(), PathBuf::from("x.iso"));
+    }
 }

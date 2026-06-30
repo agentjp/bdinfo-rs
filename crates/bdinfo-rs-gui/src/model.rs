@@ -36,8 +36,7 @@ pub(crate) struct PlaylistRow {
 /// prints.
 ///
 /// So the iced view is a trivial projection — it drops each cell into a `text`
-/// widget. The Phase-1 columns are `#`/Group/Playlist File/Length/Estimated
-/// Bytes.
+/// widget. The columns are `#`/Group/Playlist File/Length/Estimated Bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRow {
     /// The `#` column — the 1-based table position.
@@ -50,6 +49,22 @@ pub struct TableRow {
     pub length: String,
     /// The `Estimated Bytes` column — thousands-grouped, or `-`.
     pub estimated_bytes: String,
+}
+
+/// One selectable table row: the display [`TableRow`] cells plus the row's
+/// 0-based position and checked flag.
+///
+/// What the iced table's leading `Scan` checkbox column renders and toggles — a
+/// pub projection so the (separate) binary crate can build the widget from it;
+/// the selection logic itself stays in the crate's `selection` module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectableRow {
+    /// 0-based position in the table — the index a toggle message carries.
+    pub index: usize,
+    /// Whether this row is currently checked.
+    pub selected: bool,
+    /// The pre-formatted display cells.
+    pub cells: TableRow,
 }
 
 /// The playlist table rows as `(group number, playlist index)` pairs in table
