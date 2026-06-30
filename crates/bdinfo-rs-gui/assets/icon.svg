@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- bdinfo-rs app mark: an "aperture" — a bold amber ring with a centre dot.
+       Matches the procedurally-generated window icon (src/icon.rs) and the
+       in-app brand mark. Amber = Projection Booth accent (#F2A65A). Kept here as
+       the vector source of truth for Phase-5 installer/bundle icons. -->
+  <circle cx="64" cy="64" r="54.4" fill="none" stroke="#F2A65A" stroke-width="16.64"/>
+  <circle cx="64" cy="64" r="20.48" fill="#F2A65A"/>
+</svg>
