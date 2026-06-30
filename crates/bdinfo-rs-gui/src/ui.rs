@@ -71,7 +71,17 @@ pub const COL_GROUP: f32 = 72.0;
 /// The `Length` column.
 pub const COL_LENGTH: f32 = 112.0;
 /// The `Estimated Bytes` column.
-pub const COL_BYTES: f32 = 156.0;
+pub const COL_BYTES: f32 = 152.0;
+/// The `Measured Bytes` column.
+pub const COL_MEASURED: f32 = 152.0;
+/// The stream-files `Index` column.
+pub const COL_INDEX: f32 = 72.0;
+/// The streams `Codec` column.
+pub const COL_CODEC: f32 = 220.0;
+/// The streams `Language` column.
+pub const COL_LANG: f32 = 120.0;
+/// The streams `Bit Rate` column.
+pub const COL_BITRATE: f32 = 124.0;
 /// The width of the row-selection accent bar.
 pub const SEL_BAR: f32 = 3.0;
 
@@ -120,6 +130,21 @@ pub fn table_frame(p: Palette) -> impl Fn(&Theme) -> container::Style {
 /// A 1-pixel horizontal divider in the given line colour.
 pub fn divider(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style { background: Some(color.into()), ..container::Style::default() }
+}
+
+/// A read-only data row's zebra background (even rows on the surface, odd on the
+/// alt) — the non-interactive panes (Stream Files / Streams) use this.
+pub fn zebra(p: Palette, even: bool) -> impl Fn(&Theme) -> container::Style {
+    let bg = if even { p.surface } else { p.surface_alt };
+    move |_| container::Style { background: Some(bg.into()), ..container::Style::default() }
+}
+
+/// The dimmed scrim behind a modal — a translucent wash over the whole window.
+pub fn scrim() -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(with_alpha(Color::BLACK, 0.45).into()),
+        ..container::Style::default()
+    }
 }
 
 /// The read-only "source path" field — styled like a quiet text input.
@@ -269,16 +294,17 @@ pub fn toolbar_button(p: Palette) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
-/// A whole table row, styled as a flush button so it gets hover/press/disabled
-/// states for free: a selected row carries the amber wash, others zebra-stripe by
-/// parity, and any row lifts to `hover` under the cursor (a disabled row — during
-/// a scan — keeps its resting fill so the table reads frozen, not greyed).
+/// A clickable table-row region, styled as a flush button so it gets
+/// hover/press/disabled states for free: the **active** (highlighted) row carries
+/// the amber wash, others zebra-stripe by parity, and any row lifts to `hover`
+/// under the cursor (a disabled row — during a scan — keeps its resting fill so
+/// the table reads frozen, not greyed).
 pub fn row_button(
     p: Palette,
-    selected: bool,
+    active: bool,
     even: bool,
 ) -> impl Fn(&Theme, button::Status) -> button::Style {
-    let resting = if selected {
+    let resting = if active {
         p.selected
     } else if even {
         p.surface
@@ -287,7 +313,7 @@ pub fn row_button(
     };
     move |_, status| {
         let bg = match status {
-            button::Status::Hovered | button::Status::Pressed if !selected => p.hover,
+            button::Status::Hovered | button::Status::Pressed if !active => p.hover,
             _ => resting,
         };
         button::Style {

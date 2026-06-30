@@ -22,12 +22,16 @@ mod ui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::SelectableRow;
+use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{Column, Row, Space, button, container, progress_bar, scrollable, text};
+use iced::widget::{
+    Column, Row, Space, Stack, button, container, mouse_area, progress_bar, scrollable, text,
+};
 use iced::{Element, Length, Task};
 
 use crate::theme::{Palette, ThemePref};
@@ -96,6 +100,10 @@ struct App {
     scan_start: Option<Instant>,
     /// A one-line status (e.g. `Report saved to: …`), shown in the bottom bar.
     status: Option<String>,
+    /// Whether the report view (over the panes) is showing.
+    showing_report: bool,
+    /// The "scan completed" confirmation, shown as a modal until dismissed.
+    notice: Option<String>,
 }
 
 /// A top-level command — the menu/toolbar seam a later native macOS menu maps
@@ -161,8 +169,11 @@ enum Message {
     IsoPicked(Option<PathBuf>),
     /// The structural scan for `input` finished (or failed with a message).
     Listed { input: Input, result: Result<Structural, String> },
-    /// A table row's selection toggled (0-based table position).
+    /// A table row's scan checkbox toggled (0-based table position).
     RowToggled(usize),
+    /// A table row clicked — make it the active (highlighted) playlist that the
+    /// master-detail panes follow.
+    RowActivated(usize),
     /// "Select all" pressed.
     SelectAll,
     /// "Select none" pressed.
@@ -172,17 +183,29 @@ enum Message {
     /// A streamed scan-progress event from the worker thread.
     Progress { generation: u64, file: String, done: u64, total: u64 },
     /// The worker's measured scan finished.
-    Finished { generation: u64, report: String, label: String, errors: Vec<String> },
+    Finished {
+        generation: u64,
+        report: String,
+        label: String,
+        errors: Vec<String>,
+        playlists: Vec<PlaylistSummary>,
+    },
     /// The worker's measured scan failed fatally.
     ScanFailed { generation: u64, error: String },
     /// "Cancel" pressed during a scan.
     Cancel,
+    /// "View Report" pressed — show the report over the panes.
+    ShowReport,
+    /// "Back" pressed in the report view — return to the panes.
+    HideReport,
     /// "Save report…" pressed — choose a destination folder.
     SaveReport,
     /// The save-destination dialog closed.
     SaveDest(Option<PathBuf>),
     /// "Copy" pressed — copy the report to the clipboard.
     CopyReport,
+    /// The "scan completed" confirmation modal was dismissed.
+    DismissNotice,
     /// The theme toggle pressed — cycle Auto → Light → Dark.
     ToggleTheme,
     /// The OS reported (or changed) its light/dark setting.
@@ -247,6 +270,10 @@ impl App {
                 self.flow.toggle(index);
                 Task::none()
             }
+            Message::RowActivated(index) => {
+                self.flow.set_active(index);
+                Task::none()
+            }
             Message::SelectAll => {
                 self.flow.select_all();
                 Task::none()
@@ -261,9 +288,15 @@ impl App {
                 self.flow.progress(generation, file, done, total, elapsed);
                 Task::none()
             }
-            Message::Finished { generation, report, label, errors } => {
-                self.flow =
-                    std::mem::take(&mut self.flow).finished(generation, report, label, errors);
+            Message::Finished { generation, report, label, errors, playlists } => {
+                let was_scanning = self.flow.stage() == Stage::Scanning;
+                self.flow = std::mem::take(&mut self.flow)
+                    .finished(generation, report, label, errors, playlists);
+                // Announce a clean finish only if this event actually completed the
+                // in-flight scan (a stale finish leaves the stage unchanged).
+                if was_scanning && self.flow.stage() == Stage::Reported {
+                    self.notice = Some(self.scan_outcome());
+                }
                 Task::none()
             }
             Message::ScanFailed { generation, error } => {
@@ -274,12 +307,24 @@ impl App {
                 self.flow = std::mem::take(&mut self.flow).cancel();
                 Task::none()
             }
+            Message::ShowReport => {
+                self.showing_report = self.flow.report().is_some();
+                Task::none()
+            }
+            Message::HideReport => {
+                self.showing_report = false;
+                Task::none()
+            }
             Message::SaveReport => Task::perform(pick_folder(), Message::SaveDest),
             Message::SaveDest(Some(dir)) => {
                 self.save_report(&dir);
                 Task::none()
             }
             Message::CopyReport => self.copy_report(),
+            Message::DismissNotice => {
+                self.notice = None;
+                Task::none()
+            }
             Message::ToggleTheme => {
                 self.theme_pref = self.theme_pref.next();
                 Task::none()
@@ -295,6 +340,8 @@ impl App {
     /// carrying the input back so a superseded pick's result is discarded.
     fn begin_listing(&mut self, input: Input) -> Task<Message> {
         self.status = None;
+        self.showing_report = false;
+        self.notice = None;
         self.flow = Flow::start_listing(input.clone());
         Task::perform(
             async move {
@@ -316,12 +363,29 @@ impl App {
         let generation = self.generation;
         self.scan_start = Some(Instant::now());
         self.status = None;
+        self.showing_report = false;
+        self.notice = None;
 
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
-            // `ScanProgress.file` is borrowed; own it before sending. A closed
-            // receiver (the user moved on) just makes the send fail — harmless.
+            // The scan fires its progress callback every few MB — tens of thousands
+            // of times on a feature disc. Coalesce to one message per ~100 ms (plus
+            // every file boundary) so the UI re-renders a few times a second, not
+            // thousands; the CLI throttles its terminal redraw the same way.
+            let mut last_sent: Option<Instant> = None;
+            let mut last_file = String::new();
             let result = scan::scan_measured(&input, &selection, &scan_files, &mut |progress| {
+                let file_changed = progress.file != last_file;
+                let due = file_changed
+                    || progress.done == progress.total
+                    || last_sent.is_none_or(|at| at.elapsed() >= Duration::from_millis(100));
+                if !due {
+                    return;
+                }
+                last_sent = Some(Instant::now());
+                if file_changed {
+                    progress.file.clone_into(&mut last_file);
+                }
                 let _ = sender.unbounded_send(Message::Progress {
                     generation,
                     file: progress.file.to_owned(),
@@ -335,6 +399,7 @@ impl App {
                     report: measured.report,
                     label: measured.label,
                     errors: measured.errors,
+                    playlists: measured.playlists,
                 },
                 Err(error) => Message::ScanFailed { generation, error },
             };
@@ -372,18 +437,34 @@ impl App {
         }
     }
 
+    /// The scan-complete confirmation text — a clean success, or a note that the
+    /// resilient scan recorded some errors but still wrote the report.
+    fn scan_outcome(&self) -> String {
+        let errors = self.flow.report_errors().len();
+        if errors == 0 {
+            "Scan completed successfully.".to_owned()
+        } else {
+            format!("Scan completed with {errors} error(s).\nThe report below was still written.")
+        }
+    }
+
     // ── view ────────────────────────────────────────────────────────────────
 
-    /// Projects the flow onto the `BDInfo`-style layout: a brand toolbar, the source
-    /// bar, a stage-specific body (empty prompt / structural-scan note / fatal
-    /// error / the loaded-disc table), and the bottom action+progress bar.
+    /// Projects the flow onto the `BDInfo`-style layout: a brand toolbar, the
+    /// source bar, a stage-specific body (empty prompt / structural-scan note /
+    /// fatal error / the three master-detail panes, or the report view), and the
+    /// bottom action+progress bar — with the scan-complete modal over the top.
     fn view(&self) -> Element<'_, Message> {
         let p = self.palette();
-        let body: Element<'_, Message> = match self.flow.stage() {
-            Stage::Idle => self.empty_state(p),
-            Stage::Listing => self.listing_state(p),
-            Stage::Failed => self.failed_state(p),
-            Stage::Listed | Stage::Scanning | Stage::Reported => self.disc_view(p),
+        let body: Element<'_, Message> = if self.showing_report && self.flow.report().is_some() {
+            self.report_view(p)
+        } else {
+            match self.flow.stage() {
+                Stage::Idle => self.empty_state(p),
+                Stage::Listing => self.listing_state(p),
+                Stage::Failed => self.failed_state(p),
+                Stage::Listed | Stage::Scanning | Stage::Reported => self.disc_view(p),
+            }
         };
 
         let content = Column::new()
@@ -394,7 +475,11 @@ impl App {
             .push(container(body).width(Length::Fill).height(Length::Fill).padding(ui::GAP_4))
             .push(self.bottom_bar(p));
 
-        container(content).width(Length::Fill).height(Length::Fill).into()
+        let base = container(content).width(Length::Fill).height(Length::Fill).into();
+        match &self.notice {
+            Some(notice) => modal(base, notice_card(p, notice)),
+            None => base,
+        }
     }
 
     /// The top toolbar: the brand mark + wordmark on the left, the theme toggle
@@ -546,18 +631,12 @@ impl App {
         container(framed).center(Length::Fill).into()
     }
 
-    /// The loaded-disc body: the select bar, any banners, the playlist table, the
-    /// hidden-tracks note, the detected-disc strip, and (when reported) the report
-    /// pane below.
+    /// The loaded-disc body: the select bar, any banners, then the three
+    /// master-detail panes (Playlists / Stream Files / Streams) and the
+    /// detected-disc strip — the classic `BDInfo` layout.
     fn disc_view(&self, p: Palette) -> Element<'_, Message> {
-        let reported = self.flow.stage() == Stage::Reported;
-        let table_height = if reported { Length::FillPortion(2) } else { Length::Fill };
-
-        let mut content = Column::new()
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .spacing(ui::GAP_3)
-            .push(self.select_bar(p));
+        let mut content = Column::new().width(Length::Fill).height(Length::Fill).spacing(ui::GAP_2);
+        content = content.push(self.select_bar(p));
 
         // A failed measured scan leaves a banner over the still-usable table; any
         // structural warnings sit alongside.
@@ -568,17 +647,53 @@ impl App {
             content = content.push(banner(p, p.warning, warning.as_str()));
         }
 
-        content = content
-            .push(container(self.playlist_table(p)).width(Length::Fill).height(table_height));
+        content =
+            content.push(pane(p, "Playlists", self.playlist_table(p), Length::FillPortion(5)));
         if self.flow.show_hidden_note() {
             content = content.push(text(HIDDEN_NOTE).size(ui::TEXT_XS).color(p.text_muted));
         }
-        content = content.push(self.info_strip(p));
 
-        if reported {
-            content = content.push(self.report_pane(p));
-        }
+        let files_title = self
+            .flow
+            .active_playlist_name()
+            .map_or_else(|| "Stream Files".to_owned(), |name| format!("Stream Files — {name}"));
+        content = content.push(pane(
+            p,
+            &files_title,
+            data_table(p, STREAM_FILE_COLS, self.stream_file_table_rows()),
+            Length::FillPortion(3),
+        ));
+        content = content.push(pane(
+            p,
+            "Streams",
+            data_table(p, CODEC_COLS, self.codec_table_rows()),
+            Length::FillPortion(4),
+        ));
+
+        content = content.push(self.info_strip(p));
         content.into()
+    }
+
+    /// The active playlist's stream-file rows, flattened to display cells.
+    fn stream_file_table_rows(&self) -> Vec<Vec<String>> {
+        self.flow
+            .stream_file_rows()
+            .into_iter()
+            .map(|row: StreamFileRow| vec![row.file, row.index, row.length, row.size])
+            .collect()
+    }
+
+    /// The active playlist's codec rows, flattened to display cells (a hidden
+    /// stream is marked with a leading `*` on the codec name).
+    fn codec_table_rows(&self) -> Vec<Vec<String>> {
+        self.flow
+            .codec_rows()
+            .into_iter()
+            .map(|row: CodecRow| {
+                let codec = if row.hidden { format!("* {}", row.codec) } else { row.codec };
+                vec![codec, row.language, row.bitrate, row.description]
+            })
+            .collect()
     }
 
     /// The "Select Playlist(s)" control row: the select-all/none toggle and the
@@ -668,11 +783,33 @@ impl App {
             .into()
     }
 
-    /// The report pane: a "completed with errors" banner (when any failures were
-    /// recorded) over the scrollable monospace report in its readout panel.
-    fn report_pane(&self, p: Palette) -> Element<'_, Message> {
-        let mut column =
-            Column::new().width(Length::Fill).height(Length::FillPortion(3)).spacing(ui::GAP_2);
+    /// The full report view (over the panes): a header with Back / Save / Copy,
+    /// a "completed with errors" banner when any failures were recorded, and the
+    /// scrollable monospace report in its readout panel.
+    fn report_view(&self, p: Palette) -> Element<'_, Message> {
+        let label = self.flow.report_label().unwrap_or("");
+        let header = Row::new()
+            .width(Length::Fill)
+            .align_y(Vertical::Center)
+            .spacing(ui::GAP_2)
+            .push(
+                button(text("← Back").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                    .padding([ui::GAP_2, ui::GAP_3])
+                    .style(ui::secondary_button(p))
+                    .on_press(Message::HideReport),
+            )
+            .push(
+                text(format!("Report — {label}"))
+                    .size(ui::TEXT_MD)
+                    .font(ui::UI_SEMIBOLD)
+                    .color(p.text),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(self.command_button(p, Command::SaveReport))
+            .push(self.command_button(p, Command::CopyReport));
+
+        let mut column = Column::new().width(Length::Fill).height(Length::Fill).spacing(ui::GAP_2);
+        column = column.push(header);
         let errors = self.flow.report_errors();
         if !errors.is_empty() {
             column = column.push(banner(
@@ -685,14 +822,15 @@ impl App {
             ));
         }
         if let Some(report) = self.flow.report() {
-            let pane = container(scrollable(
-                container(text(report).font(ui::MONO).size(ui::TEXT_SM).color(p.text))
-                    .padding(ui::GAP_3),
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(ui::report_pane(p));
-            column = column.push(pane);
+            column = column.push(
+                container(scrollable(
+                    container(text(report).font(ui::MONO).size(ui::TEXT_SM).color(p.text))
+                        .padding(ui::GAP_3),
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(ui::report_pane(p)),
+            );
         }
         column.into()
     }
@@ -745,9 +883,12 @@ impl App {
         } else {
             let mut right = Row::new().spacing(ui::GAP_2);
             if self.flow.report().is_some() {
-                right = right
-                    .push(self.command_button(p, Command::SaveReport))
-                    .push(self.command_button(p, Command::CopyReport));
+                right = right.push(
+                    button(text("View Report…").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                        .padding([ui::GAP_2, ui::GAP_4])
+                        .style(ui::secondary_button(p))
+                        .on_press(Message::ShowReport),
+                );
             }
             right = right.push(
                 button(
@@ -844,7 +985,8 @@ fn banner<'a>(p: Palette, kind: iced::Color, message: &str) -> Element<'a, Messa
         .into()
 }
 
-/// The table header row, laid out on the same column grid as the body rows.
+/// The playlist-table header row, laid out on the same column grid as the body
+/// rows (the leading accent-bar spacer, then the columns).
 fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
     let cells = Row::new()
         .width(Length::Fill)
@@ -854,7 +996,8 @@ fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
         .push(header_cell(p, "Group", Length::Fixed(ui::COL_GROUP), Horizontal::Center))
         .push(header_cell(p, "Playlist File", Length::Fill, Horizontal::Left))
         .push(header_cell(p, "Length", Length::Fixed(ui::COL_LENGTH), Horizontal::Right))
-        .push(header_cell(p, "Estimated Bytes", Length::Fixed(ui::COL_BYTES), Horizontal::Right));
+        .push(header_cell(p, "Estimated Bytes", Length::Fixed(ui::COL_BYTES), Horizontal::Right))
+        .push(header_cell(p, "Measured Bytes", Length::Fixed(ui::COL_MEASURED), Horizontal::Right));
     Row::new()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -873,37 +1016,54 @@ fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Ele
         .into()
 }
 
-/// One selectable table row, rendered as a flush button (so it gets hover / press
-/// / disabled states): a leading accent selection bar, the check chip, then the
-/// `#` / Group / Playlist / Length / Estimated-Bytes cells.
+/// One playlist row: a leading accent bar (when active), then **two sibling
+/// buttons** — the scan checkbox (toggles the row's selection) and the cells
+/// (click to make the row active, driving the master-detail panes). They are
+/// siblings, not nested, so each click hits exactly one. The **active** row
+/// carries the amber wash; the checkbox shows the **checked** state.
 fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Element<'a, Message> {
     let even = row_data.index.checked_rem(2) == Some(0);
     let index = row_data.index;
+    let active = row_data.active;
+
+    let checkbox = button(
+        container(check_chip(p, row_data.selected)).center_x(Length::Fill).center_y(Length::Fill),
+    )
+    .width(Length::Fixed(ui::COL_CHECK))
+    .height(Length::Fill)
+    .padding(0.0)
+    .style(ui::row_button(p, active, even))
+    .on_press_maybe(editable.then_some(Message::RowToggled(index)));
 
     let mut file = Row::new()
         .push(text(row_data.cells.file.clone()).size(ui::TEXT_SM).font(ui::MONO).color(p.text));
     if row_data.has_hidden {
         file = file.push(text(" *").size(ui::TEXT_SM).font(ui::MONO).color(p.accent));
     }
-
     let cells = Row::new()
         .width(Length::Fill)
         .align_y(Vertical::Center)
-        .push(check_cell(p, row_data.selected))
         .push(num_cell(p, row_data.cells.number.clone(), ui::COL_NUM, Horizontal::Right))
         .push(num_cell(p, row_data.cells.group.clone(), ui::COL_GROUP, Horizontal::Center))
         .push(
             container(file).width(Length::Fill).align_x(Horizontal::Left).padding([0.0, ui::GAP_2]),
         )
         .push(num_cell(p, row_data.cells.length.clone(), ui::COL_LENGTH, Horizontal::Right))
+        .push(num_cell(p, row_data.cells.estimated_bytes.clone(), ui::COL_BYTES, Horizontal::Right))
         .push(num_cell(
             p,
-            row_data.cells.estimated_bytes.clone(),
-            ui::COL_BYTES,
+            row_data.cells.measured_bytes.clone(),
+            ui::COL_MEASURED,
             Horizontal::Right,
         ));
+    let cells_button = button(cells)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(0.0)
+        .style(ui::row_button(p, active, even))
+        .on_press_maybe(editable.then_some(Message::RowActivated(index)));
 
-    let inner = Row::new()
+    Row::new()
         .width(Length::Fill)
         .height(Length::Fixed(ui::ROW_H))
         .align_y(Vertical::Center)
@@ -911,33 +1071,189 @@ fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Elemen
             container(Space::new())
                 .width(Length::Fixed(ui::SEL_BAR))
                 .height(Length::Fill)
-                .style(ui::sel_bar(p, row_data.selected)),
+                .style(ui::sel_bar(p, active)),
         )
-        .push(cells);
-
-    button(inner)
-        .width(Length::Fill)
-        .padding(0.0)
-        .style(ui::row_button(p, row_data.selected, even))
-        .on_press_maybe(editable.then_some(Message::RowToggled(index)))
+        .push(checkbox)
+        .push(cells_button)
         .into()
 }
 
-/// The leading selection chip: an amber square with a check when selected, an
-/// outlined box when not, centred in the check column.
-fn check_cell<'a>(p: Palette, selected: bool) -> Element<'a, Message> {
-    let inner: Element<'a, Message> = if selected {
+/// The selection chip: an amber square with a check when checked, an outlined box
+/// when not.
+fn check_chip<'a>(p: Palette, checked: bool) -> Element<'a, Message> {
+    let inner: Element<'a, Message> = if checked {
         text("✓").size(11.0).font(ui::UI_SEMIBOLD).color(p.on_accent).into()
     } else {
         Space::new().into()
     };
-    let chip = container(inner)
+    container(inner)
         .width(Length::Fixed(16.0))
         .height(Length::Fixed(16.0))
         .center_x(Length::Fixed(16.0))
         .center_y(Length::Fixed(16.0))
-        .style(ui::check_box(p, selected));
-    container(chip).center_x(Length::Fixed(ui::COL_CHECK)).into()
+        .style(ui::check_box(p, checked))
+        .into()
+}
+
+/// A titled pane: a small muted header label over its (already-framed) table,
+/// taking `height` of the vertical space.
+fn pane<'a>(
+    p: Palette,
+    title: &str,
+    table: Element<'a, Message>,
+    height: Length,
+) -> Element<'a, Message> {
+    Column::new()
+        .width(Length::Fill)
+        .height(height)
+        .spacing(ui::GAP_1)
+        .push(text(title.to_owned()).size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
+        .push(table)
+        .into()
+}
+
+/// One read-only data column: a fixed label, width, alignment, and whether its
+/// cells render in the tabular monospace.
+struct Col {
+    /// The header label.
+    label: &'static str,
+    /// The column width.
+    width: Length,
+    /// The horizontal alignment of the label + cells.
+    align: Horizontal,
+    /// Whether to render the cells in the monospace face.
+    mono: bool,
+}
+
+/// The "Stream Files" pane columns.
+const STREAM_FILE_COLS: &[Col] = &[
+    Col { label: "Stream File", width: Length::Fill, align: Horizontal::Left, mono: true },
+    Col {
+        label: "Index",
+        width: Length::Fixed(ui::COL_INDEX),
+        align: Horizontal::Right,
+        mono: true,
+    },
+    Col {
+        label: "Length",
+        width: Length::Fixed(ui::COL_LENGTH),
+        align: Horizontal::Right,
+        mono: true,
+    },
+    Col {
+        label: "Size",
+        width: Length::Fixed(ui::COL_BYTES),
+        align: Horizontal::Right,
+        mono: true,
+    },
+];
+
+/// The "Streams" (codec) pane columns.
+const CODEC_COLS: &[Col] = &[
+    Col {
+        label: "Codec",
+        width: Length::Fixed(ui::COL_CODEC),
+        align: Horizontal::Left,
+        mono: false,
+    },
+    Col {
+        label: "Language",
+        width: Length::Fixed(ui::COL_LANG),
+        align: Horizontal::Left,
+        mono: false,
+    },
+    Col {
+        label: "Bit Rate",
+        width: Length::Fixed(ui::COL_BITRATE),
+        align: Horizontal::Right,
+        mono: true,
+    },
+    Col { label: "Description", width: Length::Fill, align: Horizontal::Left, mono: false },
+];
+
+/// A read-only data table: a quiet header over zebra-striped rows. Each `rows`
+/// entry supplies one cell string per column (extra cells are ignored); an empty
+/// table shows a single dash.
+fn data_table<'a>(
+    p: Palette,
+    cols: &'static [Col],
+    rows: Vec<Vec<String>>,
+) -> Element<'a, Message> {
+    let mut header_cells = Row::new().width(Length::Fill).align_y(Vertical::Center);
+    for col in cols {
+        header_cells = header_cells.push(header_cell(p, col.label, col.width, col.align));
+    }
+    let header = container(header_cells)
+        .width(Length::Fill)
+        .height(Length::Fixed(ui::HEADER_H))
+        .style(ui::table_header(p));
+    let rule = container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(ui::divider(p.line_strong));
+
+    let mut body_col = Column::new().width(Length::Fill);
+    if rows.is_empty() {
+        body_col = body_col
+            .push(container(text("—").size(ui::TEXT_SM).color(p.text_faint)).padding(ui::GAP_3));
+    }
+    for (i, row) in rows.into_iter().enumerate() {
+        let even = i.checked_rem(2) == Some(0);
+        let mut cells = Row::new().width(Length::Fill).align_y(Vertical::Center);
+        for (col, value) in cols.iter().zip(row) {
+            let font = if col.mono { ui::MONO } else { ui::UI };
+            cells = cells.push(
+                container(
+                    text(value)
+                        .size(ui::TEXT_SM)
+                        .font(font)
+                        .color(p.text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(col.width)
+                .align_x(col.align)
+                .padding([0.0, ui::GAP_2]),
+            );
+        }
+        body_col = body_col.push(
+            container(cells)
+                .width(Length::Fill)
+                .padding([ui::GAP_2, 0.0])
+                .style(ui::zebra(p, even)),
+        );
+    }
+    let body = scrollable(body_col).width(Length::Fill).height(Length::Fill);
+    container(
+        Column::new().width(Length::Fill).height(Length::Fill).push(header).push(rule).push(body),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(ui::table_frame(p))
+    .into()
+}
+
+/// Overlays `card` (centred over a dim scrim) on `base` — the scan-complete
+/// modal. Clicking the scrim dismisses it.
+fn modal<'a>(base: Element<'a, Message>, card: Element<'a, Message>) -> Element<'a, Message> {
+    let scrim = mouse_area(container(card).center(Length::Fill).style(ui::scrim()))
+        .on_press(Message::DismissNotice);
+    Stack::new().push(base).push(scrim).into()
+}
+
+/// The scan-complete card: the brand mark, the outcome text, and an OK button.
+fn notice_card<'a>(p: Palette, notice: &str) -> Element<'a, Message> {
+    let card = Column::new()
+        .align_x(Horizontal::Center)
+        .spacing(ui::GAP_4)
+        .push(brand_mark_large(p))
+        .push(text(notice.to_owned()).size(ui::TEXT_MD).color(p.text).align_x(Horizontal::Center))
+        .push(
+            button(text("OK").size(ui::TEXT_BASE).font(ui::UI_MEDIUM))
+                .padding([ui::GAP_2, ui::GAP_6])
+                .style(ui::primary_button(p))
+                .on_press(Message::DismissNotice),
+        );
+    container(card).padding(ui::GAP_6).max_width(440.0).style(ui::hero_card(p)).into()
 }
 
 /// One right/centre-aligned numeric cell in the table's tabular monospace.
