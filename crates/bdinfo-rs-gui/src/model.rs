@@ -63,6 +63,9 @@ pub struct SelectableRow {
     pub index: usize,
     /// Whether this row is currently checked.
     pub selected: bool,
+    /// Whether this playlist hides any stream — the table marks it with the
+    /// CLI's `*` and shows the footer note.
+    pub has_hidden: bool,
     /// The pre-formatted display cells.
     pub cells: TableRow,
 }

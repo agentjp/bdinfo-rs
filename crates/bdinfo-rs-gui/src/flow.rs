@@ -292,6 +292,17 @@ impl Flow {
         })
     }
 
+    /// The disc currently loaded or being listed (folder or `.iso`), if any —
+    /// the source the toolbar shows and "Rescan" re-lists. A pure read; it never
+    /// drives a transition.
+    #[must_use]
+    pub fn current_input(&self) -> Option<&Input> {
+        match &self.inner {
+            Inner::Listing(input) => Some(input),
+            _ => self.any_listing().map(|listing| &listing.input),
+        }
+    }
+
     /// The disc label, when a disc is loaded.
     #[must_use]
     pub fn label(&self) -> Option<&str> {
@@ -314,6 +325,7 @@ impl Flow {
             .map(|(index, cells)| SelectableRow {
                 index,
                 selected: listing.selection.is_checked(index),
+                has_hidden: listing.rows.get(index).is_some_and(|row| row.has_hidden_streams),
                 cells,
             })
             .collect()
@@ -517,6 +529,22 @@ mod tests {
         assert_eq!(flow.table().len(), 2);
         assert!(flow.editable());
         assert!(!flow.can_scan()); // nothing selected yet
+    }
+
+    #[test]
+    fn current_input_tracks_the_loaded_or_listing_disc() {
+        // None until something is picked.
+        assert_eq!(Flow::idle().current_input(), None);
+        // The input being listed.
+        assert_eq!(Flow::start_listing(input()).current_input(), Some(&input()));
+        // The input behind a loaded disc.
+        assert_eq!(listed().current_input(), Some(&input()));
+    }
+
+    #[test]
+    fn the_table_marks_hidden_streams_per_row() {
+        // The two-playlist fixture hides nothing, so no row is flagged.
+        assert!(listed().table().iter().all(|row| !row.has_hidden));
     }
 
     #[test]

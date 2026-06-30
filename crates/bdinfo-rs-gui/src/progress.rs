@@ -74,6 +74,24 @@ impl ProgressModel {
         self.percent.min(100) as f32 / 100.0
     }
 
+    /// The stream file currently being demuxed (the bottom bar's lead line).
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The elapsed wall time as `hh:mm:ss`.
+    #[must_use]
+    pub fn elapsed_hms(&self) -> String {
+        hms(self.elapsed_seconds)
+    }
+
+    /// The remaining-time estimate as `hh:mm:ss`.
+    #[must_use]
+    pub fn remaining_hms(&self) -> String {
+        hms(self.remaining_seconds)
+    }
+
     /// The progress text line: `NN% - file | Elapsed: hh:mm:ss | Remaining:
     /// hh:mm:ss`, mirroring the CLI's plain progress spelling (minus the
     /// terminal-only `Scanning` frame the bar widget replaces).
@@ -146,6 +164,16 @@ mod tests {
         assert_eq!(model.percent, 25);
         assert!((model.fraction() - 0.25).abs() < f32::EPSILON);
         assert_eq!(model.line(), " 25% - 00000.M2TS | Elapsed: 00:00:04 | Remaining: 00:00:12");
+    }
+
+    #[test]
+    fn model_exposes_file_and_hms_fields_to_the_shell() {
+        // The bottom bar reads these three instead of the combined `line`.
+        let model =
+            ProgressModel::compute("00000.M2TS".to_owned(), 50, 200, Duration::from_secs(4));
+        assert_eq!(model.file(), "00000.M2TS");
+        assert_eq!(model.elapsed_hms(), "00:00:04");
+        assert_eq!(model.remaining_hms(), "00:00:12");
     }
 
     #[test]
