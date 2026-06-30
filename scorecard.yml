@@ -17,6 +17,16 @@
 # official source over enforced TLS, and the version is drift-guarded against
 # dist-workspace.toml. The necessary danger is remediated, not removable.
 #
+# The Branch-Protection check caps the score at 3/10 because `master` does not
+# require pull-request approvers or CODEOWNERS review. That tier is unreachable
+# for a single-maintainer project: GitHub forbids approving your own PR, and with
+# enforce-admins on there is no bypass, so requiring a reviewer would make every
+# merge impossible. Every other protection the check rewards is already on —
+# force-push and deletion blocked, required signatures, linear history,
+# enforce-admins, strict required status checks, and required conversation
+# resolution — so the only unmet requirement is the unattainable second reviewer.
+# We decline that one recommendation, not branch protection itself.
+#
 # Each `reason` records that the finding is accepted; the scorecard-action emits
 # it as a SARIF suppression, so code scanning stops raising the alert on future
 # runs.
@@ -29,3 +39,7 @@ annotations:
       - pinned-dependencies
     reasons:
       - reason: remediated
+  - checks:
+      - branch-protection
+    reasons:
+      - reason: not-supported
