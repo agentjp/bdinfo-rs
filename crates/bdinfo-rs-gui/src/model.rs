@@ -19,6 +19,9 @@ use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
 pub(crate) struct PlaylistRow {
     /// 1-based position in the table — the handle a later phase's picker uses.
     pub(crate) position: usize,
+    /// Index into the scanned disc's `playlists` slice — the handle the
+    /// master-detail panes use to resolve this row's clips and streams.
+    pub(crate) playlist_index: usize,
     /// Shared-clip group number (1-based) — the CLI's `Group` column.
     pub(crate) group: usize,
     /// The playlist file name, e.g. `00000.MPLS`.
@@ -28,6 +31,9 @@ pub(crate) struct PlaylistRow {
     /// Estimated bytes — interleaved `*.ssif` size, else `*.m2ts` size, else
     /// `None` (the `-` cell).
     pub(crate) estimated_bytes: Option<u64>,
+    /// Measured (packet-derived) bytes over all angle clips — `0` until the
+    /// measured scan fills it.
+    pub(crate) measured_bytes: u64,
     /// Whether the playlist hides any stream — drives the CLI's footer note.
     pub(crate) has_hidden_streams: bool,
 }
@@ -49,6 +55,8 @@ pub struct TableRow {
     pub length: String,
     /// The `Estimated Bytes` column — thousands-grouped, or `-`.
     pub estimated_bytes: String,
+    /// The `Measured Bytes` column — thousands-grouped (`0` until measured).
+    pub measured_bytes: String,
 }
 
 /// One selectable table row: the display [`TableRow`] cells plus the row's
@@ -61,8 +69,11 @@ pub struct TableRow {
 pub struct SelectableRow {
     /// 0-based position in the table — the index a toggle message carries.
     pub index: usize,
-    /// Whether this row is currently checked.
+    /// Whether this row is currently checked (queued for the measured scan).
     pub selected: bool,
+    /// Whether this is the active (highlighted) row — the one whose clips and
+    /// streams the master-detail panes show.
+    pub active: bool,
     /// Whether this playlist hides any stream — the table marks it with the
     /// CLI's `*` and shows the footer note.
     pub has_hidden: bool,
@@ -86,7 +97,7 @@ fn table_rows(playlists: &[PlaylistSummary]) -> Vec<(usize, usize)> {
 
 /// `hh:mm:ss` from playlist seconds, truncated to the tick like the CLI table
 /// (hours wrap at 24; no day component).
-fn table_length(seconds: f64) -> String {
+pub(crate) fn table_length(seconds: f64) -> String {
     let total = seconds_to_ticks(seconds).max(0).checked_div(10_000_000).unwrap_or(0);
     let h = total.checked_div(3600).and_then(|h| h.checked_rem(24)).unwrap_or(0);
     let m = total.checked_div(60).and_then(|m| m.checked_rem(60)).unwrap_or(0);
@@ -108,7 +119,7 @@ const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
 
 /// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`). Mirrors
 /// the CLI's `group_n0`.
-fn group_n0(value: u64) -> String {
+pub(crate) fn group_n0(value: u64) -> String {
     let mut grouped = Vec::new();
     for (position, digit) in value.to_string().chars().rev().enumerate() {
         if position > 0 && position.checked_rem(3) == Some(0) {
@@ -133,10 +144,12 @@ pub(crate) fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
         .filter_map(|(position, (group, index))| {
             playlists.get(index).map(|playlist| PlaylistRow {
                 position: position.saturating_add(1),
+                playlist_index: index,
                 group,
                 name: playlist.name.clone(),
                 length: table_length(playlist.total_length),
                 estimated_bytes: estimated_bytes(playlist),
+                measured_bytes: playlist.total_angle_packet_size(),
                 has_hidden_streams: playlist.has_hidden_streams(),
             })
         })
@@ -151,6 +164,7 @@ fn display_row(row: &PlaylistRow) -> TableRow {
         file: row.name.clone(),
         length: row.length.clone(),
         estimated_bytes: estimated_cell(row.estimated_bytes),
+        measured_bytes: group_n0(row.measured_bytes),
     }
 }
 
@@ -272,6 +286,7 @@ mod tests {
                     file: "00000.MPLS".to_owned(),
                     length: "00:01:40".to_owned(),
                     estimated_bytes: "1,000".to_owned(),
+                    measured_bytes: "0".to_owned(),
                 },
                 TableRow {
                     number: "2".to_owned(),
@@ -279,6 +294,7 @@ mod tests {
                     file: "00001.MPLS".to_owned(),
                     length: "00:00:50".to_owned(),
                     estimated_bytes: "500".to_owned(),
+                    measured_bytes: "0".to_owned(),
                 },
                 TableRow {
                     number: "3".to_owned(),
@@ -286,6 +302,7 @@ mod tests {
                     file: "00002.MPLS".to_owned(),
                     length: "00:01:10".to_owned(),
                     estimated_bytes: "2,000".to_owned(),
+                    measured_bytes: "0".to_owned(),
                 },
             ]
         );
@@ -327,10 +344,12 @@ mod tests {
         assert!(!any_hidden(&rows));
         let hidden = [PlaylistRow {
             position: 1,
+            playlist_index: 0,
             group: 1,
             name: "00000.MPLS".to_owned(),
             length: "00:00:30".to_owned(),
             estimated_bytes: None,
+            measured_bytes: 0,
             has_hidden_streams: true,
         }];
         assert!(any_hidden(&hidden));

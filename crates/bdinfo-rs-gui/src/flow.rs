@@ -22,6 +22,7 @@ use std::time::Duration;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 
 use crate::model::{self, PlaylistRow, SelectableRow};
+use crate::panes::{self, CodecRow, StreamFileRow};
 use crate::progress::ProgressModel;
 use crate::scan::{Input, Structural};
 use crate::selection::{self, Selection};
@@ -60,6 +61,9 @@ struct Listing {
     rows: Vec<PlaylistRow>,
     /// One checkbox flag per row.
     selection: Selection,
+    /// The active (highlighted) row — the playlist whose clips and streams the
+    /// master-detail panes show. Clamped into the row range (`0` when empty).
+    active: usize,
     /// Whether any listed playlist hides a stream (the CLI's footer note).
     show_hidden: bool,
     /// Structural-scan failures (a corrupt playlist) — a non-blocking banner.
@@ -82,6 +86,7 @@ impl Listing {
             playlists: structural.playlists,
             rows,
             selection,
+            active: 0,
             show_hidden,
             warnings: structural.warnings,
             error: None,
@@ -91,6 +96,27 @@ impl Listing {
     /// The checked rows' playlist names, in table order.
     fn selected_names(&self) -> Vec<String> {
         self.selection.selected_names(&self.rows)
+    }
+
+    /// Replaces the playlists with the measured ones, rebuilding the rows so the
+    /// table + panes show the measured sizes and bitrates. The measured scan
+    /// re-opened the same disc with the same filter, so the rows line up; the
+    /// selection survives when the count matches (it always does in practice).
+    fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
+        let rows = model::playlist_rows(&playlists);
+        if rows.len() != self.rows.len() {
+            self.selection = Selection::new(rows.len());
+        }
+        self.show_hidden = model::any_hidden(&rows);
+        self.playlists = playlists;
+        self.rows = rows;
+        self.active = self.active.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// The active row's playlist, resolved through its `playlist_index`.
+    fn active_playlist(&self) -> Option<&PlaylistSummary> {
+        let row = self.rows.get(self.active)?;
+        self.playlists.get(row.playlist_index)
     }
 }
 
@@ -175,6 +201,17 @@ impl Flow {
         }
     }
 
+    /// Sets the active (highlighted) row — the playlist whose clips and streams
+    /// the master-detail panes show. A row click drives this; it is independent
+    /// of the scan-selection checkboxes. An out-of-range index is ignored.
+    pub const fn set_active(&mut self, index: usize) {
+        if let Some(listing) = self.editable_listing_mut()
+            && index < listing.rows.len()
+        {
+            listing.active = index;
+        }
+    }
+
     /// Checks every row ("Select all").
     pub fn select_all(&mut self) {
         if let Some(listing) = self.editable_listing_mut() {
@@ -233,9 +270,11 @@ impl Flow {
         report: String,
         label: String,
         errors: Vec<String>,
+        playlists: Vec<PlaylistSummary>,
     ) -> Self {
         match self.inner {
-            Inner::Scanning { listing, generation: active, .. } if active == generation => {
+            Inner::Scanning { mut listing, generation: active, .. } if active == generation => {
+                listing.apply_measured(playlists);
                 Self { inner: Inner::Reported { listing, report, label, errors } }
             }
             other => Self { inner: other },
@@ -309,6 +348,36 @@ impl Flow {
         self.any_listing().map(|listing| listing.label.as_str())
     }
 
+    /// The active (highlighted) row index, when a disc is loaded.
+    #[must_use]
+    pub fn active_index(&self) -> Option<usize> {
+        self.any_listing().map(|listing| listing.active)
+    }
+
+    /// The active playlist's name (for the master-detail pane headers).
+    #[must_use]
+    pub fn active_playlist_name(&self) -> Option<String> {
+        self.any_listing().and_then(Listing::active_playlist).map(|playlist| playlist.name.clone())
+    }
+
+    /// The "Stream Files" pane rows for the active playlist (empty when none).
+    #[must_use]
+    pub fn stream_file_rows(&self) -> Vec<StreamFileRow> {
+        self.any_listing()
+            .and_then(Listing::active_playlist)
+            .map(panes::stream_file_rows)
+            .unwrap_or_default()
+    }
+
+    /// The "Streams" (codec) pane rows for the active playlist (empty when none).
+    #[must_use]
+    pub fn codec_rows(&self) -> Vec<CodecRow> {
+        self.any_listing()
+            .and_then(Listing::active_playlist)
+            .map(panes::codec_rows)
+            .unwrap_or_default()
+    }
+
     /// The structural-scan warnings (a corrupt playlist found while listing).
     #[must_use]
     pub fn warnings(&self) -> &[String] {
@@ -325,6 +394,7 @@ impl Flow {
             .map(|(index, cells)| SelectableRow {
                 index,
                 selected: listing.selection.is_checked(index),
+                active: index == listing.active,
                 has_hidden: listing.rows.get(index).is_some_and(|row| row.has_hidden_streams),
                 cells,
             })
@@ -599,13 +669,54 @@ mod tests {
         flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::ZERO);
         assert_eq!(flow.progress_view().map(|p| p.percent), Some(50));
 
-        let flow = flow.finished(1, "REPORT".to_owned(), "DISC".to_owned(), Vec::new());
+        let flow = flow.finished(
+            1,
+            "REPORT".to_owned(),
+            "DISC".to_owned(),
+            Vec::new(),
+            structural().playlists,
+        );
         assert_eq!(flow.stage(), Stage::Reported);
         assert_eq!(flow.report(), Some("REPORT"));
         assert_eq!(flow.report_label(), Some("DISC"));
         assert!(flow.report_errors().is_empty());
         // Reported is editable again — the user can re-select and re-scan.
         assert!(flow.editable());
+    }
+
+    #[test]
+    fn the_active_playlist_drives_the_panes() {
+        let mut flow = listed();
+        // The first row is active by default; its clip drives the stream-files pane.
+        assert_eq!(flow.active_index(), Some(0));
+        assert_eq!(flow.active_playlist_name().as_deref(), Some("00000.MPLS"));
+        assert!(flow.table().first().is_some_and(|row| row.active));
+        let files: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.file).collect();
+        assert_eq!(files, ["A.M2TS"]);
+        // Activating the second row switches the panes to its playlist.
+        flow.set_active(1);
+        assert_eq!(flow.active_playlist_name().as_deref(), Some("00001.MPLS"));
+        let files: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.file).collect();
+        assert_eq!(files, ["B.M2TS"]);
+        // An out-of-range activation is ignored.
+        flow.set_active(99);
+        assert_eq!(flow.active_index(), Some(1));
+    }
+
+    #[test]
+    fn finishing_a_scan_refreshes_the_panes_with_measured_data() {
+        let mut flow = listed();
+        flow.toggle(0);
+        let flow = flow.start_scanning(1);
+        // The measured playlists carry the first clip's packet tally.
+        let mut measured = structural().playlists;
+        if let Some(clip) = measured.first_mut().and_then(|p| p.clips.first_mut()) {
+            clip.packet_count = 1000; // 1000 * 192 = 192,000 bytes
+        }
+        let flow = flow.finished(1, "R".to_owned(), "D".to_owned(), Vec::new(), measured);
+        // The active (first) row's stream-files pane shows the measured size.
+        let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.size).collect();
+        assert_eq!(sizes, ["192,000"]);
     }
 
     #[test]
@@ -617,7 +728,7 @@ mod tests {
         let mut probe = flow.clone();
         probe.progress(4, "x".to_owned(), 1, 1, Duration::ZERO);
         assert!(probe.progress_view().is_none(), "stale progress ignored");
-        let probe = flow.finished(4, "R".to_owned(), "D".to_owned(), Vec::new());
+        let probe = flow.finished(4, "R".to_owned(), "D".to_owned(), Vec::new(), Vec::new());
         assert_eq!(probe.stage(), Stage::Scanning, "stale finish ignored");
     }
 
@@ -628,7 +739,7 @@ mod tests {
         let flow = flow.start_scanning(7).cancel();
         assert_eq!(flow.stage(), Stage::Listed);
         // A finish from the cancelled scan's generation must not reach Reported.
-        let flow = flow.finished(7, "R".to_owned(), "D".to_owned(), Vec::new());
+        let flow = flow.finished(7, "R".to_owned(), "D".to_owned(), Vec::new(), Vec::new());
         assert_eq!(flow.stage(), Stage::Listed);
     }
 
@@ -730,7 +841,13 @@ mod tests {
                         Event::Finished(g) => {
                             let was = scanning_gen;
                             let before = flow.stage();
-                            flow = flow.finished(g, "R".to_owned(), "D".to_owned(), Vec::new());
+                            flow = flow.finished(
+                                g,
+                                "R".to_owned(),
+                                "D".to_owned(),
+                                Vec::new(),
+                                structural().playlists,
+                            );
                             // The ONLY way to enter Reported is finishing the
                             // in-flight scan; a stale finish changes nothing.
                             if before != Stage::Reported && flow.stage() == Stage::Reported {

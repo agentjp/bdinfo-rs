@@ -80,6 +80,9 @@ pub struct Measured {
     /// Any failures recorded during the measured scan — a non-empty list is the
     /// CLI's resilient "completed with errors" posture (the report still saves).
     pub errors: Vec<String>,
+    /// The measured playlists — the scanned disc's playlists with their packet
+    /// sizes and bitrates filled in, so the master-detail panes refresh in place.
+    pub playlists: Vec<PlaylistSummary>,
 }
 
 /// Opens `input` at the given scan depth, merging the backend's recorded
@@ -157,7 +160,12 @@ pub fn scan_measured(
         open(input, true, Some(scan_files), progress).map_err(|err| err.to_string())?;
     let order = selection::selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors);
-    Ok(Measured { report, label: bdrom.volume_label, errors: error_lines(&errors) })
+    Ok(Measured {
+        report,
+        label: bdrom.volume_label,
+        errors: error_lines(&errors),
+        playlists: bdrom.playlists,
+    })
 }
 
 #[cfg(test)]
