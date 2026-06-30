@@ -1,0 +1,23 @@
+# cargo-mutants policy for the native GUI crate (its own workspace; the root
+# .cargo/mutants.toml is NOT inherited). Tier A — the target-agnostic pure logic
+# (the playlist view-model in `model`) — is held to 0 missed.
+#
+# Tier B is the iced render/IO glue: the `bdinfo-rs-gui` binary (Message/App/update/
+# view/the rfd dialog + scan tasks) and the IO-bound scan seam in `scan` (FsDir +
+# `BdRom::open_resilient*` + `text::render_with`). It is verified by the golden-tie
+# parity test (byte-exact report over the committed fixture) + running the app, not
+# by line-level mutation, so exclude it here by item name. (Phase 4 grows this to
+# full Posture C; for now the v0 gate does not run mutants.)
+exclude_re = [
+    "main", # the iced entry point
+    "update", # App::update — the message dispatch (Tier B)
+    "view", # App::view — the widget tree (Tier B)
+    "loaded_view", # the loaded screen's widget tree (Tier B)
+    "window_title", # the iced title fn
+    "pick_folder_dialog", # the rfd AsyncFileDialog future
+    "open_and_render", # FsDir -> open_resilient -> render_with (IO; golden-tied)
+    "scan_folder", # the public folder-scan seams (IO; golden-tied)
+]
+
+# Enforce the committed lockfile on every mutant build (mirrors CI).
+additional_cargo_args = ["--locked"]

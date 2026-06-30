@@ -1,0 +1,84 @@
+[package]
+name = "bdinfo-rs-gui"
+version = "1.1.0"
+publish = false
+edition = "2024"
+rust-version = "1.96"
+license = "LGPL-2.1-or-later"
+authors = ["bdinfo-rs contributors"]
+repository = "https://github.com/agentjp/bdinfo-rs"
+description = "Native desktop GUI for the bdinfo-rs Blu-ray analyzer (iced, pure-Rust)."
+
+# INDEPENDENT workspace — keeps the large iced/wgpu/winit/cosmic-text dependency
+# tree (its runtime graphics deps + unavoidable transitive version duplications)
+# OUT of the root workspace's gate, lockfile, and supply-chain audit, exactly like
+# crates/bdinfo-rs-wasm and fuzz/. The root Cargo.toml also `exclude`s this dir.
+# Unlike the wasm crate this stays INSIDE `forbid(unsafe_code)`: a native iced app
+# needs no `unsafe` in our own code (iced/wgpu/winit carry their own internally —
+# a dependency concern, not ours).
+[workspace]
+
+[lib]
+# A small lib holds the Tier-A view-model (model) + the scan seam (scan) so the
+# golden-tie + unit tests link it directly; the bin is the thin iced (Tier-B)
+# shell over it, holding no business logic of its own.
+name = "bdinfo_rs_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bdinfo-rs-gui"
+path = "src/main.rs"
+
+[dependencies]
+bdinfo-rs-core = { path = "../bdinfo-rs-core" }
+# Pure-Rust GUI: wgpu (+ tiny-skia CPU fallback) / cosmic-text / winit. No C.
+iced = "0.14"
+# The folder picker, on its pure-Rust `xdg-portal` backend — NOT the `gtk3`
+# backend, which links C (gtk-sys/glib-sys/gdk-sys via pkg-config). `xdg-portal`
+# reaches the desktop's file chooser over D-Bus (ashpd/zbus, pollster) on Linux,
+# and uses the OS dialog (windows-sys / objc) on Windows/macOS — no C linked. The
+# no-C gate (`cargo tree --target all`) asserts no GTK crate ever appears.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }
+
+[dev-dependencies]
+# Amplify the Tier-A unit tests with property tests, like the wasm crate does.
+proptest = "1"
+
+# Size-tuned, mirroring the CLI's shipped binary + the wasm crate's profile.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# Maximal-FEASIBLE strictness (Posture C, mirroring the wasm crate's Posture B) —
+# but this crate KEEPS `forbid(unsafe_code)`: a native iced app needs no `unsafe`
+# in our own code. Everywhere else it is held to the core's posture: clippy
+# all/pedantic/nursery/cargo + the core's hostile-input restriction picks, with a
+# SHORT allow-list for the lints intrinsic to a GUI leaf, not bugs.
+[lints.rust]
+unsafe_code = "forbid" # memory safety is the product guarantee — no unsafe here.
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Restriction picks — the same bug classes the core guards: out-of-bounds index
+# panics, UTF-8 slice panics, silent wrap on byte/offset math, and panics.
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+unwrap_used = "deny"
+panic = "deny"
+
+# ── allow-list: each is intrinsic to a publish=false iced GUI leaf, not a bug ──
+# The iced/wgpu/winit tree carries duplicate versions of low-level crates that no
+# leaf can dedupe (design-review §2.2), so dup-detection is noise here.
+multiple_crate_versions = "allow"
+# Not a crates.io package (publish=false leaf): it carries no keywords/categories.
+cargo_common_metadata = "allow"
+# The view-model lives in a `model` module and the scan seam in `scan`; names like
+# `model::PlaylistRow` / `scan::ScanData` read naturally and renaming to dodge the
+# prefix would be worse (the core workspace allows this lint for the same reason).
+module_name_repetitions = "allow"
