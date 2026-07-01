@@ -74,9 +74,51 @@ fn main() -> iced::Result {
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first
-/// frame matches the desktop's light/dark setting.
+/// frame matches the desktop's light/dark setting. In a **debug** build it also
+/// applies the screenshot-harness environment hooks (see [`debug_boot`]).
 fn boot() -> (App, Task<Message>) {
-    (App::default(), iced::system::theme().map(Message::OsTheme))
+    let app = App::default();
+    let theme = iced::system::theme().map(Message::OsTheme);
+    boot_with(app, theme)
+}
+
+/// Release: boot with just the OS-theme probe — no environment hooks.
+#[cfg(not(debug_assertions))]
+fn boot_with(app: App, theme: Task<Message>) -> (App, Task<Message>) {
+    (app, theme)
+}
+
+/// Debug: layer the screenshot-harness hooks over the boot. `BDINFO_GUI_THEME`
+/// (`light`/`dark`) pins the palette and `BDINFO_GUI_OPEN` / `BDINFO_GUI_ISO`
+/// auto-open a disc, so `scripts/gui-shoot.ps1` can drive the real window to a
+/// known state and capture it. Compiled out of every release build.
+#[cfg(debug_assertions)]
+fn boot_with(mut app: App, theme: Task<Message>) -> (App, Task<Message>) {
+    if let Ok(pref) = std::env::var("BDINFO_GUI_THEME") {
+        match pref.as_str() {
+            "light" => app.theme_pref = ThemePref::Light,
+            "dark" => app.theme_pref = ThemePref::Dark,
+            _ => {}
+        }
+    }
+    let folder = std::env::var("BDINFO_GUI_OPEN")
+        .ok()
+        .map(|path| Task::done(Message::FolderPicked(Some(PathBuf::from(path)))));
+    let iso = std::env::var("BDINFO_GUI_ISO")
+        .ok()
+        .map(|path| Task::done(Message::IsoPicked(Some(PathBuf::from(path)))));
+    let mut tasks = vec![theme];
+    tasks.extend(folder);
+    tasks.extend(iso);
+    (app, Task::batch(tasks))
+}
+
+/// Debug only: whether the harness asked for an automatic measured scan of every
+/// playlist once the structural list lands (`BDINFO_GUI_SCAN=all`), so a capture
+/// can show the panes with measured sizes and bitrates.
+#[cfg(debug_assertions)]
+fn debug_scan_all() -> bool {
+    std::env::var("BDINFO_GUI_SCAN").is_ok_and(|value| value == "all")
 }
 
 /// The window settings: a sensible default + minimum size and the embedded app
@@ -296,10 +338,7 @@ impl App {
             }
             Message::FolderPicked(Some(path)) => self.begin_listing(Input::Folder(path)),
             Message::IsoPicked(Some(path)) => self.begin_listing(Input::Iso(path)),
-            Message::Listed { input, result } => {
-                self.flow = std::mem::take(&mut self.flow).listed(&input, result);
-                Task::none()
-            }
+            Message::Listed { input, result } => self.on_listed(&input, result),
             Message::RowToggled(index) => {
                 self.flow.toggle(index);
                 Task::none()
@@ -385,6 +424,19 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    /// Applies a finished structural scan. In a debug build it also honours the
+    /// capture harness's auto-scan hook (`BDINFO_GUI_SCAN=all`), selecting and
+    /// scanning every playlist so a screenshot can show measured data.
+    fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
+        self.flow = std::mem::take(&mut self.flow).listed(input, result);
+        #[cfg(debug_assertions)]
+        if self.flow.stage() == Stage::Listed && debug_scan_all() {
+            self.flow.select_all();
+            return self.start_scan();
+        }
+        Task::none()
     }
 
     /// Begins the structural scan of `input` on iced's executor (fast — no demux),
