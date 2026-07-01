@@ -82,6 +82,10 @@ pub const COL_LANG: f32 = 104.0;
 pub const COL_BITRATE: f32 = 108.0;
 /// The width of the row-selection accent bar.
 pub const SEL_BAR: f32 = 3.0;
+/// A trailing gutter reserved on every table header + row so the last (right-
+/// aligned) column's values clear the scrollable's scrollbar instead of hiding
+/// behind it — the padding `BDInfo` leaves on the right edge.
+pub const SCROLLBAR_GUTTER: f32 = 16.0;
 
 /// Returns `color` with its alpha replaced — for tints and shadows.
 const fn with_alpha(color: Color, a: f32) -> Color {

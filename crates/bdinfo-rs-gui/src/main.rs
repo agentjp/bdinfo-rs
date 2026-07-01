@@ -47,6 +47,11 @@ const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);
 /// small screen, beyond which the panes scroll rather than disappear (so the
 /// window never gets stuck larger than a modest display).
 const MIN_SIZE: (f32, f32) = (680.0, 540.0);
+/// The **maximum** size — a hard cap on how wide the window can be dragged
+/// (`BDInfo` sits around 800 wide; much wider just stretches the columns and
+/// wastes space). The height cap is deliberately huge, so only the width is
+/// really limited — the layout stays portrait, like `BDInfo`.
+const MAX_SIZE: (f32, f32) = (1100.0, 4320.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
 
@@ -55,8 +60,9 @@ fn main() -> iced::Result {
         .title(App::title)
         .theme(App::theme)
         .style(App::style)
-        // "Auto" tracks the desktop live: re-resolve the palette on every OS change.
-        .subscription(|_app| iced::system::theme_changes().map(Message::OsTheme))
+        // "Auto" tracks the desktop live; while the initial scan runs, also drive
+        // the indeterminate progress-bar animation.
+        .subscription(App::subscription)
         .default_font(ui::UI)
         .font(
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Variable.ttf"))
@@ -121,12 +127,23 @@ fn debug_scan_all() -> bool {
     std::env::var("BDINFO_GUI_SCAN").is_ok_and(|value| value == "all")
 }
 
+/// Debug only: an artificial pause (milliseconds from `BDINFO_GUI_SCAN_DELAY`)
+/// inserted into the initial scan, so the transient "scanning" overlay stays up
+/// long enough for the capture harness to grab it. No effect without the var.
+#[cfg(debug_assertions)]
+fn debug_scan_delay() {
+    if let Some(ms) = std::env::var("BDINFO_GUI_SCAN_DELAY").ok().and_then(|v| v.parse().ok()) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
 /// The window settings: a sensible default + minimum size and the embedded app
 /// icon (drawn procedurally, so the binary stays self-contained).
 fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
         min_size: Some(iced::Size::new(MIN_SIZE.0, MIN_SIZE.1)),
+        max_size: Some(iced::Size::new(MAX_SIZE.0, MAX_SIZE.1)),
         icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok(),
         ..iced::window::Settings::default()
     }
@@ -161,7 +178,17 @@ struct App {
     /// right-click "copy line" acts on. `None` until a Stream File / Codec row is
     /// clicked; reset when the active playlist changes.
     pane_selection: Option<(Region, usize)>,
+    /// The animation phase (`0..PULSE_PERIOD`) of the indeterminate "scanning"
+    /// bar shown during the initial disc scan; advanced by [`Message::Tick`].
+    pulse: u16,
 }
+
+/// The indeterminate-bar animation period (one full 0→1→0 breath).
+const PULSE_PERIOD: u16 = 1000;
+/// Half the period — the peak of the triangle wave.
+const PULSE_HALF: u16 = 500;
+/// The phase advance per animation frame (larger = faster breathing).
+const PULSE_STEP: u16 = 16;
 
 /// Which of the three master-detail panes a row belongs to — the hover / click
 /// messages carry it so one `hovered` slot serves all three.
@@ -286,6 +313,8 @@ enum Message {
     ToggleTheme,
     /// The OS reported (or changed) its light/dark setting.
     OsTheme(iced::theme::Mode),
+    /// An animation frame — advances the indeterminate "scanning" bar.
+    Tick,
 }
 
 impl App {
@@ -314,8 +343,10 @@ impl App {
     /// Whether a [`Command`] is currently actionable (drives its enabled state).
     fn command_enabled(&self, command: Command) -> bool {
         match command {
-            Command::OpenFolder | Command::OpenIso | Command::ToggleTheme => true,
-            Command::Rescan => self.flow.current_input().is_some(),
+            Command::ToggleTheme => true,
+            // Browsing / re-scanning is disabled while a scan is in flight.
+            Command::OpenFolder | Command::OpenIso => !self.is_busy(),
+            Command::Rescan => !self.is_busy() && self.flow.current_input().is_some(),
             Command::SaveReport | Command::CopyReport => self.flow.report().is_some(),
         }
     }
@@ -423,7 +454,43 @@ impl App {
                 self.os_mode = mode;
                 Task::none()
             }
+            Message::Tick => {
+                self.pulse =
+                    self.pulse.wrapping_add(PULSE_STEP).checked_rem(PULSE_PERIOD).unwrap_or(0);
+                Task::none()
+            }
         }
+    }
+
+    /// The live subscriptions: the OS light/dark change feed, plus — only while
+    /// the initial scan is in flight — a per-frame tick that animates the
+    /// indeterminate progress bar. The tick is off in every other state, so the
+    /// window is not redrawing continuously when idle.
+    fn subscription(&self) -> iced::Subscription<Message> {
+        let theme = iced::system::theme_changes().map(Message::OsTheme);
+        if self.flow.stage() == Stage::Listing {
+            iced::Subscription::batch([theme, iced::window::frames().map(|_| Message::Tick)])
+        } else {
+            theme
+        }
+    }
+
+    /// The indeterminate progress-bar fill while scanning — a 0→1→0 triangle over
+    /// the animation phase, so the bar "breathes" rather than implying a measured
+    /// percentage.
+    fn pulse_fraction(&self) -> f32 {
+        let phase = if self.pulse <= PULSE_HALF {
+            self.pulse
+        } else {
+            PULSE_PERIOD.saturating_sub(self.pulse)
+        };
+        f32::from(phase) / f32::from(PULSE_HALF)
+    }
+
+    /// Whether a scan (initial or measured) is in flight — the source controls are
+    /// disabled while one runs, like `BDInfo`.
+    const fn is_busy(&self) -> bool {
+        matches!(self.flow.stage(), Stage::Listing | Stage::Scanning)
     }
 
     /// Applies a finished structural scan. In a debug build it also honours the
@@ -439,17 +506,23 @@ impl App {
         Task::none()
     }
 
-    /// Begins the structural scan of `input` on iced's executor (fast — no demux),
-    /// carrying the input back so a superseded pick's result is discarded.
+    /// Begins the initial scan of `input` on iced's executor — the bounded
+    /// `Codecs` pass, which reads each stream file's head to fill the codec
+    /// detail. It runs off the UI thread, so the "scanning" overlay animates while
+    /// it works; the input is carried back so a superseded pick's result is
+    /// discarded.
     fn begin_listing(&mut self, input: Input) -> Task<Message> {
         self.status = None;
         self.showing_report = false;
         self.notice = None;
         self.hovered = None;
         self.pane_selection = None;
+        self.pulse = 0;
         self.flow = Flow::start_listing(input.clone());
         Task::perform(
             async move {
+                #[cfg(debug_assertions)]
+                debug_scan_delay();
                 let result = scan::scan_structural(&input);
                 (input, result)
             },
@@ -567,9 +640,12 @@ impl App {
         } else {
             match self.flow.stage() {
                 Stage::Idle => self.empty_state(p),
-                Stage::Listing => self.listing_state(p),
                 Stage::Failed => self.failed_state(p),
-                Stage::Listed | Stage::Scanning | Stage::Reported => self.disc_view(p),
+                // The initial scan (`Listing`) shows the empty pane skeleton with a
+                // "please wait" overlay on top, like BDInfo.
+                Stage::Listing | Stage::Listed | Stage::Scanning | Stage::Reported => {
+                    self.disc_view(p)
+                }
             }
         };
 
@@ -582,6 +658,9 @@ impl App {
             .push(self.bottom_bar(p));
 
         let base = container(content).width(Length::Fill).height(Length::Fill).into();
+        if self.flow.stage() == Stage::Listing {
+            return scanning_modal(base, scanning_card(p));
+        }
         match &self.notice {
             Some(notice) => modal(base, notice_card(p, notice)),
             None => base,
@@ -697,23 +776,6 @@ impl App {
                     .push(self.command_button(p, Command::OpenIso)),
             );
         let framed = container(card).padding(ui::GAP_6).max_width(560.0).style(ui::hero_card(p));
-        container(framed).center(Length::Fill).into()
-    }
-
-    /// The structural-scan-in-flight state: a quiet centred note.
-    fn listing_state(&self, p: Palette) -> Element<'_, Message> {
-        let path = self.flow.input_display().unwrap_or_default();
-        let card = Column::new()
-            .align_x(Horizontal::Center)
-            .spacing(ui::GAP_2)
-            .push(
-                text("Reading disc structure…")
-                    .size(ui::TEXT_MD)
-                    .font(ui::UI_SEMIBOLD)
-                    .color(p.text),
-            )
-            .push(text(path).size(ui::TEXT_SM).font(ui::MONO).color(p.text_muted));
-        let framed = container(card).padding(ui::GAP_6).style(ui::hero_card(p));
         container(framed).center(Length::Fill).into()
     }
 
@@ -921,30 +983,17 @@ impl App {
             lines = lines.push(info_line(p, "Disc Title:", title.to_owned(), false));
         }
 
+        // The folder + disc label on one line, exactly as BDInfo spells it — the
+        // label inline in parentheses, not a separate right-aligned field (which
+        // overflowed the window when narrow).
         let path = self.flow.current_input().map(Input::display).unwrap_or_default();
-        let label = self.flow.label().unwrap_or("—").to_owned();
-        lines = lines.push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Vertical::Center)
-                .spacing(ui::GAP_2)
-                .push(
-                    text("Detected BDMV Folder:")
-                        .size(ui::TEXT_XS)
-                        .font(ui::UI_MEDIUM)
-                        .color(p.text_muted),
-                )
-                .push(
-                    text(path)
-                        .size(ui::TEXT_XS)
-                        .font(ui::MONO)
-                        .color(p.text)
-                        .wrapping(text::Wrapping::None),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(text("Disc Label:").size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-                .push(text(label).size(ui::TEXT_XS).font(ui::MONO).color(p.text)),
-        );
+        let label = self.flow.label().unwrap_or("—");
+        lines = lines.push(info_line(
+            p,
+            "Detected BDMV Folder:",
+            format!("{path} (Disc Label: {label})"),
+            true,
+        ));
 
         let features = self.flow.disc_features();
         if !features.is_empty() {
@@ -1039,6 +1088,8 @@ impl App {
         let fraction = match self.flow.stage() {
             Stage::Scanning => progress.map_or(0.0, ProgressModel::fraction),
             Stage::Reported => 1.0,
+            // The initial scan has no measurable %, so the bar breathes.
+            Stage::Listing => self.pulse_fraction(),
             _ => 0.0,
         };
 
@@ -1048,6 +1099,7 @@ impl App {
                 || "Starting scan…".to_owned(),
                 |pr| format!("Scanning {}…", pr.file()),
             ),
+            Stage::Listing => "Scanning disc…".to_owned(),
             Stage::Reported => "Report ready.".to_owned(),
             Stage::Listed if self.flow.selected_count() > 0 => "Ready to scan.".to_owned(),
             // Nothing checked still scans — the whole disc, like BDInfo.
@@ -1189,7 +1241,8 @@ fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
         .push(header_cell(p, "Group", Length::Fixed(ui::COL_GROUP), Horizontal::Center))
         .push(header_cell(p, "Length", Length::Fixed(ui::COL_LENGTH), Horizontal::Right))
         .push(header_cell(p, "Estimated Size", Length::Fixed(ui::COL_BYTES), Horizontal::Right))
-        .push(header_cell(p, "Measured Size", Length::Fixed(ui::COL_MEASURED), Horizontal::Right));
+        .push(header_cell(p, "Measured Size", Length::Fixed(ui::COL_MEASURED), Horizontal::Right))
+        .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     Row::new()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1234,8 +1287,15 @@ fn table_row<'a>(
     .style(ui::flat_button(p))
     .on_press_maybe(editable.then_some(Message::RowToggled(index)));
 
-    let mut file = Row::new()
-        .push(text(row_data.cells.file.clone()).size(ui::TEXT_SM).font(ui::MONO).color(p.text));
+    let mut file = Row::new().push(
+        text(row_data.cells.file.clone())
+            .size(ui::TEXT_SM)
+            .font(ui::MONO)
+            .color(p.text)
+            // Clip a long name (e.g. `00002.MPLS [12 Chapters]`) at the column
+            // edge when the window narrows, rather than wrapping to a new line.
+            .wrapping(text::Wrapping::None),
+    );
     if row_data.has_hidden {
         file = file.push(text(" *").size(ui::TEXT_SM).font(ui::MONO).color(p.accent));
     }
@@ -1243,7 +1303,11 @@ fn table_row<'a>(
         .width(Length::Fill)
         .align_y(Vertical::Center)
         .push(
-            container(file).width(Length::Fill).align_x(Horizontal::Left).padding([0.0, ui::GAP_2]),
+            container(file)
+                .width(Length::Fill)
+                .clip(true)
+                .align_x(Horizontal::Left)
+                .padding([0.0, ui::GAP_2]),
         )
         .push(num_cell(p, row_data.cells.group.clone(), ui::COL_GROUP, Horizontal::Center))
         .push(num_cell(p, row_data.cells.length.clone(), ui::COL_LENGTH, Horizontal::Right))
@@ -1253,7 +1317,8 @@ fn table_row<'a>(
             row_data.cells.measured_bytes.clone(),
             ui::COL_MEASURED,
             Horizontal::Right,
-        ));
+        ))
+        .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     // Centre the cells vertically in the fixed-height row (the button does not
     // centre its content on its own, so the text would otherwise sit at the top).
     let cells_button =
@@ -1405,6 +1470,8 @@ fn data_table<'a>(
     for col in cols {
         header_cells = header_cells.push(header_cell(p, col.label, col.width, col.align));
     }
+    // Reserve the scrollbar gutter so the last column aligns with the body rows.
+    header_cells = header_cells.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     let header = container(header_cells)
         .width(Length::Fill)
         .height(Length::Fixed(ui::HEADER_H))
@@ -1433,10 +1500,14 @@ fn data_table<'a>(
                         .wrapping(text::Wrapping::None),
                 )
                 .width(col.width)
+                .clip(true)
                 .align_x(col.align)
                 .padding([0.0, ui::GAP_2]),
             );
         }
+        // The trailing gutter matches the header, keeping the last value clear of
+        // the scrollbar.
+        cells = cells.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
         let framed = container(cells)
             .width(Length::Fill)
             .padding([ui::GAP_2, 0.0])
@@ -1464,6 +1535,33 @@ fn modal<'a>(base: Element<'a, Message>, card: Element<'a, Message>) -> Element<
     let scrim = mouse_area(container(card).center(Length::Fill).style(ui::scrim()))
         .on_press(Message::DismissNotice);
     Stack::new().push(base).push(scrim).into()
+}
+
+/// Overlays `card` on `base` over a dim scrim, **without** a dismiss — the
+/// "please wait" overlay shown while the initial scan runs (it clears itself when
+/// the scan completes).
+fn scanning_modal<'a>(
+    base: Element<'a, Message>,
+    card: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let scrim = container(card).center(Length::Fill).style(ui::scrim());
+    Stack::new().push(base).push(scrim).into()
+}
+
+/// The "please wait" scan overlay card: the brand mark over the same message
+/// `BDInfo` shows while it reads a disc.
+fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
+    let card = Column::new()
+        .align_x(Horizontal::Center)
+        .spacing(ui::GAP_4)
+        .push(brand_mark_large(p))
+        .push(
+            text("Please wait while we scan the disc...")
+                .size(ui::TEXT_MD)
+                .color(p.text)
+                .align_x(Horizontal::Center),
+        );
+    container(card).padding(ui::GAP_6).max_width(440.0).style(ui::hero_card(p)).into()
 }
 
 /// The scan-complete card: the brand mark, the outcome text, and an OK button.
