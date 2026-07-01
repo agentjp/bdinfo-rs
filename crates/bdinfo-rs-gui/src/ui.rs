@@ -60,28 +60,50 @@ pub const ROW_H: f32 = 34.0;
 /// The table header strip's height.
 pub const HEADER_H: f32 = 36.0;
 
-// ── Table column widths (the Playlist File column takes the remaining space) ──
+// ── Table column widths ──────────────────────────────────────────────────────
+//
+// Every data column is **proportional** (an `iced` `FillPortion` weight), so the
+// columns scale with the window exactly like `BDInfo`, which sizes each column as
+// a fraction of the list's client width. The weights below are `BDInfo`'s ratios
+// ×100 (see `FormMain` `ClientSize.Width * 0.NN`), so the proportions match even
+// though we can't reuse its absolute pixels. Only the checkbox, the accent bar,
+// and the scrollbar gutter stay fixed-width.
 
-/// The leading selection-indicator column.
+/// The leading selection-indicator column (fixed).
 pub const COL_CHECK: f32 = 44.0;
-/// The `Group` column.
-pub const COL_GROUP: f32 = 72.0;
-/// The `Length` column.
-pub const COL_LENGTH: f32 = 112.0;
-/// The `Estimated Size` column.
-pub const COL_BYTES: f32 = 132.0;
-/// The `Measured Size` column.
-pub const COL_MEASURED: f32 = 132.0;
-/// The stream-files `Index` column.
-pub const COL_INDEX: f32 = 64.0;
-/// The streams `Codec` column.
-pub const COL_CODEC: f32 = 190.0;
-/// The streams `Language` column.
-pub const COL_LANG: f32 = 104.0;
-/// The streams `Bit Rate` column.
-pub const COL_BITRATE: f32 = 108.0;
-/// The width of the row-selection accent bar.
+/// The width of the row-selection accent bar (fixed).
 pub const SEL_BAR: f32 = 3.0;
+
+/// Playlist columns — Playlist File / Group / Length / Estimated / Measured.
+pub const PL_FILE: u16 = 30;
+/// Playlist `Group` weight.
+pub const PL_GROUP: u16 = 7;
+/// Playlist `Length` weight.
+pub const PL_LENGTH: u16 = 19;
+/// Playlist `Estimated Size` weight.
+pub const PL_EST: u16 = 21;
+/// Playlist `Measured Size` weight.
+pub const PL_MEAS: u16 = 21;
+
+/// Stream-file columns — Stream File / Index / Length / Estimated / Measured.
+pub const SF_FILE: u16 = 23;
+/// Stream-file `Index` weight.
+pub const SF_INDEX: u16 = 8;
+/// Stream-file `Length` weight.
+pub const SF_LENGTH: u16 = 21;
+/// Stream-file `Estimated Size` weight.
+pub const SF_EST: u16 = 23;
+/// Stream-file `Measured Size` weight.
+pub const SF_MEAS: u16 = 23;
+
+/// Codec columns — Codec / Language / Bit Rate / Description.
+pub const CD_CODEC: u16 = 22;
+/// Codec `Language` weight.
+pub const CD_LANG: u16 = 10;
+/// Codec `Bit Rate` weight.
+pub const CD_RATE: u16 = 10;
+/// Codec `Description` weight.
+pub const CD_DESC: u16 = 56;
 /// A trailing gutter reserved on every table header + row so the last (right-
 /// aligned) column's values clear the scrollable's scrollbar instead of hiding
 /// behind it — the padding `BDInfo` leaves on the right edge.

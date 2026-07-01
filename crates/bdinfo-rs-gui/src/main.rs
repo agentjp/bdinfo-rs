@@ -47,11 +47,6 @@ const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);
 /// small screen, beyond which the panes scroll rather than disappear (so the
 /// window never gets stuck larger than a modest display).
 const MIN_SIZE: (f32, f32) = (680.0, 540.0);
-/// The **maximum** size — a hard cap on how wide the window can be dragged
-/// (`BDInfo` sits around 800 wide; much wider just stretches the columns and
-/// wastes space). The height cap is deliberately huge, so only the width is
-/// really limited — the layout stays portrait, like `BDInfo`.
-const MAX_SIZE: (f32, f32) = (1100.0, 4320.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
 
@@ -143,7 +138,6 @@ fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
         min_size: Some(iced::Size::new(MIN_SIZE.0, MIN_SIZE.1)),
-        max_size: Some(iced::Size::new(MAX_SIZE.0, MAX_SIZE.1)),
         icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok(),
         ..iced::window::Settings::default()
     }
@@ -973,9 +967,9 @@ impl App {
     }
 
     /// The "detected disc" info box beneath the panes — the footer block `BDInfo`
-    /// prints: the disc title (when present), the detected folder + disc label, the
-    /// detected features (when any), the disc size in bytes and human-readable
-    /// form, and the hidden-tracks note (when any playlist hides a stream).
+    /// prints: the disc title (when present), the detected folder, the detected
+    /// features (when any), the disc size in bytes and human-readable form, and the
+    /// hidden-tracks note (when any playlist hides a stream).
     fn info_box(&self, p: Palette) -> Element<'_, Message> {
         let mut lines = Column::new().width(Length::Fill).spacing(ui::GAP_1);
 
@@ -983,17 +977,8 @@ impl App {
             lines = lines.push(info_line(p, "Disc Title:", title.to_owned(), false));
         }
 
-        // The folder + disc label on one line, exactly as BDInfo spells it — the
-        // label inline in parentheses, not a separate right-aligned field (which
-        // overflowed the window when narrow).
         let path = self.flow.current_input().map(Input::display).unwrap_or_default();
-        let label = self.flow.label().unwrap_or("—");
-        lines = lines.push(info_line(
-            p,
-            "Detected BDMV Folder:",
-            format!("{path} (Disc Label: {label})"),
-            true,
-        ));
+        lines = lines.push(info_line(p, "Detected BDMV Folder:", path, true));
 
         let features = self.flow.disc_features();
         if !features.is_empty() {
@@ -1237,11 +1222,11 @@ fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
         .width(Length::Fill)
         .align_y(Vertical::Center)
         .push(header_cell(p, "", Length::Fixed(ui::COL_CHECK), Horizontal::Center))
-        .push(header_cell(p, "Playlist File", Length::Fill, Horizontal::Left))
-        .push(header_cell(p, "Group", Length::Fixed(ui::COL_GROUP), Horizontal::Center))
-        .push(header_cell(p, "Length", Length::Fixed(ui::COL_LENGTH), Horizontal::Right))
-        .push(header_cell(p, "Estimated Size", Length::Fixed(ui::COL_BYTES), Horizontal::Right))
-        .push(header_cell(p, "Measured Size", Length::Fixed(ui::COL_MEASURED), Horizontal::Right))
+        .push(header_cell(p, "Playlist File", Length::FillPortion(ui::PL_FILE), Horizontal::Left))
+        .push(header_cell(p, "Group", Length::FillPortion(ui::PL_GROUP), Horizontal::Center))
+        .push(header_cell(p, "Length", Length::FillPortion(ui::PL_LENGTH), Horizontal::Right))
+        .push(header_cell(p, "Estimated Size", Length::FillPortion(ui::PL_EST), Horizontal::Right))
+        .push(header_cell(p, "Measured Size", Length::FillPortion(ui::PL_MEAS), Horizontal::Right))
         .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     Row::new()
         .width(Length::Fill)
@@ -1304,18 +1289,33 @@ fn table_row<'a>(
         .align_y(Vertical::Center)
         .push(
             container(file)
-                .width(Length::Fill)
+                .width(Length::FillPortion(ui::PL_FILE))
                 .clip(true)
                 .align_x(Horizontal::Left)
                 .padding([0.0, ui::GAP_2]),
         )
-        .push(num_cell(p, row_data.cells.group.clone(), ui::COL_GROUP, Horizontal::Center))
-        .push(num_cell(p, row_data.cells.length.clone(), ui::COL_LENGTH, Horizontal::Right))
-        .push(num_cell(p, row_data.cells.estimated_bytes.clone(), ui::COL_BYTES, Horizontal::Right))
+        .push(num_cell(
+            p,
+            row_data.cells.group.clone(),
+            Length::FillPortion(ui::PL_GROUP),
+            Horizontal::Center,
+        ))
+        .push(num_cell(
+            p,
+            row_data.cells.length.clone(),
+            Length::FillPortion(ui::PL_LENGTH),
+            Horizontal::Right,
+        ))
+        .push(num_cell(
+            p,
+            row_data.cells.estimated_bytes.clone(),
+            Length::FillPortion(ui::PL_EST),
+            Horizontal::Right,
+        ))
         .push(num_cell(
             p,
             row_data.cells.measured_bytes.clone(),
-            ui::COL_MEASURED,
+            Length::FillPortion(ui::PL_MEAS),
             Horizontal::Right,
         ))
         .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
@@ -1398,56 +1398,66 @@ struct Col {
     mono: bool,
 }
 
-/// The "Stream File" pane columns — the same five `BDInfo` shows.
+/// The "Stream File" pane columns — the same five `BDInfo` shows, at its ratios.
 const STREAM_FILE_COLS: &[Col] = &[
-    Col { label: "Stream File", width: Length::Fill, align: Horizontal::Left, mono: true },
+    Col {
+        label: "Stream File",
+        width: Length::FillPortion(ui::SF_FILE),
+        align: Horizontal::Left,
+        mono: true,
+    },
     Col {
         label: "Index",
-        width: Length::Fixed(ui::COL_INDEX),
+        width: Length::FillPortion(ui::SF_INDEX),
         align: Horizontal::Right,
         mono: true,
     },
     Col {
         label: "Length",
-        width: Length::Fixed(ui::COL_LENGTH),
+        width: Length::FillPortion(ui::SF_LENGTH),
         align: Horizontal::Right,
         mono: true,
     },
     Col {
         label: "Estimated Size",
-        width: Length::Fixed(ui::COL_BYTES),
+        width: Length::FillPortion(ui::SF_EST),
         align: Horizontal::Right,
         mono: true,
     },
     Col {
         label: "Measured Size",
-        width: Length::Fixed(ui::COL_MEASURED),
+        width: Length::FillPortion(ui::SF_MEAS),
         align: Horizontal::Right,
         mono: true,
     },
 ];
 
-/// The "Streams" (codec) pane columns.
+/// The "Codec" pane columns — `BDInfo`'s ratios.
 const CODEC_COLS: &[Col] = &[
     Col {
         label: "Codec",
-        width: Length::Fixed(ui::COL_CODEC),
+        width: Length::FillPortion(ui::CD_CODEC),
         align: Horizontal::Left,
         mono: false,
     },
     Col {
         label: "Language",
-        width: Length::Fixed(ui::COL_LANG),
+        width: Length::FillPortion(ui::CD_LANG),
         align: Horizontal::Left,
         mono: false,
     },
     Col {
         label: "Bit Rate",
-        width: Length::Fixed(ui::COL_BITRATE),
+        width: Length::FillPortion(ui::CD_RATE),
         align: Horizontal::Right,
         mono: true,
     },
-    Col { label: "Description", width: Length::Fill, align: Horizontal::Left, mono: false },
+    Col {
+        label: "Description",
+        width: Length::FillPortion(ui::CD_DESC),
+        align: Horizontal::Left,
+        mono: false,
+    },
 ];
 
 /// A data table: a quiet header over rows that hover and select as one band.
@@ -1594,12 +1604,20 @@ fn info_line<'a>(p: Palette, label: &str, value: String, mono: bool) -> Element<
 }
 
 /// One right/centre-aligned numeric cell in the table's tabular monospace.
-fn num_cell<'a>(p: Palette, value: String, width: f32, align: Horizontal) -> Element<'a, Message> {
-    container(text(value).size(ui::TEXT_SM).font(ui::MONO).color(p.text))
-        .width(Length::Fixed(width))
-        .align_x(align)
-        .padding([0.0, ui::GAP_2])
-        .into()
+fn num_cell<'a>(
+    p: Palette,
+    value: String,
+    width: Length,
+    align: Horizontal,
+) -> Element<'a, Message> {
+    container(
+        text(value).size(ui::TEXT_SM).font(ui::MONO).color(p.text).wrapping(text::Wrapping::None),
+    )
+    .width(width)
+    .clip(true)
+    .align_x(align)
+    .padding([0.0, ui::GAP_2])
+    .into()
 }
 
 /// Opens the native folder picker (rfd, pure-Rust xdg-portal backend on Linux)
