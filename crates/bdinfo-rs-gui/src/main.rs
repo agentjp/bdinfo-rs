@@ -112,6 +112,25 @@ struct App {
     showing_report: bool,
     /// The "scan completed" confirmation, shown as a modal until dismissed.
     notice: Option<String>,
+    /// The row the cursor is currently over — one `(region, index)` across all
+    /// three panes, so the whole row (not a sub-widget) lifts on hover.
+    hovered: Option<(Region, usize)>,
+    /// The clicked (selected) row in a lower pane — the anchor a later
+    /// right-click "copy line" acts on. `None` until a Stream File / Codec row is
+    /// clicked; reset when the active playlist changes.
+    pane_selection: Option<(Region, usize)>,
+}
+
+/// Which of the three master-detail panes a row belongs to — the hover / click
+/// messages carry it so one `hovered` slot serves all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Region {
+    /// The top playlist table.
+    Playlist,
+    /// The middle Stream File pane.
+    StreamFile,
+    /// The bottom Codec pane.
+    Codec,
 }
 
 /// A top-level command — the menu/toolbar seam a later native macOS menu maps
@@ -182,6 +201,13 @@ enum Message {
     /// A table row clicked — make it the active (highlighted) playlist that the
     /// master-detail panes follow.
     RowActivated(usize),
+    /// The cursor entered a row in `region` (0-based index within that pane).
+    RowHovered(Region, usize),
+    /// The cursor left a row in `region` — clears the hover if it still owns it.
+    RowUnhovered(Region, usize),
+    /// A lower-pane (Stream File / Codec) row was clicked — select it (the anchor
+    /// for a later "copy line" action).
+    PaneRowPressed(Region, usize),
     /// "Select all" pressed.
     SelectAll,
     /// "Select none" pressed.
@@ -280,6 +306,23 @@ impl App {
             }
             Message::RowActivated(index) => {
                 self.flow.set_active(index);
+                // The lower panes now show a different playlist — drop any
+                // pane-row selection that pointed into the old contents.
+                self.pane_selection = None;
+                Task::none()
+            }
+            Message::RowHovered(region, index) => {
+                self.hovered = Some((region, index));
+                Task::none()
+            }
+            Message::RowUnhovered(region, index) => {
+                if self.hovered == Some((region, index)) {
+                    self.hovered = None;
+                }
+                Task::none()
+            }
+            Message::PaneRowPressed(region, index) => {
+                self.pane_selection = Some((region, index));
                 Task::none()
             }
             Message::SelectAll => {
@@ -350,6 +393,8 @@ impl App {
         self.status = None;
         self.showing_report = false;
         self.notice = None;
+        self.hovered = None;
+        self.pane_selection = None;
         self.flow = Flow::start_listing(input.clone());
         Task::perform(
             async move {
@@ -373,6 +418,7 @@ impl App {
         self.status = None;
         self.showing_report = false;
         self.notice = None;
+        self.pane_selection = None;
 
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
@@ -682,13 +728,27 @@ impl App {
         content = content.push(pane(
             p,
             "Stream File",
-            data_table(p, STREAM_FILE_COLS, self.stream_file_table_rows()),
+            data_table(
+                p,
+                STREAM_FILE_COLS,
+                self.stream_file_table_rows(),
+                Region::StreamFile,
+                self.pane_hovered(Region::StreamFile),
+                self.pane_selected(Region::StreamFile),
+            ),
             Length::FillPortion(3),
         ));
         content = content.push(pane(
             p,
             "Codec",
-            data_table(p, CODEC_COLS, self.codec_table_rows()),
+            data_table(
+                p,
+                CODEC_COLS,
+                self.codec_table_rows(),
+                Region::Codec,
+                self.pane_hovered(Region::Codec),
+                self.pane_selected(Region::Codec),
+            ),
             Length::FillPortion(4),
         ));
 
@@ -719,6 +779,24 @@ impl App {
                 vec![codec, row.language, row.bitrate, row.description]
             })
             .collect()
+    }
+
+    /// The hovered row index within `region`, if the cursor is over one of its
+    /// rows (else `None`) — drives that pane's per-row hover band.
+    fn pane_hovered(&self, region: Region) -> Option<usize> {
+        match self.hovered {
+            Some((r, index)) if r == region => Some(index),
+            _ => None,
+        }
+    }
+
+    /// The clicked (selected) row index within `region`, if any — drives that
+    /// pane's selection band.
+    fn pane_selected(&self, region: Region) -> Option<usize> {
+        match self.pane_selection {
+            Some((r, index)) if r == region => Some(index),
+            _ => None,
+        }
     }
 
     /// The "Select Playlist(s)" control row: the select-all/none toggle and the
@@ -759,7 +837,8 @@ impl App {
         let editable = self.flow.editable();
         let mut rows = Column::new().width(Length::Fill);
         for row_data in self.flow.table() {
-            rows = rows.push(table_row(p, &row_data, editable));
+            let hovered = self.hovered == Some((Region::Playlist, row_data.index));
+            rows = rows.push(table_row(p, &row_data, editable, hovered));
         }
         let body = scrollable(rows).width(Length::Fill).height(Length::Fill);
 
@@ -1064,10 +1143,17 @@ fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Ele
 
 /// One playlist row: a leading accent bar (when active), then **two sibling
 /// buttons** — the scan checkbox (toggles the row's selection) and the cells
-/// (click to make the row active, driving the master-detail panes). They are
-/// siblings, not nested, so each click hits exactly one. The **active** row
-/// carries the amber wash; the checkbox shows the **checked** state.
-fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Element<'a, Message> {
+/// (click to make the row active, driving the master-detail panes). The click
+/// targets are background-free ([`ui::flat_button`]); the whole row sits on one
+/// [`ui::row_surface`] container wrapped in a `mouse_area`, so hover lifts the
+/// **entire** row as a single band (no checkbox-vs-cells seam) and the **active**
+/// row carries the amber wash. `hovered` is whether the cursor is over this row.
+fn table_row<'a>(
+    p: Palette,
+    row_data: &SelectableRow,
+    editable: bool,
+    hovered: bool,
+) -> Element<'a, Message> {
     let even = row_data.index.checked_rem(2) == Some(0);
     let index = row_data.index;
     let active = row_data.active;
@@ -1078,7 +1164,7 @@ fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Elemen
     .width(Length::Fixed(ui::COL_CHECK))
     .height(Length::Fill)
     .padding(0.0)
-    .style(ui::row_button(p, active, even))
+    .style(ui::flat_button(p))
     .on_press_maybe(editable.then_some(Message::RowToggled(index)));
 
     let mut file = Row::new()
@@ -1105,10 +1191,10 @@ fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Elemen
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(0.0)
-        .style(ui::row_button(p, active, even))
+        .style(ui::flat_button(p))
         .on_press_maybe(editable.then_some(Message::RowActivated(index)));
 
-    Row::new()
+    let row = Row::new()
         .width(Length::Fill)
         .height(Length::Fixed(ui::ROW_H))
         .align_y(Vertical::Center)
@@ -1119,7 +1205,14 @@ fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Elemen
                 .style(ui::sel_bar(p, active)),
         )
         .push(checkbox)
-        .push(cells_button)
+        .push(cells_button);
+    let framed = container(row)
+        .width(Length::Fill)
+        .height(Length::Fixed(ui::ROW_H))
+        .style(ui::row_surface(p, active, hovered, even));
+    mouse_area(framed)
+        .on_enter(Message::RowHovered(Region::Playlist, index))
+        .on_exit(Message::RowUnhovered(Region::Playlist, index))
         .into()
 }
 
@@ -1222,13 +1315,18 @@ const CODEC_COLS: &[Col] = &[
     Col { label: "Description", width: Length::Fill, align: Horizontal::Left, mono: false },
 ];
 
-/// A read-only data table: a quiet header over zebra-striped rows. Each `rows`
-/// entry supplies one cell string per column (extra cells are ignored); an empty
-/// table shows a single dash.
+/// A data table: a quiet header over rows that hover and select as one band.
+/// Each `rows` entry supplies one cell string per column (extra cells are
+/// ignored); an empty table shows a single dash. Every row is wrapped in a
+/// `mouse_area`, so it lifts under the cursor (`hovered`), takes the selection
+/// wash when clicked (`selected`), and reports hover / click for `region`.
 fn data_table<'a>(
     p: Palette,
     cols: &'static [Col],
     rows: Vec<Vec<String>>,
+    region: Region,
+    hovered: Option<usize>,
+    selected: Option<usize>,
 ) -> Element<'a, Message> {
     // Height-fill + centre so the labels sit vertically centred in the header
     // band, exactly like the playlist table's header row.
@@ -1269,11 +1367,15 @@ fn data_table<'a>(
                 .padding([0.0, ui::GAP_2]),
             );
         }
+        let framed = container(cells)
+            .width(Length::Fill)
+            .padding([ui::GAP_2, 0.0])
+            .style(ui::row_surface(p, selected == Some(i), hovered == Some(i), even));
         body_col = body_col.push(
-            container(cells)
-                .width(Length::Fill)
-                .padding([ui::GAP_2, 0.0])
-                .style(ui::zebra(p, even)),
+            mouse_area(framed)
+                .on_enter(Message::RowHovered(region, i))
+                .on_exit(Message::RowUnhovered(region, i))
+                .on_press(Message::PaneRowPressed(region, i)),
         );
     }
     let body = scrollable(body_col).width(Length::Fill).height(Length::Fill);
@@ -1319,9 +1421,7 @@ fn info_line<'a>(p: Palette, label: &str, value: String, mono: bool) -> Element<
         .align_y(Vertical::Center)
         .spacing(ui::GAP_2)
         .push(text(label.to_owned()).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-        .push(
-            text(value).size(ui::TEXT_XS).font(font).color(p.text).wrapping(text::Wrapping::None),
-        )
+        .push(text(value).size(ui::TEXT_XS).font(font).color(p.text).wrapping(text::Wrapping::None))
         .into()
 }
 

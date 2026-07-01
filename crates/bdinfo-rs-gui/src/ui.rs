@@ -130,10 +130,26 @@ pub fn divider(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style { background: Some(color.into()), ..container::Style::default() }
 }
 
-/// A read-only data row's zebra background (even rows on the surface, odd on the
-/// alt) — the non-interactive panes (Stream Files / Streams) use this.
-pub fn zebra(p: Palette, even: bool) -> impl Fn(&Theme) -> container::Style {
-    let bg = if even { p.surface } else { p.surface_alt };
+/// A table row's background, applied to the whole row so hover and selection
+/// read as one band (never a sub-widget seam): an **emphasized** row (the active
+/// playlist, or a clicked pane row) takes the selection wash; else a **hovered**
+/// row lifts to `hover`; else it zebra-stripes by parity. The interactive rows
+/// wrap this in a `mouse_area` and keep their click targets background-free.
+pub fn row_surface(
+    p: Palette,
+    emphasized: bool,
+    hovered: bool,
+    even: bool,
+) -> impl Fn(&Theme) -> container::Style {
+    let bg = if emphasized {
+        p.selected
+    } else if hovered {
+        p.hover
+    } else if even {
+        p.surface
+    } else {
+        p.surface_alt
+    };
     move |_| container::Style { background: Some(bg.into()), ..container::Style::default() }
 }
 
@@ -292,35 +308,16 @@ pub fn toolbar_button(p: Palette) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
-/// A clickable table-row region, styled as a flush button so it gets
-/// hover/press/disabled states for free: the **active** (highlighted) row carries
-/// the amber wash, others zebra-stripe by parity, and any row lifts to `hover`
-/// under the cursor (a disabled row — during a scan — keeps its resting fill so
-/// the table reads frozen, not greyed).
-pub fn row_button(
-    p: Palette,
-    active: bool,
-    even: bool,
-) -> impl Fn(&Theme, button::Status) -> button::Style {
-    let resting = if active {
-        p.selected
-    } else if even {
-        p.surface
-    } else {
-        p.surface_alt
-    };
-    move |_, status| {
-        let bg = match status {
-            button::Status::Hovered | button::Status::Pressed if !active => p.hover,
-            _ => resting,
-        };
-        button::Style {
-            background: Some(bg.into()),
-            text_color: p.text,
-            border: Border::default(),
-            shadow: Shadow::default(),
-            snap: true,
-        }
+/// A flush, background-free click target — a row's checkbox or cells button. It
+/// draws no fill of its own in any state, so the row's [`row_surface`] container
+/// behind it owns the hover / selection band and the whole row lifts as one.
+pub fn flat_button(p: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, _| button::Style {
+        background: None,
+        text_color: p.text,
+        border: Border::default(),
+        shadow: Shadow::default(),
+        snap: true,
     }
 }
 

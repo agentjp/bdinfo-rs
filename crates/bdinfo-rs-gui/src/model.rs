@@ -162,8 +162,11 @@ pub fn format_file_size(bytes: u64) -> String {
     // Widened to u128 so the *100 never overflows in the EB range.
     let divisor = u128::from(divisor);
     let half = divisor.checked_div(2).unwrap_or(0);
-    let hundredths =
-        u128::from(bytes).saturating_mul(100).saturating_add(half).checked_div(divisor).unwrap_or(0);
+    let hundredths = u128::from(bytes)
+        .saturating_mul(100)
+        .saturating_add(half)
+        .checked_div(divisor)
+        .unwrap_or(0);
     let whole = u64::try_from(hundredths.checked_div(100).unwrap_or(0)).unwrap_or(u64::MAX);
     let frac = hundredths.checked_rem(100).unwrap_or(0);
     let label = UNITS.get(unit).copied().unwrap_or("B");
