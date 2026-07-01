@@ -845,6 +845,7 @@ impl App {
                 Region::StreamFile,
                 self.pane_hovered(Region::StreamFile),
                 self.pane_selected(Region::StreamFile),
+                ui::ROW_INDENT,
             ),
             Length::FillPortion(3),
         ));
@@ -858,6 +859,7 @@ impl App {
                 Region::Codec,
                 self.pane_hovered(Region::Codec),
                 self.pane_selected(Region::Codec),
+                ui::ROW_INDENT,
             ),
             Length::FillPortion(4),
         ));
@@ -1222,11 +1224,21 @@ fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
         .width(Length::Fill)
         .align_y(Vertical::Center)
         .push(header_cell(p, "", Length::Fixed(ui::COL_CHECK), Horizontal::Center))
-        .push(header_cell(p, "Playlist File", Length::FillPortion(ui::PL_FILE), Horizontal::Left))
-        .push(header_cell(p, "Group", Length::FillPortion(ui::PL_GROUP), Horizontal::Center))
-        .push(header_cell(p, "Length", Length::FillPortion(ui::PL_LENGTH), Horizontal::Right))
-        .push(header_cell(p, "Estimated Size", Length::FillPortion(ui::PL_EST), Horizontal::Right))
-        .push(header_cell(p, "Measured Size", Length::FillPortion(ui::PL_MEAS), Horizontal::Right))
+        .push(header_cell(p, "Playlist File", Length::FillPortion(ui::GRID_NAME), Horizontal::Left))
+        .push(header_cell(p, "Group", Length::FillPortion(ui::GRID_INT), Horizontal::Center))
+        .push(header_cell(p, "Length", Length::FillPortion(ui::GRID_LENGTH), Horizontal::Right))
+        .push(header_cell(
+            p,
+            "Estimated Size",
+            Length::FillPortion(ui::GRID_EST),
+            Horizontal::Right,
+        ))
+        .push(header_cell(
+            p,
+            "Measured Size",
+            Length::FillPortion(ui::GRID_MEAS),
+            Horizontal::Right,
+        ))
         .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     Row::new()
         .width(Length::Fill)
@@ -1289,7 +1301,7 @@ fn table_row<'a>(
         .align_y(Vertical::Center)
         .push(
             container(file)
-                .width(Length::FillPortion(ui::PL_FILE))
+                .width(Length::FillPortion(ui::GRID_NAME))
                 .clip(true)
                 .align_x(Horizontal::Left)
                 .padding([0.0, ui::GAP_2]),
@@ -1297,25 +1309,25 @@ fn table_row<'a>(
         .push(num_cell(
             p,
             row_data.cells.group.clone(),
-            Length::FillPortion(ui::PL_GROUP),
+            Length::FillPortion(ui::GRID_INT),
             Horizontal::Center,
         ))
         .push(num_cell(
             p,
             row_data.cells.length.clone(),
-            Length::FillPortion(ui::PL_LENGTH),
+            Length::FillPortion(ui::GRID_LENGTH),
             Horizontal::Right,
         ))
         .push(num_cell(
             p,
             row_data.cells.estimated_bytes.clone(),
-            Length::FillPortion(ui::PL_EST),
+            Length::FillPortion(ui::GRID_EST),
             Horizontal::Right,
         ))
         .push(num_cell(
             p,
             row_data.cells.measured_bytes.clone(),
-            Length::FillPortion(ui::PL_MEAS),
+            Length::FillPortion(ui::GRID_MEAS),
             Horizontal::Right,
         ))
         .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
@@ -1398,35 +1410,38 @@ struct Col {
     mono: bool,
 }
 
-/// The "Stream File" pane columns — the same five `BDInfo` shows, at its ratios.
+/// The "Stream File" pane columns. They use the SHARED grid (same weights +
+/// alignment as the playlist) and a leading indent, so the two panes' columns
+/// line up on one continuous grid — Length / Estimated / Measured sit directly
+/// under the playlist's.
 const STREAM_FILE_COLS: &[Col] = &[
     Col {
         label: "Stream File",
-        width: Length::FillPortion(ui::SF_FILE),
+        width: Length::FillPortion(ui::GRID_NAME),
         align: Horizontal::Left,
         mono: true,
     },
     Col {
         label: "Index",
-        width: Length::FillPortion(ui::SF_INDEX),
-        align: Horizontal::Right,
+        width: Length::FillPortion(ui::GRID_INT),
+        align: Horizontal::Center,
         mono: true,
     },
     Col {
         label: "Length",
-        width: Length::FillPortion(ui::SF_LENGTH),
+        width: Length::FillPortion(ui::GRID_LENGTH),
         align: Horizontal::Right,
         mono: true,
     },
     Col {
         label: "Estimated Size",
-        width: Length::FillPortion(ui::SF_EST),
+        width: Length::FillPortion(ui::GRID_EST),
         align: Horizontal::Right,
         mono: true,
     },
     Col {
         label: "Measured Size",
-        width: Length::FillPortion(ui::SF_MEAS),
+        width: Length::FillPortion(ui::GRID_MEAS),
         align: Horizontal::Right,
         mono: true,
     },
@@ -1465,6 +1480,10 @@ const CODEC_COLS: &[Col] = &[
 /// ignored); an empty table shows a single dash. Every row is wrapped in a
 /// `mouse_area`, so it lifts under the cursor (`hovered`), takes the selection
 /// wash when clicked (`selected`), and reports hover / click for `region`.
+///
+/// `leading` is a blank left indent (the playlist's accent-bar + checkbox width)
+/// so a pane with no checkbox still starts its first column on the same grid line
+/// as the playlist.
 fn data_table<'a>(
     p: Palette,
     cols: &'static [Col],
@@ -1472,11 +1491,15 @@ fn data_table<'a>(
     region: Region,
     hovered: Option<usize>,
     selected: Option<usize>,
+    leading: f32,
 ) -> Element<'a, Message> {
     // Height-fill + centre so the labels sit vertically centred in the header
     // band, exactly like the playlist table's header row.
-    let mut header_cells =
-        Row::new().width(Length::Fill).height(Length::Fill).align_y(Vertical::Center);
+    let mut header_cells = Row::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(Vertical::Center)
+        .push(Space::new().width(Length::Fixed(leading)));
     for col in cols {
         header_cells = header_cells.push(header_cell(p, col.label, col.width, col.align));
     }
@@ -1498,7 +1521,10 @@ fn data_table<'a>(
     }
     for (i, row) in rows.into_iter().enumerate() {
         let even = i.checked_rem(2) == Some(0);
-        let mut cells = Row::new().width(Length::Fill).align_y(Vertical::Center);
+        let mut cells = Row::new()
+            .width(Length::Fill)
+            .align_y(Vertical::Center)
+            .push(Space::new().width(Length::Fixed(leading)));
         for (col, value) in cols.iter().zip(row) {
             let font = if col.mono { ui::MONO } else { ui::UI };
             cells = cells.push(
