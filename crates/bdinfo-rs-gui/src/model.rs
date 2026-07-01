@@ -117,9 +117,12 @@ const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
     }
 }
 
-/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`). Mirrors
-/// the CLI's `group_n0`.
-pub(crate) fn group_n0(value: u64) -> String {
+/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`).
+///
+/// Mirrors the CLI's `group_n0`. Public so the binary's info box can group the
+/// exact disc-size byte count alongside its [`format_file_size`] short form.
+#[must_use]
+pub fn group_n0(value: u64) -> String {
     let mut grouped = Vec::new();
     for (position, digit) in value.to_string().chars().rev().enumerate() {
         if position > 0 && position.checked_rem(3) == Some(0) {
@@ -133,6 +136,38 @@ pub(crate) fn group_n0(value: u64) -> String {
 /// The `Estimated Bytes` cell: thousands-grouped when known, else `-`.
 fn estimated_cell(bytes: Option<u64>) -> String {
     bytes.map_or_else(|| "-".to_owned(), group_n0)
+}
+
+/// A human-readable byte size, `N.NN <unit>`.
+///
+/// Mirrors `BDInfo`'s `ToolBox.FormatFileSize(size, true)`: the largest binary
+/// (1024) unit, labelled `B`/`KB`/`MB`/`GB`/… (its convention — powers of 1024
+/// under decimal labels), with two decimals rounded to nearest. `0` bytes renders
+/// as `0`, like `BDInfo`. The GUI's disc-info box shows this next to the exact
+/// byte count.
+#[must_use]
+pub fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 7] = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    if bytes == 0 {
+        return "0".to_owned();
+    }
+    // The largest unit whose divisor (1024^unit) still fits in `bytes`.
+    let mut unit = 0_usize;
+    let mut divisor = 1_u64;
+    while unit.saturating_add(1) < UNITS.len() && divisor.saturating_mul(1024) <= bytes {
+        divisor = divisor.saturating_mul(1024);
+        unit = unit.saturating_add(1);
+    }
+    // value * 100, rounded to nearest hundredth: (bytes*100 + divisor/2) / divisor.
+    // Widened to u128 so the *100 never overflows in the EB range.
+    let divisor = u128::from(divisor);
+    let half = divisor.checked_div(2).unwrap_or(0);
+    let hundredths =
+        u128::from(bytes).saturating_mul(100).saturating_add(half).checked_div(divisor).unwrap_or(0);
+    let whole = u64::try_from(hundredths.checked_div(100).unwrap_or(0)).unwrap_or(u64::MAX);
+    let frac = hundredths.checked_rem(100).unwrap_or(0);
+    let label = UNITS.get(unit).copied().unwrap_or("B");
+    format!("{}.{frac:02} {label}", group_n0(whole))
 }
 
 /// Builds the structured selection-table rows over the standard filtered set.
@@ -183,8 +218,8 @@ mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
 
     use super::{
-        PlaylistRow, TableRow, any_hidden, display_rows, estimated_bytes, estimated_cell, group_n0,
-        playlist_rows, table_length, table_rows,
+        PlaylistRow, TableRow, any_hidden, display_rows, estimated_bytes, estimated_cell,
+        format_file_size, group_n0, playlist_rows, table_length, table_rows,
     };
 
     /// A `ClipSummary` carrying just a name + length (the fields the view-model
@@ -193,6 +228,8 @@ mod tests {
         ClipSummary {
             name: name.to_owned(),
             display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
             angle_index: 0,
             relative_time_in: 0.0,
             length,
@@ -336,6 +373,24 @@ mod tests {
     fn estimated_cell_is_a_dash_when_absent() {
         assert_eq!(estimated_cell(None), "-");
         assert_eq!(estimated_cell(Some(2_000_000)), "2,000,000");
+    }
+
+    #[test]
+    fn format_file_size_picks_the_binary_unit_with_two_decimals() {
+        // Zero is the special "0" case, like BDInfo.
+        assert_eq!(format_file_size(0), "0");
+        // Under 1 KiB stays in bytes.
+        assert_eq!(format_file_size(512), "512.00 B");
+        // Exact powers of 1024 promote to the next unit.
+        assert_eq!(format_file_size(1024), "1.00 KB");
+        assert_eq!(format_file_size(1_048_576), "1.00 MB");
+        assert_eq!(format_file_size(1_073_741_824), "1.00 GB");
+        // Halfway values round to nearest.
+        assert_eq!(format_file_size(1536), "1.50 KB");
+        // A feature-disc-scale size lands in GB, grouped and rounded.
+        assert_eq!(format_file_size(78_000_000_000), "72.64 GB");
+        // The unit ladder tops out at EB rather than indexing past the table.
+        assert_eq!(format_file_size(u64::MAX), "16.00 EB");
     }
 
     #[test]

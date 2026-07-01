@@ -61,6 +61,15 @@ impl Input {
 pub struct Structural {
     /// The disc label (the folder name, or the `.iso`'s UDF volume label).
     pub label: String,
+    /// The disc title from `META/bdmt_eng.xml`, when present — the info box's
+    /// `Disc Title` line.
+    pub disc_title: Option<String>,
+    /// The total disc size in bytes (excluding `*.ssif`) — the info box's
+    /// `Disc Size` line.
+    pub size: u64,
+    /// The detected-feature labels (`Ultra HD`, `BD-Java`, …) in the core's
+    /// fixed order — the info box's `Detected Features` line.
+    pub features: Vec<String>,
     /// Every parsed playlist — the view-model builds the filtered table rows
     /// from these, and the measured scan resolves the selection against them.
     pub playlists: Vec<PlaylistSummary>,
@@ -127,8 +136,12 @@ fn error_lines(errors: &[ScanError]) -> Vec<String> {
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
 pub fn scan_structural(input: &Input) -> Result<Structural, String> {
     let (bdrom, errors) = open(input, false, None, &mut |_| {}).map_err(|err| err.to_string())?;
+    let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural {
         label: bdrom.volume_label,
+        disc_title: bdrom.disc_title,
+        size: bdrom.size,
+        features,
         playlists: bdrom.playlists,
         warnings: error_lines(&errors),
     })

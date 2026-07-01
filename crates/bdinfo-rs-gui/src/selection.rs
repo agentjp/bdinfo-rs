@@ -134,6 +134,8 @@ mod tests {
         ClipSummary {
             name: name.to_owned(),
             display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
             angle_index: 0,
             relative_time_in: 0.0,
             length: 0.0,

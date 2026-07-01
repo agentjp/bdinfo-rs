@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
-use bdinfo_rs_gui::model::SelectableRow;
+use bdinfo_rs_gui::model::{SelectableRow, format_file_size, group_n0};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
@@ -535,18 +535,36 @@ impl App {
             .width(Length::Fill)
             .align_y(Vertical::Center)
             .spacing(ui::GAP_2)
-            .push(text("Source").size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
+            .push(
+                text("Select the Source BD-ROM:")
+                    .size(ui::TEXT_SM)
+                    .font(ui::UI_MEDIUM)
+                    .color(p.text_muted),
+            )
             .push(field)
-            .push(self.command_button(p, Command::OpenFolder))
-            .push(self.command_button(p, Command::OpenIso))
-            .push(self.command_button(p, Command::Rescan));
+            .push(self.labeled_command_button(p, "Browse...", Command::OpenFolder))
+            .push(self.labeled_command_button(p, "ISO", Command::OpenIso))
+            .push(self.labeled_command_button(p, "Rescan", Command::Rescan));
         container(bar).width(Length::Fill).padding([ui::GAP_3, ui::GAP_4]).into()
     }
 
-    /// A secondary-styled button for a [`Command`], disabled when not actionable.
+    /// A secondary-styled button for a [`Command`], disabled when not actionable,
+    /// labelled by the command's own [`Command::label`].
     fn command_button(&self, p: Palette, command: Command) -> Element<'_, Message> {
+        self.labeled_command_button(p, command.label(), command)
+    }
+
+    /// A secondary-styled button for a [`Command`] with an explicit `label` (so a
+    /// toolbar control can match `BDInfo`'s wording — e.g. "Browse..." — while the
+    /// same command keeps a friendlier label elsewhere).
+    fn labeled_command_button<'a>(
+        &self,
+        p: Palette,
+        label: &'a str,
+        command: Command,
+    ) -> Element<'a, Message> {
         let enabled = self.command_enabled(command);
-        button(text(command.label()).size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+        button(text(label).size(ui::TEXT_SM).font(ui::UI_MEDIUM))
             .padding([ui::GAP_2, ui::GAP_3])
             .style(ui::secondary_button(p))
             .on_press_maybe(enabled.then(|| command.message()))
@@ -655,39 +673,38 @@ impl App {
             content = content.push(banner(p, p.warning, warning.as_str()));
         }
 
-        content =
-            content.push(pane(p, "Playlists", self.playlist_table(p), Length::FillPortion(5)));
-        if self.flow.show_hidden_note() {
-            content = content.push(text(HIDDEN_NOTE).size(ui::TEXT_XS).color(p.text_muted));
-        }
+        // The select bar above is this section's titled header ("Playlist"), so
+        // the table itself carries no separate title.
+        content = content.push(
+            container(self.playlist_table(p)).width(Length::Fill).height(Length::FillPortion(5)),
+        );
 
-        let files_title = self
-            .flow
-            .active_playlist_name()
-            .map_or_else(|| "Stream Files".to_owned(), |name| format!("Stream Files — {name}"));
         content = content.push(pane(
             p,
-            &files_title,
+            "Stream File",
             data_table(p, STREAM_FILE_COLS, self.stream_file_table_rows()),
             Length::FillPortion(3),
         ));
         content = content.push(pane(
             p,
-            "Streams",
+            "Codec",
             data_table(p, CODEC_COLS, self.codec_table_rows()),
             Length::FillPortion(4),
         ));
 
-        content = content.push(self.info_strip(p));
+        content = content.push(self.info_box(p));
         content.into()
     }
 
-    /// The active playlist's stream-file rows, flattened to display cells.
+    /// The active playlist's stream-file rows, flattened to display cells
+    /// (Stream File / Index / Length / Estimated Size / Measured Size).
     fn stream_file_table_rows(&self) -> Vec<Vec<String>> {
         self.flow
             .stream_file_rows()
             .into_iter()
-            .map(|row: StreamFileRow| vec![row.file, row.index, row.length, row.size])
+            .map(|row: StreamFileRow| {
+                vec![row.file, row.index, row.length, row.estimated, row.measured]
+            })
             .collect()
     }
 
@@ -709,10 +726,10 @@ impl App {
     fn select_bar(&self, p: Palette) -> Element<'_, Message> {
         let editable = self.flow.editable();
         let toggle = if self.flow.all_selected() {
-            button(text("Select none").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+            button(text("Unselect All").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                 .on_press_maybe(editable.then_some(Message::SelectNone))
         } else {
-            button(text("Select all").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+            button(text("Select All").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                 .on_press_maybe(editable.then_some(Message::SelectAll))
         };
         let count = format!("{} of {} selected", self.flow.selected_count(), self.flow.row_count());
@@ -720,7 +737,7 @@ impl App {
             .width(Length::Fill)
             .align_y(Vertical::Center)
             .spacing(ui::GAP_3)
-            .push(text("Playlists").size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
+            .push(text("Playlist").size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
             .push(toggle.padding([ui::GAP_2, ui::GAP_3]).style(ui::secondary_button(p)))
             .push(Space::new().width(Length::Fill))
             .push(text(count).size(ui::TEXT_SM).color(p.text_muted))
@@ -760,31 +777,57 @@ impl App {
         .into()
     }
 
-    /// The slim "detected disc" strip beneath the table — what `BDInfo` prints in
-    /// its footer box (the source kind, the path, and the disc label).
-    fn info_strip(&self, p: Palette) -> Element<'_, Message> {
-        let (kind, path) =
-            self.flow.current_input().map_or(("Disc", String::new()), |input| match input {
-                Input::Folder(_) => ("Folder", input.display()),
-                Input::Iso(_) => ("ISO", input.display()),
-            });
-        let label = self.flow.label().unwrap_or("—");
-        let line = Row::new()
-            .width(Length::Fill)
-            .align_y(Vertical::Center)
-            .spacing(ui::GAP_2)
-            .push(text(kind).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-            .push(
-                text(path)
-                    .size(ui::TEXT_XS)
-                    .font(ui::MONO)
-                    .color(p.text_muted)
-                    .wrapping(text::Wrapping::None),
-            )
-            .push(Space::new().width(Length::Fill))
-            .push(text("Disc Label:").size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-            .push(text(label.to_owned()).size(ui::TEXT_XS).font(ui::MONO).color(p.text));
-        container(line)
+    /// The "detected disc" info box beneath the panes — the footer block `BDInfo`
+    /// prints: the disc title (when present), the detected folder + disc label, the
+    /// detected features (when any), the disc size in bytes and human-readable
+    /// form, and the hidden-tracks note (when any playlist hides a stream).
+    fn info_box(&self, p: Palette) -> Element<'_, Message> {
+        let mut lines = Column::new().width(Length::Fill).spacing(ui::GAP_1);
+
+        if let Some(title) = self.flow.disc_title() {
+            lines = lines.push(info_line(p, "Disc Title:", title.to_owned(), false));
+        }
+
+        let path = self.flow.current_input().map(Input::display).unwrap_or_default();
+        let label = self.flow.label().unwrap_or("—").to_owned();
+        lines = lines.push(
+            Row::new()
+                .width(Length::Fill)
+                .align_y(Vertical::Center)
+                .spacing(ui::GAP_2)
+                .push(
+                    text("Detected BDMV Folder:")
+                        .size(ui::TEXT_XS)
+                        .font(ui::UI_MEDIUM)
+                        .color(p.text_muted),
+                )
+                .push(
+                    text(path)
+                        .size(ui::TEXT_XS)
+                        .font(ui::MONO)
+                        .color(p.text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(text("Disc Label:").size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
+                .push(text(label).size(ui::TEXT_XS).font(ui::MONO).color(p.text)),
+        );
+
+        let features = self.flow.disc_features();
+        if !features.is_empty() {
+            lines = lines.push(info_line(p, "Detected Features:", features.join(", "), false));
+        }
+
+        if let Some(size) = self.flow.disc_size() {
+            let value = format!("{} bytes ({})", group_n0(size), format_file_size(size));
+            lines = lines.push(info_line(p, "Disc Size:", value, true));
+        }
+
+        if self.flow.show_hidden_note() {
+            lines = lines.push(text(HIDDEN_NOTE).size(ui::TEXT_XS).color(p.text_muted));
+        }
+
+        container(lines)
             .width(Length::Fill)
             .padding([ui::GAP_2, ui::GAP_3])
             .style(ui::info_strip(p))
@@ -892,21 +935,17 @@ impl App {
             let mut right = Row::new().spacing(ui::GAP_2);
             if self.flow.report().is_some() {
                 right = right.push(
-                    button(text("View Report…").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                    button(text("View Report...").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                         .padding([ui::GAP_2, ui::GAP_4])
                         .style(ui::secondary_button(p))
                         .on_press(Message::ShowReport),
                 );
             }
             right = right.push(
-                button(
-                    text(format!("Scan selected ({})", self.flow.selected_count()))
-                        .size(ui::TEXT_SM)
-                        .font(ui::UI_SEMIBOLD),
-                )
-                .padding([ui::GAP_2, ui::GAP_4])
-                .style(ui::primary_button(p))
-                .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected)),
+                button(text("Scan Bitrates").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
+                    .padding([ui::GAP_2, ui::GAP_4])
+                    .style(ui::primary_button(p))
+                    .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected)),
             );
             Row::new().width(Length::Fill).push(Space::new().width(Length::Fill)).push(right)
         };
@@ -1000,12 +1039,11 @@ fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
         .width(Length::Fill)
         .align_y(Vertical::Center)
         .push(header_cell(p, "", Length::Fixed(ui::COL_CHECK), Horizontal::Center))
-        .push(header_cell(p, "#", Length::Fixed(ui::COL_NUM), Horizontal::Right))
-        .push(header_cell(p, "Group", Length::Fixed(ui::COL_GROUP), Horizontal::Center))
         .push(header_cell(p, "Playlist File", Length::Fill, Horizontal::Left))
+        .push(header_cell(p, "Group", Length::Fixed(ui::COL_GROUP), Horizontal::Center))
         .push(header_cell(p, "Length", Length::Fixed(ui::COL_LENGTH), Horizontal::Right))
-        .push(header_cell(p, "Estimated Bytes", Length::Fixed(ui::COL_BYTES), Horizontal::Right))
-        .push(header_cell(p, "Measured Bytes", Length::Fixed(ui::COL_MEASURED), Horizontal::Right));
+        .push(header_cell(p, "Estimated Size", Length::Fixed(ui::COL_BYTES), Horizontal::Right))
+        .push(header_cell(p, "Measured Size", Length::Fixed(ui::COL_MEASURED), Horizontal::Right));
     Row::new()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1051,11 +1089,10 @@ fn table_row<'a>(p: Palette, row_data: &SelectableRow, editable: bool) -> Elemen
     let cells = Row::new()
         .width(Length::Fill)
         .align_y(Vertical::Center)
-        .push(num_cell(p, row_data.cells.number.clone(), ui::COL_NUM, Horizontal::Right))
-        .push(num_cell(p, row_data.cells.group.clone(), ui::COL_GROUP, Horizontal::Center))
         .push(
             container(file).width(Length::Fill).align_x(Horizontal::Left).padding([0.0, ui::GAP_2]),
         )
+        .push(num_cell(p, row_data.cells.group.clone(), ui::COL_GROUP, Horizontal::Center))
         .push(num_cell(p, row_data.cells.length.clone(), ui::COL_LENGTH, Horizontal::Right))
         .push(num_cell(p, row_data.cells.estimated_bytes.clone(), ui::COL_BYTES, Horizontal::Right))
         .push(num_cell(
@@ -1133,7 +1170,7 @@ struct Col {
     mono: bool,
 }
 
-/// The "Stream Files" pane columns.
+/// The "Stream File" pane columns — the same five `BDInfo` shows.
 const STREAM_FILE_COLS: &[Col] = &[
     Col { label: "Stream File", width: Length::Fill, align: Horizontal::Left, mono: true },
     Col {
@@ -1149,8 +1186,14 @@ const STREAM_FILE_COLS: &[Col] = &[
         mono: true,
     },
     Col {
-        label: "Size",
+        label: "Estimated Size",
         width: Length::Fixed(ui::COL_BYTES),
+        align: Horizontal::Right,
+        mono: true,
+    },
+    Col {
+        label: "Measured Size",
+        width: Length::Fixed(ui::COL_MEASURED),
         align: Horizontal::Right,
         mono: true,
     },
@@ -1187,7 +1230,10 @@ fn data_table<'a>(
     cols: &'static [Col],
     rows: Vec<Vec<String>>,
 ) -> Element<'a, Message> {
-    let mut header_cells = Row::new().width(Length::Fill).align_y(Vertical::Center);
+    // Height-fill + centre so the labels sit vertically centred in the header
+    // band, exactly like the playlist table's header row.
+    let mut header_cells =
+        Row::new().width(Length::Fill).height(Length::Fill).align_y(Vertical::Center);
     for col in cols {
         header_cells = header_cells.push(header_cell(p, col.label, col.width, col.align));
     }
@@ -1262,6 +1308,21 @@ fn notice_card<'a>(p: Palette, notice: &str) -> Element<'a, Message> {
                 .on_press(Message::DismissNotice),
         );
     container(card).padding(ui::GAP_6).max_width(440.0).style(ui::hero_card(p)).into()
+}
+
+/// One "label: value" line in the disc-info box — a muted label followed by the
+/// value (monospace when `mono`, e.g. the byte size; the UI face otherwise).
+fn info_line<'a>(p: Palette, label: &str, value: String, mono: bool) -> Element<'a, Message> {
+    let font = if mono { ui::MONO } else { ui::UI };
+    Row::new()
+        .width(Length::Fill)
+        .align_y(Vertical::Center)
+        .spacing(ui::GAP_2)
+        .push(text(label.to_owned()).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
+        .push(
+            text(value).size(ui::TEXT_XS).font(font).color(p.text).wrapping(text::Wrapping::None),
+        )
+        .into()
 }
 
 /// One right/centre-aligned numeric cell in the table's tabular monospace.

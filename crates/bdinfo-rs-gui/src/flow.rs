@@ -54,6 +54,12 @@ struct Listing {
     input: Input,
     /// The disc label (folder name, or `.iso` UDF volume label).
     label: String,
+    /// The disc title from `META/bdmt_eng.xml`, when present.
+    disc_title: Option<String>,
+    /// The total disc size in bytes (excluding `*.ssif`).
+    size: u64,
+    /// The detected-feature labels, in the core's fixed order.
+    features: Vec<String>,
     /// Every parsed playlist — the measured scan resolves the selection's clip
     /// set + report order against these.
     playlists: Vec<PlaylistSummary>,
@@ -83,6 +89,9 @@ impl Listing {
         Self {
             input,
             label: structural.label,
+            disc_title: structural.disc_title,
+            size: structural.size,
+            features: structural.features,
             playlists: structural.playlists,
             rows,
             selection,
@@ -348,6 +357,27 @@ impl Flow {
         self.any_listing().map(|listing| listing.label.as_str())
     }
 
+    /// The disc title (`META/bdmt_eng.xml`), when a disc is loaded and it has one
+    /// — the info box's `Disc Title` line.
+    #[must_use]
+    pub fn disc_title(&self) -> Option<&str> {
+        self.any_listing().and_then(|listing| listing.disc_title.as_deref())
+    }
+
+    /// The total disc size in bytes, when a disc is loaded — the info box's
+    /// `Disc Size` line.
+    #[must_use]
+    pub fn disc_size(&self) -> Option<u64> {
+        self.any_listing().map(|listing| listing.size)
+    }
+
+    /// The detected-feature labels, when a disc is loaded — the info box's
+    /// `Detected Features` line (empty slice when the disc has none).
+    #[must_use]
+    pub fn disc_features(&self) -> &[String] {
+        self.any_listing().map_or(&[], |listing| listing.features.as_slice())
+    }
+
     /// The active (highlighted) row index, when a disc is loaded.
     #[must_use]
     pub fn active_index(&self) -> Option<usize> {
@@ -534,6 +564,8 @@ mod tests {
         ClipSummary {
             name: name.to_owned(),
             display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
             angle_index: 0,
             relative_time_in: 0.0,
             length: 0.0,
@@ -568,6 +600,9 @@ mod tests {
     fn structural() -> Structural {
         Structural {
             label: "DISC".to_owned(),
+            disc_title: Some("A Movie".to_owned()),
+            size: 78_000_000_000,
+            features: vec!["Ultra HD".to_owned()],
             playlists: vec![
                 playlist("00000.MPLS", 100.0, &["A.M2TS"]),
                 playlist("00001.MPLS", 70.0, &["B.M2TS"]),
@@ -609,6 +644,18 @@ mod tests {
         assert_eq!(Flow::start_listing(input()).current_input(), Some(&input()));
         // The input behind a loaded disc.
         assert_eq!(listed().current_input(), Some(&input()));
+    }
+
+    #[test]
+    fn disc_info_accessors_expose_the_structural_facts() {
+        let flow = listed();
+        assert_eq!(flow.disc_title(), Some("A Movie"));
+        assert_eq!(flow.disc_size(), Some(78_000_000_000));
+        assert_eq!(flow.disc_features(), ["Ultra HD"]);
+        // Idle has no disc, so none of them resolve.
+        assert_eq!(Flow::idle().disc_title(), None);
+        assert_eq!(Flow::idle().disc_size(), None);
+        assert!(Flow::idle().disc_features().is_empty());
     }
 
     #[test]
@@ -715,7 +762,7 @@ mod tests {
         }
         let flow = flow.finished(1, "R".to_owned(), "D".to_owned(), Vec::new(), measured);
         // The active (first) row's stream-files pane shows the measured size.
-        let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.size).collect();
+        let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.measured).collect();
         assert_eq!(sizes, ["192,000"]);
     }
 

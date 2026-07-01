@@ -64,15 +64,13 @@ pub const HEADER_H: f32 = 36.0;
 
 /// The leading selection-indicator column.
 pub const COL_CHECK: f32 = 44.0;
-/// The `#` column.
-pub const COL_NUM: f32 = 48.0;
 /// The `Group` column.
 pub const COL_GROUP: f32 = 72.0;
 /// The `Length` column.
 pub const COL_LENGTH: f32 = 112.0;
-/// The `Estimated Bytes` column.
+/// The `Estimated Size` column.
 pub const COL_BYTES: f32 = 132.0;
-/// The `Measured Bytes` column.
+/// The `Measured Size` column.
 pub const COL_MEASURED: f32 = 132.0;
 /// The stream-files `Index` column.
 pub const COL_INDEX: f32 = 64.0;

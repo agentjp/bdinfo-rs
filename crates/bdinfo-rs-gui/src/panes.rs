@@ -12,21 +12,28 @@ use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary};
 
 use crate::model::{group_n0, table_length};
 
-/// One "Stream Files" pane row: a clip of the selected playlist, pre-formatted.
+/// One "Stream File" pane row: a clip of the selected playlist, pre-formatted.
 ///
-/// Columns: Stream File / Index / Length / Size. `size` is the measured
-/// packet-derived size (`0` until the measured scan fills it) — the same value
-/// the report's `FILES:` section prints.
+/// Columns: Stream File / Index / Length / Estimated Size / Measured Size — the
+/// same five `BDInfo` shows. `estimated` is the clip's on-disk size (the
+/// interleaved `*.ssif` when it has one, else the `*.m2ts`); `measured` is the
+/// packet-derived size the demux attributed to the clip. Either is `-` until it
+/// is known (no file on disk / nothing demuxed yet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamFileRow {
-    /// The clip's display name (the interleaved `*.ssif`, else the `*.m2ts`).
+    /// The clip's display name (the interleaved `*.ssif`, else the `*.m2ts`),
+    /// with a ` (N)` suffix for an extra-angle clip.
     pub file: String,
     /// The 1-based clip index, counting the main angle's clips.
     pub index: String,
     /// `hh:mm:ss` clip length.
     pub length: String,
-    /// Measured (packet-derived) size, thousands-grouped (`0` until measured).
-    pub size: String,
+    /// The clip's on-disk (estimated) size, thousands-grouped, or `-` when the
+    /// file is absent.
+    pub estimated: String,
+    /// The measured (packet-derived) size, thousands-grouped, or `-` until the
+    /// measured scan fills it.
+    pub measured: String,
 }
 
 /// One "Streams" pane row: a presented stream of the selected playlist.
@@ -61,14 +68,34 @@ pub fn stream_file_rows(playlist: &PlaylistSummary) -> Vec<StreamFileRow> {
     rows
 }
 
-/// Formats one clip into its stream-file row.
+/// Formats one clip into its stream-file row, mirroring `BDInfo`: an extra-angle
+/// clip gets a ` (N)` suffix; the estimated size prefers the interleaved
+/// `*.ssif` and falls back to the plain `*.m2ts`; a size that is not yet known
+/// (no file / nothing demuxed) shows as `-`.
 fn stream_file_row(clip: &ClipSummary, index: usize) -> StreamFileRow {
+    let file = if clip.angle_index > 0 {
+        format!("{} ({})", clip.display_name, clip.angle_index)
+    } else {
+        clip.display_name.clone()
+    };
     StreamFileRow {
-        file: clip.display_name.clone(),
+        file,
         index: index.to_string(),
         length: table_length(clip.length),
-        size: group_n0(clip.packet_size()),
+        estimated: size_cell(estimated_size(clip)),
+        measured: size_cell(clip.packet_size()),
     }
+}
+
+/// The clip's on-disk (estimated) size — the interleaved `*.ssif` when it has
+/// one, else the plain `*.m2ts` (`0` when neither is present).
+const fn estimated_size(clip: &ClipSummary) -> u64 {
+    if clip.interleaved_file_size > 0 { clip.interleaved_file_size } else { clip.file_size }
+}
+
+/// A byte-size cell: thousands-grouped, or `-` when the size is not yet known.
+fn size_cell(bytes: u64) -> String {
+    if bytes > 0 { group_n0(bytes) } else { "-".to_owned() }
 }
 
 /// Builds the "Streams" (codec) rows for `playlist` — one per presented stream,
@@ -78,13 +105,15 @@ pub fn codec_rows(playlist: &PlaylistSummary) -> Vec<CodecRow> {
     playlist.streams.iter().map(codec_row).collect()
 }
 
-/// Formats one stream into its codec row.
+/// Formats one stream into its codec row. Uses `full_description` — the same
+/// string the locked report prints (video profile/level, audio kbps / bit depth
+/// / embedded core) — so the pane matches the report and the original `BDInfo`.
 fn codec_row(stream: &StreamSummary) -> CodecRow {
     CodecRow {
         codec: stream.codec_name.clone(),
         language: stream.language_name.clone(),
         bitrate: bitrate_cell(stream.bitrate),
-        description: stream.description.clone(),
+        description: stream.full_description.clone(),
         hidden: stream.is_hidden,
     }
 }
@@ -110,9 +139,23 @@ mod tests {
 
     /// A clip carrying the fields the stream-file row reads.
     fn clip(name: &str, angle_index: i32, length: f64, packet_count: u64) -> ClipSummary {
+        sized_clip(name, angle_index, length, packet_count, 0, 0)
+    }
+
+    /// A clip that also carries on-disk sizes (`*.m2ts` and interleaved `*.ssif`).
+    fn sized_clip(
+        name: &str,
+        angle_index: i32,
+        length: f64,
+        packet_count: u64,
+        file_size: u64,
+        interleaved_file_size: u64,
+    ) -> ClipSummary {
         ClipSummary {
             name: name.to_owned(),
             display_name: name.to_owned(),
+            file_size,
+            interleaved_file_size,
             angle_index,
             relative_time_in: 0.0,
             length,
@@ -164,13 +207,18 @@ mod tests {
                 stream("MPEG-4 AVC Video", "", 0, "1080p / 23.976 fps / 16:9"),
                 stream("DTS-HD Master Audio", "English", 3_948_000, "5.1 / 48 kHz / 24-bit"),
             ],
-            clips: vec![clip("00000.M2TS", 0, 100.0, 1000), clip("00001.M2TS", 0, 30.0, 0)],
+            clips: vec![
+                // A plain clip: a 500 KB `*.m2ts`, 1000 packets demuxed.
+                sized_clip("00000.M2TS", 0, 100.0, 1000, 500_000, 0),
+                // No file on disk, nothing demuxed yet: both sizes unknown.
+                clip("00001.M2TS", 0, 30.0, 0),
+            ],
             chapters: Vec::new(),
         }
     }
 
     #[test]
-    fn stream_files_carry_index_length_and_measured_size() {
+    fn stream_files_carry_index_length_and_both_sizes() {
         let rows = stream_file_rows(&playlist());
         assert_eq!(
             rows,
@@ -179,17 +227,39 @@ mod tests {
                     file: "00000.M2TS".to_owned(),
                     index: "1".to_owned(),
                     length: "00:01:40".to_owned(),
+                    // The 500 KB `*.m2ts` on disk (no `*.ssif`).
+                    estimated: "500,000".to_owned(),
                     // 1000 packets * 192 bytes = 192,000.
-                    size: "192,000".to_owned(),
+                    measured: "192,000".to_owned(),
                 },
                 StreamFileRow {
                     file: "00001.M2TS".to_owned(),
                     index: "2".to_owned(),
                     length: "00:00:30".to_owned(),
-                    // Nothing demuxed yet → 0.
-                    size: "0".to_owned(),
+                    // No file on disk / nothing demuxed → both unknown.
+                    estimated: "-".to_owned(),
+                    measured: "-".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn the_estimated_size_prefers_the_interleaved_ssif_and_suffixes_the_angle() {
+        let mut p = playlist();
+        // An extra-angle clip with both a plain and an interleaved size: the row
+        // shows the interleaved size and a ` (2)` angle suffix.
+        p.clips = vec![sized_clip("00007.M2TS", 2, 40.0, 0, 700_000, 900_000)];
+        let rows = stream_file_rows(&p);
+        assert_eq!(
+            rows,
+            [StreamFileRow {
+                file: "00007.M2TS (2)".to_owned(),
+                index: "0".to_owned(),
+                length: "00:00:40".to_owned(),
+                estimated: "900,000".to_owned(),
+                measured: "-".to_owned(),
+            }]
         );
     }
 
