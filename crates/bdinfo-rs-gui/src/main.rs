@@ -1417,8 +1417,12 @@ fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Ele
             .wrapping(text::Wrapping::None),
     )
     .width(width)
-    .clip(true)
+    // Fill the header band and centre vertically, so every column's label sits on
+    // the same baseline whether or not it carries a resize grab.
+    .height(Length::Fill)
     .align_x(align)
+    .align_y(Vertical::Center)
+    .clip(true)
     .padding([0.0, ui::GAP_2])
     .into()
 }
