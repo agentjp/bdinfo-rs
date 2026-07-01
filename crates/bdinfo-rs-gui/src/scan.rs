@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::fs::FsDir;
@@ -100,22 +100,21 @@ pub struct Measured {
 /// vs `.iso` input diverges, mirroring the CLI's `scan_disc`.
 fn open(
     input: &Input,
-    run_packet_scan: bool,
+    mode: ScanMode,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     match input {
         Input::Folder(path) => {
             let root = FsDir::new(path);
-            let report = BdRom::open_resilient_with(&root, run_packet_scan, scan_files, progress)?;
+            let report = BdRom::open_resilient_with(&root, mode, scan_files, progress)?;
             let mut errors = report.errors;
             errors.extend(root.take_errors());
             Ok((report.bdrom, errors))
         }
         Input::Iso(path) => {
             let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-            let report =
-                BdRom::open_resilient_with(&source.root(), run_packet_scan, scan_files, progress)?;
+            let report = BdRom::open_resilient_with(&source.root(), mode, scan_files, progress)?;
             let mut errors = report.errors;
             errors.extend(source.take_errors());
             Ok((report.bdrom, errors))
@@ -135,7 +134,11 @@ fn error_lines(errors: &[ScanError]) -> Vec<String> {
 /// A short message when the input holds no readable Blu-ray structure (no
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
 pub fn scan_structural(input: &Input) -> Result<Structural, String> {
-    let (bdrom, errors) = open(input, false, None, &mut |_| {}).map_err(|err| err.to_string())?;
+    // `Codecs` mode runs the bounded quick pass — reads only the head of each
+    // stream file — so the panes show full codec detail (profile / HDR / Dolby
+    // Vision) right after opening, like BDInfo, without the whole-file bitrate scan.
+    let (bdrom, errors) =
+        open(input, ScanMode::Codecs, None, &mut |_| {}).map_err(|err| err.to_string())?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural {
         label: bdrom.volume_label,
@@ -170,7 +173,7 @@ pub fn scan_measured(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<Measured, String> {
     let (bdrom, errors) =
-        open(input, true, Some(scan_files), progress).map_err(|err| err.to_string())?;
+        open(input, ScanMode::Full, Some(scan_files), progress).map_err(|err| err.to_string())?;
     let order = selection::selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors);
     Ok(Measured {

@@ -55,7 +55,7 @@ use std::sync::Arc;
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
-use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::order::presentation_groups;
@@ -921,7 +921,7 @@ fn render_selection(
     selection: &[String],
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, SelectionError> {
-    let structural = BdRom::open_resilient(root, false)?;
+    let structural = BdRom::open_resilient(root, ScanMode::Metadata)?;
     let names = named_selection(&structural.bdrom.playlists, selection);
     if names.is_empty() {
         return Err(SelectionError::NoMatch);
@@ -932,8 +932,8 @@ fn render_selection(
     // found, so it cannot hit the only hard error (`StructureNotFound`); on that
     // unreachable failure it degrades to the structural disc (zero measured
     // tallies) rather than erroring.
-    let measured =
-        BdRom::open_resilient_with(root, true, Some(&files), progress).unwrap_or(structural);
+    let measured = BdRom::open_resilient_with(root, ScanMode::Full, Some(&files), progress)
+        .unwrap_or(structural);
     let order = selection_order(&measured.bdrom.playlists, &names);
     Ok(text::render_with(&measured.bdrom, &order, &measured.errors))
 }
@@ -957,7 +957,7 @@ fn render_disc(
     root: &dyn BdDir,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, BdError> {
-    let report = BdRom::open_resilient_with(root, true, None, progress)?;
+    let report = BdRom::open_resilient_with(root, ScanMode::Full, None, progress)?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
@@ -1125,7 +1125,7 @@ pub fn scan_iso(
 #[wasm_bindgen]
 pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String, JsValue> {
     let root = build_web_tree(&paths, &files)?;
-    let report = BdRom::open_resilient(&root, false)
+    let report = BdRom::open_resilient(&root, ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }
@@ -1147,7 +1147,7 @@ pub fn list_iso_playlists(file: web_sys::File) -> Result<String, JsValue> {
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    let report = BdRom::open_resilient(&source.root(), false)
+    let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }

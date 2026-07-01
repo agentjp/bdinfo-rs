@@ -48,7 +48,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text;
@@ -110,7 +110,12 @@ fn scan_iso(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<ScanOutcome, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-    let report = BdRom::open_resilient_with(&source.root(), run_packet_scan, scan_files, progress)?;
+    let report = BdRom::open_resilient_with(
+        &source.root(),
+        scan_mode(run_packet_scan),
+        scan_files,
+        progress,
+    )?;
     let mut errors = report.errors;
     errors.extend(source.take_errors());
     Ok((report.bdrom, errors))
@@ -126,7 +131,8 @@ fn scan_folder(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<ScanOutcome, BdError> {
     let root = FsDir::new(location);
-    let report = BdRom::open_resilient_with(&root, run_packet_scan, scan_files, progress)?;
+    let report =
+        BdRom::open_resilient_with(&root, scan_mode(run_packet_scan), scan_files, progress)?;
     let mut errors = report.errors;
     errors.extend(root.take_errors());
     let mut bdrom = report.bdrom;
@@ -134,6 +140,13 @@ fn scan_folder(
     // label unusable; recover the real UDF volume label (or the drive letter).
     bdrom.volume_label = volume::resolve_folder_label(&bdrom.volume_label);
     Ok((bdrom, errors))
+}
+
+/// The CLI's scan depth: it only ever wants the metadata list or the full
+/// measured report, so `run_packet_scan` maps to [`ScanMode::Full`] or
+/// [`ScanMode::Metadata`] (the bounded [`ScanMode::Codecs`] is a GUI affordance).
+const fn scan_mode(run_packet_scan: bool) -> ScanMode {
+    if run_packet_scan { ScanMode::Full } else { ScanMode::Metadata }
 }
 
 /// The no-op progress observer for the metadata scan — it never runs the
