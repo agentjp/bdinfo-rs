@@ -107,6 +107,18 @@ impl Listing {
         self.selection.selected_names(&self.rows)
     }
 
+    /// Every listed playlist's name, in table order — the whole-disc scan set
+    /// used when the user scans with nothing checked (`BDInfo`'s default).
+    fn all_names(&self) -> Vec<String> {
+        self.rows.iter().map(|row| row.name.clone()).collect()
+    }
+
+    /// The names to scan: the checked rows, or — when nothing is checked — every
+    /// listed playlist (scan-all, like the CLI's `--whole`).
+    fn scan_names(&self) -> Vec<String> {
+        if self.selection.any() { self.selected_names() } else { self.all_names() }
+    }
+
     /// Replaces the playlists with the measured ones, rebuilding the rows so the
     /// table + panes show the measured sizes and bitrates. The measured scan
     /// re-opened the same disc with the same filter, so the rows line up; the
@@ -235,14 +247,15 @@ impl Flow {
         }
     }
 
-    /// Begins a measured scan of the current selection, tagged with `generation`.
-    /// Applied only from an editable state with a non-empty selection (the same
-    /// gate as [`Flow::scan_request`]); otherwise a no-op.
+    /// Begins a measured scan, tagged with `generation`. Applied from an editable
+    /// state that has at least one listed playlist (the same gate as
+    /// [`Flow::scan_request`]); the selection may be empty (scan-all). No-op
+    /// otherwise.
     #[must_use]
     pub fn start_scanning(self, generation: u64) -> Self {
         match self.inner {
             Inner::Listed(mut listing) | Inner::Reported { mut listing, .. }
-                if listing.selection.any() =>
+                if !listing.rows.is_empty() =>
             {
                 listing.error = None;
                 Self { inner: Inner::Scanning { listing, generation, progress: None } }
@@ -462,21 +475,24 @@ impl Flow {
         self.any_listing().is_some_and(|listing| listing.selection.all())
     }
 
-    /// Whether a measured scan can start now (an editable state with a non-empty
-    /// selection) — the "Scan selected" button's enabled state.
+    /// Whether a measured scan can start now — an editable state with at least one
+    /// listed playlist. The selection may be empty: scanning with nothing checked
+    /// scans the whole disc (`BDInfo`'s behaviour), so the "Scan Bitrates" button
+    /// is live as soon as a disc is listed.
     #[must_use]
     pub fn can_scan(&self) -> bool {
-        self.editable() && self.any_listing().is_some_and(|listing| listing.selection.any())
+        self.editable() && self.any_listing().is_some_and(|listing| !listing.rows.is_empty())
     }
 
-    /// The measured-scan request for the current selection, when [`Flow::can_scan`].
+    /// The measured-scan request, when [`Flow::can_scan`]. Scans the checked
+    /// playlists, or — when nothing is checked — every listed playlist (scan-all).
     #[must_use]
     pub fn scan_request(&self) -> Option<ScanRequest> {
         if !self.can_scan() {
             return None;
         }
         let listing = self.any_listing()?;
-        let selection = listing.selected_names();
+        let selection = listing.scan_names();
         let scan_files = selection::selection_stream_files(&listing.playlists, &selection);
         Some(ScanRequest { input: listing.input.clone(), selection, scan_files })
     }
@@ -633,7 +649,7 @@ mod tests {
         assert_eq!(flow.row_count(), 2);
         assert_eq!(flow.table().len(), 2);
         assert!(flow.editable());
-        assert!(!flow.can_scan()); // nothing selected yet
+        assert!(flow.can_scan()); // scan-all is available as soon as a disc is listed
     }
 
     #[test]
@@ -682,14 +698,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_drives_can_scan_and_the_request() {
+    fn scan_request_covers_the_selection_or_the_whole_disc() {
+        // A listed disc can be scanned even before anything is checked.
         let mut flow = listed();
+        assert!(flow.can_scan());
+        // Nothing checked ⇒ scan every listed playlist (scan-all, like --whole).
+        let whole = flow.scan_request().expect("a scan-all request");
+        assert_eq!(whole.selection, ["00000.MPLS", "00001.MPLS"]);
+        // Checking a row narrows the scan to that playlist.
         flow.toggle(0);
         assert_eq!(flow.selected_count(), 1);
-        assert!(flow.can_scan());
-        let request = flow.scan_request().expect("a request once a row is checked");
-        assert_eq!(request.selection, ["00000.MPLS"]);
-        assert_eq!(request.scan_files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
+        let one = flow.scan_request().expect("a request once a row is checked");
+        assert_eq!(one.selection, ["00000.MPLS"]);
+        assert_eq!(one.scan_files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
     }
 
     #[test]
@@ -700,7 +721,8 @@ mod tests {
         assert!(flow.all_selected());
         flow.select_none();
         assert_eq!(flow.selected_count(), 0);
-        assert!(!flow.can_scan());
+        // Nothing checked no longer blocks scanning — it becomes a whole-disc scan.
+        assert!(flow.can_scan());
     }
 
     #[test]
@@ -807,9 +829,10 @@ mod tests {
         idle.toggle(0);
         idle.select_all();
         assert_eq!(idle.selected_count(), 0);
-        // start_scanning with no selection is a no-op.
-        let flow = listed().start_scanning(1);
-        assert_eq!(flow.stage(), Stage::Listed);
+        // start_scanning outside an editable state is a no-op.
+        assert_eq!(Flow::idle().start_scanning(1).stage(), Stage::Idle);
+        // A listed disc scans even with nothing checked (scan-all).
+        assert_eq!(listed().start_scanning(1).stage(), Stage::Scanning);
     }
 
     // The async message ordering is the crate's trickiest seam, so amplify the
@@ -925,10 +948,11 @@ mod tests {
                     if flow.editable() {
                         prop_assert!(matches!(stage, Stage::Listed | Stage::Reported));
                     }
-                    // can_scan implies an editable disc with a selection.
+                    // can_scan implies an editable disc with at least one row
+                    // (the selection may be empty — that is a whole-disc scan).
                     if flow.can_scan() {
                         prop_assert!(flow.editable());
-                        prop_assert!(flow.selected_count() > 0);
+                        prop_assert!(flow.row_count() > 0);
                     }
                 }
             }

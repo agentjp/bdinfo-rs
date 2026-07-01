@@ -42,7 +42,7 @@ use crate::theme::{Palette, ThemePref};
 /// taller, sized to nearly fill a standard ~900-tall work area. The layout is
 /// fully responsive (`Fill`/`FillPortion` + scrollable panes), so any size works;
 /// long codec descriptions clip at the pane edge exactly as they do in `BDInfo`.
-const WINDOW_SIZE: (f32, f32) = (800.0, 880.0);
+const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);
 /// The minimum size the window can be resized down to — low enough to fit a
 /// small screen, beyond which the panes scroll rather than disappear (so the
 /// window never gets stuck larger than a modest display).
@@ -623,9 +623,16 @@ impl App {
         let field_text = path.as_deref().unwrap_or("No disc selected");
         let field_color = if path.is_some() { p.text } else { p.text_faint };
         let field = container(
-            text(field_text.to_owned()).font(ui::MONO).size(ui::TEXT_SM).color(field_color),
+            text(field_text.to_owned())
+                .font(ui::MONO)
+                .size(ui::TEXT_SM)
+                .color(field_color)
+                // A long path clips at the field's edge (like BDInfo's textbox)
+                // rather than wrapping to a second line when the window narrows.
+                .wrapping(text::Wrapping::None),
         )
         .width(Length::Fill)
+        .clip(true)
         .padding([ui::GAP_2, ui::GAP_3])
         .style(ui::path_field(p));
 
@@ -633,12 +640,7 @@ impl App {
             .width(Length::Fill)
             .align_y(Vertical::Center)
             .spacing(ui::GAP_2)
-            .push(
-                text("Select the Source BD-ROM:")
-                    .size(ui::TEXT_SM)
-                    .font(ui::UI_MEDIUM)
-                    .color(p.text_muted),
-            )
+            .push(text("Source:").size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
             .push(field)
             .push(self.labeled_command_button(p, "Browse...", Command::OpenFolder))
             .push(self.labeled_command_button(p, "ISO", Command::OpenIso))
@@ -1004,14 +1006,26 @@ impl App {
             ));
         }
         if let Some(report) = self.flow.report() {
+            // Monospace, no wrapping — long report lines extend past the pane and
+            // scroll horizontally, exactly like BDInfo's read-only text box.
+            let body = scrollable(
+                container(
+                    text(report)
+                        .font(ui::MONO)
+                        .size(ui::TEXT_SM)
+                        .color(p.text)
+                        .wrapping(text::Wrapping::None),
+                )
+                .padding(ui::GAP_3),
+            )
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::new(),
+                horizontal: scrollable::Scrollbar::new(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill);
             column = column.push(
-                container(scrollable(
-                    container(text(report).font(ui::MONO).size(ui::TEXT_SM).color(p.text))
-                        .padding(ui::GAP_3),
-                ))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(ui::report_pane(p)),
+                container(body).width(Length::Fill).height(Length::Fill).style(ui::report_pane(p)),
             );
         }
         column.into()
@@ -1036,7 +1050,8 @@ impl App {
             ),
             Stage::Reported => "Report ready.".to_owned(),
             Stage::Listed if self.flow.selected_count() > 0 => "Ready to scan.".to_owned(),
-            Stage::Listed => "Choose playlists to scan.".to_owned(),
+            // Nothing checked still scans — the whole disc, like BDInfo.
+            Stage::Listed => "Ready to scan the whole disc.".to_owned(),
             _ => String::new(),
         });
 
@@ -1239,12 +1254,15 @@ fn table_row<'a>(
             ui::COL_MEASURED,
             Horizontal::Right,
         ));
-    let cells_button = button(cells)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(0.0)
-        .style(ui::flat_button(p))
-        .on_press_maybe(editable.then_some(Message::RowActivated(index)));
+    // Centre the cells vertically in the fixed-height row (the button does not
+    // centre its content on its own, so the text would otherwise sit at the top).
+    let cells_button =
+        button(container(cells).width(Length::Fill).height(Length::Fill).align_y(Vertical::Center))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(0.0)
+            .style(ui::flat_button(p))
+            .on_press_maybe(editable.then_some(Message::RowActivated(index)));
 
     let row = Row::new()
         .width(Length::Fill)

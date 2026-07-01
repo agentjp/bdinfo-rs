@@ -26,6 +26,9 @@ pub(crate) struct PlaylistRow {
     pub(crate) group: usize,
     /// The playlist file name, e.g. `00000.MPLS`.
     pub(crate) name: String,
+    /// The playlist's chapter count — appended to the displayed name as
+    /// ` [NN Chapters]` when it exceeds one, mirroring `BDInfo`.
+    pub(crate) chapter_count: usize,
     /// `hh:mm:ss` total length, truncated like the CLI table.
     pub(crate) length: String,
     /// Estimated bytes — interleaved `*.ssif` size, else `*.m2ts` size, else
@@ -185,6 +188,7 @@ pub(crate) fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
                 playlist_index: index,
                 group,
                 name: playlist.name.clone(),
+                chapter_count: playlist.chapter_count,
                 length: table_length(playlist.total_length),
                 estimated_bytes: estimated_bytes(playlist),
                 measured_bytes: playlist.total_angle_packet_size(),
@@ -194,12 +198,23 @@ pub(crate) fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
         .collect()
 }
 
+/// The playlist name shown in the `Playlist File` column: the file name, plus a
+/// ` [NN Chapters]` suffix (zero-padded to two digits) when the playlist has more
+/// than one chapter — the same annotation `BDInfo` appends.
+fn playlist_display_name(name: &str, chapter_count: usize) -> String {
+    if chapter_count > 1 {
+        format!("{name} [{chapter_count:02} Chapters]")
+    } else {
+        name.to_owned()
+    }
+}
+
 /// Formats one structured row into its display cells.
 fn display_row(row: &PlaylistRow) -> TableRow {
     TableRow {
         number: row.position.to_string(),
         group: row.group.to_string(),
-        file: row.name.clone(),
+        file: playlist_display_name(&row.name, row.chapter_count),
         length: row.length.clone(),
         estimated_bytes: estimated_cell(row.estimated_bytes),
         measured_bytes: group_n0(row.measured_bytes),
@@ -222,7 +237,7 @@ mod tests {
 
     use super::{
         PlaylistRow, TableRow, any_hidden, display_rows, estimated_bytes, estimated_cell,
-        format_file_size, group_n0, playlist_rows, table_length, table_rows,
+        format_file_size, group_n0, playlist_display_name, playlist_rows, table_length, table_rows,
     };
 
     /// A `ClipSummary` carrying just a name + length (the fields the view-model
@@ -405,6 +420,7 @@ mod tests {
             playlist_index: 0,
             group: 1,
             name: "00000.MPLS".to_owned(),
+            chapter_count: 0,
             length: "00:00:30".to_owned(),
             estimated_bytes: None,
             measured_bytes: 0,
@@ -412,6 +428,17 @@ mod tests {
         }];
         assert!(any_hidden(&hidden));
         assert!(!any_hidden(&[]));
+    }
+
+    #[test]
+    fn playlist_name_gains_a_chapter_suffix_only_past_one_chapter() {
+        // Zero or one chapter: just the name (BDInfo shows no suffix for a single
+        // or absent chapter mark).
+        assert_eq!(playlist_display_name("00000.MPLS", 0), "00000.MPLS");
+        assert_eq!(playlist_display_name("00000.MPLS", 1), "00000.MPLS");
+        // More than one: the zero-padded ` [NN Chapters]` annotation.
+        assert_eq!(playlist_display_name("00002.MPLS", 12), "00002.MPLS [12 Chapters]");
+        assert_eq!(playlist_display_name("00002.MPLS", 5), "00002.MPLS [05 Chapters]");
     }
 
     // The cell formatting is panic-safety-critical (it formats hostile disc

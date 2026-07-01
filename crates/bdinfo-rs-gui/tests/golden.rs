@@ -72,5 +72,5 @@ fn the_structural_scan_lists_the_disc_playlist() {
     assert_eq!(row.cells.length, "00:00:30");
     assert!(!row.selected, "rows start unselected");
     assert!(!flow.show_hidden_note(), "the fixture hides no streams");
-    assert!(!flow.can_scan(), "nothing is selected yet");
+    assert!(flow.can_scan(), "scan-all is available once a disc is listed");
 }
