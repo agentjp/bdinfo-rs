@@ -71,17 +71,17 @@ pub const COL_GROUP: f32 = 72.0;
 /// The `Length` column.
 pub const COL_LENGTH: f32 = 112.0;
 /// The `Estimated Bytes` column.
-pub const COL_BYTES: f32 = 152.0;
+pub const COL_BYTES: f32 = 132.0;
 /// The `Measured Bytes` column.
-pub const COL_MEASURED: f32 = 152.0;
+pub const COL_MEASURED: f32 = 132.0;
 /// The stream-files `Index` column.
-pub const COL_INDEX: f32 = 72.0;
+pub const COL_INDEX: f32 = 64.0;
 /// The streams `Codec` column.
-pub const COL_CODEC: f32 = 220.0;
+pub const COL_CODEC: f32 = 190.0;
 /// The streams `Language` column.
-pub const COL_LANG: f32 = 120.0;
+pub const COL_LANG: f32 = 104.0;
 /// The streams `Bit Rate` column.
-pub const COL_BITRATE: f32 = 124.0;
+pub const COL_BITRATE: f32 = 108.0;
 /// The width of the row-selection accent bar.
 pub const SEL_BAR: f32 = 3.0;
 

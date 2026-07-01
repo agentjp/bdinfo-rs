@@ -36,16 +36,17 @@ use iced::{Element, Length, Task};
 
 use crate::theme::{Palette, ThemePref};
 
-/// The window's initial logical size — anchored on the classic `BDInfo`
-/// footprint (854×661 client) but taller and wider, so the three stacked
-/// master-detail panes get room while still fitting a standard ~900-tall work
-/// area. The layout is fully responsive (`Fill`/`FillPortion` + scrollable
-/// panes), so any size works.
-const WINDOW_SIZE: (f32, f32) = (1080.0, 860.0);
+/// The window's initial logical size — a **portrait-leaning** footprint (taller
+/// than wide), because the three master-detail panes are stacked vertically, so
+/// the vertical axis is where the value is. Roughly `BDInfo`'s width but much
+/// taller, sized to nearly fill a standard ~900-tall work area. The layout is
+/// fully responsive (`Fill`/`FillPortion` + scrollable panes), so any size works;
+/// long codec descriptions clip at the pane edge exactly as they do in `BDInfo`.
+const WINDOW_SIZE: (f32, f32) = (800.0, 880.0);
 /// The minimum size the window can be resized down to — low enough to fit a
 /// small screen, beyond which the panes scroll rather than disappear (so the
 /// window never gets stuck larger than a modest display).
-const MIN_SIZE: (f32, f32) = (720.0, 520.0);
+const MIN_SIZE: (f32, f32) = (680.0, 540.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
 
