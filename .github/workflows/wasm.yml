@@ -66,7 +66,7 @@ jobs:
           workspaces: crates/bdinfo-rs-wasm
 
       - name: Install wasm-bindgen-cli (pinned to the crate version)
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: wasm-bindgen-cli@0.2.126
 
@@ -88,7 +88,7 @@ jobs:
           }
 
       - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+        uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,cargo-deny,typos-cli
 
