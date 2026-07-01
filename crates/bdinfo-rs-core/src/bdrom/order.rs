@@ -153,6 +153,8 @@ mod tests {
                 .map(|clip| ClipSummary {
                     name: (*clip).to_owned(),
                     display_name: (*clip).to_owned(),
+                    file_size: 0,
+                    interleaved_file_size: 0,
                     angle_index: 0,
                     relative_time_in: 0.0,
                     length: total_length,

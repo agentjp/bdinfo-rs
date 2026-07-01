@@ -194,6 +194,12 @@ pub struct ClipSummary {
     /// The display name: the interleaved `*.ssif` name when the clip has one,
     /// else [`name`](Self::name).
     pub display_name: String,
+    /// The clip's `*.m2ts` on-disk size in bytes (`0` when the file is absent) —
+    /// the estimated (unmeasured) size.
+    pub file_size: u64,
+    /// The clip's interleaved `*.ssif` on-disk size in bytes (`0` when the clip
+    /// has no interleaved file).
+    pub interleaved_file_size: u64,
     /// Angle index; `0` is the main angle.
     pub angle_index: i32,
     /// Start time relative to the whole playlist, seconds.
@@ -1296,6 +1302,8 @@ fn clear_measurements(playlists: &mut [TsPlaylistFile]) {
 /// whole-file per-stream tallies, limited to the presented streams.
 fn build_clip_summaries(
     playlist: &TsPlaylistFile,
+    stream_files: &BTreeMap<String, u64>,
+    interleaved_files: &BTreeMap<String, u64>,
     measured: &BTreeMap<String, TsStreamFile>,
 ) -> Vec<ClipSummary> {
     let mut clips = Vec::new();
@@ -1318,10 +1326,16 @@ fn build_clip_summaries(
                 }
             }
         }
+        let stem = clip_stem(&clip.name);
         clips.push(ClipSummary {
             name: clip.name.clone(),
             display_name: file
                 .map_or_else(|| clip.name.clone(), |f| f.display_name(true).to_owned()),
+            file_size: stream_files.get(&clip.name).copied().unwrap_or(0),
+            interleaved_file_size: interleaved_files
+                .get(&format!("{stem}.SSIF"))
+                .copied()
+                .unwrap_or(0),
             angle_index: clip.angle_index,
             relative_time_in: clip.relative_time_in,
             length: clip.length,
@@ -1399,7 +1413,7 @@ fn build_summary(
             has_loops: playlist_has_loops(playlist),
             angle_count: angle,
             streams,
-            clips: build_clip_summaries(playlist, measured),
+            clips: build_clip_summaries(playlist, stream_files, interleaved_files, measured),
             chapters: build_chapter_summaries(playlist, measured, total_length),
         },
         is_50hz,
@@ -2774,6 +2788,11 @@ mod tests {
         assert_eq!(pl.total_length.to_bits(), 40.0_f64.to_bits());
         assert_eq!(pl.file_size, 1000);
         assert_eq!(pl.interleaved_file_size, 500);
+        // The single clip carries the same on-disk sizes (its `*.m2ts` + `*.ssif`).
+        assert_eq!(pl.clips.len(), 1);
+        let clip0 = pl.clips.first().unwrap();
+        assert_eq!(clip0.file_size, 1000);
+        assert_eq!(clip0.interleaved_file_size, 500);
         assert_eq!(pl.chapter_count, 1);
         assert_eq!(pl.stream_count, 4);
         // The scan-free open leaves the presented streams unfilled by codec detail
@@ -2830,6 +2849,10 @@ mod tests {
         assert_eq!(pl.total_length.to_bits(), 100.0_f64.to_bits());
         assert_eq!(pl.file_size, 0); // no *.m2ts on disc
         assert_eq!(pl.interleaved_file_size, 0);
+        // The clip mirrors the absence: no on-disk file, no interleaved file.
+        let clip0 = pl.clips.first().unwrap();
+        assert_eq!(clip0.file_size, 0);
+        assert_eq!(clip0.interleaved_file_size, 0);
         assert_eq!(pl.chapter_count, 0);
         assert_eq!(pl.stream_count, 1);
     }
@@ -2977,6 +3000,8 @@ mod tests {
         ClipSummary {
             name: "00000.M2TS".to_owned(),
             display_name: "00000.M2TS".to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
             angle_index,
             relative_time_in: time_in,
             length,
@@ -3450,8 +3475,15 @@ mod tests {
             angle_count: 0,
         };
         let measured = BTreeMap::from([("00000.M2TS".to_owned(), file)]);
-        let clips = build_clip_summaries(&playlist, &measured);
-        let tallies = &clips.first().unwrap().streams;
+        let stream_files = BTreeMap::from([("00000.M2TS".to_owned(), 4096_u64)]);
+        let interleaved_files = BTreeMap::from([("00000.SSIF".to_owned(), 8192_u64)]);
+        let clips = build_clip_summaries(&playlist, &stream_files, &interleaved_files, &measured);
+        let clip = clips.first().unwrap();
+        // The on-disk sizes come straight from the two size maps, keyed by the
+        // clip's `*.m2ts` name and its `<stem>.SSIF`.
+        assert_eq!(clip.file_size, 4096);
+        assert_eq!(clip.interleaved_file_size, 8192);
+        let tallies = &clip.streams;
         assert_eq!(tallies.len(), 1);
         assert_eq!(tallies.first().unwrap().pid, Pid::new(0x1100));
         assert_eq!(tallies.first().unwrap().codec_short_name, "AC3");
