@@ -59,20 +59,15 @@ impl Input {
 /// without demuxing a single stream file.
 #[derive(Debug, Clone)]
 pub struct Structural {
-    /// The disc label (the folder name, or the `.iso`'s UDF volume label).
-    pub label: String,
-    /// The disc title from `META/bdmt_eng.xml`, when present — the info box's
-    /// `Disc Title` line.
-    pub disc_title: Option<String>,
-    /// The total disc size in bytes (excluding `*.ssif`) — the info box's
-    /// `Disc Size` line.
-    pub size: u64,
+    /// The scanned disc from the codec pass — no measured bitrate. It carries
+    /// the disc-level facts (label, title, size, flags) and the parsed
+    /// playlists the view-model builds its table from, and is enough to render
+    /// the classic report with zero (unmeasured) bitrates: the pre-scan "View
+    /// Report", exactly as `BDInfo` shows it before the bitrate scan.
+    pub bdrom: BdRom,
     /// The detected-feature labels (`Ultra HD`, `BD-Java`, …) in the core's
     /// fixed order — the info box's `Detected Features` line.
     pub features: Vec<String>,
-    /// Every parsed playlist — the view-model builds the filtered table rows
-    /// from these, and the measured scan resolves the selection against them.
-    pub playlists: Vec<PlaylistSummary>,
     /// Any failures recorded while reading the structure (a corrupt playlist,
     /// an unreadable directory) — shown as a non-blocking warning banner.
     pub warnings: Vec<String>,
@@ -140,14 +135,7 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
     let (bdrom, errors) =
         open(input, ScanMode::Codecs, None, &mut |_| {}).map_err(|err| err.to_string())?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
-    Ok(Structural {
-        label: bdrom.volume_label,
-        disc_title: bdrom.disc_title,
-        size: bdrom.size,
-        features,
-        playlists: bdrom.playlists,
-        warnings: error_lines(&errors),
-    })
+    Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
 }
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.

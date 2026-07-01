@@ -74,3 +74,24 @@ fn the_structural_scan_lists_the_disc_playlist() {
     assert!(!flow.show_hidden_note(), "the fixture hides no streams");
     assert!(flow.can_scan(), "scan-all is available once a disc is listed");
 }
+
+#[test]
+fn the_pre_scan_report_matches_the_disc_but_reads_zero_bitrate() {
+    // BDInfo's pre-scan "View Report": the full report is offered straight after
+    // the structural scan, rendered from the disc with zero (unmeasured)
+    // bitrates. Nothing is selected, so it covers the whole disc.
+    let input = Input::Folder(fixture("BigBuckBunny"));
+    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let flow = Flow::start_listing(input.clone()).listed(&input, Ok(structural));
+    assert!(flow.report_available(), "View Report is offered before the scan");
+    let report = flow.report().expect("a structural report before scanning");
+    // The disc-level facts and the feature playlist render.
+    assert!(report.contains("Disc Label:"), "the disc label renders");
+    assert!(report.contains("BigBuckBunny"), "the disc label is the directory name");
+    assert!(report.contains("00000.MPLS"), "the feature playlist renders");
+    // The bitrate reads zero (no measurement) where the measured golden reads
+    // the real 2.94 Mbps — the whole point of the pre-scan report.
+    assert!(report.contains("0.00 Mbps"), "the pre-scan bitrate is zero");
+    assert!(!report.contains("2.94 Mbps"), "no measured bitrate before the scan");
+    assert_ne!(report, FOLDER_GOLDEN, "measuring the disc changes the report");
+}

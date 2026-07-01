@@ -385,7 +385,6 @@ enum Message {
     Finished {
         generation: u64,
         report: String,
-        label: String,
         errors: Vec<String>,
         playlists: Vec<PlaylistSummary>,
     },
@@ -454,7 +453,7 @@ impl App {
             // Browsing / re-scanning is disabled while a scan is in flight.
             Command::OpenFolder | Command::OpenIso => !self.is_busy(),
             Command::Rescan => !self.is_busy() && self.flow.current_input().is_some(),
-            Command::SaveReport | Command::CopyReport => self.flow.report().is_some(),
+            Command::SaveReport | Command::CopyReport => self.flow.report_available(),
         }
     }
 
@@ -516,8 +515,8 @@ impl App {
                 self.flow.progress(generation, file, done, total, elapsed);
                 Task::none()
             }
-            Message::Finished { generation, report, label, errors, playlists } => {
-                self.on_finished(generation, report, label, errors, playlists)
+            Message::Finished { generation, report, errors, playlists } => {
+                self.on_finished(generation, report, errors, playlists)
             }
             Message::ScanFailed { generation, error } => {
                 self.flow = std::mem::take(&mut self.flow).scan_failed(generation, error);
@@ -528,7 +527,7 @@ impl App {
                 Task::none()
             }
             Message::ShowReport => {
-                self.showing_report = self.flow.report().is_some();
+                self.showing_report = self.flow.report_available();
                 Task::none()
             }
             Message::HideReport => {
@@ -672,13 +671,11 @@ impl App {
         &mut self,
         generation: u64,
         report: String,
-        label: String,
         errors: Vec<String>,
         playlists: Vec<PlaylistSummary>,
     ) -> Task<Message> {
         let was_scanning = self.flow.stage() == Stage::Scanning;
-        self.flow =
-            std::mem::take(&mut self.flow).finished(generation, report, label, errors, playlists);
+        self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
             self.notice = Some(self.scan_outcome());
         }
@@ -755,7 +752,6 @@ impl App {
                 Ok(measured) => Message::Finished {
                     generation,
                     report: measured.report,
-                    label: measured.label,
                     errors: measured.errors,
                     playlists: measured.playlists,
                 },
@@ -773,7 +769,7 @@ impl App {
     /// Writes the rendered report into `dir` as `BDINFO.{label}.txt`, bytes
     /// verbatim (the locked CRLF / UTF-8 no-BOM contract — never re-encode).
     fn save_report(&mut self, dir: &std::path::Path) {
-        let (Some(report), Some(label)) = (self.flow.report(), self.flow.report_label()) else {
+        let (Some(report), Some(label)) = (self.flow.report(), self.flow.label()) else {
             return;
         };
         let target = dir.join(format!("BDINFO.{label}.txt"));
@@ -787,9 +783,8 @@ impl App {
     fn copy_report(&mut self) -> Task<Message> {
         match self.flow.report() {
             Some(report) => {
-                let contents = report.to_owned();
                 self.status = Some("Report copied to the clipboard.".to_owned());
-                iced::clipboard::write(contents)
+                iced::clipboard::write(report)
             }
             None => Task::none(),
         }
@@ -814,7 +809,7 @@ impl App {
     /// bottom action+progress bar — with the scan-complete modal over the top.
     fn view(&self) -> Element<'_, Message> {
         let p = self.palette();
-        let body: Element<'_, Message> = if self.showing_report && self.flow.report().is_some() {
+        let body: Element<'_, Message> = if self.showing_report && self.flow.report_available() {
             self.report_view(p)
         } else {
             match self.flow.stage() {
@@ -1195,7 +1190,7 @@ impl App {
     /// a "completed with errors" banner when any failures were recorded, and the
     /// scrollable monospace report in its readout panel.
     fn report_view(&self, p: Palette) -> Element<'_, Message> {
-        let label = self.flow.report_label().unwrap_or("");
+        let label = self.flow.label().unwrap_or("");
         let header = Row::new()
             .width(Length::Fill)
             .align_y(Vertical::Center)
@@ -1306,7 +1301,7 @@ impl App {
             )
         } else {
             let mut right = Row::new().spacing(ui::GAP_2);
-            if self.flow.report().is_some() {
+            if self.flow.report_available() {
                 right = right.push(
                     button(text("View Report...").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                         .padding([ui::GAP_2, ui::GAP_4])

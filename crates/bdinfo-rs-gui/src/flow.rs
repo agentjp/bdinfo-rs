@@ -19,7 +19,8 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
+use bdinfo_rs_core::report::text;
 
 use crate::model::{self, PlaylistRow, SelectableRow};
 use crate::panes::{self, CodecRow, StreamFileRow};
@@ -46,23 +47,20 @@ pub enum Stage {
 }
 
 /// The structural-scan payload shared by the [`Stage::Listed`], [`Stage::Scanning`],
-/// and [`Stage::Reported`] states: the picked input, the disc label, the parsed
-/// playlists, the filtered table rows, and the live row selection over them.
+/// and [`Stage::Reported`] states: the picked input, the scanned disc, the
+/// filtered table rows, and the live row selection over them.
 #[derive(Debug, Clone)]
 struct Listing {
     /// The disc the table came from (folder or `.iso`).
     input: Input,
-    /// The disc label (folder name, or `.iso` UDF volume label).
-    label: String,
-    /// The disc title from `META/bdmt_eng.xml`, when present.
-    disc_title: Option<String>,
-    /// The total disc size in bytes (excluding `*.ssif`).
-    size: u64,
+    /// The scanned disc — the disc-level facts (label / title / size / flags)
+    /// and the parsed playlists. The measured scan resolves the selection's
+    /// clip set + report order against `bdrom.playlists`, and the pre-scan
+    /// "View Report" renders straight from this disc (zero, unmeasured
+    /// bitrates). A finished measured scan swaps in its measured playlists.
+    bdrom: BdRom,
     /// The detected-feature labels, in the core's fixed order.
     features: Vec<String>,
-    /// Every parsed playlist — the measured scan resolves the selection's clip
-    /// set + report order against these.
-    playlists: Vec<PlaylistSummary>,
     /// The standard filtered table rows; the selection parallels this list.
     rows: Vec<PlaylistRow>,
     /// One checkbox flag per row.
@@ -83,16 +81,13 @@ impl Listing {
     /// Builds the listing from a successful structural scan: the filtered rows
     /// and an empty selection over them.
     fn build(input: Input, structural: Structural) -> Self {
-        let rows = model::playlist_rows(&structural.playlists);
+        let rows = model::playlist_rows(&structural.bdrom.playlists);
         let show_hidden = model::any_hidden(&rows);
         let selection = Selection::new(rows.len());
         Self {
             input,
-            label: structural.label,
-            disc_title: structural.disc_title,
-            size: structural.size,
+            bdrom: structural.bdrom,
             features: structural.features,
-            playlists: structural.playlists,
             rows,
             selection,
             active: 0,
@@ -119,17 +114,19 @@ impl Listing {
         if self.selection.any() { self.selected_names() } else { self.all_names() }
     }
 
-    /// Replaces the playlists with the measured ones, rebuilding the rows so the
-    /// table + panes show the measured sizes and bitrates. The measured scan
-    /// re-opened the same disc with the same filter, so the rows line up; the
-    /// selection survives when the count matches (it always does in practice).
+    /// Replaces the disc's playlists with the measured ones, rebuilding the rows
+    /// so the table + panes show the measured sizes and bitrates. The measured
+    /// scan re-opened the same disc with the same filter, so the rows line up;
+    /// the selection survives when the count matches (it always does in
+    /// practice). The disc-level facts are unchanged by measurement, so only
+    /// `bdrom.playlists` is swapped.
     fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
         let rows = model::playlist_rows(&playlists);
         if rows.len() != self.rows.len() {
             self.selection = Selection::new(rows.len());
         }
         self.show_hidden = model::any_hidden(&rows);
-        self.playlists = playlists;
+        self.bdrom.playlists = playlists;
         self.rows = rows;
         self.active = self.active.min(self.rows.len().saturating_sub(1));
     }
@@ -137,7 +134,19 @@ impl Listing {
     /// The active row's playlist, resolved through its `playlist_index`.
     fn active_playlist(&self) -> Option<&PlaylistSummary> {
         let row = self.rows.get(self.active)?;
-        self.playlists.get(row.playlist_index)
+        self.bdrom.playlists.get(row.playlist_index)
+    }
+
+    /// Renders the classic disc report straight from the scanned disc, over the
+    /// playlists that would be scanned now — the checked rows, or every listed
+    /// playlist when none are checked ([`scan_names`](Self::scan_names), the same
+    /// set `BDInfo`'s report covers). Before the measured scan the disc's packet
+    /// tallies are zero, so the sizes and bitrates render as `0` / `0.00` — the
+    /// pre-scan "View Report". (Structural warnings surface in the UI's banner,
+    /// so the report's `WARNING` block is left to the measured scan.)
+    fn render_structural(&self) -> String {
+        let order = selection::selection_order(&self.bdrom.playlists, &self.scan_names());
+        text::render_with(&self.bdrom, &order, &[])
     }
 }
 
@@ -172,7 +181,7 @@ enum Inner {
     Listing(Input),
     Listed(Listing),
     Scanning { listing: Listing, generation: u64, progress: Option<ProgressModel> },
-    Reported { listing: Listing, report: String, label: String, errors: Vec<String> },
+    Reported { listing: Listing, report: String, errors: Vec<String> },
     Failed(String),
 }
 
@@ -284,20 +293,20 @@ impl Flow {
     }
 
     /// The measured scan finished — applied only when `generation` matches the
-    /// in-flight scan; moves [`Stage::Scanning`] → [`Stage::Reported`].
+    /// in-flight scan; moves [`Stage::Scanning`] → [`Stage::Reported`]. The disc
+    /// label comes from the (unchanged) loaded disc, so it is not threaded here.
     #[must_use]
     pub fn finished(
         self,
         generation: u64,
         report: String,
-        label: String,
         errors: Vec<String>,
         playlists: Vec<PlaylistSummary>,
     ) -> Self {
         match self.inner {
             Inner::Scanning { mut listing, generation: active, .. } if active == generation => {
                 listing.apply_measured(playlists);
-                Self { inner: Inner::Reported { listing, report, label, errors } }
+                Self { inner: Inner::Reported { listing, report, errors } }
             }
             other => Self { inner: other },
         }
@@ -367,21 +376,21 @@ impl Flow {
     /// The disc label, when a disc is loaded.
     #[must_use]
     pub fn label(&self) -> Option<&str> {
-        self.any_listing().map(|listing| listing.label.as_str())
+        self.any_listing().map(|listing| listing.bdrom.volume_label.as_str())
     }
 
     /// The disc title (`META/bdmt_eng.xml`), when a disc is loaded and it has one
     /// — the info box's `Disc Title` line.
     #[must_use]
     pub fn disc_title(&self) -> Option<&str> {
-        self.any_listing().and_then(|listing| listing.disc_title.as_deref())
+        self.any_listing().and_then(|listing| listing.bdrom.disc_title.as_deref())
     }
 
     /// The total disc size in bytes, when a disc is loaded — the info box's
     /// `Disc Size` line.
     #[must_use]
     pub fn disc_size(&self) -> Option<u64> {
-        self.any_listing().map(|listing| listing.size)
+        self.any_listing().map(|listing| listing.bdrom.size)
     }
 
     /// The detected-feature labels, when a disc is loaded — the info box's
@@ -493,7 +502,7 @@ impl Flow {
         }
         let listing = self.any_listing()?;
         let selection = listing.scan_names();
-        let scan_files = selection::selection_stream_files(&listing.playlists, &selection);
+        let scan_files = selection::selection_stream_files(&listing.bdrom.playlists, &selection);
         Some(ScanRequest { input: listing.input.clone(), selection, scan_files })
     }
 
@@ -506,20 +515,33 @@ impl Flow {
         }
     }
 
-    /// The rendered report, in [`Stage::Reported`].
+    /// Whether a report can be shown / saved / copied now — true whenever a disc
+    /// is loaded ([`Stage::Listed`] / [`Stage::Scanning`] / [`Stage::Reported`]).
+    /// Before the measured scan that report is the structural (zero-bitrate) one;
+    /// after, the measured one. A cheap predicate the view gates the "View Report"
+    /// button and Save / Copy on — unlike [`report`](Self::report) it never
+    /// renders, so it is safe to call every frame.
     #[must_use]
-    pub fn report(&self) -> Option<&str> {
-        match &self.inner {
-            Inner::Reported { report, .. } => Some(report),
-            _ => None,
-        }
+    pub const fn report_available(&self) -> bool {
+        matches!(self.inner, Inner::Listed(_) | Inner::Scanning { .. } | Inner::Reported { .. })
     }
 
-    /// The report's disc label — the `BDINFO.{label}.txt` save name.
+    /// The report to display / save / copy for the current stage: the measured
+    /// report once a scan has finished ([`Stage::Reported`], byte-for-byte what
+    /// the scan rendered), else the structural (zero-bitrate) report rendered
+    /// from the loaded disc over the current selection ([`Stage::Listed`] /
+    /// [`Stage::Scanning`]) — `BDInfo`'s pre-scan "View Report".
+    ///
+    /// The structural case renders on demand, so call this only when actually
+    /// showing or writing the report; test availability with
+    /// [`report_available`](Self::report_available) instead.
     #[must_use]
-    pub fn report_label(&self) -> Option<&str> {
+    pub fn report(&self) -> Option<String> {
         match &self.inner {
-            Inner::Reported { label, .. } => Some(label),
+            Inner::Reported { report, .. } => Some(report.clone()),
+            Inner::Listed(listing) | Inner::Scanning { listing, .. } => {
+                Some(listing.render_structural())
+            }
             _ => None,
         }
     }
@@ -571,7 +593,7 @@ impl Flow {
 mod tests {
     use std::time::Duration;
 
-    use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
+    use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
 
     use super::{Flow, Stage};
     use crate::scan::{Input, Structural};
@@ -613,16 +635,32 @@ mod tests {
         Input::Folder("disc".into())
     }
 
-    fn structural() -> Structural {
-        Structural {
-            label: "DISC".to_owned(),
+    /// A `BdRom` carrying the disc-level facts the flow reads (label / title /
+    /// size / flags) over `playlists`; the flags stay off (a plain 2D disc).
+    fn bdrom(playlists: Vec<PlaylistSummary>) -> BdRom {
+        BdRom {
+            volume_label: "DISC".to_owned(),
             disc_title: Some("A Movie".to_owned()),
             size: 78_000_000_000,
-            features: vec!["Ultra HD".to_owned()],
-            playlists: vec![
+            interleaved_size: 0,
+            is_3d: false,
+            is_50hz: false,
+            is_uhd: false,
+            is_bd_plus: false,
+            is_bd_java: false,
+            is_dbox: false,
+            is_psp: false,
+            playlists,
+        }
+    }
+
+    fn structural() -> Structural {
+        Structural {
+            bdrom: bdrom(vec![
                 playlist("00000.MPLS", 100.0, &["A.M2TS"]),
                 playlist("00001.MPLS", 70.0, &["B.M2TS"]),
-            ],
+            ]),
+            features: vec!["Ultra HD".to_owned()],
             warnings: Vec::new(),
         }
     }
@@ -738,19 +776,59 @@ mod tests {
         flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::ZERO);
         assert_eq!(flow.progress_view().map(|p| p.percent), Some(50));
 
-        let flow = flow.finished(
-            1,
-            "REPORT".to_owned(),
-            "DISC".to_owned(),
-            Vec::new(),
-            structural().playlists,
-        );
+        let flow = flow.finished(1, "REPORT".to_owned(), Vec::new(), structural().bdrom.playlists);
         assert_eq!(flow.stage(), Stage::Reported);
-        assert_eq!(flow.report(), Some("REPORT"));
-        assert_eq!(flow.report_label(), Some("DISC"));
+        // Reported returns the measured report byte-for-byte (not a re-render).
+        assert_eq!(flow.report().as_deref(), Some("REPORT"));
+        assert_eq!(flow.label(), Some("DISC"));
         assert!(flow.report_errors().is_empty());
+        assert!(flow.report_available());
         // Reported is editable again — the user can re-select and re-scan.
         assert!(flow.editable());
+    }
+
+    #[test]
+    fn the_report_is_available_before_the_scan_and_follows_the_selection() {
+        // A freshly listed disc already offers a report — BDInfo's pre-scan
+        // "View Report", the structural (zero-bitrate) one.
+        let mut flow = listed();
+        assert!(flow.report_available());
+        assert_eq!(flow.label(), Some("DISC")); // the disc label is available pre-scan
+        let whole = flow.report().expect("a structural report before scanning");
+        // The disc-level facts render even before measuring.
+        assert!(whole.contains("Disc Label:"));
+        assert!(whole.contains("DISC"));
+        // Nothing checked ⇒ every listed playlist, exactly like BDInfo's report.
+        assert!(whole.contains("00000.MPLS"));
+        assert!(whole.contains("00001.MPLS"));
+        // Checking one row narrows the report to that playlist's block, so it is
+        // strictly shorter than the whole-disc report (it tracks the selection).
+        flow.toggle(0);
+        let one = flow.report().expect("a structural report for the selection");
+        assert!(one.len() < whole.len());
+        assert!(one.contains("00000.MPLS"));
+    }
+
+    #[test]
+    fn the_structural_report_is_available_while_scanning() {
+        let mut flow = listed();
+        flow.toggle(0);
+        let flow = flow.start_scanning(1);
+        assert_eq!(flow.stage(), Stage::Scanning);
+        // View Report stays offered during the scan (the structural report).
+        assert!(flow.report_available());
+        assert!(flow.report().is_some_and(|report| report.contains("00000.MPLS")));
+    }
+
+    #[test]
+    fn no_report_before_a_disc_is_loaded() {
+        assert!(!Flow::idle().report_available());
+        assert!(Flow::idle().report().is_none());
+        assert_eq!(Flow::idle().label(), None);
+        // A fatal pick failure has no disc, hence no report either.
+        let failed = Flow::start_listing(input()).listed(&input(), Err("no BD".to_owned()));
+        assert!(!failed.report_available());
+        assert!(failed.report().is_none());
     }
 
     #[test]
@@ -778,11 +856,11 @@ mod tests {
         flow.toggle(0);
         let flow = flow.start_scanning(1);
         // The measured playlists carry the first clip's packet tally.
-        let mut measured = structural().playlists;
+        let mut measured = structural().bdrom.playlists;
         if let Some(clip) = measured.first_mut().and_then(|p| p.clips.first_mut()) {
             clip.packet_count = 1000; // 1000 * 192 = 192,000 bytes
         }
-        let flow = flow.finished(1, "R".to_owned(), "D".to_owned(), Vec::new(), measured);
+        let flow = flow.finished(1, "R".to_owned(), Vec::new(), measured);
         // The active (first) row's stream-files pane shows the measured size.
         let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.measured).collect();
         assert_eq!(sizes, ["192,000"]);
@@ -797,7 +875,7 @@ mod tests {
         let mut probe = flow.clone();
         probe.progress(4, "x".to_owned(), 1, 1, Duration::ZERO);
         assert!(probe.progress_view().is_none(), "stale progress ignored");
-        let probe = flow.finished(4, "R".to_owned(), "D".to_owned(), Vec::new(), Vec::new());
+        let probe = flow.finished(4, "R".to_owned(), Vec::new(), Vec::new());
         assert_eq!(probe.stage(), Stage::Scanning, "stale finish ignored");
     }
 
@@ -808,7 +886,7 @@ mod tests {
         let flow = flow.start_scanning(7).cancel();
         assert_eq!(flow.stage(), Stage::Listed);
         // A finish from the cancelled scan's generation must not reach Reported.
-        let flow = flow.finished(7, "R".to_owned(), "D".to_owned(), Vec::new(), Vec::new());
+        let flow = flow.finished(7, "R".to_owned(), Vec::new(), Vec::new());
         assert_eq!(flow.stage(), Stage::Listed);
     }
 
@@ -914,9 +992,8 @@ mod tests {
                             flow = flow.finished(
                                 g,
                                 "R".to_owned(),
-                                "D".to_owned(),
                                 Vec::new(),
-                                structural().playlists,
+                                structural().bdrom.playlists,
                             );
                             // The ONLY way to enter Reported is finishing the
                             // in-flight scan; a stale finish changes nothing.
