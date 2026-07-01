@@ -30,7 +30,8 @@ use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
-    Column, Row, Space, Stack, button, container, mouse_area, progress_bar, scrollable, text,
+    Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
+    scrollable, text,
 };
 use iced::{Element, Length, Task};
 
@@ -147,7 +148,6 @@ fn window_settings() -> iced::window::Settings {
 /// bits: the visual preference + last-known OS mode, the scan generation counter
 /// (stamped on the worker's messages so a stale event is ignored), the scan start
 /// time (for the elapsed / remaining estimate), and a transient status line.
-#[derive(Default)]
 struct App {
     /// The flow state machine — `view` is a projection of it.
     flow: Flow,
@@ -175,6 +175,47 @@ struct App {
     /// The animation phase (`0..PULSE_PERIOD`) of the indeterminate "scanning"
     /// bar shown during the initial disc scan; advanced by [`Message::Tick`].
     pulse: u16,
+    /// The three master-detail panes and the two draggable splitters between
+    /// them (Playlist / Stream File on top, Codec below). Holds the split ratios,
+    /// which the user drags and which resize proportionally with the window.
+    panes: pane_grid::State<Region>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            flow: Flow::default(),
+            theme_pref: ThemePref::default(),
+            os_mode: iced::theme::Mode::default(),
+            generation: 0,
+            scan_start: None,
+            status: None,
+            showing_report: false,
+            notice: None,
+            hovered: None,
+            pane_selection: None,
+            pulse: 0,
+            panes: default_panes(),
+        }
+    }
+}
+
+/// The initial pane layout — the same nesting + ratios `BDInfo` opens with:
+/// Playlist and Stream File share the top region, Codec takes the bottom. The
+/// outer split gives the top region ~0.56 (`BDInfo`'s 228/406); the inner split
+/// gives the playlist ~0.48 (`BDInfo`'s 109/228).
+fn default_panes() -> pane_grid::State<Region> {
+    pane_grid::State::with_configuration(pane_grid::Configuration::Split {
+        axis: pane_grid::Axis::Horizontal,
+        ratio: 0.56,
+        a: Box::new(pane_grid::Configuration::Split {
+            axis: pane_grid::Axis::Horizontal,
+            ratio: 0.48,
+            a: Box::new(pane_grid::Configuration::Pane(Region::Playlist)),
+            b: Box::new(pane_grid::Configuration::Pane(Region::StreamFile)),
+        }),
+        b: Box::new(pane_grid::Configuration::Pane(Region::Codec)),
+    })
 }
 
 /// The indeterminate-bar animation period (one full 0→1→0 breath).
@@ -309,6 +350,8 @@ enum Message {
     OsTheme(iced::theme::Mode),
     /// An animation frame — advances the indeterminate "scanning" bar.
     Tick,
+    /// A pane splitter was dragged — resize the two panes it divides.
+    PaneResized(pane_grid::ResizeEvent),
 }
 
 impl App {
@@ -404,15 +447,7 @@ impl App {
                 Task::none()
             }
             Message::Finished { generation, report, label, errors, playlists } => {
-                let was_scanning = self.flow.stage() == Stage::Scanning;
-                self.flow = std::mem::take(&mut self.flow)
-                    .finished(generation, report, label, errors, playlists);
-                // Announce a clean finish only if this event actually completed the
-                // in-flight scan (a stale finish leaves the stage unchanged).
-                if was_scanning && self.flow.stage() == Stage::Reported {
-                    self.notice = Some(self.scan_outcome());
-                }
-                Task::none()
+                self.on_finished(generation, report, label, errors, playlists)
             }
             Message::ScanFailed { generation, error } => {
                 self.flow = std::mem::take(&mut self.flow).scan_failed(generation, error);
@@ -451,6 +486,10 @@ impl App {
             Message::Tick => {
                 self.pulse =
                     self.pulse.wrapping_add(PULSE_STEP).checked_rem(PULSE_PERIOD).unwrap_or(0);
+                Task::none()
+            }
+            Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
+                self.panes.resize(split, ratio);
                 Task::none()
             }
         }
@@ -496,6 +535,26 @@ impl App {
         if self.flow.stage() == Stage::Listed && debug_scan_all() {
             self.flow.select_all();
             return self.start_scan();
+        }
+        Task::none()
+    }
+
+    /// Applies a finished measured scan, announcing a clean finish only when this
+    /// event actually completed the in-flight scan (a stale finish leaves the
+    /// stage unchanged, so no modal fires).
+    fn on_finished(
+        &mut self,
+        generation: u64,
+        report: String,
+        label: String,
+        errors: Vec<String>,
+        playlists: Vec<PlaylistSummary>,
+    ) -> Task<Message> {
+        let was_scanning = self.flow.stage() == Stage::Scanning;
+        self.flow =
+            std::mem::take(&mut self.flow).finished(generation, report, label, errors, playlists);
+        if was_scanning && self.flow.stage() == Stage::Reported {
+            self.notice = Some(self.scan_outcome());
         }
         Task::none()
     }
@@ -813,12 +872,11 @@ impl App {
         container(framed).center(Length::Fill).into()
     }
 
-    /// The loaded-disc body: the select bar, any banners, then the three
-    /// master-detail panes (Playlists / Stream Files / Streams) and the
-    /// detected-disc strip — the classic `BDInfo` layout.
+    /// The loaded-disc body: any banners, then the three resizable master-detail
+    /// panes (Playlist / Stream File / Codec, with draggable splitters between
+    /// them) and the detected-disc info box — the classic `BDInfo` layout.
     fn disc_view(&self, p: Palette) -> Element<'_, Message> {
         let mut content = Column::new().width(Length::Fill).height(Length::Fill).spacing(ui::GAP_2);
-        content = content.push(self.select_bar(p));
 
         // A failed measured scan leaves a banner over the still-usable table; any
         // structural warnings sit alongside.
@@ -829,16 +887,21 @@ impl App {
             content = content.push(banner(p, p.warning, warning.as_str()));
         }
 
-        // The select bar above is this section's titled header ("Playlist"), so
-        // the table itself carries no separate title.
-        content = content.push(
-            container(self.playlist_table(p)).width(Length::Fill).height(Length::FillPortion(5)),
-        );
+        content =
+            content.push(container(self.disc_panes(p)).width(Length::Fill).height(Length::Fill));
+        content = content.push(self.info_box(p));
+        content.into()
+    }
 
-        content = content.push(pane(
-            p,
-            "Stream File",
-            data_table(
+    /// The three panes as a resizable [`PaneGrid`]: draggable splitters between
+    /// them (their ratios live in [`App::panes`]) that also scale with the window.
+    /// The Playlist pane's title bar carries the section's selection controls; the
+    /// other two carry a plain title.
+    fn disc_panes(&self, p: Palette) -> Element<'_, Message> {
+        PaneGrid::new(&self.panes, |_pane, region, _maximized| match *region {
+            Region::Playlist => pane_grid::Content::new(self.playlist_table(p))
+                .title_bar(pane_grid::TitleBar::new(self.select_bar(p))),
+            Region::StreamFile => pane_grid::Content::new(data_table(
                 p,
                 STREAM_FILE_COLS,
                 self.stream_file_table_rows(),
@@ -846,13 +909,9 @@ impl App {
                 self.pane_hovered(Region::StreamFile),
                 self.pane_selected(Region::StreamFile),
                 ui::ROW_INDENT,
-            ),
-            Length::FillPortion(3),
-        ));
-        content = content.push(pane(
-            p,
-            "Codec",
-            data_table(
+            ))
+            .title_bar(pane_grid::TitleBar::new(pane_title(p, "Stream File"))),
+            Region::Codec => pane_grid::Content::new(data_table(
                 p,
                 CODEC_COLS,
                 self.codec_table_rows(),
@@ -860,12 +919,12 @@ impl App {
                 self.pane_hovered(Region::Codec),
                 self.pane_selected(Region::Codec),
                 ui::ROW_INDENT,
-            ),
-            Length::FillPortion(4),
-        ));
-
-        content = content.push(self.info_box(p));
-        content.into()
+            ))
+            .title_bar(pane_grid::TitleBar::new(pane_title(p, "Codec"))),
+        })
+        .spacing(ui::GAP_2)
+        .on_resize(8.0, Message::PaneResized)
+        .into()
     }
 
     /// The active playlist's stream-file rows, flattened to display cells
@@ -1380,20 +1439,11 @@ fn check_chip<'a>(p: Palette, checked: bool) -> Element<'a, Message> {
         .into()
 }
 
-/// A titled pane: a small muted header label over its (already-framed) table,
-/// taking `height` of the vertical space.
-fn pane<'a>(
-    p: Palette,
-    title: &str,
-    table: Element<'a, Message>,
-    height: Length,
-) -> Element<'a, Message> {
-    Column::new()
-        .width(Length::Fill)
-        .height(height)
-        .spacing(ui::GAP_1)
-        .push(text(title.to_owned()).size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
-        .push(table)
+/// A pane's title-bar label — a small muted section heading (Stream File /
+/// Codec) with a little breathing room, matching the playlist select bar's line.
+fn pane_title<'a>(p: Palette, title: &str) -> Element<'a, Message> {
+    container(text(title.to_owned()).size(ui::TEXT_SM).font(ui::UI_MEDIUM).color(p.text_muted))
+        .padding([ui::GAP_1, 0.0])
         .into()
 }
 
