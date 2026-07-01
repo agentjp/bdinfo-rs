@@ -31,7 +31,7 @@ use bdinfo_rs_gui::scan::{self, Input, Structural};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
-    scrollable, text,
+    responsive, scrollable, text,
 };
 use iced::{Element, Length, Task};
 
@@ -179,6 +179,15 @@ struct App {
     /// them (Playlist / Stream File on top, Codec below). Holds the split ratios,
     /// which the user drags and which resize proportionally with the window.
     panes: pane_grid::State<Region>,
+    /// The Playlist + Stream File shared column weights (Name / Int / Length /
+    /// Estimated / Measured) — the user drags header dividers to re-weight them.
+    grid_w: [f32; 5],
+    /// The Codec pane column weights (Codec / Language / Bit Rate / Description).
+    codec_w: [f32; 4],
+    /// The in-flight column drag: which grid + boundary, the columns' pixel span
+    /// (for delta→weight), and the last cursor x (`None` until the first move) so
+    /// successive moves apply a delta.
+    col_drag: Option<(ColGrid, usize, f32, Option<f32>)>,
 }
 
 impl Default for App {
@@ -196,6 +205,10 @@ impl Default for App {
             pane_selection: None,
             pulse: 0,
             panes: default_panes(),
+            // BDInfo's playlist ratios; the Codec grid is its own 22/10/10/56.
+            grid_w: [30.0, 7.0, 19.0, 21.0, 21.0],
+            codec_w: [22.0, 10.0, 10.0, 56.0],
+            col_drag: None,
         }
     }
 }
@@ -218,6 +231,36 @@ fn default_panes() -> pane_grid::State<Region> {
     })
 }
 
+/// Shifts `delta` weight across the boundary between column `boundary` and
+/// `boundary + 1`, clamped so neither drops below [`MIN_COL_WEIGHT`]. Their sum is
+/// preserved, so only these two columns change width — the rest hold still.
+fn adjust_weight(weights: &mut [f32], boundary: usize, delta: f32) {
+    let (Some(&a), Some(&b)) = (weights.get(boundary), weights.get(boundary.wrapping_add(1)))
+    else {
+        return;
+    };
+    let pair = a + b;
+    let new_a = (a + delta).clamp(MIN_COL_WEIGHT, (pair - MIN_COL_WEIGHT).max(MIN_COL_WEIGHT));
+    if let Some(slot) = weights.get_mut(boundary) {
+        *slot = new_a;
+    }
+    if let Some(slot) = weights.get_mut(boundary.wrapping_add(1)) {
+        *slot = pair - new_a;
+    }
+}
+
+/// A column weight as an `iced` `FillPortion` (scaled up so fractional weights
+/// keep resolution).
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "weight is clamped to a small positive range before the cast"
+)]
+fn fill(weight: f32) -> Length {
+    Length::FillPortion((weight * 10.0).round().clamp(1.0, 60000.0) as u16)
+}
+
 /// The indeterminate-bar animation period (one full 0→1→0 breath).
 const PULSE_PERIOD: u16 = 1000;
 /// Half the period — the peak of the triangle wave.
@@ -236,6 +279,24 @@ enum Region {
     /// The bottom Codec pane.
     Codec,
 }
+
+/// Which set of resizable column weights a drag targets. The Playlist and Stream
+/// File panes share ONE weight set (`Shared`) so their columns stay locked
+/// together; the Codec pane has its own (`Codec`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColGrid {
+    /// The Playlist + Stream File shared column weights.
+    Shared,
+    /// The Codec pane's column weights.
+    Codec,
+}
+
+/// The minimum weight a column can be dragged down to (keeps every column
+/// visible). Weights are `BDInfo`-ratio units (they sum to ~98).
+const MIN_COL_WEIGHT: f32 = 4.0;
+/// The width of the grab strip on a header column's right edge — the zone that
+/// shows the resize cursor and drags the boundary (wide enough to hit easily).
+const GRAB_W: f32 = 14.0;
 
 /// A top-level command — the menu/toolbar seam a later native macOS menu maps
 /// onto. `view` never hard-codes an action's label, message, or enablement: it
@@ -352,6 +413,15 @@ enum Message {
     Tick,
     /// A pane splitter was dragged — resize the two panes it divides.
     PaneResized(pane_grid::ResizeEvent),
+    /// A column-divider grab was pressed — begin resizing that boundary. Carries
+    /// the pixel span the columns share (from the responsive header) for the
+    /// delta→weight conversion.
+    ColDragStart(ColGrid, usize, f32),
+    /// The cursor moved while a column divider is held (window x). Delivered by a
+    /// global mouse subscription, so it keeps tracking even off the grab zone.
+    ColDragMove(f32),
+    /// A column drag ended (the mouse button was released).
+    ColDragEnd,
 }
 
 impl App {
@@ -492,6 +562,50 @@ impl App {
                 self.panes.resize(split, ratio);
                 Task::none()
             }
+            Message::ColDragStart(grid, boundary, cols_width) => {
+                self.col_drag = Some((grid, boundary, cols_width, None));
+                Task::none()
+            }
+            Message::ColDragMove(x) => {
+                self.column_drag(x);
+                Task::none()
+            }
+            Message::ColDragEnd => {
+                self.col_drag = None;
+                Task::none()
+            }
+        }
+    }
+
+    /// Applies a column-divider drag: shifts weight across the held boundary by
+    /// the cursor's movement since the last event, scaled by the stored column
+    /// span so it tracks the cursor at any window size. Only the two columns the
+    /// divider separates change; the rest hold, so far columns never shift.
+    fn column_drag(&mut self, x: f32) {
+        let Some((grid, boundary, cols_width, last_x)) = self.col_drag else { return };
+        if let Some(prev_x) = last_x
+            && cols_width > 0.0
+        {
+            let total: f32 = self.column_weights(grid).iter().sum();
+            let delta = (x - prev_x) / cols_width * total;
+            adjust_weight(self.column_weights_mut(grid), boundary, delta);
+        }
+        self.col_drag = Some((grid, boundary, cols_width, Some(x)));
+    }
+
+    /// The live column weights for `grid`.
+    const fn column_weights(&self, grid: ColGrid) -> &[f32] {
+        match grid {
+            ColGrid::Shared => self.grid_w.as_slice(),
+            ColGrid::Codec => self.codec_w.as_slice(),
+        }
+    }
+
+    /// The live column weights for `grid`, mutable.
+    const fn column_weights_mut(&mut self, grid: ColGrid) -> &mut [f32] {
+        match grid {
+            ColGrid::Shared => self.grid_w.as_mut_slice(),
+            ColGrid::Codec => self.codec_w.as_mut_slice(),
         }
     }
 
@@ -500,12 +614,24 @@ impl App {
     /// indeterminate progress bar. The tick is off in every other state, so the
     /// window is not redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
-        let theme = iced::system::theme_changes().map(Message::OsTheme);
+        let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
         if self.flow.stage() == Stage::Listing {
-            iced::Subscription::batch([theme, iced::window::frames().map(|_| Message::Tick)])
-        } else {
-            theme
+            subs.push(iced::window::frames().map(|_| Message::Tick));
         }
+        // While a column divider is held, follow the mouse globally — even off the
+        // grab zone — so the drag tracks the cursor and ends on button release.
+        if self.col_drag.is_some() {
+            subs.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::ColDragMove(position.x))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::ColDragEnd),
+                _ => None,
+            }));
+        }
+        iced::Subscription::batch(subs)
     }
 
     /// The indeterminate progress-bar fill while scanning — a 0→1→0 triangle over
@@ -904,21 +1030,23 @@ impl App {
             Region::StreamFile => pane_grid::Content::new(data_table(
                 p,
                 STREAM_FILE_COLS,
+                &self.grid_w,
+                ColGrid::Shared,
                 self.stream_file_table_rows(),
                 Region::StreamFile,
                 self.pane_hovered(Region::StreamFile),
                 self.pane_selected(Region::StreamFile),
-                ui::ROW_INDENT,
             ))
             .title_bar(pane_grid::TitleBar::new(pane_title(p, "Stream File"))),
             Region::Codec => pane_grid::Content::new(data_table(
                 p,
                 CODEC_COLS,
+                &self.codec_w,
+                ColGrid::Codec,
                 self.codec_table_rows(),
                 Region::Codec,
                 self.pane_hovered(Region::Codec),
                 self.pane_selected(Region::Codec),
-                ui::ROW_INDENT,
             ))
             .title_bar(pane_grid::TitleBar::new(pane_title(p, "Codec"))),
         })
@@ -996,10 +1124,11 @@ impl App {
     /// The hand-rolled playlist table: a sharp data grid with a quiet header over
     /// scrollable selectable rows.
     fn playlist_table(&self, p: Palette) -> Element<'_, Message> {
-        let header = container(table_header_row(p))
-            .width(Length::Fill)
-            .height(Length::Fixed(ui::HEADER_H))
-            .style(ui::table_header(p));
+        let header =
+            container(resizable_header(p, PLAYLIST_COLS, ColGrid::Shared, self.grid_w.to_vec()))
+                .width(Length::Fill)
+                .height(Length::Fixed(ui::HEADER_H))
+                .style(ui::table_header(p));
         let rule = container(Space::new())
             .width(Length::Fill)
             .height(Length::Fixed(1.0))
@@ -1009,7 +1138,7 @@ impl App {
         let mut rows = Column::new().width(Length::Fill);
         for row_data in self.flow.table() {
             let hovered = self.hovered == Some((Region::Playlist, row_data.index));
-            rows = rows.push(table_row(p, &row_data, editable, hovered));
+            rows = rows.push(table_row(p, &row_data, editable, hovered, &self.grid_w));
         }
         let body = scrollable(rows).width(Length::Fill).height(Length::Fill);
 
@@ -1276,45 +1405,98 @@ fn banner<'a>(p: Palette, kind: iced::Color, message: &str) -> Element<'a, Messa
         .into()
 }
 
-/// The playlist-table header row, laid out on the same column grid as the body
-/// rows (the leading accent-bar spacer, then the columns).
-fn table_header_row<'a>(p: Palette) -> Element<'a, Message> {
-    let cells = Row::new()
-        .width(Length::Fill)
-        .align_y(Vertical::Center)
-        .push(header_cell(p, "", Length::Fixed(ui::COL_CHECK), Horizontal::Center))
-        .push(header_cell(p, "Playlist File", Length::FillPortion(ui::GRID_NAME), Horizontal::Left))
-        .push(header_cell(p, "Group", Length::FillPortion(ui::GRID_INT), Horizontal::Center))
-        .push(header_cell(p, "Length", Length::FillPortion(ui::GRID_LENGTH), Horizontal::Right))
-        .push(header_cell(
-            p,
-            "Estimated Size",
-            Length::FillPortion(ui::GRID_EST),
-            Horizontal::Right,
-        ))
-        .push(header_cell(
-            p,
-            "Measured Size",
-            Length::FillPortion(ui::GRID_MEAS),
-            Horizontal::Right,
-        ))
-        .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
-    Row::new()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(Vertical::Center)
-        .push(Space::new().width(Length::Fixed(ui::SEL_BAR)))
-        .push(cells)
-        .into()
-}
-
 /// One header cell: a muted label in a fixed-width, aligned box.
 fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Element<'_, Message> {
-    container(text(label).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-        .width(width)
-        .align_x(align)
-        .padding([0.0, ui::GAP_2])
-        .into()
+    container(
+        text(label)
+            .size(ui::TEXT_XS)
+            .font(ui::UI_MEDIUM)
+            .color(p.text_muted)
+            // Clip a long label (e.g. "Estimated Size") at the column edge, like
+            // every other cell — never wrap it to a second line.
+            .wrapping(text::Wrapping::None),
+    )
+    .width(width)
+    .clip(true)
+    .align_x(align)
+    .padding([0.0, ui::GAP_2])
+    .into()
+}
+
+/// A header cell (weight `width`) with an optional resize grab on its right edge.
+/// The grab is a `Stack` overlay wrapped in a `container(width)` — the
+/// `FillPortion` lives on the container, exactly like a body cell, so it stays aligned
+/// with the rows. It shows a visible 1px separator inside a wide hit zone and a
+/// horizontal-resize cursor. Pressing it only *starts* the drag (carrying the
+/// column span `cols_width`); a global mouse subscription then tracks the cursor
+/// even as it leaves the zone, so the drag does not stop after a few pixels.
+fn header_col(
+    p: Palette,
+    label: &str,
+    width: Length,
+    align: Horizontal,
+    grab: Option<(ColGrid, usize, f32)>,
+) -> Element<'_, Message> {
+    let Some((grid, boundary, cols_width)) = grab else {
+        return header_cell(p, label, width, align);
+    };
+    // A visible 1px line at the right edge (the boundary), inside a wide grab zone.
+    let separator = Row::new()
+        .width(Length::Fixed(GRAB_W))
+        .height(Length::Fill)
+        .push(Space::new().width(Length::Fill))
+        .push(
+            container(Space::new())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fill)
+                .style(ui::divider(p.line_strong)),
+        );
+    let handle = mouse_area(separator)
+        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        .on_press(Message::ColDragStart(grid, boundary, cols_width));
+    let overlay = Row::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(Space::new().width(Length::Fill))
+        .push(handle);
+    container(
+        Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(header_cell(p, label, Length::Fill, align))
+            .push(overlay),
+    )
+    .width(width)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Builds a resizable table header: a leading indent, one [`header_col`] per
+/// column (each with a right-edge drag grab, except the last), and the trailing
+/// scrollbar gutter — wrapped in `responsive` so the grabs know the column span.
+/// `weights` are the live column weights for `grid`.
+fn resizable_header<'a>(
+    p: Palette,
+    cols: &'static [Col],
+    grid: ColGrid,
+    weights: Vec<f32>,
+) -> Element<'a, Message> {
+    responsive(move |size| {
+        let cols_width = (size.width - ui::ROW_INDENT - ui::SCROLLBAR_GUTTER).max(1.0);
+        let last = cols.len().saturating_sub(1);
+        let mut row = Row::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Vertical::Center)
+            .push(Space::new().width(Length::Fixed(ui::ROW_INDENT)));
+        for (i, col) in cols.iter().enumerate() {
+            let weight = weights.get(i).copied().unwrap_or(1.0);
+            let grab = (i != last).then_some((grid, i, cols_width));
+            row = row.push(header_col(p, col.label, fill(weight), col.align, grab));
+        }
+        row.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER))).into()
+    })
+    .into()
 }
 
 /// One playlist row: a leading accent bar (when active), then **two sibling
@@ -1329,7 +1511,9 @@ fn table_row<'a>(
     row_data: &SelectableRow,
     editable: bool,
     hovered: bool,
+    weights: &[f32],
 ) -> Element<'a, Message> {
+    let w = |i: usize| fill(weights.get(i).copied().unwrap_or(1.0));
     let even = row_data.index.checked_rem(2) == Some(0);
     let index = row_data.index;
     let active = row_data.active;
@@ -1360,35 +1544,15 @@ fn table_row<'a>(
         .align_y(Vertical::Center)
         .push(
             container(file)
-                .width(Length::FillPortion(ui::GRID_NAME))
+                .width(w(0))
                 .clip(true)
                 .align_x(Horizontal::Left)
                 .padding([0.0, ui::GAP_2]),
         )
-        .push(num_cell(
-            p,
-            row_data.cells.group.clone(),
-            Length::FillPortion(ui::GRID_INT),
-            Horizontal::Center,
-        ))
-        .push(num_cell(
-            p,
-            row_data.cells.length.clone(),
-            Length::FillPortion(ui::GRID_LENGTH),
-            Horizontal::Right,
-        ))
-        .push(num_cell(
-            p,
-            row_data.cells.estimated_bytes.clone(),
-            Length::FillPortion(ui::GRID_EST),
-            Horizontal::Right,
-        ))
-        .push(num_cell(
-            p,
-            row_data.cells.measured_bytes.clone(),
-            Length::FillPortion(ui::GRID_MEAS),
-            Horizontal::Right,
-        ))
+        .push(num_cell(p, row_data.cells.group.clone(), w(1), Horizontal::Center))
+        .push(num_cell(p, row_data.cells.length.clone(), w(2), Horizontal::Right))
+        .push(num_cell(p, row_data.cells.estimated_bytes.clone(), w(3), Horizontal::Right))
+        .push(num_cell(p, row_data.cells.measured_bytes.clone(), w(4), Horizontal::Right))
         .push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
     // Centre the cells vertically in the fixed-height row (the button does not
     // centre its content on its own, so the text would otherwise sit at the top).
@@ -1447,82 +1611,45 @@ fn pane_title<'a>(p: Palette, title: &str) -> Element<'a, Message> {
         .into()
 }
 
-/// One read-only data column: a fixed label, width, alignment, and whether its
-/// cells render in the tabular monospace.
+/// One read-only data column — its header label, alignment, and whether its
+/// cells render in the tabular monospace. The **width** is not fixed here: it
+/// comes from the live, user-resizable weights (see [`App::grid_w`] /
+/// [`App::codec_w`]).
 struct Col {
     /// The header label.
     label: &'static str,
-    /// The column width.
-    width: Length,
     /// The horizontal alignment of the label + cells.
     align: Horizontal,
     /// Whether to render the cells in the monospace face.
     mono: bool,
 }
 
-/// The "Stream File" pane columns. They use the SHARED grid (same weights +
-/// alignment as the playlist) and a leading indent, so the two panes' columns
-/// line up on one continuous grid — Length / Estimated / Measured sit directly
-/// under the playlist's.
-const STREAM_FILE_COLS: &[Col] = &[
-    Col {
-        label: "Stream File",
-        width: Length::FillPortion(ui::GRID_NAME),
-        align: Horizontal::Left,
-        mono: true,
-    },
-    Col {
-        label: "Index",
-        width: Length::FillPortion(ui::GRID_INT),
-        align: Horizontal::Center,
-        mono: true,
-    },
-    Col {
-        label: "Length",
-        width: Length::FillPortion(ui::GRID_LENGTH),
-        align: Horizontal::Right,
-        mono: true,
-    },
-    Col {
-        label: "Estimated Size",
-        width: Length::FillPortion(ui::GRID_EST),
-        align: Horizontal::Right,
-        mono: true,
-    },
-    Col {
-        label: "Measured Size",
-        width: Length::FillPortion(ui::GRID_MEAS),
-        align: Horizontal::Right,
-        mono: true,
-    },
+/// The Playlist columns (the shared grid). The checkbox is a separate leading
+/// column, so these are the five data columns only.
+const PLAYLIST_COLS: &[Col] = &[
+    Col { label: "Playlist File", align: Horizontal::Left, mono: true },
+    Col { label: "Group", align: Horizontal::Center, mono: true },
+    Col { label: "Length", align: Horizontal::Right, mono: true },
+    Col { label: "Estimated Size", align: Horizontal::Right, mono: true },
+    Col { label: "Measured Size", align: Horizontal::Right, mono: true },
 ];
 
-/// The "Codec" pane columns — `BDInfo`'s ratios.
+/// The "Stream File" pane columns — the SHARED grid, so they line up under the
+/// playlist's (Length / Estimated / Measured on the same grid lines).
+const STREAM_FILE_COLS: &[Col] = &[
+    Col { label: "Stream File", align: Horizontal::Left, mono: true },
+    Col { label: "Index", align: Horizontal::Center, mono: true },
+    Col { label: "Length", align: Horizontal::Right, mono: true },
+    Col { label: "Estimated Size", align: Horizontal::Right, mono: true },
+    Col { label: "Measured Size", align: Horizontal::Right, mono: true },
+];
+
+/// The "Codec" pane columns — its own grid.
 const CODEC_COLS: &[Col] = &[
-    Col {
-        label: "Codec",
-        width: Length::FillPortion(ui::CD_CODEC),
-        align: Horizontal::Left,
-        mono: false,
-    },
-    Col {
-        label: "Language",
-        width: Length::FillPortion(ui::CD_LANG),
-        align: Horizontal::Left,
-        mono: false,
-    },
-    Col {
-        label: "Bit Rate",
-        width: Length::FillPortion(ui::CD_RATE),
-        align: Horizontal::Right,
-        mono: true,
-    },
-    Col {
-        label: "Description",
-        width: Length::FillPortion(ui::CD_DESC),
-        align: Horizontal::Left,
-        mono: false,
-    },
+    Col { label: "Codec", align: Horizontal::Left, mono: false },
+    Col { label: "Language", align: Horizontal::Left, mono: false },
+    Col { label: "Bit Rate", align: Horizontal::Right, mono: true },
+    Col { label: "Description", align: Horizontal::Left, mono: false },
 ];
 
 /// A data table: a quiet header over rows that hover and select as one band.
@@ -1531,31 +1658,20 @@ const CODEC_COLS: &[Col] = &[
 /// `mouse_area`, so it lifts under the cursor (`hovered`), takes the selection
 /// wash when clicked (`selected`), and reports hover / click for `region`.
 ///
-/// `leading` is a blank left indent (the playlist's accent-bar + checkbox width)
-/// so a pane with no checkbox still starts its first column on the same grid line
-/// as the playlist.
+/// `weights` are the live, user-resizable column weights for `grid`; the header
+/// carries the drag grabs. Every column starts on the shared grid line (a fixed
+/// [`ui::ROW_INDENT`] leading, where the playlist's checkbox sits).
 fn data_table<'a>(
     p: Palette,
     cols: &'static [Col],
+    weights: &[f32],
+    grid: ColGrid,
     rows: Vec<Vec<String>>,
     region: Region,
     hovered: Option<usize>,
     selected: Option<usize>,
-    leading: f32,
 ) -> Element<'a, Message> {
-    // Height-fill + centre so the labels sit vertically centred in the header
-    // band, exactly like the playlist table's header row.
-    let mut header_cells = Row::new()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_y(Vertical::Center)
-        .push(Space::new().width(Length::Fixed(leading)));
-    for col in cols {
-        header_cells = header_cells.push(header_cell(p, col.label, col.width, col.align));
-    }
-    // Reserve the scrollbar gutter so the last column aligns with the body rows.
-    header_cells = header_cells.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER)));
-    let header = container(header_cells)
+    let header = container(resizable_header(p, cols, grid, weights.to_vec()))
         .width(Length::Fill)
         .height(Length::Fixed(ui::HEADER_H))
         .style(ui::table_header(p));
@@ -1574,8 +1690,8 @@ fn data_table<'a>(
         let mut cells = Row::new()
             .width(Length::Fill)
             .align_y(Vertical::Center)
-            .push(Space::new().width(Length::Fixed(leading)));
-        for (col, value) in cols.iter().zip(row) {
+            .push(Space::new().width(Length::Fixed(ui::ROW_INDENT)));
+        for (col_index, (col, value)) in cols.iter().zip(row).enumerate() {
             let font = if col.mono { ui::MONO } else { ui::UI };
             cells = cells.push(
                 container(
@@ -1585,7 +1701,7 @@ fn data_table<'a>(
                         .color(p.text)
                         .wrapping(text::Wrapping::None),
                 )
-                .width(col.width)
+                .width(fill(weights.get(col_index).copied().unwrap_or(1.0)))
                 .clip(true)
                 .align_x(col.align)
                 .padding([0.0, ui::GAP_2]),

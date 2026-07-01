@@ -60,14 +60,13 @@ pub const ROW_H: f32 = 34.0;
 /// The table header strip's height.
 pub const HEADER_H: f32 = 36.0;
 
-// ── Table column widths ──────────────────────────────────────────────────────
+// ── Table column geometry ────────────────────────────────────────────────────
 //
-// Every data column is **proportional** (an `iced` `FillPortion` weight), so the
-// columns scale with the window exactly like `BDInfo`, which sizes each column as
-// a fraction of the list's client width. The weights below are `BDInfo`'s ratios
-// ×100 (see `FormMain` `ClientSize.Width * 0.NN`), so the proportions match even
-// though we can't reuse its absolute pixels. Only the checkbox, the accent bar,
-// and the scrollbar gutter stay fixed-width.
+// Data-column WIDTHS are not fixed here: they are live, user-resizable weights
+// (`App::grid_w` / `App::codec_w`), rendered as `iced` `FillPortion`s so the
+// columns stay proportional as the window resizes — like `BDInfo`, whose columns
+// are a fraction of the list width. Only the checkbox, the accent bar, and the
+// scrollbar gutter are fixed-width.
 
 /// The leading selection-indicator column (fixed).
 pub const COL_CHECK: f32 = 44.0;
@@ -78,32 +77,6 @@ pub const SEL_BAR: f32 = 3.0;
 /// lower panes (which have no checkbox) reserve the same blank width, so all
 /// three panes' columns line up on one continuous grid.
 pub const ROW_INDENT: f32 = 47.0;
-
-// The Playlist and Stream File panes share ONE column grid — their columns are
-// the same kind (a name, an integer, then Length / Estimated / Measured), so
-// locking them to identical weights + alignment lines the two panes up (BDInfo
-// leaves them on separate ratios; this is deliberately tidier). Weights are
-// BDInfo's playlist ratios ×100.
-
-/// Grid column 0 — the name (Playlist File / Stream File).
-pub const GRID_NAME: u16 = 30;
-/// Grid column 1 — the integer (Group / Index).
-pub const GRID_INT: u16 = 7;
-/// Grid column 2 — `Length`.
-pub const GRID_LENGTH: u16 = 19;
-/// Grid column 3 — `Estimated Size`.
-pub const GRID_EST: u16 = 21;
-/// Grid column 4 — `Measured Size`.
-pub const GRID_MEAS: u16 = 21;
-
-/// Codec columns — Codec / Language / Bit Rate / Description.
-pub const CD_CODEC: u16 = 22;
-/// Codec `Language` weight.
-pub const CD_LANG: u16 = 10;
-/// Codec `Bit Rate` weight.
-pub const CD_RATE: u16 = 10;
-/// Codec `Description` weight.
-pub const CD_DESC: u16 = 56;
 /// A trailing gutter reserved on every table header + row so the last (right-
 /// aligned) column's values clear the scrollable's scrollbar instead of hiding
 /// behind it — the padding `BDInfo` leaves on the right edge.

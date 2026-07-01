@@ -5,3 +5,10 @@
 # `large_types_passed_by_value`'s limit just past it so that idiomatic by-value
 # threading is not flagged; every other size stays at the default.
 pass-by-value-size-limit = 320
+
+# `App::update` is one big message-dispatch `match` and `data_table` genuinely
+# needs its column + row-state parameters — both are inherent to an iced view/
+# update, so nudge these two pedantic thresholds just past what they need rather
+# than fragmenting the code to satisfy a line/arg count.
+too-many-lines-threshold = 130
+too-many-arguments-threshold = 8
