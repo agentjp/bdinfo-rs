@@ -31,7 +31,7 @@ concurrency:
 env:
   # cargo-fuzz needs nightly. Keep in lockstep with ci.yml NIGHTLY and
   # $script:Nightly in scripts/_common.ps1.
-  NIGHTLY: nightly-2026-06-05
+  NIGHTLY: nightly-2026-07-06
   # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
   # with scripts/fuzz-docker.sh.
   TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report

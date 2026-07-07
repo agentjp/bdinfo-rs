@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned nightly rustfmt
-        run: rustup toolchain install nightly-2026-06-05 --profile minimal --component rustfmt
+        run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rustfmt
 
       - name: Add the wasm32 target
         run: rustup target add wasm32-unknown-unknown

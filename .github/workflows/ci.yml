@@ -19,7 +19,7 @@ env:
   CARGO_TERM_COLOR: always
   # The nightly that backs the `fmt` step (rustfmt.toml has nightly-only options).
   # Keep in lockstep with $script:Nightly in scripts/_common.ps1.
-  NIGHTLY: nightly-2026-06-05
+  NIGHTLY: nightly-2026-07-06
 
 concurrency:
   group: ci-${{ github.ref }}
