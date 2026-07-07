@@ -110,6 +110,9 @@ The quickest route if you already have one — a single command, kept up to date
 # macOS / Linux — Homebrew
 brew install agentjp/tap/bdinfo-rs
 
+# Windows — WinGet
+winget install agentjp.bdinfo-rs
+
 # Windows — Scoop
 scoop bucket add agentjp https://github.com/agentjp/scoop-bucket
 scoop install bdinfo-rs
@@ -120,9 +123,8 @@ cargo binstall bdinfo-rs
 cargo install bdinfo-rs
 ```
 
-A WinGet package (`agentjp.bdinfo-rs`) and an Arch Linux AUR package (`bdinfo-rs-bin`) are on the
-way but not available just yet — for now, Windows users have Scoop (above) and Arch users can
-`cargo install` or grab a prebuilt binary.
+An Arch Linux AUR package (`bdinfo-rs-bin`) is on the way but not available just yet — for now,
+Arch users can `cargo install` or grab a prebuilt binary.
 
 On Debian/Ubuntu and Fedora/RHEL/openSUSE, install **by name with updates** from the hosted
 package repository — add it once (like any third-party repo), then use your package manager

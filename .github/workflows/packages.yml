@@ -92,15 +92,15 @@ jobs:
     name: WinGet
     runs-on: ubuntu-latest
     environment: release # WINGET_TOKEN is an env secret on `release` (see header)
-    # GATED OFF (2026-06-23): winget-releaser UPDATES an existing package — it bases
-    # the new manifest on the package's prior version already in microsoft/winget-pkgs.
-    # The first submission (agentjp.bdinfo-rs 1.0.0) is still an open New-Package PR
-    # awaiting manual moderator review, so an auto-update now would fail (no base
-    # manifest) and could jump ahead of that pending PR. Re-enable by setting the repo
-    # variable WINGET_ENABLED=true once 1.0.0 has merged into winget-pkgs master — no
-    # code change needed; the WINGET_TOKEN secret is already set.
+    # LIVE since 2026-07-07: agentjp.bdinfo-rs 1.0.0 merged into microsoft/winget-pkgs
+    # (PR #390663), so a base manifest now exists. winget-releaser UPDATES an existing
+    # package — it bases each new manifest on the prior version already in winget-pkgs —
+    # so from here on every stable release auto-submits a new-version PR. (1.1.0 was
+    # backfilled by hand with komac right after 1.0.0 merged; the first CI auto-submit is
+    # the next tag.) Now unconditional on a stable tag, like the deb/rpm jobs; only `aur`
+    # stays gated (AUR registration still pending).
     needs: gate
-    if: ${{ needs.gate.outputs.stable == 'true' && vars.WINGET_ENABLED == 'true' }}
+    if: needs.gate.outputs.stable == 'true'
     env:
       VERSION: ${{ needs.gate.outputs.version }}
     steps:
