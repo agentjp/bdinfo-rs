@@ -9,8 +9,8 @@ user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
 [[publisher.memchr]]
-version = "2.8.2"
-when = "2026-06-12"
+version = "2.8.3"
+when = "2026-07-08"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
