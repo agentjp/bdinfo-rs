@@ -46,7 +46,7 @@ jobs:
       # nags (files an issue) when Homebrew master moves past this SHA, and the bump
       # is then a deliberate edit here. Dependabot cannot do it (it bumps toward
       # releases, and this repo has none).
-      - uses: Homebrew/actions/setup-homebrew@097625b28a26ba4b7437926ab03b4d3bd2e6c3d1 # zizmor: ignore[ref-version-mismatch]
+      - uses: Homebrew/actions/setup-homebrew@24728b77430f9659b8d89068e4afe7f5fd0f973c # zizmor: ignore[ref-version-mismatch]
 
       # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
       # check then warns about them on every brew command. We install bdinfo-rs by its
