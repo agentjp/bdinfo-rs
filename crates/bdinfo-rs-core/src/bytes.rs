@@ -210,13 +210,13 @@ mod tests {
 
     #[test]
     fn read_ascii_zero_count_is_empty() {
-        let buf = [b'A', b'B'];
+        let buf = *b"AB";
         assert_eq!(read_ascii(&buf, 0, 0).as_deref(), Some(""));
     }
 
     #[test]
     fn read_ascii_out_of_bounds_is_none() {
-        let buf = [b'A', b'B'];
+        let buf = *b"AB";
         assert_eq!(read_ascii(&buf, 0, 3), None);
         assert_eq!(read_ascii(&buf, usize::MAX, 1), None);
     }
