@@ -246,8 +246,9 @@ jobs:
       # version that is already there. A plain re-push of an existing version uploads
       # then FAILS mid-sync ("...already exists...This package should be deleted"),
       # leaving a broken entry; `--republish` avoids that but needlessly re-uploads and
-      # is discouraged by Cloudsmith. So query the List API by version + filename and
-      # SKIP if present; push cleanly (no `--republish`) only when absent. `--republish`
+      # is discouraged by Cloudsmith. So query the public API by filename (matching the
+      # version base — Cloudsmith stores it revisioned, e.g. 1.2.0-1) and SKIP if present;
+      # push cleanly (no `--republish`) only when absent. `--republish`
       # is kept solely as the safe fallback for the two cases where a plain push would
       # otherwise strand a broken entry: the preflight could not determine state, or the
       # push races another run and hits "already exists".
@@ -261,9 +262,13 @@ jobs:
           ver="${VERSION#v}"
           repo=bdinfo-rs/bdinfo-rs
           file="dl/bdinfo-rs-${{ matrix.triple }}.deb"
+          # Cloudsmith stores the packaging-revisioned version (e.g. 1.2.0-1), so a bare
+          # `version:${ver}` matches NOTHING. Query the anonymous public API by the exact
+          # filename and match the version BASE (strip the trailing -<revision>) — exact
+          # and revision-agnostic. count stays empty on any query error → --republish fallback.
           count=""
-          if json=$(cloudsmith list packages "$repo" -q "filename:bdinfo-rs-${{ matrix.triple }}.deb version:${ver}" -F json 2>/dev/null); then
-            count=$(printf '%s' "$json" | jq -r '.data | length' 2>/dev/null || true)
+          if json=$(curl -sSf -G "https://api.cloudsmith.io/v1/packages/$repo/" --data-urlencode "query=filename:bdinfo-rs-${{ matrix.triple }}.deb" --data-urlencode "page_size=100" 2>/dev/null); then
+            count=$(printf '%s' "$json" | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || true)
           fi
           if [ -n "$count" ] && [ "$count" != "0" ]; then
             echo "bdinfo-rs-${{ matrix.triple }}.deb ${ver} already in Cloudsmith (${count}) — skipping"
@@ -336,9 +341,11 @@ jobs:
           ver="${VERSION#v}"
           repo=bdinfo-rs/bdinfo-rs
           file="dl/bdinfo-rs-${{ matrix.triple }}.rpm"
+          # Match the version BASE via the anonymous public API — see the .deb job for why
+          # a bare `version:${ver}` misses Cloudsmith's revisioned version (e.g. 1.2.0-1).
           count=""
-          if json=$(cloudsmith list packages "$repo" -q "filename:bdinfo-rs-${{ matrix.triple }}.rpm version:${ver}" -F json 2>/dev/null); then
-            count=$(printf '%s' "$json" | jq -r '.data | length' 2>/dev/null || true)
+          if json=$(curl -sSf -G "https://api.cloudsmith.io/v1/packages/$repo/" --data-urlencode "query=filename:bdinfo-rs-${{ matrix.triple }}.rpm" --data-urlencode "page_size=100" 2>/dev/null); then
+            count=$(printf '%s' "$json" | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || true)
           fi
           if [ -n "$count" ] && [ "$count" != "0" ]; then
             echo "bdinfo-rs-${{ matrix.triple }}.rpm ${ver} already in Cloudsmith (${count}) — skipping"
