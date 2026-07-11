@@ -12,6 +12,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v1.2.0](https://github.com/agentjp/bdinfo-rs/compare/v1.1.0...v1.2.0) (2026-07-11)
+
+### Fixes
+
+* **cli:** recover the real disc label when scanning a Windows drive root
+(#77)
+([1f6ee48](https://github.com/agentjp/bdinfo-rs/commit/1f6ee485a43a4a105fb063e6355530e1ef3e82a2)),
+closes [#77](https://github.com/agentjp/bdinfo-rs/issues/77)
+[#76](https://github.com/agentjp/bdinfo-rs/issues/76)
+
+## [v1.1.0](https://github.com/agentjp/bdinfo-rs/compare/v1.0.1...v1.1.0) (2026-06-29)
+
+### Features
+
+* **wasm:** add the @bdinfo-rs/wasm in-browser WebAssembly package (#41)
+([38f2da7](https://github.com/agentjp/bdinfo-rs/commit/38f2da723172c8c4a1588a7f462ffed852f6d97d)),
+closes [#41](https://github.com/agentjp/bdinfo-rs/issues/41)
+
+### Fixes
+
+* **wasm:** make the scan Worker spawn detectable by Vite and webpack (#45)
+([f78fbcb](https://github.com/agentjp/bdinfo-rs/commit/f78fbcb5ab8bf46ada8c113269c176ea38a1095e)),
+closes [#45](https://github.com/agentjp/bdinfo-rs/issues/45)
+* **packaging:** ship a complete DEP-5 copyright in the .deb (#31)
+([3b97a48](https://github.com/agentjp/bdinfo-rs/commit/3b97a48c4f5ba064918ea4edd78f69bad08c0206)),
+closes [#31](https://github.com/agentjp/bdinfo-rs/issues/31)
+
 ## [v1.1.0](https://github.com/agentjp/bdinfo-rs/compare/v1.0.1...v1.1.0) (2026-06-29)
 
 ### Features
