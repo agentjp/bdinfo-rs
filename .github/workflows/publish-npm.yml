@@ -57,9 +57,50 @@ jobs:
     permissions:
       contents: read
 
+  # Cheap early skip: if this version is already LIVE on npm, skip the whole publish job
+  # — a re-run/backfill of an already-published version would otherwise rebuild the wasm
+  # artifact for minutes only to skip at the very end. A pure registry curl (no node, no
+  # build). A STAGED-but-unapproved version is NOT in the public registry, so it correctly
+  # does NOT skip here: the publish job then proceeds and its stage step tolerates the
+  # already-staged case.
+  live-check:
+    name: skip if already live on npm
+    needs: guard-ancestor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      live: ${{ steps.c.outputs.live }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Resolve the version and query the npm registry
+        id: c
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ]; then tag="$REF_NAME"
+          elif [ -n "${INPUT_TAG:-}" ]; then tag="$INPUT_TAG"
+          else tag="v$(jq -r .version crates/bdinfo-rs-wasm/web/package.json)"; fi
+          ver="${tag#v}"
+          # 200 = the version is live in the registry; 404 = not (incl. staged-only). A
+          # transient/non-200 stays live=false, so we fall through to build + stage (safe:
+          # the stage step tolerates an already-live/staged race) rather than wrongly
+          # skipping a needed publish.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@bdinfo-rs/wasm/$ver" 2>/dev/null || echo "000")
+          if [ "$code" = "200" ]; then live=true; else live=false; fi
+          echo "live=$live" >> "$GITHUB_OUTPUT"
+          echo "npm @bdinfo-rs/wasm@$ver -> HTTP $code (live=$live)"
+
   publish:
     name: npm publish (OIDC Trusted Publishing)
-    needs: guard-ancestor
+    needs: [guard-ancestor, live-check]
+    if: needs.live-check.outputs.live != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -223,11 +264,14 @@ jobs:
           $out = & npm stage publish --provenance --access public --tag $distTag 2>&1 | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0) {
-            # Tolerate an "already staged / already exists" race (a re-run before the
-            # maintainer has approved or rejected the prior stage) as success; fail on
-            # anything else.
-            if ($out -match 'already (staged|exists|published)') {
-              Write-Host "@bdinfo-rs/wasm@$version is already staged — treating as success"
+            # Tolerate an "already there" race (a re-run before the maintainer approved or
+            # rejected the prior stage, or a version that went live between the early
+            # live-check and here) as success; fail on anything else. npm phrases this
+            # several ways, so match all: the staged-conflict wording plus a live-publish
+            # rejection ("cannot publish over the previously published versions", 409
+            # EPUBLISHCONFLICT).
+            if ($out -match 'already (staged|exists|published)|cannot publish over|previously published|EPUBLISHCONFLICT') {
+              Write-Host "@bdinfo-rs/wasm@$version is already staged or published — treating as success"
               exit 0
             }
             exit $LASTEXITCODE
