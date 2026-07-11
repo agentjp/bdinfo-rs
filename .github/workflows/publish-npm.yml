@@ -205,15 +205,33 @@ jobs:
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
+          $tag = $env:TAG
+          $version = $tag -replace '^v', ''
+          # Preflight: if this version is already LIVE on npm, staging it is rejected
+          # (npm versions are immutable) — skip cleanly so a re-run/backfill no-ops.
+          $live = & npm view "@bdinfo-rs/wasm@$version" version 2>$null
+          if ($LASTEXITCODE -eq 0 -and $live) {
+            Write-Host "@bdinfo-rs/wasm@$version is already live on npm — skipping stage"
+            exit 0
+          }
           # A prerelease tag (vX.Y.Z-rc.1 — carries a `-` suffix) must NOT take the
           # `latest` dist-tag that a bare `npm install @bdinfo-rs/wasm` resolves;
           # ship it under `next` instead. Stable vX.Y.Z tags stage under `latest`.
           # The dist-tag is immutable on a staged package (reject + re-stage to change).
-          $tag = $env:TAG
           $distTag = if ($tag -match '-') { 'next' } else { 'latest' }
           Write-Host "staging $tag to npm dist-tag '$distTag'"
-          npm stage publish --provenance --access public --tag $distTag
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $out = & npm stage publish --provenance --access public --tag $distTag 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) {
+            # Tolerate an "already staged / already exists" race (a re-run before the
+            # maintainer has approved or rejected the prior stage) as success; fail on
+            # anything else.
+            if ($out -match 'already (staged|exists|published)') {
+              Write-Host "@bdinfo-rs/wasm@$version is already staged — treating as success"
+              exit 0
+            }
+            exit $LASTEXITCODE
+          }
 
       # The staged version is NOT live yet — the maintainer must approve it (2FA).
       # Surface the exact commands in the run's job summary + log.
