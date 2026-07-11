@@ -344,6 +344,25 @@ impl UdfSource {
     pub fn volume_label(&self) -> &str {
         &self.inner.label
     }
+
+    /// Reads **only** the volume label from `factory`, parsing the volume
+    /// descriptors but skipping the directory-tree walk [`open`](Self::open)
+    /// does.
+    ///
+    /// This is the cheap path for naming a report after a mounted disc whose
+    /// files are read some other way (a Windows drive root read through
+    /// `std::fs`, whose raw volume device this can be pointed at to recover the
+    /// genuine label — the same string [`open`](Self::open) would expose). The
+    /// label resolves identically to `open(..).volume_label()`.
+    ///
+    /// # Errors
+    /// - [`BdError::Io`] if the source cannot be opened or read.
+    /// - [`BdError::StructureNotFound`] if it has no readable UDF volume (see
+    ///   [`open`](Self::open)).
+    pub fn read_label(factory: &dyn IsoReader) -> Result<String, BdError> {
+        let mut reader = factory.open()?;
+        Ok(parse_volume(&mut *reader, Limits::DEFAULT)?.label)
+    }
 }
 
 /// Builds a [`UdfDir`] for the directory node at `idx`, or `None` if `idx` is not a
@@ -2095,6 +2114,28 @@ mod tests {
             ]
         );
         assert_eq!(dir_names(&root), vec!["SUB".to_owned()]);
+    }
+
+    #[test]
+    fn read_label_returns_the_volume_label_without_walking_the_tree() {
+        // Same label `open(..).volume_label()` yields, from the descriptors alone.
+        let factory = MemIso::boxed(physical_iso());
+        assert_eq!(UdfSource::read_label(&*factory).expect("read label"), "VOLPHYS");
+    }
+
+    #[test]
+    fn read_label_errors_on_a_non_udf_image() {
+        // No AVDP at any anchor → not a UDF volume → the parse fails (the
+        // StructureNotFound variant is pinned by the shared `parse_volume` tests).
+        let factory = MemIso::boxed(vec![0_u8; 300 * SS]);
+        assert!(UdfSource::read_label(&*factory).is_err());
+    }
+
+    #[test]
+    fn read_label_propagates_an_open_failure() {
+        // The factory itself fails to open → the IO error surfaces.
+        let factory = PathIso::new("no/such/bdinfo-rs-udf-xyzzy.iso");
+        assert!(UdfSource::read_label(&factory).is_err());
     }
 
     #[test]
