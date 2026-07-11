@@ -3,8 +3,8 @@
 //!
 //! A folder scan labels the disc after its root directory's name. That works
 //! everywhere a disc is mounted at a *named* path — an extracted folder, or the
-//! label-named mount points macOS (`/Volumes/THE_KILLING`) and Linux
-//! (`/media/<user>/THE_KILLING`) use — but a physical disc mounted at a bare
+//! label-named mount points macOS (`/Volumes/MY_DISC`) and Linux
+//! (`/media/<user>/MY_DISC`) use — but a physical disc mounted at a bare
 //! Windows drive root (`J:\`) has no such name: the disc root resolves to the
 //! drive root, whose path carries no final component, so the label degrades to
 //! the drive-root string itself (`"J:\"`). That is wrong in the report and, with
@@ -65,7 +65,7 @@ fn drive_root_letter(label: &str) -> Option<char> {
 /// real name, or — when `scanned` is a bare Windows drive root — the genuine UDF
 /// volume label read off the raw volume device, falling back to the drive letter
 /// when that read is unavailable (no disc, unreadable, or a non-Windows build).
-/// This is what recovers `THE_KILLING` from a `J:\` scan.
+/// This is what recovers `MY_DISC` from a `J:\` scan.
 pub(crate) fn resolve_folder_label(scanned: &str) -> String {
     resolve_with(scanned, real_volume_label)
 }
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn safe_report_stem_passes_clean_labels_through() {
-        assert_eq!(safe_report_stem("THE_KILLING"), "THE_KILLING");
+        assert_eq!(safe_report_stem("MY_DISC"), "MY_DISC");
         assert_eq!(safe_report_stem("BigBuckBunny"), "BigBuckBunny");
         assert_eq!(safe_report_stem("Blu-Ray"), "Blu-Ray");
         assert_eq!(safe_report_stem(""), "");
