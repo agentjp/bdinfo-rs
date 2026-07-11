@@ -6,10 +6,12 @@ name: release-status
 # partial release: it tells you exactly which channels still need publishing before
 # you re-run a channel's own workflow_dispatch, so a re-run never double-pushes.
 #
-# Queries PUBLIC endpoints only — no secrets, no writes. The immutable-registry
-# channels (crates.io, npm live, GitHub Release, GHCR, WinGet) are authoritative;
-# Cloudsmith is best-effort over its public API and npm's staged (not-yet-approved)
-# queue is not visible here (it needs auth), so "absent" on npm means "not live".
+# Queries PUBLIC endpoints only — no secrets, no writes. Each row is PRESENT / ABSENT
+# (confirmed) or UNKNOWN (the check itself couldn't complete — e.g. a transient crates.io
+# 503; transient errors are retried before this verdict, so a stray UNKNOWN just means
+# "re-run"). It is a diagnostic, so it NEVER reports a transient failure as ABSENT. npm's
+# staged (not-yet-approved) queue is not visible here (needs auth), so ABSENT on npm means
+# "not live"; Homebrew is a rolling tap, so it reports the tap's CURRENT version.
 
 on:
   workflow_dispatch:
@@ -40,44 +42,61 @@ jobs:
           rows=()
           add() { rows+=("$1|$2"); }
 
-          # GitHub Release
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            add "GitHub Release" "PRESENT"; else add "GitHub Release" "absent"; fi
+          # Retry a command up to 3x to ride out a transient flake; success = channel HAS it.
+          try3() { i=0; while [ "$i" -lt 3 ]; do "$@" >/dev/null 2>&1 && return 0; i=$((i+1)); sleep 2; done; return 1; }
+          # HTTP status for a URL, retrying only TRANSIENT codes (000 curl-fail / 429 / 5xx)
+          # up to 3x — so a definite 404 is fast and a flaky 503 is never mistaken for absence.
+          http_status() {
+            u="$1"; code=000; i=0
+            while [ "$i" -lt 3 ]; do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' -A "bdinfo-rs-release-status" "$u" 2>/dev/null || echo "000")
+              case "$code" in 000 | 429 | 5??) i=$((i+1)); sleep 2;; *) break;; esac
+            done
+            echo "$code"
+          }
 
-          # crates.io — both crates (200 = published, else absent)
+          # GitHub Release (archive)
+          if try3 gh release view "$tag" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release" "PRESENT"; else add "GitHub Release" "ABSENT"; fi
+
+          # crates.io — both crates: 200 present, 404 absent, anything else = couldn't check
           for crate in bdinfo-rs-core bdinfo-rs; do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' -A "bdinfo-rs-release-status" \
-              "https://crates.io/api/v1/crates/$crate/$ver" 2>/dev/null || echo "000")
-            if [ "$code" = "200" ]; then add "crates.io/$crate" "PRESENT"; else add "crates.io/$crate" "absent ($code)"; fi
+            code=$(http_status "https://crates.io/api/v1/crates/$crate/$ver")
+            case "$code" in
+              200) add "crates.io/$crate" "PRESENT" ;;
+              404) add "crates.io/$crate" "ABSENT" ;;
+              *)   add "crates.io/$crate" "UNKNOWN ($code)" ;;
+            esac
           done
 
           # npm — live only (the staged queue needs auth and is not visible here)
-          if npm view "@bdinfo-rs/wasm@$ver" version >/dev/null 2>&1; then
-            add "npm @bdinfo-rs/wasm" "PRESENT (live)"; else add "npm @bdinfo-rs/wasm" "absent (or staged)"; fi
+          if try3 npm view "@bdinfo-rs/wasm@$ver" version; then add "npm @bdinfo-rs/wasm" "PRESENT (live)"; else add "npm @bdinfo-rs/wasm" "ABSENT (or staged)"; fi
 
           # GHCR image (anonymous inspect of the public multi-arch tag)
-          if docker buildx imagetools inspect "ghcr.io/$GITHUB_REPOSITORY:$ver" >/dev/null 2>&1; then
-            add "GHCR image" "PRESENT"; else add "GHCR image" "absent"; fi
+          if try3 docker buildx imagetools inspect "ghcr.io/$GITHUB_REPOSITORY:$ver"; then add "GHCR image" "PRESENT"; else add "GHCR image" "ABSENT"; fi
 
           # Homebrew tap — a ROLLING formula holding ONLY the current version (not an
           # archive), so this reports whether the tap is CURRENTLY at the target, not
           # whether the version ever existed. Extract the formula's `version "X"` field and
           # compare exactly. (Scoop is the same rolling shape; not queried here.)
           hbver=$(gh api "repos/agentjp/homebrew-tap/contents/Formula/bdinfo-rs.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -oE 'version "[^"]+"' | head -1 | sed -E 's/version "([^"]+)"/\1/')
-          if [ "$hbver" = "$ver" ]; then add "Homebrew tap" "PRESENT (tap at $hbver)"; else add "Homebrew tap" "absent (tap at ${hbver:-none})"; fi
+          if [ "$hbver" = "$ver" ]; then add "Homebrew tap" "PRESENT (tap at $hbver)"; else add "Homebrew tap" "ABSENT (tap at ${hbver:-none})"; fi
 
           # WinGet — the version manifest directory in microsoft/winget-pkgs (an archive)
-          if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver" >/dev/null 2>&1; then
-            add "WinGet" "PRESENT"; else add "WinGet" "absent"; fi
+          if try3 gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver"; then add "WinGet" "PRESENT"; else add "WinGet" "ABSENT"; fi
 
           # Cloudsmith deb/rpm — anonymous public API. Cloudsmith stores the packaging-
           # revisioned version (e.g. 1.2.0-1), so match the version BASE (strip -<revision>),
-          # NOT a bare version: query. Expect 4 (deb+rpm x2 arch).
-          cs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
-            | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
-          if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "unknown (query failed)"
+          # NOT a bare version: query. Expect 4 (deb+rpm x2 arch). Retry a transient failure.
+          cs="?"; i=0
+          while [ "$i" -lt 3 ]; do
+            cs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
+              | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
+            { [ "$cs" != "?" ] && [ -n "$cs" ]; } && break
+            i=$((i+1)); sleep 2
+          done
+          if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "UNKNOWN (query failed)"
           elif [ "$cs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm" "PRESENT ($cs/4)"
-          else add "Cloudsmith deb/rpm" "absent"; fi
+          else add "Cloudsmith deb/rpm" "ABSENT"; fi
 
           # Render to the log and the job summary.
           printf '\n=== release status for %s ===\n' "$tag"

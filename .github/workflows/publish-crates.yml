@@ -84,13 +84,13 @@ jobs:
       # uploaded"), and `cargo publish --workspace` publishes core then the CLI in ONE
       # command — so if core published but the CLI did not on a first run (a mid-way CI
       # failure), a naive re-run dies on core's "already uploaded" and NEVER reaches
-      # the CLI, stranding a half-published release. Instead check each crate against
-      # crates.io first and publish only what is missing, core before the CLI so the
-      # CLI's registry dep on core resolves (`cargo publish` blocks until the crate it
-      # just published is live in the index, so by the CLI's turn core is resolvable).
-      # Belt-and-braces: also tolerate an "already uploaded/exists" race as success, so
-      # an index-lag TOCTOU between the check and the publish cannot red-X the job.
-      - name: Publish core then the CLI, skipping any already on crates.io
+      # the CLI, stranding a half-published release. Instead publish each crate
+      # individually, core before the CLI, tolerating an "already uploaded" error as
+      # success — so a re-run after a partial publish finishes the CLI instead of aborting
+      # on core. (`cargo publish` blocks until the crate it just published is live in the
+      # index, so by the CLI's turn core is resolvable.) No registry pre-check: it would
+      # only add a crates.io-API call a transient 503 could fail the job on.
+      - name: Publish core then the CLI, tolerating any already on crates.io
         shell: pwsh
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
@@ -106,30 +106,18 @@ jobs:
           }
           if (-not $version) { throw 'No [workspace.package] version found in Cargo.toml' }
 
-          # $true if <crate>@<version> already exists on crates.io, $false on a 404.
-          # A real network/API error rethrows (never mistaken for "not published").
-          function Test-Published($crate, $version) {
-            try {
-              Invoke-RestMethod -Uri "https://crates.io/api/v1/crates/$crate/$version" `
-                -Headers @{ 'User-Agent' = 'bdinfo-rs-release (github actions)' } -ErrorAction Stop | Out-Null
-              return $true
-            } catch {
-              if ($_.Exception.Response.StatusCode.value__ -eq 404) { return $false }
-              throw
-            }
-          }
-
+          # crates.io versions are immutable: re-publishing an existing version errors
+          # cleanly with "already uploaded", which we tolerate as success. So we do NOT
+          # pre-check the registry — that only added a crates.io-API dependency a transient
+          # 503 could fail the whole job on, for no benefit. Just publish each crate and
+          # treat "already uploaded/exists" as done.
           foreach ($crate in @('bdinfo-rs-core', 'bdinfo-rs')) {
-            if (Test-Published $crate $version) {
-              Write-Host "$crate@$version already on crates.io — skipping"
-              continue
-            }
             Write-Host "publishing $crate@$version"
             $out = cargo publish -p $crate --locked 2>&1 | Out-String
             Write-Host $out
             if ($LASTEXITCODE -ne 0) {
               if ($out -match 'already (uploaded|exists)') {
-                Write-Host "$crate@$version already published (raced) — treating as success"
+                Write-Host "$crate@$version is already on crates.io — treating as success"
               } else {
                 throw "cargo publish -p $crate failed (exit $LASTEXITCODE)"
               }
