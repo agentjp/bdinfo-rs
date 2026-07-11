@@ -8,7 +8,10 @@
 //! the in-house UDF 2.50 reader ([`bdinfo_rs_core::vfs::udf::source`]); a directory
 //! through `std::fs` — the same parsers run over either (the vfs seam). For
 //! folder input the disc label is the directory name; `.iso` input reads the
-//! real UDF volume label.
+//! real UDF volume label. The one exception is a folder scan whose disc root is
+//! a nameless Windows drive root (`J:\`): the directory name is unusable there,
+//! so the label is recovered from the raw volume device's UDF descriptor — the
+//! same real label — falling back to the drive letter (see [`volume`]).
 //!
 //! `REPORT_DEST` is the folder the disc report is written to, as
 //! `BDINFO.{volume label}.txt`. It defaults to `BD_PATH` and is required when
@@ -61,6 +64,8 @@ use crossterm::{Command as _, cursor, terminal};
 // private fields are in scope exactly as if declared inline. `cli.rs` brings
 // `use clap::Parser;` along with it, so `Cli::parse()` below resolves.
 include!("cli.rs");
+
+mod volume;
 
 fn main() -> ExitCode {
     // A bare invocation (no arguments at all) prints the help to stdout and
@@ -124,7 +129,11 @@ fn scan_folder(
     let report = BdRom::open_resilient_with(&root, run_packet_scan, scan_files, progress)?;
     let mut errors = report.errors;
     errors.extend(root.take_errors());
-    Ok((report.bdrom, errors))
+    let mut bdrom = report.bdrom;
+    // A disc mounted at a nameless drive root (`J:\`) leaves the folder-derived
+    // label unusable; recover the real UDF volume label (or the drive letter).
+    bdrom.volume_label = volume::resolve_folder_label(&bdrom.volume_label);
+    Ok((bdrom, errors))
 }
 
 /// The no-op progress observer for the metadata scan — it never runs the
@@ -489,7 +498,7 @@ fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<u
 /// Writes `rendered` into `dest` as `BDINFO.{volume label}.txt` (CRLF, UTF-8,
 /// no BOM). Returns the exit code on a failed write (`2`).
 fn save_report(dest: &Path, bdrom: &BdRom, rendered: &str) -> Result<(), u8> {
-    let target = dest.join(format!("BDINFO.{}.txt", bdrom.volume_label));
+    let target = dest.join(format!("BDINFO.{}.txt", volume::safe_report_stem(&bdrom.volume_label)));
     std::fs::write(&target, rendered.as_bytes()).map_err(|err| {
         eprintln!("error: cannot write {}: {err}", target.display());
         2

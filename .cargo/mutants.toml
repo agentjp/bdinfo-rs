@@ -167,4 +167,21 @@ exclude_re = [
     # host; on Linux the mutant is UNVIABLE (`File` has no `Default`). The arm's
     # body is `File::open(path)` verbatim.
     "fs\\.rs:\\d+:\\d+: replace open_sequential -> io::Result<File> with Ok\\(Default::default\\(\\)\\)",
+
+    # CLI `volume::real_volume_label` (every mutant shape, both the Windows body
+    # and the `#[cfg(not(windows))]` `-> None` stub): opens a raw volume device
+    # (`\\.\J:`) and reads its UDF label — no test can exercise it without a
+    # mounted physical UDF disc, so every mutant is indistinguishable from the
+    # original in any test environment. The returned label is validated end-to-end
+    # against real hardware; the pure machinery it drives (AlignedReader,
+    # UdfSource::read_label, resolve_with, drive_root_letter, safe_report_stem) is
+    # unit-tested AND mutation-covered. cargo-mutants ignores `cfg`, so it also
+    # mutates the cfg'd-out non-Windows stub; both are matched here by the fn name.
+    "volume\\.rs:\\d+:\\d+:.*real_volume_label",
+
+    # CLI `volume::add_signed`: `delta < 0` vs `delta <= 0` differ only at
+    # `delta == 0`, where BOTH arms return `base` — `base.checked_add(0)` and
+    # `base.checked_sub(0)` are each `Some(base)`. Adding or subtracting a
+    # zero magnitude is identical, so the two comparisons are equivalent.
+    "volume\\.rs:\\d+:\\d+: replace < with <= in add_signed",
 ]
