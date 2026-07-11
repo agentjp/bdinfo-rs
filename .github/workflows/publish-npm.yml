@@ -24,6 +24,16 @@ name: publish-npm
 on:
   push:
     tags: ["v*"]
+  # Manual re-publish (e.g. after a CI-only fix) WITHOUT re-tagging — re-pushing a
+  # tag would re-fire Release + crates.io, which error on an already-published
+  # version. Dispatch on master (guard-ancestor rejects any other ref); the tag
+  # defaults to `v<web/package.json version>`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to (re)publish, e.g. v1.2.0 (default: web/package.json version)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -59,6 +69,29 @@ jobs:
         with:
           persist-credentials: false
 
+      # The release tag drives the version guard + npm dist-tag. On a tag push it
+      # is the ref; on a manual dispatch it is the input, or `v<package.json
+      # version>`. GitHub context is routed through env (never inlined into the
+      # run block) so zizmor's template-injection audit stays clean.
+      - name: Resolve the release tag (tag push or manual dispatch)
+        id: resolve
+        shell: pwsh
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if ($env:EVENT -eq 'push') {
+            $tag = $env:REF_NAME
+          } elseif ($env:INPUT_TAG) {
+            $tag = $env:INPUT_TAG
+          } else {
+            $pkg = (Get-Content crates/bdinfo-rs-wasm/web/package.json -Raw | ConvertFrom-Json).version
+            $tag = "v$pkg"
+          }
+          "tag=$tag" | Add-Content -Path $env:GITHUB_OUTPUT
+          Write-Host "resolved release tag: $tag"
+
       - name: Install pinned nightly rustfmt
         run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rustfmt
 
@@ -82,17 +115,20 @@ jobs:
           # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).
           node-version: "26.5.0"
 
-      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0. Node 26.5.0
-      # already bundles an npm >= the floor, so this is not strictly required
-      # today — but pin npm explicitly anyway, so the publish runs on a
-      # deterministic, version-freshness-watched npm independent of which npm a
-      # given Node 26.x patch happens to bundle (the repo's pin-everything posture).
-      # The published wasm bytes are fixed by the pinned rustc / wasm-bindgen /
-      # binaryen, independent of npm. zizmor's adhoc-packages audit flags any
-      # runtime install; pinning npm (from the official registry) carries a scoped
-      # inline ignore. Keep this pin in lockstep with version-freshness.yml.
+      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0, and
+      # `--provenance` needs a working bundled `sigstore`. npm 12.0.x ships BROKEN
+      # here: `npm publish --provenance` dies with `Cannot find module 'sigstore'`
+      # (npm/cli#9722), so pin the latest 11.x — which has BOTH staged publishing
+      # and a working provenance path — until a fixed 12.x lands. Pinning also keeps
+      # the publish deterministic regardless of which npm a given Node 26.x bundles
+      # (the repo's pin-everything posture); the published wasm bytes are fixed by
+      # the pinned rustc / wasm-bindgen / binaryen, independent of npm. zizmor's
+      # adhoc-packages audit flags any runtime install; pinning npm (from the
+      # official registry) carries a scoped inline ignore. Keep this pin in lockstep
+      # with version-freshness.yml (which, until 12.x is fixed, flags it as "behind"
+      # the 12.x `latest` — that nag is the intended reminder to re-evaluate).
       - name: Pin npm to a staged-publishing-capable version
-        run: npm install -g npm@12.0.0 # zizmor: ignore[adhoc-packages]
+        run: npm install -g npm@11.18.0 # zizmor: ignore[adhoc-packages]
 
       - name: Verify Node >= 26 and npm >= 11.15.0
         shell: pwsh
@@ -108,8 +144,10 @@ jobs:
       # (mirrors the guard in publish-crates.yml).
       - name: Verify the tag matches the workspace + package versions
         shell: pwsh
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:TAG
           if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
             throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
           }
@@ -164,12 +202,14 @@ jobs:
       - name: Stage publish @bdinfo-rs/wasm (provenance; prerelease -> dist-tag next)
         working-directory: crates/bdinfo-rs-wasm/web
         shell: pwsh
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           # A prerelease tag (vX.Y.Z-rc.1 — carries a `-` suffix) must NOT take the
           # `latest` dist-tag that a bare `npm install @bdinfo-rs/wasm` resolves;
           # ship it under `next` instead. Stable vX.Y.Z tags stage under `latest`.
           # The dist-tag is immutable on a staged package (reject + re-stage to change).
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:TAG
           $distTag = if ($tag -match '-') { 'next' } else { 'latest' }
           Write-Host "staging $tag to npm dist-tag '$distTag'"
           npm stage publish --provenance --access public --tag $distTag
@@ -179,8 +219,10 @@ jobs:
       # Surface the exact commands in the run's job summary + log.
       - name: Remind to approve the staged release
         shell: pwsh
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:TAG
           Write-Host "Staged $tag with provenance. It is NOT live until approved (2FA):"
           Write-Host "  npm stage view @bdinfo-rs/wasm"
           Write-Host "  npm stage download @bdinfo-rs/wasm"

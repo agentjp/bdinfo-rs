@@ -103,19 +103,40 @@ jobs:
     if: needs.gate.outputs.stable == 'true'
     env:
       VERSION: ${{ needs.gate.outputs.version }}
+      # Komac release to pin — the tool the manual backfills use, and what
+      # winget-releaser wrapped internally. A submission tool (not output-coupled),
+      # so it is a static pin bumped by hand; the winget-pkgs manifest schema is
+      # stable, so an occasional lag is harmless.
+      KOMAC_VERSION: 2.16.0
     steps:
+      # Submit with komac DIRECTLY — the same tool winget-releaser wraps, but
+      # without its `cargo-bins/cargo-binstall@main` bootstrap, which this repo's
+      # `sha_pinning_required` + allowlist policy (correctly) rejects. komac has no
+      # taiki-e/install-action entry, so fetch its pinned release binary over curl
+      # (a `run:` step, so no action-allowlist involvement at all).
+      - name: Install komac
+        run: |
+          url="https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$url" -o komac.tar.gz
+          tar -xzf komac.tar.gz komac
+          install -m755 komac /usr/local/bin/komac
+          komac --version
       - name: Submit the new version to winget-pkgs
-        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
-        with:
-          identifier: agentjp.bdinfo-rs
-          # Pass the tag explicitly: the action's default (github.ref_name) is the
-          # default branch under workflow_run, not the release tag.
-          release-tag: ${{ env.VERSION }}
-          # Both windows-msvc .zip archives (x64 + arm64); excludes the .sha256 sidecars.
-          installers-regex: '-pc-windows-msvc\.zip$'
-          # The bot account that holds the fork of microsoft/winget-pkgs.
-          fork-user: agentjp-bot
-          token: ${{ secrets.WINGET_TOKEN }}
+        # WINGET_TOKEN is the agentjp-bot PAT; komac reads it from GITHUB_TOKEN and
+        # forks microsoft/winget-pkgs under that account (no fork-user flag needed).
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          ver="${VERSION#v}"
+          base="https://github.com/agentjp/bdinfo-rs/releases/download/v${ver}"
+          # Both windows-msvc .zip archives (x64 + arm64); komac reads the arch from
+          # each. --submit opens the version-bump PR against microsoft/winget-pkgs.
+          komac update agentjp.bdinfo-rs \
+            --version "$ver" \
+            --submit \
+            --urls \
+              "${base}/bdinfo-rs-x86_64-pc-windows-msvc.zip" \
+              "${base}/bdinfo-rs-aarch64-pc-windows-msvc.zip"
 
   # ── Arch Linux: AUR (-bin, repackages the prebuilt musl binary) ────────────
   aur:
