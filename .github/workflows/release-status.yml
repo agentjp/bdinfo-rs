@@ -59,18 +59,24 @@ jobs:
           if docker buildx imagetools inspect "ghcr.io/$GITHUB_REPOSITORY:$ver" >/dev/null 2>&1; then
             add "GHCR image" "PRESENT"; else add "GHCR image" "absent"; fi
 
-          # Homebrew tap formula (does the committed formula carry this version?)
-          rb=$(gh api "repos/agentjp/homebrew-tap/contents/Formula/bdinfo-rs.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
-          if printf '%s' "$rb" | grep -qF "$ver"; then add "Homebrew tap" "PRESENT ($ver)"; else add "Homebrew tap" "absent/other version"; fi
+          # Homebrew tap — a ROLLING formula holding ONLY the current version (not an
+          # archive), so this reports whether the tap is CURRENTLY at the target, not
+          # whether the version ever existed. Extract the formula's `version "X"` field and
+          # compare exactly. (Scoop is the same rolling shape; not queried here.)
+          hbver=$(gh api "repos/agentjp/homebrew-tap/contents/Formula/bdinfo-rs.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -oE 'version "[^"]+"' | head -1 | sed -E 's/version "([^"]+)"/\1/')
+          if [ "$hbver" = "$ver" ]; then add "Homebrew tap" "PRESENT (tap at $hbver)"; else add "Homebrew tap" "absent (tap at ${hbver:-none})"; fi
 
-          # WinGet — the version manifest directory in microsoft/winget-pkgs
+          # WinGet — the version manifest directory in microsoft/winget-pkgs (an archive)
           if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver" >/dev/null 2>&1; then
             add "WinGet" "PRESENT"; else add "WinGet" "absent"; fi
 
-          # Cloudsmith deb/rpm — best-effort anonymous query of the public repo
-          cs=$(curl -sS "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/?query=version:$ver" 2>/dev/null | jq 'length' 2>/dev/null || echo "?")
-          if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "unknown (auth?)"
-          elif [ "$cs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm" "PRESENT ($cs)"
+          # Cloudsmith deb/rpm — anonymous public API. Cloudsmith stores the packaging-
+          # revisioned version (e.g. 1.2.0-1), so match the version BASE (strip -<revision>),
+          # NOT a bare version: query. Expect 4 (deb+rpm x2 arch).
+          cs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
+            | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
+          if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "unknown (query failed)"
+          elif [ "$cs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm" "PRESENT ($cs/4)"
           else add "Cloudsmith deb/rpm" "absent"; fi
 
           # Render to the log and the job summary.
