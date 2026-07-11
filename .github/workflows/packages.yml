@@ -228,13 +228,22 @@ jobs:
       # Publish the SAME bytes to the Cloudsmith apt repo so users can `apt install
       # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
       # Debian-family distro).
+      #
+      # `--republish` makes this IDEMPOTENT so a workflow_dispatch re-run / backfill
+      # (the header advertises those) is safe: without it, re-pushing an already-
+      # published version uploads then FAILS mid-sync ("...already exists...Replace
+      # Package w/ Same Version was not enabled...This package should be deleted"),
+      # leaving a broken entry that must be hand-deleted in the Cloudsmith UI. The
+      # flag replaces the same-version package (identical release bytes) and does NOT
+      # need the repo-level "Replace Packages By Default" setting; on a first push
+      # there is nothing to replace, so it behaves like a normal push.
       - name: Publish the .deb to Cloudsmith
         shell: bash
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           pipx install cloudsmith-cli==1.19.0
-          cloudsmith push deb bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.deb
+          cloudsmith push deb --republish bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.deb
 
   # ── Fedora/RHEL: .rpm attached to the release (x64 + arm64) ────────────────
   rpm:
@@ -285,14 +294,14 @@ jobs:
 
       # Publish the SAME bytes to the Cloudsmith yum repo so users can `dnf install
       # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
-      # RPM-family distro).
+      # RPM-family distro). `--republish` for re-run idempotency — see the .deb job.
       - name: Publish the .rpm to Cloudsmith
         shell: bash
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           pipx install cloudsmith-cli==1.19.0
-          cloudsmith push rpm bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.rpm
+          cloudsmith push rpm --republish bdinfo-rs/bdinfo-rs/any-distro/any-version dl/bdinfo-rs-${{ matrix.triple }}.rpm
 
   # ── Verify the PUBLISHED Cloudsmith repo: install bdinfo-rs BY NAME and confirm
   # ── the binary + man + completions all land — on both arches, native runners, no
