@@ -123,7 +123,7 @@ fn real_volume_label(letter: char) -> Option<String> {
 /// platform constant, excluded from coverage like its Windows sibling.
 #[cfg(not(windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn real_volume_label(_letter: char) -> Option<String> {
+const fn real_volume_label(_letter: char) -> Option<String> {
     None
 }
 

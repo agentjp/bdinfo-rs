@@ -184,4 +184,12 @@ exclude_re = [
     # `base.checked_sub(0)` are each `Some(base)`. Adding or subtracting a
     # zero magnitude is identical, so the two comparisons are equivalent.
     "volume\\.rs:\\d+:\\d+: replace < with <= in add_signed",
+
+    # CLI `volume::RawVolumeIso::open`: opens the raw volume device — env-bound
+    # like `real_volume_label` and uncatchable either way. On Windows the
+    # `Ok(Box::new(Default::default()))` mutant is UNVIABLE (`Box<dyn ReadSeek>`
+    # has no `Default`); on non-Windows the whole `#[cfg(windows)]` impl is
+    # compiled out, so cargo-mutants (which ignores `cfg`) lands the mutation in
+    # dead code and no test can observe it. Matched by the type name.
+    "volume\\.rs:\\d+:\\d+:.*RawVolumeIso",
 ]
