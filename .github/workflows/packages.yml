@@ -133,11 +133,29 @@ jobs:
           # Preflight: skip if this version already exists in winget-pkgs. komac has no
           # "already submitted?" guard, so a re-run/backfill of `--submit` would open a
           # DUPLICATE PR against microsoft/winget-pkgs that a moderator must close.
-          # `list-versions` reads the public manifests; strip whitespace and match the
-          # exact version. Biased toward submitting when the check is inconclusive (a
-          # stray duplicate PR is recoverable; a wrongly-skipped submit means the winget
-          # version never lands).
-          if komac list-versions agentjp.bdinfo-rs 2>/dev/null | sed 's/[[:space:]]//g' | grep -qxF "$ver"; then
+          #
+          # FAIL CLOSED, never open. `komac list-versions` exits non-zero on ANY error
+          # (verified: a clean success is exit 0 with the versions on stdout; an
+          # invalid/EXPIRED WINGET_TOKEN is exit 1 with empty stdout — "GitHub token is
+          # invalid"). The old `... 2>/dev/null | grep` swallowed that error, saw no match,
+          # and FELL THROUGH TO --submit — so an expired token would spam a duplicate PR.
+          # Instead capture the exit code: retry a transient failure, and if it still can't
+          # be determined, FAIL the job (a blocked winget submit is safe + recoverable; a
+          # duplicate PR to Microsoft is not). Only a CLEAN "version not present" submits.
+          # (agentjp.bdinfo-rs has existed in winget-pkgs since the 1.0.0 hand-bootstrap, so
+          # a real success always lists >=1 version — the "package does not exist" error,
+          # which is also exit 1, cannot legitimately occur here.)
+          versions=""; ok=0
+          for attempt in 1 2 3; do
+            if versions=$(komac list-versions agentjp.bdinfo-rs 2>/dev/null); then ok=1; break; fi
+            echo "komac list-versions failed (attempt $attempt/3) — retrying..." >&2
+            sleep 5
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::komac list-versions could not determine existing winget-pkgs versions (invalid WINGET_TOKEN or GitHub API error) — refusing to --submit, which could open a duplicate PR. Re-run once resolved, or submit by hand with komac." >&2
+            exit 1
+          fi
+          if printf '%s\n' "$versions" | sed 's/[[:space:]]//g' | grep -qxF "$ver"; then
             echo "agentjp.bdinfo-rs ${ver} already in winget-pkgs — skipping submit"
           else
             # Both windows-msvc .zip archives (x64 + arm64); komac reads the arch from
