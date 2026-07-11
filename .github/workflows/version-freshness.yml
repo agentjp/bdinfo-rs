@@ -25,12 +25,19 @@ name: version-freshness
 #     — the staged-publishing floor), and wrangler (`npx wrangler@X` in
 #     deploy-pages.yml) — the last two are npx/setup-node inputs, NOT package.json
 #     deps, so Dependabot's npm scan cannot see them,
-#   - two action SHAs whose comment tags MOVE (so Dependabot can't bump them and
-#     zizmor's ref-version-mismatch would red-X a PR once they drift): the
-#     Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) pins a TAGLESS
-#     repo's `master`, and vedantmgoyal9/winget-releaser (packages.yml) pins a SHA
-#     with a moving-major `# v2` comment (no patch tag at that commit). Both are
-#     nagged here when they drift past the pinned SHA, so re-pinning stays deliberate.
+#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) pins a
+#     TAGLESS repo's `master` — a moving `# master` comment tag Dependabot can't bump
+#     and zizmor's ref-version-mismatch would red-X a PR once it drifts, so it is
+#     nagged here when it drifts past the pinned SHA, keeping re-pinning deliberate,
+#   - komac (the `KOMAC_VERSION` pin in packages.yml — the WinGet job submits with
+#     komac DIRECTLY, fetched over curl at a static hand-bumped version invisible to
+#     Dependabot; checked against russellbanks/Komac's latest release),
+#   - cargo-deb + cargo-generate-rpm (the `cargo-deb@X` / `cargo-generate-rpm@X` pins
+#     in build-linux-packages.sh — the .deb/.rpm packagers are compiled from source
+#     INSIDE dist's fail-fast release, so they are version-pinned there so a broken
+#     upstream release can't abort the whole release; both checked vs crates.io), and
+#     cloudsmith-cli (the `cloudsmith-cli==X` pipx pin in packages.yml — a pip pin
+#     invisible to Dependabot's cargo/npm/actions scans; checked vs PyPI),
 # (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
 # binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
@@ -119,6 +126,17 @@ jobs:
               $resp = Invoke-RestMethod -Uri "https://registry.npmjs.org/$pkg/latest" `
                 -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
               return $resp.version
+            }
+            catch { return $null }
+          }
+
+          # The latest published version of a PyPI package (registry metadata), or
+          # $null on failure.
+          function Latest-PyPI($pkg) {
+            try {
+              $resp = Invoke-RestMethod -Uri "https://pypi.org/pypi/$pkg/json" `
+                -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' } -ErrorAction Stop
+              return $resp.info.version
             }
             catch { return $null }
           }
@@ -223,6 +241,29 @@ jobs:
             Add-Problem 'convco (query failed)' '- could not query the latest convco release (crates.io)'
           } elseif ([version]$convcoLatest -gt [version]$convcoPin) {
             Add-Problem "convco $convcoPin->$convcoLatest" "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
+          }
+
+          # --- cargo-deb / cargo-generate-rpm: build-linux-packages.sh vs crates.io -
+          # The .deb/.rpm packagers are compiled from source INSIDE dist's fail-fast
+          # release (a shell script in build-global-artifacts, where a `uses:` install
+          # action is unavailable), so they are version-pinned there — a broken upstream
+          # release would otherwise abort the whole release. Nothing else watches them,
+          # so nag here like the other hand-bumped tools when a newer one ships.
+          $cargoDebPin = Read-Pin '.github/build-linux-packages.sh' 'cargo-deb@([0-9.]+)'
+          if (-not $cargoDebPin) { throw 'No cargo-deb@<version> pin in build-linux-packages.sh' }
+          $cargoDebLatest = Latest-CratesIo 'cargo-deb'
+          if (-not $cargoDebLatest) {
+            Add-Problem 'cargo-deb (query failed)' '- could not query the latest cargo-deb release (crates.io)'
+          } elseif ([version]$cargoDebLatest -gt [version]$cargoDebPin) {
+            Add-Problem "cargo-deb $cargoDebPin->$cargoDebLatest" "- cargo-deb pin ``$cargoDebPin`` (build-linux-packages.sh) is behind the latest release ``$cargoDebLatest``"
+          }
+          $cargoRpmPin = Read-Pin '.github/build-linux-packages.sh' 'cargo-generate-rpm@([0-9.]+)'
+          if (-not $cargoRpmPin) { throw 'No cargo-generate-rpm@<version> pin in build-linux-packages.sh' }
+          $cargoRpmLatest = Latest-CratesIo 'cargo-generate-rpm'
+          if (-not $cargoRpmLatest) {
+            Add-Problem 'cargo-generate-rpm (query failed)' '- could not query the latest cargo-generate-rpm release (crates.io)'
+          } elseif ([version]$cargoRpmLatest -gt [version]$cargoRpmPin) {
+            Add-Problem "cargo-generate-rpm $cargoRpmPin->$cargoRpmLatest" "- cargo-generate-rpm pin ``$cargoRpmPin`` (build-linux-packages.sh) is behind the latest release ``$cargoRpmLatest``"
           }
 
           # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
@@ -359,26 +400,37 @@ jobs:
           $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
           $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
 
-          # --- vedantmgoyal9/winget-releaser: packages.yml SHA vs the v2 tag HEAD ---
-          # SHA-pinned with a MOVING-major `# v2` comment (no patch tag exists at that
-          # commit, so it can't be pinned more precisely). When upstream re-points the
-          # v2 tag to a new commit, our SHA stays put and the `# v2` comment then
-          # mismatches the resolved tag — zizmor's ref-version-mismatch would red-X
-          # every PR. Watch it like setup-homebrew: nag (don't fail) when v2 drifts so
-          # re-pinning stays deliberate. (The winget publish step is GATED OFF today,
-          # but its `uses:` line is still scanned on every PR.)
-          $wingetPin = Read-Pin '.github/workflows/packages.yml' 'winget-releaser@([0-9a-f]{40})'
-          if (-not $wingetPin) { throw 'No winget-releaser SHA pin in packages.yml' }
-          $wingetHead = gh api repos/vedantmgoyal9/winget-releaser/commits/v2 --jq '.sha' 2>$null
-          if ($LASTEXITCODE -ne 0 -or -not $wingetHead) {
-            Add-Problem 'winget-releaser (query failed)' '- could not query winget-releaser v2 tag HEAD (GitHub API)'
-          } elseif ($wingetPin -ne $wingetHead) {
-            Add-Problem 'winget-releaser SHA drifted' "- winget-releaser pin ``$($wingetPin.Substring(0, 12))`` (packages.yml) no longer matches the v2 tag HEAD ``$($wingetHead.Substring(0, 12))`` — the moving major drifted; re-pin the SHA (keep the # v2 comment) deliberately"
+          # --- komac: packages.yml KOMAC_VERSION vs russellbanks/Komac latest ------
+          # The WinGet job submits with komac DIRECTLY (winget-releaser's
+          # cargo-binstall@main bootstrap trips this repo's SHA-pinning policy), fetched
+          # over curl at a static hand-bumped KOMAC_VERSION invisible to Dependabot.
+          # Nothing else watches it, so nag here like the other hand-bumped tools
+          # (taplo/convco/ryl) when a newer komac ships; the winget-pkgs manifest schema
+          # is stable, so an occasional lag is harmless.
+          $komacPin = Read-Pin '.github/workflows/packages.yml' 'KOMAC_VERSION:\s*([0-9.]+)'
+          if (-not $komacPin) { throw 'No KOMAC_VERSION pin in packages.yml' }
+          $komacLatest = Latest-Semver 'russellbanks/Komac'
+          if (-not $komacLatest) {
+            Add-Problem 'komac (query failed)' '- could not query the latest komac release (russellbanks/Komac)'
+          } elseif ([version]$komacLatest -gt [version]$komacPin) {
+            Add-Problem "komac $komacPin->$komacLatest" "- komac pin ``$komacPin`` (packages.yml KOMAC_VERSION) is behind the latest release ``$komacLatest``"
           }
-          $wingetPinShort = if ($wingetPin) { $wingetPin.Substring(0, 12) } else { '?' }
-          $wingetHeadShort = if ($wingetHead) { $wingetHead.Substring(0, 12) } else { '?' }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  winget: $wingetPinShort (head $wingetHeadShort)"
+          # --- cloudsmith-cli: packages.yml `pipx install` pin vs PyPI --------------
+          # The deb/rpm jobs push to Cloudsmith with a pinned `cloudsmith-cli==X`
+          # (pipx). A pip pin invisible to Dependabot's cargo/npm/actions scans, so a
+          # server-side API change could break the frozen client silently; nag here
+          # like the other hand-bumped tools when a newer client ships.
+          $cloudsmithPin = Read-Pin '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
+          if (-not $cloudsmithPin) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
+          $cloudsmithLatest = Latest-PyPI 'cloudsmith-cli'
+          if (-not $cloudsmithLatest) {
+            Add-Problem 'cloudsmith-cli (query failed)' '- could not query the latest cloudsmith-cli release (PyPI)'
+          } elseif ([version]$cloudsmithLatest -gt [version]$cloudsmithPin) {
+            Add-Problem "cloudsmith-cli $cloudsmithPin->$cloudsmithLatest" "- cloudsmith-cli pin ``$cloudsmithPin`` (packages.yml) is behind the latest release ``$cloudsmithLatest``"
+          }
+
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  komac: $komacPin (latest $komacLatest)  cargo-deb: $cargoDebPin (latest $cargoDebLatest)  cargo-generate-rpm: $cargoRpmPin (latest $cargoRpmLatest)  cloudsmith-cli: $cloudsmithPin (latest $cloudsmithLatest)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $bodyLines = @($problems | ForEach-Object { $_.line })

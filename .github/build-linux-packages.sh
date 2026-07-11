@@ -28,12 +28,17 @@ TRIPLES=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl)
 OUT=dist-extra
 mkdir -p "$OUT"
 
-# The pure-Rust packagers, compiled from source. Unpinned (latest), matching the
-# old packages.yml posture; there is no prebuilt-binary URL/SHA to rot, so this is
-# zero-maintenance. It runs only on a release tag, so the one-time compile is fine.
-# Skip if a cached copy is already on PATH (re-runs / future dist caching).
+# The pure-Rust packagers, compiled from source (dist runs this file as a plain
+# shell script inside build-global-artifacts, so taiki-e/install-action — a `uses:`
+# step — is not available here; `cargo install` is the fallback). PINNED, because
+# this compile runs INSIDE dist's fail-fast release: a broken or schema-changing
+# upstream release would abort the ENTIRE release (all six binaries + every
+# channel), and only at tag time. The pins are the versions that shipped the last
+# release; version-freshness.yml nags when a newer one ships so the bump stays a
+# deliberate, reviewed change. Skip if a cached copy is already on PATH (re-runs /
+# future dist caching).
 command -v cargo-deb >/dev/null 2>&1 && command -v cargo-generate-rpm >/dev/null 2>&1 \
-  || cargo install --locked cargo-deb cargo-generate-rpm
+  || cargo install --locked cargo-deb@3.7.0 cargo-generate-rpm@0.21.0
 
 for triple in "${TRIPLES[@]}"; do
   archive="target/distrib/bdinfo-rs-${triple}.tar.gz"
