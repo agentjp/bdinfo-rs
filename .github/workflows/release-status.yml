@@ -1,0 +1,83 @@
+name: release-status
+
+# Read-only recovery dashboard. Given a version tag, report which distribution
+# channels already have it published — the "what is already out there for vX.Y.Z?"
+# matrix. Run this (Actions -> release-status -> Run workflow) when recovering a
+# partial release: it tells you exactly which channels still need publishing before
+# you re-run a channel's own workflow_dispatch, so a re-run never double-pushes.
+#
+# Queries PUBLIC endpoints only — no secrets, no writes. The immutable-registry
+# channels (crates.io, npm live, GitHub Release, GHCR, WinGet) are authoritative;
+# Cloudsmith is best-effort over its public API and npm's staged (not-yet-approved)
+# queue is not visible here (it needs auth), so "absent" on npm means "not live".
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to check, e.g. v1.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    name: release status for the version
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Query every distribution channel
+        shell: bash
+        run: |
+          # NOT `-e`: every check is best-effort so one failure never hides the rest.
+          set -uo pipefail
+          tag="$TAG"
+          ver="${tag#v}"
+          rows=()
+          add() { rows+=("$1|$2"); }
+
+          # GitHub Release
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            add "GitHub Release" "PRESENT"; else add "GitHub Release" "absent"; fi
+
+          # crates.io — both crates (200 = published, else absent)
+          for crate in bdinfo-rs-core bdinfo-rs; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' -A "bdinfo-rs-release-status" \
+              "https://crates.io/api/v1/crates/$crate/$ver" 2>/dev/null || echo "000")
+            if [ "$code" = "200" ]; then add "crates.io/$crate" "PRESENT"; else add "crates.io/$crate" "absent ($code)"; fi
+          done
+
+          # npm — live only (the staged queue needs auth and is not visible here)
+          if npm view "@bdinfo-rs/wasm@$ver" version >/dev/null 2>&1; then
+            add "npm @bdinfo-rs/wasm" "PRESENT (live)"; else add "npm @bdinfo-rs/wasm" "absent (or staged)"; fi
+
+          # GHCR image (anonymous inspect of the public multi-arch tag)
+          if docker buildx imagetools inspect "ghcr.io/$GITHUB_REPOSITORY:$ver" >/dev/null 2>&1; then
+            add "GHCR image" "PRESENT"; else add "GHCR image" "absent"; fi
+
+          # Homebrew tap formula (does the committed formula carry this version?)
+          rb=$(gh api "repos/agentjp/homebrew-tap/contents/Formula/bdinfo-rs.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+          if printf '%s' "$rb" | grep -qF "$ver"; then add "Homebrew tap" "PRESENT ($ver)"; else add "Homebrew tap" "absent/other version"; fi
+
+          # WinGet — the version manifest directory in microsoft/winget-pkgs
+          if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver" >/dev/null 2>&1; then
+            add "WinGet" "PRESENT"; else add "WinGet" "absent"; fi
+
+          # Cloudsmith deb/rpm — best-effort anonymous query of the public repo
+          cs=$(curl -sS "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/?query=version:$ver" 2>/dev/null | jq 'length' 2>/dev/null || echo "?")
+          if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "unknown (auth?)"
+          elif [ "$cs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm" "PRESENT ($cs)"
+          else add "Cloudsmith deb/rpm" "absent"; fi
+
+          # Render to the log and the job summary.
+          printf '\n=== release status for %s ===\n' "$tag"
+          { echo "### Release status for \`$tag\`"; echo ""; echo "| Channel | Status |"; echo "|---|---|"; } >> "$GITHUB_STEP_SUMMARY"
+          for r in "${rows[@]}"; do
+            chan="${r%%|*}"; stat="${r#*|}"
+            printf '  %-22s %s\n' "$chan" "$stat"
+            echo "| $chan | $stat |" >> "$GITHUB_STEP_SUMMARY"
+          done

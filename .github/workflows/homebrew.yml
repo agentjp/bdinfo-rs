@@ -24,6 +24,17 @@ on:
         description: The dist release plan (JSON), passed by dist.
         required: true
         type: string
+  # Manual re-push of just the tap formula (e.g. if only this job failed while the
+  # rest of the release is fine) WITHOUT re-running the whole release — which can't
+  # be re-run cleanly (gh release create errors once the Release exists). Dispatch
+  # from master; a synthesize step below rebuilds the minimal plan from the release's
+  # attached .rb so the publish loop stays identical to the dist-called path.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose Homebrew formula to (re)push, e.g. v1.2.0
+        required: true
+        type: string
 
 permissions:
   contents: read # read the release to download dist's generated formula
@@ -44,6 +55,9 @@ jobs:
       # the tap uses HOMEBREW_TAP_TOKEN (the checkout credentials), not this.
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ inputs.plan }}
+      # The release tag: the caller's tag ref on the dist workflow_call path, or the
+      # dispatch input on a manual re-push (inputs.tag is empty off the dispatch path).
+      REF_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       # Check out the TAP repo (not this one) with a token that can push to it.
       # persist-credentials stays true so the formula commit below can push.
@@ -52,6 +66,23 @@ jobs:
           repository: agentjp/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           persist-credentials: true # zizmor: ignore[artipacked] the token MUST persist to push the formula commit
+
+      # On a manual dispatch there is no dist plan; rebuild a minimal one from the
+      # release's attached .rb (we ship exactly one) so the publish loop below is
+      # identical to the dist-called path. Overwrites the job-level PLAN env for the
+      # steps that follow. No-op on the workflow_call (dist) path.
+      - name: Synthesize the plan on manual dispatch
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          filename=$(gh release view "$DISPATCH_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name | select(endswith(".rb"))][0]')
+          if [ -z "$filename" ] || [ "$filename" = "null" ]; then
+            echo "::error::no .rb asset on release $DISPATCH_TAG"; exit 1
+          fi
+          plan=$(jq -cn --arg fn "$filename" --arg v "${DISPATCH_TAG#v}" '{releases: [{artifacts: [$fn], app_version: $v}]}')
+          echo "PLAN=$plan" >> "$GITHUB_ENV"
 
       - name: Add the man page + shell completions to dist's formula, then push
         shell: bash
@@ -70,7 +101,7 @@ jobs:
             version=$(echo "$release" | jq --raw-output '.app_version')
 
             # Pull dist's just-generated formula from the release into the tap.
-            gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$filename" --dir Formula --clobber
+            gh release download "$REF_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$filename" --dir Formula --clobber
             f="Formula/${filename}"
 
             # dist installs only the binary; add the man page + the bash/zsh/fish
@@ -94,7 +125,15 @@ jobs:
             brew update
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "$f" || true
 
+            # Guard the commit: a re-push of a byte-identical formula (same release,
+            # same bytes) has nothing staged, and `git commit` would fail "nothing to
+            # commit" under `set -e` and abort the job. Skip the commit when unchanged;
+            # the push below is then a clean no-op.
             git add "$f"
-            git commit -m "${name} ${version}"
+            if git diff --cached --quiet; then
+              echo "formula ${name} ${version} is unchanged — nothing to commit"
+            else
+              git commit -m "${name} ${version}"
+            fi
           done
           git push
