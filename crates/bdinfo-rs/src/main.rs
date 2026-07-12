@@ -45,6 +45,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
@@ -110,11 +111,13 @@ fn scan_iso(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<ScanOutcome, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
+    // The CLI has no cancel affordance (yet): the flag is never set.
     let report = BdRom::open_resilient_with(
         &source.root(),
         scan_mode(run_packet_scan),
         scan_files,
         progress,
+        &AtomicBool::new(false),
     )?;
     let mut errors = report.errors;
     errors.extend(source.take_errors());
@@ -131,8 +134,14 @@ fn scan_folder(
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<ScanOutcome, BdError> {
     let root = FsDir::new(location);
-    let report =
-        BdRom::open_resilient_with(&root, scan_mode(run_packet_scan), scan_files, progress)?;
+    // The CLI has no cancel affordance (yet): the flag is never set.
+    let report = BdRom::open_resilient_with(
+        &root,
+        scan_mode(run_packet_scan),
+        scan_files,
+        progress,
+        &AtomicBool::new(false),
+    )?;
     let mut errors = report.errors;
     errors.extend(root.take_errors());
     let mut bdrom = report.bdrom;

@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read};
+use std::sync::atomic::AtomicBool;
 
 use super::chapters::{ChapterClip, ChapterSummary, walk_chapters};
 use super::clpi::TsStreamClipFile;
@@ -423,7 +424,8 @@ pub struct ScanProgress<'a> {
 
 /// The live bookkeeping of one packet scan: the running byte count over the
 /// full pass's total, reported through the caller's callback after every
-/// demux read and at every file boundary.
+/// demux read and at every file boundary, plus the caller's cooperative
+/// cancel flag the demux polls per read chunk.
 struct Progress<'a> {
     /// The caller's observer; a no-op for the plain `open`s.
     callback: &'a mut dyn FnMut(ScanProgress<'_>),
@@ -432,6 +434,8 @@ struct Progress<'a> {
     /// Total bytes the reported (full) demux pass will read over the
     /// selected files.
     total: u64,
+    /// The caller's cancel flag; never set for the plain `open`s.
+    cancel: &'a AtomicBool,
 }
 
 impl Progress<'_> {
@@ -643,11 +647,12 @@ impl BdRom {
     /// - [`BdError::UnknownFileType`]/[`BdError::UnexpectedEof`] for malformed metadata, or
     ///   [`BdError::Io`] for a filesystem error.
     pub fn open(root: &dyn BdDir, mode: ScanMode) -> Result<Self, BdError> {
-        Self::open_with(root, mode, None, &mut |_| {})
+        Self::open_with(root, mode, None, &mut |_| {}, &AtomicBool::new(false))
     }
 
     /// Opens and scans the disc like [`open`](Self::open), with the packet
-    /// scan narrowed to `scan_files` and observed by `progress`.
+    /// scan narrowed to `scan_files`, observed by `progress`, and abortable
+    /// through `cancel`.
     ///
     /// `scan_files` — when `Some`, only the stream files whose upper-cased
     /// names (`00000.M2TS`) it contains are packet-scanned; the rest keep
@@ -658,15 +663,24 @@ impl BdRom {
     /// with the running [`ScanProgress`]; it never fires without the packet
     /// scan.
     ///
+    /// `cancel` — a cooperative stop flag: set it from any thread (a UI cancel
+    /// button, a Ctrl+C handler, the progress callback itself) and the packet
+    /// scan aborts at its next read chunk with [`BdError::ScanCancelled`],
+    /// yielding no partial result. The flag is polled with one relaxed load
+    /// per chunk, so the demux hot path is unaffected; a scan that reads no
+    /// packets ([`ScanMode::Metadata`]) never observes it.
+    ///
     /// # Errors
-    /// As [`open`](Self::open).
+    /// As [`open`](Self::open), plus [`BdError::ScanCancelled`] when `cancel`
+    /// was set mid-scan.
     pub fn open_with(
         root: &dyn BdDir,
         mode: ScanMode,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
+        cancel: &AtomicBool,
     ) -> Result<Self, BdError> {
-        Self::open_impl(root, mode, scan_files, progress, &mut Sink { errors: None })
+        Self::open_impl(root, mode, scan_files, progress, cancel, &mut Sink { errors: None })
     }
 
     /// Opens and scans the disc like [`open`](Self::open), but **collects** per-file
@@ -684,20 +698,26 @@ impl BdRom {
     /// `BDMV`/`CLIPINF`/`PLAYLIST` failed ([`BdError::StructureNotFound`], or
     /// [`BdError::Io`] if those lookups cannot enumerate).
     pub fn open_resilient(root: &dyn BdDir, mode: ScanMode) -> Result<ScanReport, BdError> {
-        Self::open_resilient_with(root, mode, None, &mut |_| {})
+        Self::open_resilient_with(root, mode, None, &mut |_| {}, &AtomicBool::new(false))
     }
 
     /// Opens and scans the disc like [`open_resilient`](Self::open_resilient),
-    /// with the packet scan narrowed to `scan_files` and observed by
-    /// `progress` (the [`open_with`](Self::open_with) extras).
+    /// with the packet scan narrowed to `scan_files`, observed by `progress`,
+    /// and abortable through `cancel` (the [`open_with`](Self::open_with)
+    /// extras).
     ///
     /// # Errors
-    /// As [`open_resilient`](Self::open_resilient).
+    /// As [`open_resilient`](Self::open_resilient), plus
+    /// [`BdError::ScanCancelled`] when `cancel` was set mid-scan — resilience
+    /// collects disc damage, not the caller's abort, so a cancelled scan
+    /// returns this error (never a partial [`ScanReport`], and never a
+    /// recorded per-file failure).
     pub fn open_resilient_with(
         root: &dyn BdDir,
         mode: ScanMode,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
+        cancel: &AtomicBool,
     ) -> Result<ScanReport, BdError> {
         let mut errors = Vec::new();
         let bdrom = Self::open_impl(
@@ -705,6 +725,7 @@ impl BdRom {
             mode,
             scan_files,
             progress,
+            cancel,
             &mut Sink { errors: Some(&mut errors) },
         )?;
         Ok(ScanReport { bdrom, errors })
@@ -717,6 +738,7 @@ impl BdRom {
         mode: ScanMode,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
+        cancel: &AtomicBool,
         sink: &mut Sink<'_>,
     ) -> Result<Self, BdError> {
         // --- locate directories ---------------------------------------------
@@ -799,6 +821,7 @@ impl BdRom {
                 scan_files,
                 mode.measures_bitrate(),
                 progress,
+                cancel,
                 sink,
             )?
         } else {
@@ -1191,13 +1214,15 @@ fn run_measurement_scan(
     scan_files: Option<&BTreeSet<String>>,
     measure: bool,
     callback: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
     sink: &mut Sink<'_>,
 ) -> Result<(ScannedFiles, ScannedFiles), BdError> {
     // The quick pass reads an unpredictable sliver of each file (codec
     // init), so it draws no progress; the reported budget is the full pass,
-    // every selected byte once — a steady 0→100%.
+    // every selected byte once — a steady 0→100%. Cancellation reaches both
+    // passes: each carries the caller's flag in its `Progress`.
     let mut warmup = |_: ScanProgress<'_>| {};
-    let quick_progress = &mut Progress { callback: &mut warmup, done: 0, total: 0 };
+    let quick_progress = &mut Progress { callback: &mut warmup, done: 0, total: 0, cancel };
     let quick = scan_stream_files(stream, ssif, parsed, scan_files, quick_progress, sink, false)?;
     for playlist in parsed.iter_mut() {
         if let Ok(metas) = collect_clip_metas(playlist, clip_files, stream_files, &quick) {
@@ -1218,6 +1243,7 @@ fn run_measurement_scan(
         callback,
         done: 0,
         total: scan_total(stream_files, interleaved_files, scan_files),
+        cancel,
     };
     let full = scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, true)?;
     // The PGS caption tallies and dimensions only exist after the full pass
@@ -1737,7 +1763,9 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
 /// the measurement pass. Used only at the `streams` level; the
 /// disc/`playlists` levels skip it entirely. In strict mode a failed open/scan
 /// propagates; in resilient mode it is recorded and the file skipped — its
-/// playlists fall back to the clip-info detail.
+/// playlists fall back to the clip-info detail. The one exception is
+/// [`BdError::ScanCancelled`] (the caller's flag in the [`Progress`]), which
+/// aborts the pass in both modes without being recorded.
 fn scan_stream_files(
     stream_dir: Option<&dyn BdDir>,
     ssif_dir: Option<&dyn BdDir>,
@@ -1781,6 +1809,13 @@ fn scan_stream_files(
         let source_size = interleaved.as_ref().map_or_else(|| file.length(), |f| f.length());
         let target = progress.done.saturating_add(source_size);
         let scan = scan_one_stream_file(&*file, interleaved, playlists, is_full_scan, progress);
+        // Cancellation aborts the whole open, in strict and resilient modes
+        // alike — the sink collects disc damage, not the caller's abort, so
+        // the cancelled error is never recorded per-file, and no further
+        // progress (not even this file's boundary snap) is reported.
+        if matches!(scan, Err(BdError::ScanCancelled)) {
+            return Err(BdError::ScanCancelled);
+        }
         progress.finish_file(&name, target);
         if let Some(stream_file) =
             sink.absorb(ScanStage::StreamFile, file.name(), None, scan.map(Some))?
@@ -1809,8 +1844,11 @@ fn scan_one_stream_file(
         Some(interleaved) => interleaved.open_read().map_err(BdError::Io)?,
         None => file.open_read()?,
     };
+    // The shared reference is copied out before the reader mutably borrows
+    // the progress, so the demux can poll it alongside the counting reads.
+    let cancel = progress.cancel;
     let mut reader = CountingReader { inner, name: file.name().to_ascii_uppercase(), progress };
-    stream_file.scan(&mut reader, playlists, is_full_scan)?;
+    stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel)?;
     Ok(stream_file)
 }
 
@@ -1938,7 +1976,7 @@ mod tests {
     use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
@@ -4128,7 +4166,8 @@ mod tests {
             vec![TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap()];
         // Strict mode propagates the read failure…
         let mut noop = |_: ScanProgress<'_>| {};
-        let mut progress = Progress { callback: &mut noop, done: 0, total: 200 };
+        let mut progress =
+            Progress { callback: &mut noop, done: 0, total: 200, cancel: &AtomicBool::new(false) };
         let strict = scan_stream_files(
             Some(&stream_dir),
             None,
@@ -4143,7 +4182,8 @@ mod tests {
         // consumes its progress budget (the snap to the file boundary).
         let mut errors = Vec::new();
         let mut noop = |_: ScanProgress<'_>| {};
-        let mut progress = Progress { callback: &mut noop, done: 0, total: 200 };
+        let mut progress =
+            Progress { callback: &mut noop, done: 0, total: 200, cancel: &AtomicBool::new(false) };
         let resilient = scan_stream_files(
             Some(&stream_dir),
             None,
@@ -4189,7 +4229,12 @@ mod tests {
         {
             let mut callback =
                 |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-            let mut progress = Progress { callback: &mut callback, done: 0, total: 100 };
+            let mut progress = Progress {
+                callback: &mut callback,
+                done: 0,
+                total: 100,
+                cancel: &AtomicBool::new(false),
+            };
             progress.advance("A.M2TS", 30);
             // An over-read clamps at the total instead of overshooting.
             progress.advance("A.M2TS", 90);
@@ -4210,11 +4255,22 @@ mod tests {
         {
             let mut callback =
                 |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-            let mut progress = Progress { callback: &mut callback, done: 0, total: 100 };
+            let mut progress = Progress {
+                callback: &mut callback,
+                done: 0,
+                total: 100,
+                cancel: &AtomicBool::new(false),
+            };
             progress.advance("B.M2TS", 10);
             progress.finish_file("B.M2TS", 60);
         }
         assert_eq!(events, [("B.M2TS".to_owned(), 10, 100), ("B.M2TS".to_owned(), 60, 100)]);
+    }
+
+    /// A cancel flag that never trips — the default scan extras of every test
+    /// that is not about cancellation.
+    fn never_cancel() -> AtomicBool {
+        AtomicBool::new(false)
     }
 
     #[test]
@@ -4236,7 +4292,7 @@ mod tests {
         // (the quick codec-init pass is neither budgeted nor reported).
         let mut events: Vec<(String, u64, u64)> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-        let bd = BdRom::open_with(&root, ScanMode::Full, None, &mut collect)
+        let bd = BdRom::open_with(&root, ScanMode::Full, None, &mut collect, &never_cancel())
             .expect("scan with progress");
         assert_eq!(bd.playlists.len(), 2);
         assert!(!events.is_empty());
@@ -4253,8 +4309,9 @@ mod tests {
         let selected = BTreeSet::from(["00000.M2TS".to_owned()]);
         let mut events: Vec<(String, u64, u64)> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-        let bd = BdRom::open_with(&root, ScanMode::Full, Some(&selected), &mut collect)
-            .expect("scan the selection");
+        let bd =
+            BdRom::open_with(&root, ScanMode::Full, Some(&selected), &mut collect, &never_cancel())
+                .expect("scan the selection");
         assert_eq!(bd.playlists.len(), 2);
         assert!(events.iter().all(|(file, _, total)| file == "00000.M2TS" && *total == 1000));
         assert_eq!(events.last().map(|(_, done, _)| *done), Some(1000));
@@ -4263,9 +4320,14 @@ mod tests {
         // healthy media.
         let mut last_total = 0;
         let mut observe = |p: ScanProgress<'_>| last_total = p.total;
-        let report =
-            BdRom::open_resilient_with(&root, ScanMode::Full, Some(&selected), &mut observe)
-                .expect("resilient scan with progress");
+        let report = BdRom::open_resilient_with(
+            &root,
+            ScanMode::Full,
+            Some(&selected),
+            &mut observe,
+            &never_cancel(),
+        )
+        .expect("resilient scan with progress");
         assert!(report.errors.is_empty());
         assert_eq!(last_total, 1000);
         assert_eq!(report.bdrom, bd);
@@ -4274,10 +4336,134 @@ mod tests {
         let mut fired = false;
         let mut observe = |_: ScanProgress<'_>| fired = true;
         drop(
-            BdRom::open_with(&root, ScanMode::Metadata, None, &mut observe)
+            BdRom::open_with(&root, ScanMode::Metadata, None, &mut observe, &never_cancel())
                 .expect("metadata-only scan"),
         );
         assert!(!fired);
+    }
+
+    // ── cooperative cancellation ─────────────────────────────────────────────
+
+    /// The two-playlist / two-stream-file on-disk fixture the cancellation
+    /// tests scan (the same shape the progress test uses).
+    fn cancel_fixture() -> TempDisc {
+        TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 2_700_000, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00000.clpi", clpi(&[(0x1011, 0x1B, [0x63, 0x30, 0, 0])])),
+                ("BDMV/STREAM/00000.m2ts", vec![0_u8; 1000]),
+                ("BDMV/PLAYLIST/00001.mpls", mpls("00001", 2_700_000, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00001.clpi", clpi(&[(0x1011, 0x1B, [0x63, 0x30, 0, 0])])),
+                ("BDMV/STREAM/00001.m2ts", vec![0_u8; 500]),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_cancel_flag_tripped_by_the_progress_callback_aborts_the_scan() {
+        let disc = cancel_fixture();
+        let root = FsDir::new(disc.root.clone());
+        // Baseline: the uncancelled full scan's complete event trail.
+        let mut baseline: Vec<u64> = Vec::new();
+        let mut collect = |p: ScanProgress<'_>| baseline.push(p.done);
+        drop(
+            BdRom::open_with(&root, ScanMode::Full, None, &mut collect, &never_cancel())
+                .expect("the uncancelled scan"),
+        );
+        // Cancelling on the FIRST event: the scan aborts with `ScanCancelled`
+        // and stops emitting promptly — the full pass's event trail and the
+        // file-boundary snaps never happen, proving an early exit rather than
+        // a scan run to completion.
+        let cancel = AtomicBool::new(false);
+        let mut events: Vec<u64> = Vec::new();
+        let mut trip = |p: ScanProgress<'_>| {
+            events.push(p.done);
+            cancel.store(true, Ordering::Relaxed);
+        };
+        let err = BdRom::open_with(&root, ScanMode::Full, None, &mut trip, &cancel)
+            .expect_err("the cancelled scan errors");
+        assert_eq!(err.to_string(), "scan cancelled");
+        assert!(events.len() < baseline.len(), "the cancelled scan must stop early");
+        assert!(events.len() <= 3, "the event trail stops at the in-flight chunk");
+
+        // The resilient scan aborts identically: cancellation is the caller's
+        // abort, not disc damage to collect, so no partial report escapes.
+        let cancel = AtomicBool::new(false);
+        let mut trip = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+        let err = BdRom::open_resilient_with(&root, ScanMode::Full, None, &mut trip, &cancel)
+            .expect_err("the cancelled resilient scan errors");
+        assert_eq!(err.to_string(), "scan cancelled");
+    }
+
+    #[test]
+    fn a_preset_cancel_flag_aborts_the_packet_scan_before_any_progress() {
+        let disc = cancel_fixture();
+        let root = FsDir::new(disc.root.clone());
+        let cancel = AtomicBool::new(true);
+        // Every packet-scanning mode aborts on the quick pass's first chunk
+        // read, before the full pass ever fires the callback.
+        for mode in [ScanMode::Codecs, ScanMode::Full] {
+            let mut fired = false;
+            let mut observe = |_: ScanProgress<'_>| fired = true;
+            let err = BdRom::open_with(&root, mode, None, &mut observe, &cancel)
+                .expect_err("the pre-cancelled scan errors");
+            assert_eq!(err.to_string(), "scan cancelled");
+            assert!(!fired, "no progress escapes a pre-cancelled scan");
+        }
+        let mut resilient_fired = false;
+        let mut observe = |_: ScanProgress<'_>| resilient_fired = true;
+        let err = BdRom::open_resilient_with(&root, ScanMode::Full, None, &mut observe, &cancel)
+            .expect_err("the pre-cancelled resilient scan errors");
+        assert_eq!(err.to_string(), "scan cancelled");
+        assert!(!resilient_fired, "no progress escapes the resilient abort either");
+        // Metadata reads no packets, so the flag is never observed — the
+        // bounded structural scan completes as if no flag existed.
+        let mut metadata_fired = false;
+        let mut observe = |_: ScanProgress<'_>| metadata_fired = true;
+        let bd = BdRom::open_with(&root, ScanMode::Metadata, None, &mut observe, &cancel)
+            .expect("the metadata scan never polls the flag");
+        assert!(!metadata_fired, "a metadata scan reads no packets");
+        assert_eq!(bd.playlists.len(), 2);
+    }
+
+    #[test]
+    fn a_cancelled_resilient_scan_records_no_per_file_errors() {
+        // Cancellation mid-pass aborts the RESILIENT `scan_stream_files` with
+        // nothing recorded — a cancel never misreports the in-flight (or any
+        // later) file as damaged.
+        let trip = Trip::new(usize::MAX);
+        let file = |name: &str| MockFile {
+            name: name.to_owned(),
+            extension: ".m2ts".to_owned(),
+            bytes: vec![0_u8; 200],
+            trip: trip.clone(),
+            fail_read: false,
+        };
+        let stream_dir = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: vec![file("00000.m2ts"), file("00001.m2ts")],
+            trip,
+        };
+        let mut playlists =
+            vec![TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap()];
+        let cancel = AtomicBool::new(false);
+        let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+        let mut progress = Progress { callback: &mut arm, done: 0, total: 400, cancel: &cancel };
+        let mut errors = Vec::new();
+        let result = scan_stream_files(
+            Some(&stream_dir),
+            None,
+            &mut playlists,
+            None,
+            &mut progress,
+            &mut Sink { errors: Some(&mut errors) },
+            false,
+        );
+        let message = result.err().map(|err| err.to_string());
+        assert_eq!(message.as_deref(), Some("scan cancelled"));
+        assert!(errors.is_empty(), "cancellation is never a per-file failure");
     }
 
     // ── the resilient (collect-and-continue) scan ────────────────────────────
