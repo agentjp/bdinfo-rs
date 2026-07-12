@@ -9,7 +9,10 @@
 //! `view` is a thin projection of [`Flow`] onto widgets dressed in the
 //! "Projection Booth" identity ([`theme`] + [`ui`]). The only impure thing the
 //! shell owns is the measured-scan worker thread and the channel that streams its
-//! progress back as messages, plus the OS-theme subscription.
+//! progress back as messages, plus the OS-theme and file-drop subscriptions.
+//! A disc can arrive three ways — the pickers, a drag-and-drop onto the window,
+//! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
+//! open flow.
 #![forbid(unsafe_code)]
 // The window is a leaf binary, not a library: a Windows release build hides the
 // console so launching it does not flash a terminal. No effect on other targets.
@@ -76,18 +79,25 @@ fn main() -> iced::Result {
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first
-/// frame matches the desktop's light/dark setting. In a **debug** build it also
-/// applies the screenshot-harness environment hooks (see [`debug_boot`]).
+/// frame matches the desktop's light/dark setting. A command-line path
+/// (`bdinfo-rs-gui <path>`, `BDInfo`'s `args[0]`) opens at boot through the same
+/// classify-and-list road a drop takes — read from the OS-native argv, so a
+/// non-UTF-8 path survives intact. In a **debug** build it also applies the
+/// screenshot-harness environment hooks (see [`debug_boot`]).
 fn boot() -> (App, Task<Message>) {
     let app = App::default();
-    let theme = iced::system::theme().map(Message::OsTheme);
-    boot_with(app, theme)
+    let mut tasks = vec![iced::system::theme().map(Message::OsTheme)];
+    if let Some(path) = std::env::args_os().nth(1) {
+        tasks.push(Task::done(Message::OpenPath(PathBuf::from(path))));
+    }
+    boot_with(app, Task::batch(tasks))
 }
 
-/// Release: boot with just the OS-theme probe — no environment hooks.
+/// Release: boot with just the base tasks (theme probe + any argv open) — no
+/// environment hooks.
 #[cfg(not(debug_assertions))]
-fn boot_with(app: App, theme: Task<Message>) -> (App, Task<Message>) {
-    (app, theme)
+fn boot_with(app: App, base: Task<Message>) -> (App, Task<Message>) {
+    (app, base)
 }
 
 /// Debug: layer the screenshot-harness hooks over the boot. `BDINFO_GUI_THEME`
@@ -95,7 +105,7 @@ fn boot_with(app: App, theme: Task<Message>) -> (App, Task<Message>) {
 /// auto-open a disc, so `scripts/gui-shoot.ps1` can drive the real window to a
 /// known state and capture it. Compiled out of every release build.
 #[cfg(debug_assertions)]
-fn boot_with(mut app: App, theme: Task<Message>) -> (App, Task<Message>) {
+fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
     if let Ok(pref) = std::env::var("BDINFO_GUI_THEME") {
         match pref.as_str() {
             "light" => app.theme_pref = ThemePref::Light,
@@ -109,7 +119,7 @@ fn boot_with(mut app: App, theme: Task<Message>) -> (App, Task<Message>) {
     let iso = std::env::var("BDINFO_GUI_ISO")
         .ok()
         .map(|path| Task::done(Message::IsoPicked(Some(PathBuf::from(path)))));
-    let mut tasks = vec![theme];
+    let mut tasks = vec![base];
     tasks.extend(folder);
     tasks.extend(iso);
     (app, Task::batch(tasks))
@@ -188,6 +198,12 @@ struct App {
     /// (for delta→weight), and the last cursor x (`None` until the first move) so
     /// successive moves apply a delta.
     col_drag: Option<(ColGrid, usize, f32, Option<f32>)>,
+    /// Whether a drag-and-drop payload is held over the window — set by the
+    /// first `FileHovered`, cleared by the drop or the hover leaving. Doubles
+    /// as the drop-batch guard: only the drop that takes the flag opens (the
+    /// FIRST item of a multi-file drop, `BDInfo`'s behaviour — winit delivers
+    /// one `FileDropped` per item, always after their hover events).
+    drop_hover: bool,
 }
 
 impl Default for App {
@@ -209,6 +225,7 @@ impl Default for App {
             grid_w: [30.0, 7.0, 19.0, 21.0, 21.0],
             codec_w: [22.0, 10.0, 10.0, 56.0],
             col_drag: None,
+            drop_hover: false,
         }
     }
 }
@@ -359,6 +376,15 @@ enum Message {
     FolderPicked(Option<PathBuf>),
     /// The `.iso` file dialog closed.
     IsoPicked(Option<PathBuf>),
+    /// A path arrived from outside the pickers (the boot argument) — classify
+    /// it and open like a pick, or land in the friendly failure state.
+    OpenPath(PathBuf),
+    /// A drag-and-drop payload entered the window (one event per held file).
+    FileHovered,
+    /// A hovered file was dropped onto the window — open it like a pick.
+    FileDropped(PathBuf),
+    /// The hovered file(s) left the window without dropping.
+    FilesHoveredLeft,
     /// The structural scan for `input` finished (or failed with a message).
     Listed { input: Input, result: Result<Structural, String> },
     /// A table row's scan checkbox toggled (0-based table position).
@@ -475,6 +501,24 @@ impl App {
             }
             Message::FolderPicked(Some(path)) => self.begin_listing(Input::Folder(path)),
             Message::IsoPicked(Some(path)) => self.begin_listing(Input::Iso(path)),
+            Message::OpenPath(path) => self.open_path(path),
+            Message::FileHovered => {
+                self.drop_hover = true;
+                Task::none()
+            }
+            Message::FilesHoveredLeft => {
+                self.drop_hover = false;
+                Task::none()
+            }
+            Message::FileDropped(path) => {
+                // Only the drop that takes the hover flag opens — the first item
+                // of a multi-file drop; its companions arrive with the flag gone.
+                if std::mem::take(&mut self.drop_hover) {
+                    self.open_path(path)
+                } else {
+                    Task::none()
+                }
+            }
             Message::Listed { input, result } => self.on_listed(&input, result),
             Message::RowToggled(index) => {
                 self.flow.toggle(index);
@@ -614,6 +658,19 @@ impl App {
     /// window is not redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
+        // Drag-and-drop, surfaced by winit as window events on every desktop
+        // platform (Wayland excepted — winit does not implement file drops
+        // there). Always on: the busy rule is applied where the drop lands.
+        subs.push(iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Window(iced::window::Event::FileHovered(_)) => Some(Message::FileHovered),
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
+            iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                Some(Message::FilesHoveredLeft)
+            }
+            _ => None,
+        }));
         if self.flow.stage() == Stage::Listing {
             subs.push(iced::window::frames().map(|_| Message::Tick));
         }
@@ -680,6 +737,30 @@ impl App {
             self.notice = Some(self.scan_outcome());
         }
         Task::none()
+    }
+
+    /// Opens `path` — a dropped item or the boot argument — through the same
+    /// classify-and-list road the pickers take ([`Input::classify`], the one
+    /// Tier-A classifier both roads share). Ignored while a scan is in flight,
+    /// the same rule that disables the Source buttons; a path that is neither a
+    /// directory nor a `.iso` file lands in the same friendly failure state as
+    /// a bad pick, with the loaded-disc chrome cleared like any new open.
+    fn open_path(&mut self, path: PathBuf) -> Task<Message> {
+        if self.is_busy() {
+            return Task::none();
+        }
+        match Input::classify(path) {
+            Ok(input) => self.begin_listing(input),
+            Err(message) => {
+                self.status = None;
+                self.showing_report = false;
+                self.notice = None;
+                self.hovered = None;
+                self.pane_selection = None;
+                self.flow = std::mem::take(&mut self.flow).open_failed(message);
+                Task::none()
+            }
+        }
     }
 
     /// Begins the initial scan of `input` on iced's executor — the bounded
@@ -1263,19 +1344,25 @@ impl App {
             _ => 0.0,
         };
 
-        // The lead line: a transient status, else the current scan file, else a hint.
-        let lead = self.status.clone().unwrap_or_else(|| match self.flow.stage() {
-            Stage::Scanning => progress.map_or_else(
-                || "Starting scan…".to_owned(),
-                |pr| format!("Scanning {}…", pr.file()),
-            ),
-            Stage::Listing => "Scanning disc…".to_owned(),
-            Stage::Reported => "Report ready.".to_owned(),
-            Stage::Listed if self.flow.selected_count() > 0 => "Ready to scan.".to_owned(),
-            // Nothing checked still scans — the whole disc, like BDInfo.
-            Stage::Listed => "Ready to scan the whole disc.".to_owned(),
-            _ => String::new(),
-        });
+        // The lead line: the drop affordance while a file is held over the
+        // window (and a drop would be accepted), else a transient status, else
+        // the current scan file, else a hint.
+        let lead = if self.drop_hover && !self.is_busy() {
+            "Drop to open the disc folder or .iso image.".to_owned()
+        } else {
+            self.status.clone().unwrap_or_else(|| match self.flow.stage() {
+                Stage::Scanning => progress.map_or_else(
+                    || "Starting scan…".to_owned(),
+                    |pr| format!("Scanning {}…", pr.file()),
+                ),
+                Stage::Listing => "Scanning disc…".to_owned(),
+                Stage::Reported => "Report ready.".to_owned(),
+                Stage::Listed if self.flow.selected_count() > 0 => "Ready to scan.".to_owned(),
+                // Nothing checked still scans — the whole disc, like BDInfo.
+                Stage::Listed => "Ready to scan the whole disc.".to_owned(),
+                _ => String::new(),
+            })
+        };
 
         let times = progress.map_or_else(String::new, |pr| {
             format!("Elapsed {}   ·   Remaining {}", pr.elapsed_hms(), pr.remaining_hms())
