@@ -1,0 +1,537 @@
+//! Tier A — the persistent GUI configuration.
+//!
+//! The app's small memory between launches: the window geometry, the last
+//! opened source path, and the theme preference, stored as a flat
+//! `key = value` text file (hand-rolled parser + writer, pure std — this
+//! project hand-rolled a UDF reader; a key-value file is squarely in its
+//! idiom). The store is a **convenience, never a dependency**: unknown keys
+//! are ignored (a newer version's file loads fine), malformed lines and a
+//! missing / corrupt / unreadable file all degrade to defaults silently, and
+//! a failed save is swallowed — persistence must never crash or block the
+//! app. Config content is local state, not disc data, but the same
+//! hostile-input discipline applies to parsing it: no panics, no raw
+//! indexing, values validated before use.
+//!
+//! The pure pieces — [`Settings::parse`] / [`Settings::render`] (a proptested
+//! round-trip) and the per-platform path helpers — are the Tier-A surface;
+//! [`load`] / [`save`] are the thin best-effort IO wrappers over them.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+/// The config file's key for the last opened source path.
+const KEY_LAST_PATH: &str = "last-path";
+/// The config file's key for the theme preference.
+const KEY_THEME: &str = "theme";
+/// The config file's keys for the window's logical size.
+const KEY_WINDOW_WIDTH: &str = "window-width";
+/// See [`KEY_WINDOW_WIDTH`].
+const KEY_WINDOW_HEIGHT: &str = "window-height";
+/// The config file's keys for the window's logical position.
+const KEY_WINDOW_X: &str = "window-x";
+/// See [`KEY_WINDOW_X`].
+const KEY_WINDOW_Y: &str = "window-y";
+
+/// The largest believable window axis, in logical pixels — a stored size or
+/// position beyond this (a corrupt file, a minimized window's fake Win32
+/// `-32000` position) is dropped rather than restored.
+const MAX_AXIS: f32 = 16_384.0;
+
+/// The persisted theme preference — the storable form of the shell's
+/// System / Light / Dark cycle.
+///
+/// The shell maps this onto its own `ThemePref`, which carries the
+/// iced-facing resolve logic. Defaults to following the OS, exactly like a
+/// fresh install.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ThemeChoice {
+    /// Follow the operating system's light/dark setting.
+    #[default]
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
+impl ThemeChoice {
+    /// The stored token for this choice.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// Parses a stored token — `None` for anything unrecognised (the caller
+    /// keeps the default; a corrupt value never fails the load).
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
+/// Everything the GUI persists between launches — plain data, one field per
+/// remembered fact.
+///
+/// `Default` reproduces today's fresh-launch behaviour exactly (no geometry,
+/// no path, follow-the-OS theme), so a missing or corrupt config file
+/// changes nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Settings {
+    /// The window's logical size, `(width, height)`.
+    pub window_size: Option<(f32, f32)>,
+    /// The window's logical outer position, `(x, y)` — absent on Wayland,
+    /// which has no global window positions.
+    pub window_pos: Option<(f32, f32)>,
+    /// The last successfully opened source (disc folder or `.iso`).
+    pub last_path: Option<PathBuf>,
+    /// The theme preference.
+    pub theme: ThemeChoice,
+}
+
+impl Settings {
+    /// Parses the config file's text. Tolerant by design: unknown keys are
+    /// ignored (forward compatibility), malformed lines are skipped, and an
+    /// out-of-range or non-finite number is dropped — whatever the bytes,
+    /// this returns a usable value and never panics.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let mut settings = Self::default();
+        let (mut width, mut height, mut x, mut y) = (None, None, None, None);
+        for line in text.lines() {
+            let Some((raw_key, raw_value)) = line.split_once('=') else {
+                continue; // not a `key = value` line — skipped
+            };
+            let key = raw_key.trim();
+            // The writer puts exactly one space after `=`; strip exactly that
+            // one, so a value's own leading/trailing spaces round-trip.
+            let value = raw_value.strip_prefix(' ').unwrap_or(raw_value);
+            match key {
+                // A path with a stray carriage return could never be
+                // re-rendered onto one line, so it is treated as corrupt.
+                KEY_LAST_PATH if !value.is_empty() && !value.contains('\r') => {
+                    settings.last_path = Some(PathBuf::from(value));
+                }
+                KEY_THEME => {
+                    if let Some(theme) = ThemeChoice::parse(value.trim()) {
+                        settings.theme = theme;
+                    }
+                }
+                KEY_WINDOW_WIDTH => width = parse_axis(value),
+                KEY_WINDOW_HEIGHT => height = parse_axis(value),
+                KEY_WINDOW_X => x = parse_axis(value),
+                KEY_WINDOW_Y => y = parse_axis(value),
+                _ => {} // unknown key — a newer version's setting; ignored
+            }
+        }
+        // Geometry is restored only whole: a lone width (or a width whose
+        // height was corrupt) restores nothing rather than something skewed.
+        settings.window_size = width.zip(height).filter(|&(w, h)| w >= 1.0 && h >= 1.0);
+        settings.window_pos = x.zip(y);
+        settings
+    }
+
+    /// Renders the config file's text: one `key = value` line per stored
+    /// fact, sorted by key (deterministic output), `\n` endings. Absent
+    /// fields write no line, and a value that cannot live on one line (a
+    /// non-UTF-8 or control-character path) is simply not persisted.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut entries: Vec<(&str, String)> = vec![(KEY_THEME, self.theme.as_str().to_owned())];
+        if let Some(path) = self.last_path.as_deref().and_then(Path::to_str)
+            && !path.is_empty()
+            && !path.contains(['\n', '\r'])
+        {
+            entries.push((KEY_LAST_PATH, path.to_owned()));
+        }
+        if let Some((width, height)) = self.window_size {
+            entries.push((KEY_WINDOW_WIDTH, width.to_string()));
+            entries.push((KEY_WINDOW_HEIGHT, height.to_string()));
+        }
+        if let Some((x, y)) = self.window_pos {
+            entries.push((KEY_WINDOW_X, x.to_string()));
+            entries.push((KEY_WINDOW_Y, y.to_string()));
+        }
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut out = String::new();
+        for (key, value) in entries {
+            out.push_str(key);
+            out.push_str(" = ");
+            out.push_str(&value);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Parses one geometry number: finite and within the believable range, else
+/// `None` (dropped, never clamped into pretend-validity).
+fn parse_axis(value: &str) -> Option<f32> {
+    value.trim().parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() <= MAX_AXIS)
+}
+
+// ── where the file lives ─────────────────────────────────────────────────────
+
+/// The directory + file name under the platform's config base.
+const APP_DIR: &str = "bdinfo-rs";
+/// See [`APP_DIR`].
+const FILE_NAME: &str = "gui.conf";
+
+/// Windows: `%APPDATA%\bdinfo-rs\gui.conf`. `None` without a usable
+/// `APPDATA` (run without persistence).
+#[must_use]
+pub fn windows_config_path(appdata: Option<&OsStr>) -> Option<PathBuf> {
+    let base = appdata.filter(|v| !v.is_empty())?;
+    Some(Path::new(base).join(APP_DIR).join(FILE_NAME))
+}
+
+/// macOS: `~/Library/Application Support/bdinfo-rs/gui.conf`. `None` without
+/// a usable `HOME`.
+#[must_use]
+pub fn macos_config_path(home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = home.filter(|v| !v.is_empty())?;
+    Some(Path::new(base).join("Library").join("Application Support").join(APP_DIR).join(FILE_NAME))
+}
+
+/// Linux (and other unix): `$XDG_CONFIG_HOME/bdinfo-rs/gui.conf`, falling
+/// back to `~/.config/bdinfo-rs/gui.conf`.
+///
+/// Per the XDG base-directory spec a relative `XDG_CONFIG_HOME` is invalid
+/// and ignored (checked with [`Path::has_root`], which equals `is_absolute`
+/// on unix and keeps this helper testable on any host). `None` without a
+/// usable base.
+#[must_use]
+pub fn unix_config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(base) =
+        xdg_config_home.filter(|v| !v.is_empty()).map(Path::new).filter(|p| p.has_root())
+    {
+        return Some(base.join(APP_DIR).join(FILE_NAME));
+    }
+    let base = home.filter(|v| !v.is_empty())?;
+    Some(Path::new(base).join(".config").join(APP_DIR).join(FILE_NAME))
+}
+
+/// The per-platform config file location, resolved from std env vars only —
+/// `None` when no base directory can be resolved (the app then runs without
+/// persistence).
+#[must_use]
+pub fn config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_config_path(std::env::var_os("APPDATA").as_deref())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_config_path(std::env::var_os("HOME").as_deref())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        unix_config_path(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+}
+
+// ── best-effort IO ───────────────────────────────────────────────────────────
+
+/// Loads the settings from the platform config path — defaults when there is
+/// no path, no file, or no readable content. Called once at boot.
+#[must_use]
+pub fn load() -> Settings {
+    config_path().as_deref().map_or_else(Settings::default, load_from)
+}
+
+/// Loads the settings from `path`. Any failure — missing file, permission
+/// error, garbage bytes — degrades to defaults; invalid UTF-8 is read
+/// lossily so the intact lines still count.
+#[must_use]
+pub fn load_from(path: &Path) -> Settings {
+    std::fs::read(path).map_or_else(
+        |_| Settings::default(),
+        |bytes| Settings::parse(&String::from_utf8_lossy(&bytes)),
+    )
+}
+
+/// Saves the settings to the platform config path, best-effort.
+///
+/// No resolvable path means no persistence, and a write failure is swallowed
+/// (an unwritable disk must not break the app — the store is a convenience).
+pub fn save(settings: &Settings) {
+    if let Some(path) = config_path() {
+        save_to(&path, settings);
+    }
+}
+
+/// Saves the settings to `path`, creating the parent directory on first save.
+/// Best-effort: every IO failure is swallowed.
+pub fn save_to(path: &Path, settings: &Settings) {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, settings.render());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    use super::{Settings, ThemeChoice};
+
+    #[test]
+    fn defaults_are_a_fresh_launch() {
+        let settings = Settings::default();
+        assert_eq!(settings.window_size, None);
+        assert_eq!(settings.window_pos, None);
+        assert_eq!(settings.last_path, None);
+        assert_eq!(settings.theme, ThemeChoice::System);
+    }
+
+    #[test]
+    fn a_full_file_round_trips() {
+        let settings = Settings {
+            window_size: Some((880.0, 960.5)),
+            window_pos: Some((-120.25, 64.0)),
+            last_path: Some(PathBuf::from(r"D:\rips\MY_DISC")),
+            theme: ThemeChoice::Dark,
+        };
+        let text = settings.render();
+        assert_eq!(Settings::parse(&text), settings);
+        // Keys come out sorted — deterministic output.
+        let keys: Vec<&str> =
+            text.lines().filter_map(|line| line.split_once(" = ").map(|(k, _)| k)).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let text = "future-key = 42\ntheme = light\nchart-style = bars\n";
+        let settings = Settings::parse(text);
+        assert_eq!(settings.theme, ThemeChoice::Light);
+        assert_eq!(settings.window_size, None);
+    }
+
+    #[test]
+    fn malformed_lines_degrade_to_defaults() {
+        // No panic and no partial nonsense from any of these shapes.
+        let text = "no separator here\n= empty key\nwindow-width = not a number\n\
+                    window-height = \ntheme = purple\nlast-path = \n";
+        assert_eq!(Settings::parse(text), Settings::default());
+        assert_eq!(Settings::parse(""), Settings::default());
+        assert_eq!(Settings::parse("\u{0}\u{FFFD}garbage\u{7F}"), Settings::default());
+    }
+
+    #[test]
+    fn geometry_is_restored_only_whole_and_sane() {
+        // A lone width restores nothing.
+        assert_eq!(Settings::parse("window-width = 800\n").window_size, None);
+        // Non-finite and out-of-range axes are dropped, taking the pair with them.
+        assert_eq!(Settings::parse("window-width = NaN\nwindow-height = 600\n").window_size, None);
+        assert_eq!(Settings::parse("window-width = inf\nwindow-height = 600\n").window_size, None);
+        assert_eq!(
+            Settings::parse("window-width = 99999\nwindow-height = 600\n").window_size,
+            None
+        );
+        // A sub-pixel size is nonsense; Win32's minimized -32000 position is too.
+        assert_eq!(Settings::parse("window-width = 0\nwindow-height = 600\n").window_size, None);
+        assert_eq!(Settings::parse("window-x = -32000\nwindow-y = -32000\n").window_pos, None);
+        // A negative position (a monitor left of the primary) is legitimate.
+        assert_eq!(
+            Settings::parse("window-x = -1920\nwindow-y = 32\n").window_pos,
+            Some((-1920.0, 32.0))
+        );
+    }
+
+    #[test]
+    fn the_theme_tokens_round_trip_and_reject_junk() {
+        for theme in [ThemeChoice::System, ThemeChoice::Light, ThemeChoice::Dark] {
+            assert_eq!(ThemeChoice::parse(theme.as_str()), Some(theme));
+        }
+        assert_eq!(ThemeChoice::parse("Dark"), None); // tokens are exact
+        assert_eq!(ThemeChoice::parse(""), None);
+    }
+
+    #[test]
+    fn a_path_value_keeps_its_spaces_and_equals_signs() {
+        // Split on the FIRST `=`: a path containing `=` survives, and so do
+        // leading/trailing spaces (one separator space belongs to the writer).
+        let settings = Settings {
+            last_path: Some(PathBuf::from(" /discs/name = weird/BDMV ")),
+            ..Settings::default()
+        };
+        assert_eq!(Settings::parse(&settings.render()), settings);
+    }
+
+    #[test]
+    fn an_unrepresentable_path_is_not_persisted() {
+        // A newline could never live on one `key = value` line; the writer
+        // drops the entry rather than corrupting the file.
+        let settings = Settings { last_path: Some(PathBuf::from("a\nb")), ..Settings::default() };
+        assert_eq!(Settings::parse(&settings.render()).last_path, None);
+    }
+
+    // ── the per-platform path helpers (pure, host-independent) ──────────────
+
+    /// An env-var value as the helpers take it (they all accept an `Option`).
+    #[expect(clippy::unnecessary_wraps, reason = "mirrors the Option-taking helper signatures")]
+    fn os(value: &str) -> Option<&OsStr> {
+        Some(OsStr::new(value))
+    }
+
+    #[test]
+    fn windows_path_hangs_off_appdata() {
+        let path =
+            super::windows_config_path(os(r"C:\Users\a\AppData\Roaming")).expect("a base resolves");
+        assert_eq!(path, Path::new(r"C:\Users\a\AppData\Roaming").join("bdinfo-rs/gui.conf"));
+        assert_eq!(super::windows_config_path(None), None);
+        assert_eq!(super::windows_config_path(os("")), None);
+    }
+
+    #[test]
+    fn macos_path_hangs_off_home() {
+        let path = super::macos_config_path(os("/Users/a")).expect("a base resolves");
+        assert_eq!(
+            path,
+            Path::new("/Users/a").join("Library/Application Support/bdinfo-rs/gui.conf")
+        );
+        assert_eq!(super::macos_config_path(None), None);
+        assert_eq!(super::macos_config_path(os("")), None);
+    }
+
+    #[test]
+    fn unix_path_prefers_a_rooted_xdg_config_home() {
+        assert_eq!(
+            super::unix_config_path(os("/xdg"), os("/home/a")),
+            Some(Path::new("/xdg").join("bdinfo-rs/gui.conf"))
+        );
+        // A relative XDG_CONFIG_HOME is invalid per the spec — fall through.
+        assert_eq!(
+            super::unix_config_path(os("rel/config"), os("/home/a")),
+            Some(Path::new("/home/a").join(".config/bdinfo-rs/gui.conf"))
+        );
+        assert_eq!(
+            super::unix_config_path(None, os("/home/a")),
+            Some(Path::new("/home/a").join(".config/bdinfo-rs/gui.conf"))
+        );
+        assert_eq!(super::unix_config_path(os(""), None), None);
+    }
+
+    // ── the best-effort IO wrappers ──────────────────────────────────────────
+
+    /// A scratch path under the target dir (unique per test).
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/settings-tests");
+        dir.join(name)
+    }
+
+    #[test]
+    fn save_then_load_round_trips_and_creates_the_directory() {
+        let path = scratch("round-trip/gui.conf");
+        let _ = std::fs::remove_dir_all(path.parent().expect("a parent"));
+        let settings = Settings {
+            window_size: Some((700.0, 800.0)),
+            theme: ThemeChoice::Light,
+            ..Settings::default()
+        };
+        super::save_to(&path, &settings);
+        assert_eq!(super::load_from(&path), settings);
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_file_loads_as_defaults() {
+        assert_eq!(super::load_from(Path::new("definitely/not/here.conf")), Settings::default());
+        let path = scratch("corrupt.conf");
+        super::save_to(&path, &Settings::default()); // ensure the dir exists
+        std::fs::write(&path, [0xFF, 0xFE, 0x00, b'\n', 0x80, 0x81]).expect("scratch write");
+        assert_eq!(super::load_from(&path), Settings::default());
+        // Invalid UTF-8 around an intact line still yields that line.
+        std::fs::write(&path, b"\xFF\xFE\ntheme = dark\n\x80").expect("scratch write");
+        assert_eq!(super::load_from(&path).theme, ThemeChoice::Dark);
+    }
+
+    #[test]
+    fn an_unwritable_destination_is_swallowed() {
+        // The parent is a FILE, so neither create_dir_all nor write can
+        // succeed — save_to must still return without error.
+        let blocker = scratch("blocker");
+        super::save_to(&blocker, &Settings::default()); // creates dir + file
+        super::save_to(&blocker.join("child.conf"), &Settings::default());
+    }
+
+    mod prop {
+        use std::path::PathBuf;
+
+        use proptest::prelude::*;
+
+        use super::super::{MAX_AXIS, Settings, ThemeChoice};
+
+        /// A believable size axis (whatever a real resize can produce).
+        fn size_axis() -> impl Strategy<Value = f32> {
+            1.0f32..=MAX_AXIS
+        }
+
+        /// A believable position axis (negative = a monitor left of primary).
+        fn pos_axis() -> impl Strategy<Value = f32> {
+            -MAX_AXIS..=MAX_AXIS
+        }
+
+        /// A representable stored path: non-empty valid Unicode without line
+        /// breaks (a real path; `\r`/`\n` are the file format's one limit).
+        fn path_string() -> impl Strategy<Value = String> {
+            "[a-zA-Z0-9 ./\\\\:=_-]{1,60}"
+        }
+
+        fn theme() -> impl Strategy<Value = ThemeChoice> {
+            prop_oneof![
+                Just(ThemeChoice::System),
+                Just(ThemeChoice::Light),
+                Just(ThemeChoice::Dark)
+            ]
+        }
+
+        fn settings() -> impl Strategy<Value = Settings> {
+            (
+                proptest::option::of((size_axis(), size_axis())),
+                proptest::option::of((pos_axis(), pos_axis())),
+                proptest::option::of(path_string().prop_map(PathBuf::from)),
+                theme(),
+            )
+                .prop_map(|(window_size, window_pos, last_path, theme)| Settings {
+                    window_size,
+                    window_pos,
+                    last_path,
+                    theme,
+                })
+        }
+
+        proptest! {
+            // The store's core contract: everything written comes back
+            // exactly (floats included — Rust renders the shortest string
+            // that re-parses to the same value).
+            #[test]
+            fn every_settings_value_round_trips(settings in settings()) {
+                prop_assert_eq!(Settings::parse(&settings.render()), settings);
+            }
+
+            // Hostile-input discipline: ANY text parses without panicking,
+            // and what it parses to is stable through a render cycle (so a
+            // partially-salvaged file re-saves losslessly).
+            #[test]
+            fn any_text_parses_and_restabilizes(text in any::<String>()) {
+                let parsed = Settings::parse(&text);
+                prop_assert_eq!(Settings::parse(&parsed.render()), parsed);
+            }
+        }
+    }
+}
