@@ -179,6 +179,9 @@ struct App {
     /// The row the cursor is currently over — one `(region, index)` across all
     /// three panes, so the whole row (not a sub-widget) lifts on hover.
     hovered: Option<(Region, usize)>,
+    /// The sortable playlist header cell the cursor is over — its hover wash
+    /// is the sort-click affordance.
+    hovered_header: Option<SortColumn>,
     /// The clicked (selected) row in a lower pane — the anchor a later
     /// right-click "copy line" acts on. `None` until a Stream File / Codec row is
     /// clicked; reset when the active playlist changes.
@@ -219,6 +222,7 @@ impl Default for App {
             showing_report: false,
             notice: None,
             hovered: None,
+            hovered_header: None,
             pane_selection: None,
             pulse: 0,
             panes: default_panes(),
@@ -401,8 +405,14 @@ enum Message {
     /// anchor the Ctrl+C copy acts on).
     PaneRowPressed(Region, usize),
     /// A playlist-table column header was clicked — sort by that column
-    /// (first click ascending, a second click flips).
+    /// (ascending first — descending when the rows already read ascending —
+    /// and a repeat click flips).
     SortBy(SortColumn),
+    /// The cursor entered a sortable playlist header cell.
+    HeaderHovered(SortColumn),
+    /// The cursor left a sortable playlist header cell — clears the hover if
+    /// that column still owns it.
+    HeaderUnhovered(SortColumn),
     /// Ctrl+C (Cmd+C on macOS) — copy the highlighted row's file path.
     CopyPath,
     /// "Select all" pressed.
@@ -549,6 +559,8 @@ impl App {
                 self.flow.sort_by(column);
                 Task::none()
             }
+            Message::HeaderHovered(column) => self.on_header_hovered(column),
+            Message::HeaderUnhovered(column) => self.on_header_unhovered(column),
             Message::CopyPath => self.copy_path(),
             Message::SelectAll => {
                 self.flow.select_all();
@@ -775,6 +787,7 @@ impl App {
                 self.showing_report = false;
                 self.notice = None;
                 self.hovered = None;
+                self.hovered_header = None;
                 self.pane_selection = None;
                 self.flow = std::mem::take(&mut self.flow).open_failed(message);
                 Task::none()
@@ -792,6 +805,7 @@ impl App {
         self.showing_report = false;
         self.notice = None;
         self.hovered = None;
+        self.hovered_header = None;
         self.pane_selection = None;
         self.pulse = 0;
         self.flow = Flow::start_listing(input.clone());
@@ -885,6 +899,20 @@ impl App {
     fn activate_row(&mut self, index: usize) -> Task<Message> {
         self.flow.set_active(index);
         self.pane_selection = None;
+        Task::none()
+    }
+
+    /// Records the sortable header cell under the cursor (its hover wash).
+    fn on_header_hovered(&mut self, column: SortColumn) -> Task<Message> {
+        self.hovered_header = Some(column);
+        Task::none()
+    }
+
+    /// Clears the header hover if `column` still owns it.
+    fn on_header_unhovered(&mut self, column: SortColumn) -> Task<Message> {
+        if self.hovered_header == Some(column) {
+            self.hovered_header = None;
+        }
         Task::none()
     }
 
@@ -1259,7 +1287,7 @@ impl App {
             PLAYLIST_COLS,
             ColGrid::Shared,
             self.grid_w.to_vec(),
-            Some((PLAYLIST_SORT_COLS, self.flow.sort())),
+            Some((PLAYLIST_SORT_COLS, self.flow.sort(), self.hovered_header)),
         ))
         .width(Length::Fill)
         .height(Length::Fixed(ui::HEADER_H))
@@ -1546,12 +1574,15 @@ fn banner<'a>(p: Palette, kind: iced::Color, message: &str) -> Element<'a, Messa
         .into()
 }
 
-/// One header cell: a muted label in a fixed-width, aligned box.
+/// One header cell: a muted label in a fixed-width, aligned box. A sortable
+/// cell passes `hovered` while the cursor is over it, lifting it with the same
+/// wash the body rows use (the sort-click affordance).
 fn header_cell<'a>(
     p: Palette,
     label: String,
     width: Length,
     align: Horizontal,
+    hovered: bool,
 ) -> Element<'a, Message> {
     container(
         text(label)
@@ -1570,6 +1601,7 @@ fn header_cell<'a>(
     .align_y(Vertical::Center)
     .clip(true)
     .padding([0.0, ui::GAP_2])
+    .style(ui::header_surface(p, hovered))
     .into()
 }
 
@@ -1584,17 +1616,18 @@ fn header_cell<'a>(
 ///
 /// When `sort` names this column's [`SortColumn`], the label area becomes a
 /// click target dispatching that sort (the grab strip still wins on the right
-/// edge), and the active sort column carries an ↑/↓ marker after its label.
+/// edge), the active sort column carries an ↑/↓ marker after its label, and
+/// the cell lifts with the row-hover wash while the cursor is over it.
 fn header_col<'a>(
     p: Palette,
     label: &str,
     width: Length,
     align: Horizontal,
     grab: Option<(ColGrid, usize, f32)>,
-    sort: Option<(SortColumn, Option<Sort>)>,
+    sort: Option<(SortColumn, Option<Sort>, bool)>,
 ) -> Element<'a, Message> {
     let title = match sort {
-        Some((column, Some(active))) if active.column == column => {
+        Some((column, Some(active), _)) if active.column == column => {
             format!("{label} {}", if active.ascending { "↑" } else { "↓" })
         }
         _ => label.to_owned(),
@@ -1602,13 +1635,16 @@ fn header_col<'a>(
     // The (possibly clickable) label cell at `w` — built twice below, once per
     // layout (plain vs grab-overlaid).
     let cell = |w: Length| -> Element<'a, Message> {
-        let plain = header_cell(p, title.clone(), w, align);
         match sort {
-            Some((column, _)) => mouse_area(plain)
-                .interaction(iced::mouse::Interaction::Pointer)
-                .on_press(Message::SortBy(column))
-                .into(),
-            None => plain,
+            Some((column, _, hovered)) => {
+                mouse_area(header_cell(p, title.clone(), w, align, hovered))
+                    .interaction(iced::mouse::Interaction::Pointer)
+                    .on_press(Message::SortBy(column))
+                    .on_enter(Message::HeaderHovered(column))
+                    .on_exit(Message::HeaderUnhovered(column))
+                    .into()
+            }
+            None => header_cell(p, title.clone(), w, align, false),
         }
     };
     let Some((grid, boundary, cols_width)) = grab else {
@@ -1650,13 +1686,14 @@ fn header_col<'a>(
 /// scrollbar gutter — wrapped in `responsive` so the grabs know the column span.
 /// `weights` are the live column weights for `grid`. `sort_cols`, when given,
 /// makes every column a sort click target: the per-column [`SortColumn`] list
-/// (parallel to `cols`) plus the active sort for the direction marker.
+/// (parallel to `cols`), the active sort for the direction marker, and the
+/// hovered header column for the hover wash.
 fn resizable_header<'a>(
     p: Palette,
     cols: &'static [Col],
     grid: ColGrid,
     weights: Vec<f32>,
-    sort_cols: Option<(&'static [SortColumn], Option<Sort>)>,
+    sort_cols: Option<(&'static [SortColumn], Option<Sort>, Option<SortColumn>)>,
 ) -> Element<'a, Message> {
     responsive(move |size| {
         let cols_width = (size.width - ui::ROW_INDENT - ui::SCROLLBAR_GUTTER).max(1.0);
@@ -1669,8 +1706,9 @@ fn resizable_header<'a>(
         for (i, col) in cols.iter().enumerate() {
             let weight = weights.get(i).copied().unwrap_or(1.0);
             let grab = (i != last).then_some((grid, i, cols_width));
-            let sort = sort_cols
-                .and_then(|(columns, active)| columns.get(i).map(|&column| (column, active)));
+            let sort = sort_cols.and_then(|(columns, active, hovered)| {
+                columns.get(i).map(|&column| (column, active, hovered == Some(column)))
+            });
             row = row.push(header_col(p, col.label, fill(weight), col.align, grab, sort));
         }
         row.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER))).into()

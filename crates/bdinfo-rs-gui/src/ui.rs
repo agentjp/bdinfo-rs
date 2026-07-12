@@ -114,6 +114,19 @@ pub fn table_header(p: Palette) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A sortable header cell's own background: a lift while the cursor is over it
+/// — the click affordance, mirroring how the body rows hover — and transparent
+/// otherwise, so the header band's [`table_header`] shows through exactly like
+/// a non-sortable header. The wash is a translucent text-colour overlay (not
+/// the row `hover` fill, which is calibrated against the darker body surface
+/// and vanishes on the already-raised header strip).
+pub fn header_surface(p: Palette, hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: hovered.then(|| with_alpha(p.text, 0.07).into()),
+        ..container::Style::default()
+    }
+}
+
 /// The table's outer frame — a precise, **sharp-cornered** data grid (a
 /// deliberate contrast to the rounded chrome and buttons around it).
 pub fn table_frame(p: Palette) -> impl Fn(&Theme) -> container::Style {

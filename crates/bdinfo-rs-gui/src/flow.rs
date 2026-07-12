@@ -124,7 +124,7 @@ impl Listing {
     /// the rows, so the checked set (and thus [`scan_names`](Self::scan_names))
     /// is unchanged by any sorting.
     fn sort_by(&mut self, column: SortColumn) {
-        let sort = Sort::click(self.sort, column);
+        let sort = Sort::click(self.sort, column, &self.rows);
         self.sort = Some(sort);
         let order = model::sort_rows(&mut self.rows, sort);
         self.selection.permute(&order);
@@ -281,10 +281,12 @@ impl Flow {
     }
 
     /// Sorts the playlist table by `column` — `BDInfo`'s header-click rule:
-    /// the first click sorts ascending, a second click on the same column
-    /// flips to descending. Only while the table is editable ([`Stage::Listed`]
-    /// / [`Stage::Reported`]); the check-marks and the active-row highlight
-    /// travel with their playlists, so the scan set never changes.
+    /// the first click sorts ascending (descending when the rows already read
+    /// ascending by that column, so a click always visibly re-orders), and a
+    /// repeat click on the same column flips. Only while the table is editable
+    /// ([`Stage::Listed`] / [`Stage::Reported`]); the check-marks and the
+    /// active-row highlight travel with their playlists, so the scan set never
+    /// changes.
     pub fn sort_by(&mut self, column: SortColumn) {
         if let Some(listing) = self.editable_listing_mut() {
             listing.sort_by(column);
@@ -1026,8 +1028,10 @@ mod tests {
     fn a_measured_rebuild_reapplies_the_sort_and_keeps_the_checked_names() {
         let mut flow = listed3();
         flow.toggle(1); // check 00001
+        // The presentation order already reads ascending by name, so the first
+        // File click goes straight to descending: 00002, 00001, 00000.
         flow.sort_by(SortColumn::File);
-        flow.sort_by(SortColumn::File); // File descending: 00002, 00001, 00000
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::File, ascending: false }));
         assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
         flow.set_active(0); // highlight 00002
         let flow = flow.start_scanning(1);
