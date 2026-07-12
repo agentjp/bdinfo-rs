@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn selected_names_follow_table_order() {
-        let rows = playlist_rows(&disc());
+        let rows = playlist_rows(&disc(), &bdinfo_rs_core::bdrom::order::PlaylistFilter::default());
         // Table order is 00000, 00001 (group 1), then 00002 (group 2).
         let mut selection = Selection::new(rows.len());
         selection.toggle(2); // 00002

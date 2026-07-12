@@ -22,7 +22,7 @@ use std::time::Duration;
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
 use bdinfo_rs_core::report::text;
 
-use crate::model::{self, PlaylistRow, SelectableRow, Sort, SortColumn};
+use crate::model::{self, PlaylistRow, SelectableRow, Sort, SortColumn, ViewSettings};
 use crate::panes::{self, CodecRow, StreamFileRow};
 use crate::progress::ProgressModel;
 use crate::scan::{Input, Structural};
@@ -61,7 +61,11 @@ struct Listing {
     bdrom: BdRom,
     /// The detected-feature labels, in the core's fixed order.
     features: Vec<String>,
-    /// The standard filtered table rows; the selection parallels this list.
+    /// The table's presentation settings — the filter the rows were derived
+    /// under and the display toggles the cells render with. Retained so a
+    /// settings change re-derives the rows from `bdrom` without a rescan.
+    view: ViewSettings,
+    /// The filtered table rows; the selection parallels this list.
     rows: Vec<PlaylistRow>,
     /// One checkbox flag per row.
     selection: Selection,
@@ -81,16 +85,17 @@ struct Listing {
 }
 
 impl Listing {
-    /// Builds the listing from a successful structural scan: the filtered rows
-    /// and an empty selection over them.
-    fn build(input: Input, structural: Structural) -> Self {
-        let rows = model::playlist_rows(&structural.bdrom.playlists);
+    /// Builds the listing from a successful structural scan: the rows filtered
+    /// under `view` and an empty selection over them.
+    fn build(input: Input, structural: Structural, view: ViewSettings) -> Self {
+        let rows = model::playlist_rows(&structural.bdrom.playlists, &view.filter());
         let show_hidden = model::any_hidden(&rows);
         let selection = Selection::new(rows.len());
         Self {
             input,
             bdrom: structural.bdrom,
             features: structural.features,
+            view,
             rows,
             selection,
             active: 0,
@@ -99,6 +104,28 @@ impl Listing {
             warnings: structural.warnings,
             error: None,
         }
+    }
+
+    /// Applies a changed view configuration (the Settings dialog's OK). A
+    /// display-only change (sizes / chapter suffix) just re-renders; a
+    /// **filter** change re-derives the rows from the retained disc — no disk
+    /// IO, mirroring `BDInfo`'s `LoadPlaylists()` re-run — resetting the
+    /// selection (the row set changed, as `BDInfo`'s does) and clamping the
+    /// active row into the new range.
+    fn set_view(&mut self, view: ViewSettings) {
+        let filter_changed = self.view.filter() != view.filter();
+        self.view = view;
+        if !filter_changed {
+            return;
+        }
+        let mut rows = model::playlist_rows(&self.bdrom.playlists, &self.view.filter());
+        if let Some(sort) = self.sort {
+            let _ = model::sort_rows(&mut rows, sort);
+        }
+        self.selection = Selection::new(rows.len());
+        self.active = self.active.min(rows.len().saturating_sub(1));
+        self.show_hidden = model::any_hidden(&rows);
+        self.rows = rows;
     }
 
     /// The checked rows' playlist names, in table order.
@@ -143,7 +170,7 @@ impl Listing {
     fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
         let checked: BTreeSet<String> = self.selected_names().into_iter().collect();
         let active_name = self.rows.get(self.active).map(|row| row.name.clone());
-        let mut rows = model::playlist_rows(&playlists);
+        let mut rows = model::playlist_rows(&playlists, &self.view.filter());
         if let Some(sort) = self.sort {
             let _ = model::sort_rows(&mut rows, sort);
         }
@@ -254,18 +281,31 @@ impl Flow {
 
     /// The structural scan for `input` finished. Applied only when this flow is
     /// still listing **that** input (a newer pick supersedes a stale result):
-    /// success → the table; failure → the fatal error state.
+    /// success → the table, filtered and rendered under `view`; failure → the
+    /// fatal error state.
     #[must_use]
-    pub fn listed(self, input: &Input, result: Result<Structural, String>) -> Self {
+    pub fn listed(self, input: &Input, result: Result<Structural, String>, view: ViewSettings) -> Self {
         match &self.inner {
             Inner::Listing(pending) if pending == input => match result {
                 Ok(structural) => {
-                    Self { inner: Inner::Listed(Listing::build(input.clone(), structural)) }
+                    Self { inner: Inner::Listed(Listing::build(input.clone(), structural, view)) }
                 }
                 Err(message) => Self { inner: Inner::Failed(message) },
             },
             // A superseded or unexpected result — keep the current state.
             _ => self,
+        }
+    }
+
+    /// Applies a changed view configuration (the Settings dialog's OK): a
+    /// filter change rebuilds the rows from the retained disc (the selection
+    /// resets, the active row clamps); a display-only change re-renders the
+    /// cells. Only while the table is editable ([`Stage::Listed`] /
+    /// [`Stage::Reported`]) — the dialog cannot open mid-scan, and this
+    /// enforces the same rule.
+    pub fn set_view(&mut self, view: ViewSettings) {
+        if let Some(listing) = self.editable_listing_mut() {
+            listing.set_view(view);
         }
     }
 
@@ -502,12 +542,16 @@ impl Flow {
         self.any_listing().and_then(Listing::active_playlist).map(|playlist| playlist.name.clone())
     }
 
-    /// The "Stream Files" pane rows for the active playlist (empty when none).
+    /// The "Stream Files" pane rows for the active playlist (empty when none),
+    /// their size cells rendered under the human-readable toggle.
     #[must_use]
     pub fn stream_file_rows(&self) -> Vec<StreamFileRow> {
         self.any_listing()
-            .and_then(Listing::active_playlist)
-            .map(panes::stream_file_rows)
+            .and_then(|listing| {
+                listing.active_playlist().map(|playlist| {
+                    panes::stream_file_rows(playlist, listing.view.human_readable_sizes)
+                })
+            })
             .unwrap_or_default()
     }
 
@@ -530,7 +574,7 @@ impl Flow {
     #[must_use]
     pub fn table(&self) -> Vec<SelectableRow> {
         let Some(listing) = self.any_listing() else { return Vec::new() };
-        model::display_rows(&listing.rows)
+        model::display_rows(&listing.rows, listing.view)
             .into_iter()
             .enumerate()
             .map(|(index, cells)| SelectableRow {
@@ -686,7 +730,7 @@ mod tests {
     use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
 
     use super::{Flow, Stage};
-    use crate::model::{Sort, SortColumn};
+    use crate::model::{Sort, SortColumn, ViewSettings};
     use crate::scan::{Input, Structural};
 
     fn clip(name: &str) -> ClipSummary {
@@ -762,7 +806,7 @@ mod tests {
 
     /// A flow listed from the two-playlist disc.
     fn listed() -> Flow {
-        Flow::start_listing(input()).listed(&input(), Ok(structural()))
+        Flow::start_listing(input()).listed(&input(), Ok(structural()), ViewSettings::default())
     }
 
     /// A three-playlist disc with varied lengths and sizes, so every sort
@@ -783,7 +827,7 @@ mod tests {
 
     /// A flow listed from the three-playlist disc.
     fn listed3() -> Flow {
-        Flow::start_listing(input()).listed(&input(), Ok(structural3()))
+        Flow::start_listing(input()).listed(&input(), Ok(structural3()), ViewSettings::default())
     }
 
     /// The table's row names in display order.
@@ -812,7 +856,7 @@ mod tests {
         let flow = Flow::start_listing(input());
         assert_eq!(flow.stage(), Stage::Listing);
         assert_eq!(flow.input_display(), Some("disc".to_owned()));
-        let flow = flow.listed(&input(), Ok(structural()));
+        let flow = flow.listed(&input(), Ok(structural()), ViewSettings::default());
         assert_eq!(flow.stage(), Stage::Listed);
         assert_eq!(flow.row_count(), 2);
         assert_eq!(flow.table().len(), 2);
@@ -832,7 +876,8 @@ mod tests {
         assert_eq!(flow.input_display(), Some("disc".to_owned()));
         assert_eq!(flow.current_input(), Some(&input()));
         // The reopen takes the ordinary listing road.
-        let flow = Flow::start_listing(input()).listed(&input(), Ok(structural()));
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural()), ViewSettings::default());
         assert_eq!(flow.stage(), Stage::Listed);
     }
 
@@ -866,7 +911,8 @@ mod tests {
 
     #[test]
     fn a_failed_structural_scan_is_fatal() {
-        let flow = Flow::start_listing(input()).listed(&input(), Err("no BD".to_owned()));
+        let flow = Flow::start_listing(input())
+            .listed(&input(), Err("no BD".to_owned()), ViewSettings::default());
         assert_eq!(flow.stage(), Stage::Failed);
         assert_eq!(flow.error_message(), Some("no BD"));
     }
@@ -898,7 +944,7 @@ mod tests {
         // Pick A, then pick B before A's scan returns; A's result must not apply.
         let other = Input::Folder("other".into());
         let flow = Flow::start_listing(other);
-        let flow = flow.listed(&input(), Ok(structural())); // result for the OLD pick
+        let flow = flow.listed(&input(), Ok(structural()), ViewSettings::default()); // result for the OLD pick
         assert_eq!(flow.stage(), Stage::Listing); // still listing the new pick
         assert_eq!(flow.input_display(), Some("other".to_owned()));
     }
@@ -994,7 +1040,8 @@ mod tests {
         assert!(Flow::idle().report().is_none());
         assert_eq!(Flow::idle().label(), None);
         // A fatal pick failure has no disc, hence no report either.
-        let failed = Flow::start_listing(input()).listed(&input(), Err("no BD".to_owned()));
+        let failed = Flow::start_listing(input())
+            .listed(&input(), Err("no BD".to_owned()), ViewSettings::default());
         assert!(!failed.report_available());
         assert!(failed.report().is_none());
     }
@@ -1142,6 +1189,87 @@ mod tests {
     }
 
     #[test]
+    fn a_filter_change_rebuilds_the_rows_and_resets_the_selection() {
+        // structural3 lists 3 playlists (100/70/50 s) under the default 20 s
+        // filter; raising the threshold to 60 s drops 00002.
+        let mut flow = listed3();
+        flow.toggle(2); // check 00002 — the row the new filter will drop
+        flow.set_active(2);
+        assert_eq!(flow.selected_count(), 1);
+        let raised = ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() };
+        flow.set_view(raised);
+        // The row set changed: 00002 is gone, the selection reset, the active
+        // row clamped into the new range.
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS"]);
+        assert_eq!(flow.selected_count(), 0);
+        assert_eq!(flow.active_index(), Some(1));
+        // Loosening the filter to everything brings the short row back —
+        // still straight from the retained disc, no rescan anywhere.
+        let everything = ViewSettings {
+            filter_short_playlists: false,
+            filter_looping_playlists: false,
+            ..ViewSettings::default()
+        };
+        flow.set_view(everything);
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn a_display_only_change_keeps_the_rows_and_the_selection() {
+        let mut flow = listed3();
+        flow.toggle(0);
+        let human = ViewSettings { human_readable_sizes: true, ..ViewSettings::default() };
+        flow.set_view(human);
+        // Same filter ⇒ same row set, the check-mark untouched…
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+        assert_eq!(flow.selected_count(), 1);
+        // …but the cells now render human-readable (est 1000 B on row 0).
+        let table = flow.table();
+        let first = table.first().expect("the first row");
+        assert_eq!(first.cells.estimated_bytes, "1,000.00 B");
+    }
+
+    #[test]
+    fn a_filter_change_reapplies_the_active_sort() {
+        let mut flow = listed3();
+        // File descending (the names already read ascending): 00002, 00001, 00000.
+        flow.sort_by(SortColumn::File);
+        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        // Dropping 00002 via the threshold keeps the sort over the survivors.
+        let raised = ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() };
+        flow.set_view(raised);
+        assert_eq!(row_names(&flow), ["00001.MPLS", "00000.MPLS"]);
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::File, ascending: false }));
+    }
+
+    #[test]
+    fn set_view_is_refused_while_a_scan_is_in_flight() {
+        let mut flow = listed3().start_scanning(1);
+        let raised = ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() };
+        flow.set_view(raised);
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+        // And on stages with no listing it is simply a no-op.
+        let mut idle = Flow::idle();
+        idle.set_view(raised);
+        assert_eq!(idle.stage(), Stage::Idle);
+    }
+
+    #[test]
+    fn a_measured_rebuild_keeps_the_view_settings() {
+        // Scan with the filter loosened: the short 00003-style row (00002 at
+        // 50 s under a 60 s threshold) must survive the measured rebuild too.
+        let mut flow = listed3();
+        let raised = ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() };
+        flow.set_view(raised);
+        assert_eq!(flow.row_count(), 2);
+        let flow = flow.start_scanning(1);
+        let flow = flow.finished(1, "R".to_owned(), Vec::new(), structural3().bdrom.playlists);
+        assert_eq!(flow.stage(), Stage::Reported);
+        // The rebuilt table still filters under the retained view settings.
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS"]);
+    }
+
+    #[test]
     fn edits_and_scans_are_refused_outside_their_states() {
         // Toggling while idle / scanning changes nothing.
         let mut idle = Flow::idle();
@@ -1161,7 +1289,9 @@ mod tests {
         use proptest::prelude::*;
 
         use super::super::{Flow, Stage};
-        use super::{SortColumn, checked_set, input, listed, listed3, row_names, structural};
+        use super::{
+            SortColumn, ViewSettings, checked_set, input, listed, listed3, row_names, structural,
+        };
 
         /// One driver event — the messages `update` would feed the flow.
         #[derive(Debug, Clone)]
@@ -1282,7 +1412,7 @@ mod tests {
                             }
                         }
                         Event::Cancel => flow = flow.cancel(),
-                        Event::Relist => flow = Flow::start_listing(input()).listed(&input(), Ok(structural())),
+                        Event::Relist => flow = Flow::start_listing(input()).listed(&input(), Ok(structural()), ViewSettings::default()),
                         Event::OpenRejected => {
                             let before = flow.stage();
                             flow = flow.open_failed("nope".to_owned());

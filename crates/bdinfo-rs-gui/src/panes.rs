@@ -10,7 +10,7 @@
 
 use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary};
 
-use crate::model::{group_n0, table_length};
+use crate::model::{byte_cell, group_n0, table_length};
 
 /// One "Stream File" pane row: a clip of the selected playlist, pre-formatted.
 ///
@@ -54,16 +54,18 @@ pub struct CodecRow {
 }
 
 /// Builds the "Stream Files" rows for `playlist` — one per clip, the index
-/// counting the main (angle-0) clips.
+/// counting the main (angle-0) clips. `human_sizes` switches the size cells to
+/// the human-readable form — `BDInfo` applies its `SizeFormatHR` setting to
+/// this grid exactly as to the playlist table.
 #[must_use]
-pub fn stream_file_rows(playlist: &PlaylistSummary) -> Vec<StreamFileRow> {
+pub fn stream_file_rows(playlist: &PlaylistSummary, human_sizes: bool) -> Vec<StreamFileRow> {
     let mut rows = Vec::new();
     let mut index: usize = 0;
     for clip in &playlist.clips {
         if clip.angle_index == 0 {
             index = index.saturating_add(1);
         }
-        rows.push(stream_file_row(clip, index));
+        rows.push(stream_file_row(clip, index, human_sizes));
     }
     rows
 }
@@ -72,7 +74,7 @@ pub fn stream_file_rows(playlist: &PlaylistSummary) -> Vec<StreamFileRow> {
 /// clip gets a ` (N)` suffix; the estimated size prefers the interleaved
 /// `*.ssif` and falls back to the plain `*.m2ts`; a size that is not yet known
 /// (no file / nothing demuxed) shows as `-`.
-fn stream_file_row(clip: &ClipSummary, index: usize) -> StreamFileRow {
+fn stream_file_row(clip: &ClipSummary, index: usize, human_sizes: bool) -> StreamFileRow {
     let file = if clip.angle_index > 0 {
         format!("{} ({})", clip.display_name, clip.angle_index)
     } else {
@@ -82,8 +84,8 @@ fn stream_file_row(clip: &ClipSummary, index: usize) -> StreamFileRow {
         file,
         index: index.to_string(),
         length: table_length(clip.length),
-        estimated: size_cell(estimated_size(clip)),
-        measured: size_cell(clip.packet_size()),
+        estimated: size_cell(estimated_size(clip), human_sizes),
+        measured: size_cell(clip.packet_size(), human_sizes),
     }
 }
 
@@ -93,9 +95,10 @@ const fn estimated_size(clip: &ClipSummary) -> u64 {
     if clip.interleaved_file_size > 0 { clip.interleaved_file_size } else { clip.file_size }
 }
 
-/// A byte-size cell: thousands-grouped, or `-` when the size is not yet known.
-fn size_cell(bytes: u64) -> String {
-    if bytes > 0 { group_n0(bytes) } else { "-".to_owned() }
+/// A byte-size cell — grouped or human-readable per the toggle — or `-` when
+/// the size is not yet known.
+fn size_cell(bytes: u64, human: bool) -> String {
+    if bytes > 0 { byte_cell(bytes, human) } else { "-".to_owned() }
 }
 
 /// Builds the "Streams" (codec) rows for `playlist` — one per presented stream,
@@ -219,7 +222,7 @@ mod tests {
 
     #[test]
     fn stream_files_carry_index_length_and_both_sizes() {
-        let rows = stream_file_rows(&playlist());
+        let rows = stream_file_rows(&playlist(), false);
         assert_eq!(
             rows,
             [
@@ -250,7 +253,7 @@ mod tests {
         // An extra-angle clip with both a plain and an interleaved size: the row
         // shows the interleaved size and a ` (2)` angle suffix.
         p.clips = vec![sized_clip("00007.M2TS", 2, 40.0, 0, 700_000, 900_000)];
-        let rows = stream_file_rows(&p);
+        let rows = stream_file_rows(&p, false);
         assert_eq!(
             rows,
             [StreamFileRow {
@@ -272,8 +275,25 @@ mod tests {
             clip("00001.M2TS", 1, 100.0, 0),
             clip("00002.M2TS", 0, 50.0, 0),
         ];
-        let indices: Vec<_> = stream_file_rows(&p).into_iter().map(|row| row.index).collect();
+        let indices: Vec<_> =
+            stream_file_rows(&p, false).into_iter().map(|row| row.index).collect();
         assert_eq!(indices, ["1", "1", "2"]);
+    }
+
+    #[test]
+    fn the_human_readable_toggle_reaches_the_size_cells() {
+        // The same grid BDInfo formats with SizeFormatHR: known sizes switch
+        // to the short form, the unknown `-` stays a dash.
+        let rows = stream_file_rows(&playlist(), true);
+        let cells: Vec<_> =
+            rows.into_iter().map(|row| (row.estimated, row.measured)).collect();
+        assert_eq!(
+            cells,
+            [
+                ("488.28 KB".to_owned(), "187.50 KB".to_owned()),
+                ("-".to_owned(), "-".to_owned()),
+            ]
+        );
     }
 
     #[test]

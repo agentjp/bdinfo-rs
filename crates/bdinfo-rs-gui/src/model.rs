@@ -13,6 +13,62 @@ use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
 
+use crate::settings::Settings;
+
+/// The table's presentation settings — the projection of the persisted
+/// [`Settings`] the view-model reads: the playlist filter switches and the two
+/// display toggles. It travels with the loaded disc (the flow's `Listing`), so
+/// a settings change re-derives the rows from the retained `BdRom` — no
+/// rescan, mirroring `BDInfo`'s `LoadPlaylists()` re-run.
+///
+/// `Default` is the fresh-config table: the standard filter (on at 20 s),
+/// grouped-byte size cells, the chapter suffix shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewSettings {
+    /// Drop playlists shorter than the threshold.
+    pub filter_short_playlists: bool,
+    /// The short-playlist threshold, in whole seconds.
+    pub short_playlist_seconds: u32,
+    /// Drop looping playlists.
+    pub filter_looping_playlists: bool,
+    /// Human-readable size cells (`72.64 GB`) instead of grouped bytes.
+    pub human_readable_sizes: bool,
+    /// Show the ` [NN Chapters]` suffix in the Playlist File column.
+    pub display_chapter_count: bool,
+}
+
+impl Default for ViewSettings {
+    fn default() -> Self {
+        Self::from_settings(&Settings::default())
+    }
+}
+
+impl ViewSettings {
+    /// The view-facing slice of the persisted settings.
+    #[must_use]
+    pub const fn from_settings(settings: &Settings) -> Self {
+        Self {
+            filter_short_playlists: settings.filter_short_playlists,
+            short_playlist_seconds: settings.short_playlist_seconds,
+            filter_looping_playlists: settings.filter_looping_playlists,
+            human_readable_sizes: settings.human_readable_sizes,
+            display_chapter_count: settings.display_chapter_count,
+        }
+    }
+
+    /// The core playlist filter these settings build — what the row
+    /// construction applies in place of the old hard-coded
+    /// `PlaylistFilter::default()`.
+    #[must_use]
+    pub fn filter(&self) -> PlaylistFilter {
+        PlaylistFilter {
+            filter_short_playlists: self.filter_short_playlists,
+            short_playlist_seconds: f64::from(self.short_playlist_seconds),
+            filter_looping_playlists: self.filter_looping_playlists,
+        }
+    }
+}
+
 /// One structured playlist row — the machine-readable form of the CLI's
 /// `#`/Group/Playlist File/Length/Estimated Bytes table. Mirrors the wasm
 /// crate's `PlaylistRow`. (Measured Bytes is omitted: a structural scan never
@@ -91,11 +147,11 @@ pub struct SelectableRow {
 }
 
 /// The playlist table rows as `(group number, playlist index)` pairs in table
-/// order: the standard filtered set (short and looping playlists dropped),
-/// grouped by shared clips, each group longest-first. Mirrors the CLI's
-/// `table_rows`.
-fn table_rows(playlists: &[PlaylistSummary]) -> Vec<(usize, usize)> {
-    presentation_groups(playlists, &PlaylistFilter::default())
+/// order: the `filter`-kept set (by default short and looping playlists are
+/// dropped), grouped by shared clips, each group longest-first. Mirrors the
+/// CLI's `table_rows`.
+fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(usize, usize)> {
+    presentation_groups(playlists, filter)
         .into_iter()
         .enumerate()
         .flat_map(|(group, members)| {
@@ -142,9 +198,15 @@ pub fn group_n0(value: u64) -> String {
     grouped.into_iter().rev().collect()
 }
 
-/// The `Estimated Bytes` cell: thousands-grouped when known, else `-`.
-fn estimated_cell(bytes: Option<u64>) -> String {
-    bytes.map_or_else(|| "-".to_owned(), group_n0)
+/// One byte-count cell body: the human-readable short form when the toggle is
+/// on (`BDInfo`'s `SizeFormatHR`), else the thousands-grouped exact count.
+pub(crate) fn byte_cell(bytes: u64, human: bool) -> String {
+    if human { format_file_size(bytes) } else { group_n0(bytes) }
+}
+
+/// The `Estimated Bytes` cell: a [`byte_cell`] when known, else `-`.
+fn estimated_cell(bytes: Option<u64>, human: bool) -> String {
+    bytes.map_or_else(|| "-".to_owned(), |value| byte_cell(value, human))
 }
 
 /// A human-readable byte size, `N.NN <unit>`.
@@ -182,10 +244,13 @@ pub fn format_file_size(bytes: u64) -> String {
     format!("{}.{frac:02} {label}", group_n0(whole))
 }
 
-/// Builds the structured selection-table rows over the standard filtered set.
+/// Builds the structured selection-table rows over the `filter`-kept set.
 /// Mirrors the wasm crate's `playlist_rows`.
-pub(crate) fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
-    table_rows(playlists)
+pub(crate) fn playlist_rows(
+    playlists: &[PlaylistSummary],
+    filter: &PlaylistFilter,
+) -> Vec<PlaylistRow> {
+    table_rows(playlists, filter)
         .into_iter()
         .enumerate()
         .filter_map(|(position, (group, index))| {
@@ -289,31 +354,33 @@ fn compare(a: &PlaylistRow, b: &PlaylistRow, sort: Sort) -> Ordering {
 }
 
 /// The playlist name shown in the `Playlist File` column: the file name, plus a
-/// ` [NN Chapters]` suffix (zero-padded to two digits) when the playlist has more
-/// than one chapter — the same annotation `BDInfo` appends.
-fn playlist_display_name(name: &str, chapter_count: usize) -> String {
-    if chapter_count > 1 {
+/// ` [NN Chapters]` suffix (zero-padded to two digits) when `show_chapters` is
+/// on and the playlist has more than one chapter — the same annotation
+/// `BDInfo` appends under its `DisplayChapterCount` setting.
+fn playlist_display_name(name: &str, chapter_count: usize, show_chapters: bool) -> String {
+    if show_chapters && chapter_count > 1 {
         format!("{name} [{chapter_count:02} Chapters]")
     } else {
         name.to_owned()
     }
 }
 
-/// Formats one structured row into its display cells.
-fn display_row(row: &PlaylistRow) -> TableRow {
+/// Formats one structured row into its display cells, under `view`'s display
+/// toggles (the chapter suffix, human-readable sizes).
+fn display_row(row: &PlaylistRow, view: ViewSettings) -> TableRow {
     TableRow {
         number: row.position.to_string(),
         group: row.group.to_string(),
-        file: playlist_display_name(&row.name, row.chapter_count),
+        file: playlist_display_name(&row.name, row.chapter_count, view.display_chapter_count),
         length: row.length.clone(),
-        estimated_bytes: estimated_cell(row.estimated_bytes),
-        measured_bytes: group_n0(row.measured_bytes),
+        estimated_bytes: estimated_cell(row.estimated_bytes, view.human_readable_sizes),
+        measured_bytes: byte_cell(row.measured_bytes, view.human_readable_sizes),
     }
 }
 
 /// Formats the structured rows into the display rows the table renders.
-pub(crate) fn display_rows(rows: &[PlaylistRow]) -> Vec<TableRow> {
-    rows.iter().map(display_row).collect()
+pub(crate) fn display_rows(rows: &[PlaylistRow], view: ViewSettings) -> Vec<TableRow> {
+    rows.iter().map(|row| display_row(row, view)).collect()
 }
 
 /// Whether any listed playlist hides a stream — drives the CLI's footer note.
@@ -324,12 +391,14 @@ pub(crate) fn any_hidden(rows: &[PlaylistRow]) -> bool {
 #[cfg(test)]
 mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
+    use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 
     use super::{
-        PlaylistRow, Sort, SortColumn, TableRow, any_hidden, display_rows, estimated_bytes,
-        estimated_cell, format_file_size, group_n0, playlist_display_name, playlist_rows,
-        sort_rows, table_length, table_rows,
+        PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell,
+        display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
+        playlist_display_name, playlist_rows, sort_rows, table_length, table_rows,
     };
+    use crate::settings::Settings;
 
     /// A `ClipSummary` carrying just a name + length (the fields the view-model
     /// reads); the measured tallies stay zero.
@@ -389,12 +458,60 @@ mod tests {
     #[test]
     fn table_rows_groups_and_filters_like_the_cli() {
         // Sorted by length desc, grouped by shared clip, the short row dropped.
-        assert_eq!(table_rows(&disc()), [(1, 0), (1, 1), (2, 2)]);
+        assert_eq!(table_rows(&disc(), &PlaylistFilter::default()), [(1, 0), (1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn the_filter_settings_reach_the_row_construction() {
+        // Filters off: the 5 s playlist joins the table (last — shortest).
+        let everything = ViewSettings {
+            filter_short_playlists: false,
+            filter_looping_playlists: false,
+            ..ViewSettings::default()
+        };
+        assert_eq!(
+            table_rows(&disc(), &everything.filter()),
+            [(1, 0), (1, 1), (2, 2), (3, 3)]
+        );
+        // A zeroed threshold keeps it too, even with the switch on.
+        let zero = ViewSettings { short_playlist_seconds: 0, ..ViewSettings::default() };
+        assert_eq!(table_rows(&disc(), &zero.filter()).len(), 4);
+        // A raised threshold drops more: only the 100 s and 70 s rows survive.
+        let raised = ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() };
+        let rows = playlist_rows(&disc(), &raised.filter());
+        let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(names, ["00000.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn view_settings_project_the_persisted_settings() {
+        // The defaults are today's exact table…
+        assert_eq!(ViewSettings::default(), ViewSettings::from_settings(&Settings::default()));
+        assert_eq!(ViewSettings::default().filter(), PlaylistFilter::default());
+        // …and every field reads through from the store.
+        let stored = Settings {
+            filter_short_playlists: false,
+            short_playlist_seconds: 45,
+            filter_looping_playlists: false,
+            human_readable_sizes: true,
+            display_chapter_count: false,
+            ..Settings::default()
+        };
+        let view = ViewSettings::from_settings(&stored);
+        assert!(!view.filter_short_playlists);
+        assert_eq!(view.short_playlist_seconds, 45);
+        assert!(!view.filter_looping_playlists);
+        assert!(view.human_readable_sizes);
+        assert!(!view.display_chapter_count);
+        let filter = view.filter();
+        assert!(!filter.filter_short_playlists);
+        assert!((filter.short_playlist_seconds - 45.0).abs() < f64::EPSILON);
+        assert!(!filter.filter_looping_playlists);
     }
 
     #[test]
     fn playlist_rows_carry_the_structured_columns() {
-        let rows = playlist_rows(&disc());
+        let rows = playlist_rows(&disc(), &PlaylistFilter::default());
         let view: Vec<_> = rows
             .iter()
             .map(|row| {
@@ -424,7 +541,7 @@ mod tests {
         // The display rows are exactly the CLI table cells: positions/groups as
         // decimals, lengths as hh:mm:ss, estimated bytes thousands-grouped.
         assert_eq!(
-            display_rows(&playlist_rows(&disc())),
+            display_rows(&playlist_rows(&disc(), &PlaylistFilter::default()), ViewSettings::default()),
             [
                 TableRow {
                     number: "1".to_owned(),
@@ -480,8 +597,45 @@ mod tests {
 
     #[test]
     fn estimated_cell_is_a_dash_when_absent() {
-        assert_eq!(estimated_cell(None), "-");
-        assert_eq!(estimated_cell(Some(2_000_000)), "2,000,000");
+        assert_eq!(estimated_cell(None, false), "-");
+        assert_eq!(estimated_cell(Some(2_000_000), false), "2,000,000");
+        // The dash is format-independent; a present size follows the toggle.
+        assert_eq!(estimated_cell(None, true), "-");
+        assert_eq!(estimated_cell(Some(2_000_000), true), "1.91 MB");
+    }
+
+    #[test]
+    fn byte_cells_follow_the_human_readable_toggle() {
+        assert_eq!(byte_cell(78_000_000_000, false), "78,000,000,000");
+        assert_eq!(byte_cell(78_000_000_000, true), "72.64 GB");
+        // A zero (unmeasured) count renders "0" either way — today's cell.
+        assert_eq!(byte_cell(0, false), "0");
+        assert_eq!(byte_cell(0, true), "0");
+    }
+
+    #[test]
+    fn the_display_toggles_reach_the_cells() {
+        let mut playlists = disc();
+        if let Some(playlist) = playlists.get_mut(0) {
+            playlist.chapter_count = 12;
+        }
+        let rows = playlist_rows(&playlists, &PlaylistFilter::default());
+        let human = ViewSettings {
+            human_readable_sizes: true,
+            display_chapter_count: false,
+            ..ViewSettings::default()
+        };
+        let cells = display_rows(&rows, human);
+        let first = cells.first().expect("the feature row");
+        // The chapter suffix is gated off, the sizes read human-readable.
+        assert_eq!(first.file, "00000.MPLS");
+        assert_eq!(first.estimated_bytes, "1,000.00 B");
+        assert_eq!(first.measured_bytes, "0");
+        // The defaults render exactly as before the settings existed.
+        let default_cells = display_rows(&rows, ViewSettings::default());
+        let first = default_cells.first().expect("the feature row");
+        assert_eq!(first.file, "00000.MPLS [12 Chapters]");
+        assert_eq!(first.estimated_bytes, "1,000");
     }
 
     #[test]
@@ -504,7 +658,7 @@ mod tests {
 
     #[test]
     fn any_hidden_reflects_the_rows() {
-        let rows = playlist_rows(&disc());
+        let rows = playlist_rows(&disc(), &PlaylistFilter::default());
         assert!(!any_hidden(&rows));
         let hidden = [PlaylistRow {
             position: 1,
@@ -525,7 +679,7 @@ mod tests {
     /// The filtered `disc()` rows: 00000 (100 s, est 1000), 00001 (50 s,
     /// est 500), 00002 (70 s, est 2000) — see [`disc`].
     fn rows() -> Vec<PlaylistRow> {
-        playlist_rows(&disc())
+        playlist_rows(&disc(), &PlaylistFilter::default())
     }
 
     /// The row names in order, for a compact order assertion.
@@ -603,7 +757,7 @@ mod tests {
             playlist.interleaved_file_size = 0;
         }
         for ascending in [true, false] {
-            let mut sorted = playlist_rows(&playlists);
+            let mut sorted = playlist_rows(&playlists, &PlaylistFilter::default());
             sort_rows(&mut sorted, Sort { column: SortColumn::Estimated, ascending });
             assert_eq!(
                 sorted.last().map(|row| row.name.as_str()),
@@ -617,11 +771,13 @@ mod tests {
     fn playlist_name_gains_a_chapter_suffix_only_past_one_chapter() {
         // Zero or one chapter: just the name (BDInfo shows no suffix for a single
         // or absent chapter mark).
-        assert_eq!(playlist_display_name("00000.MPLS", 0), "00000.MPLS");
-        assert_eq!(playlist_display_name("00000.MPLS", 1), "00000.MPLS");
+        assert_eq!(playlist_display_name("00000.MPLS", 0, true), "00000.MPLS");
+        assert_eq!(playlist_display_name("00000.MPLS", 1, true), "00000.MPLS");
         // More than one: the zero-padded ` [NN Chapters]` annotation.
-        assert_eq!(playlist_display_name("00002.MPLS", 12), "00002.MPLS [12 Chapters]");
-        assert_eq!(playlist_display_name("00002.MPLS", 5), "00002.MPLS [05 Chapters]");
+        assert_eq!(playlist_display_name("00002.MPLS", 12, true), "00002.MPLS [12 Chapters]");
+        assert_eq!(playlist_display_name("00002.MPLS", 5, true), "00002.MPLS [05 Chapters]");
+        // The DisplayChapterCount toggle gates the suffix off entirely.
+        assert_eq!(playlist_display_name("00002.MPLS", 12, false), "00002.MPLS");
     }
 
     // The cell formatting is panic-safety-critical (it formats hostile disc

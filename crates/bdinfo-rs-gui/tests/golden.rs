@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use bdinfo_rs_gui::flow::Flow;
+use bdinfo_rs_gui::model::ViewSettings;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
 
 /// Absolute path to a committed real-disc fixture (they live under the CLI
@@ -32,7 +33,9 @@ const ISO_GOLDEN: &str = include_str!("../../bdinfo-rs/tests/fixtures/golden/iso
 /// Tier-A flow the shell drives, returning the rendered report + disc label.
 fn list_select_all_and_measure(input: &Input) -> (String, String) {
     let structural: Structural = scan::scan_structural(input).expect("the fixture lists");
-    let mut flow = Flow::start_listing(input.clone()).listed(input, Ok(structural));
+    // Default view settings — the byte contract holds for a fresh config.
+    let mut flow =
+        Flow::start_listing(input.clone()).listed(input, Ok(structural), ViewSettings::default());
     flow.select_all();
     let request = flow.scan_request().expect("a request once every row is selected");
     let measured =
@@ -62,7 +65,8 @@ fn the_structural_scan_lists_the_disc_playlist() {
     let input = Input::Folder(fixture("BigBuckBunny"));
     let structural = scan::scan_structural(&input).expect("the fixture lists");
     assert!(structural.warnings.is_empty(), "the fixture lists cleanly");
-    let flow = Flow::start_listing(input.clone()).listed(&input, Ok(structural));
+    let flow =
+        Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
     let rows = flow.table();
     let row = rows.first().expect("one filtered playlist row");
     assert_eq!(rows.len(), 1, "the filtered table lists exactly the feature playlist");
@@ -82,7 +86,8 @@ fn the_pre_scan_report_matches_the_disc_but_reads_zero_bitrate() {
     // bitrates. Nothing is selected, so it covers the whole disc.
     let input = Input::Folder(fixture("BigBuckBunny"));
     let structural = scan::scan_structural(&input).expect("the fixture lists");
-    let flow = Flow::start_listing(input.clone()).listed(&input, Ok(structural));
+    let flow =
+        Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
     assert!(flow.report_available(), "View Report is offered before the scan");
     let report = flow.report().expect("a structural report before scanning");
     // The disc-level facts and the feature playlist render.
