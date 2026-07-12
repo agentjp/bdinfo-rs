@@ -7,6 +7,8 @@
 //! plain data in, plain data out, so `view()` is a thin projection and Phase 4
 //! can hold this layer to the core bar (100% coverage + 0 missed mutants).
 
+use std::cmp::Ordering;
+
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
@@ -31,6 +33,10 @@ pub(crate) struct PlaylistRow {
     pub(crate) chapter_count: usize,
     /// `hh:mm:ss` total length, truncated like the CLI table.
     pub(crate) length: String,
+    /// The playlist length as the report's 100 ns ticks — the underlying sort
+    /// key behind the formatted `length` cell (hours wrap in the cell, ticks
+    /// don't).
+    pub(crate) length_ticks: i64,
     /// Estimated bytes — interleaved `*.ssif` size, else `*.m2ts` size, else
     /// `None` (the `-` cell).
     pub(crate) estimated_bytes: Option<u64>,
@@ -190,12 +196,87 @@ pub(crate) fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
                 name: playlist.name.clone(),
                 chapter_count: playlist.chapter_count,
                 length: table_length(playlist.total_length),
+                length_ticks: seconds_to_ticks(playlist.total_length),
                 estimated_bytes: estimated_bytes(playlist),
                 measured_bytes: playlist.total_angle_packet_size(),
                 has_hidden_streams: playlist.has_hidden_streams(),
             })
         })
         .collect()
+}
+
+/// A sortable playlist-table column. The sort key is the row's underlying
+/// value — the playlist name (ordinal), the group number, the length seconds,
+/// the byte counts — never the formatted cell string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    /// The `Playlist File` column — ordinal on the playlist name.
+    File,
+    /// The `Group` column — the shared-clip group number.
+    Group,
+    /// The `Length` column — the underlying playlist length (as ticks).
+    Length,
+    /// The `Estimated Size` column — bytes; an absent size (the `-` cell)
+    /// orders last in both directions.
+    Estimated,
+    /// The `Measured Size` column — packet-derived bytes (`0` until measured).
+    Measured,
+}
+
+/// The playlist table's active sort: a column and a direction, built by
+/// `BDInfo`'s header-click rule ([`Sort::click`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sort {
+    /// The column the table is sorted by.
+    pub column: SortColumn,
+    /// Ascending (`true`) or descending.
+    pub ascending: bool,
+}
+
+impl Sort {
+    /// `BDInfo`'s header-click rule (`listViewPlaylistFiles_ColumnClick`): a
+    /// click on the current sort column flips its direction; a click on any
+    /// other column starts it ascending.
+    #[must_use]
+    pub fn click(current: Option<Self>, column: SortColumn) -> Self {
+        match current {
+            Some(sort) if sort.column == column => Self { column, ascending: !sort.ascending },
+            _ => Self { column, ascending: true },
+        }
+    }
+}
+
+/// Stable-sorts `rows` by `sort` and returns the applied permutation
+/// (`order[new] = old`), so index-parallel state — the selection flags, the
+/// active row — can travel with the rows. Ties keep their current relative
+/// order, like a repeated `ListView` sort.
+pub(crate) fn sort_rows(rows: &mut Vec<PlaylistRow>, sort: Sort) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| match (rows.get(a), rows.get(b)) {
+        (Some(x), Some(y)) => compare(x, y, sort),
+        _ => Ordering::Equal,
+    });
+    *rows = order.iter().filter_map(|&index| rows.get(index).cloned()).collect();
+    order
+}
+
+/// Compares two rows under `sort`, on the underlying values. The absent
+/// estimated size (the `-` cell) orders after every present value in BOTH
+/// directions, so the dashes sit at the bottom whichever way the column sorts.
+fn compare(a: &PlaylistRow, b: &PlaylistRow, sort: Sort) -> Ordering {
+    let dir = |ordering: Ordering| if sort.ascending { ordering } else { ordering.reverse() };
+    match sort.column {
+        SortColumn::File => dir(a.name.cmp(&b.name)),
+        SortColumn::Group => dir(a.group.cmp(&b.group)),
+        SortColumn::Length => dir(a.length_ticks.cmp(&b.length_ticks)),
+        SortColumn::Measured => dir(a.measured_bytes.cmp(&b.measured_bytes)),
+        SortColumn::Estimated => match (a.estimated_bytes, b.estimated_bytes) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(x), Some(y)) => dir(x.cmp(&y)),
+        },
+    }
 }
 
 /// The playlist name shown in the `Playlist File` column: the file name, plus a
@@ -236,8 +317,9 @@ mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
 
     use super::{
-        PlaylistRow, TableRow, any_hidden, display_rows, estimated_bytes, estimated_cell,
-        format_file_size, group_n0, playlist_display_name, playlist_rows, table_length, table_rows,
+        PlaylistRow, Sort, SortColumn, TableRow, any_hidden, display_rows, estimated_bytes,
+        estimated_cell, format_file_size, group_n0, playlist_display_name, playlist_rows,
+        sort_rows, table_length, table_rows,
     };
 
     /// A `ClipSummary` carrying just a name + length (the fields the view-model
@@ -422,12 +504,89 @@ mod tests {
             name: "00000.MPLS".to_owned(),
             chapter_count: 0,
             length: "00:00:30".to_owned(),
+            length_ticks: 300_000_000,
             estimated_bytes: None,
             measured_bytes: 0,
             has_hidden_streams: true,
         }];
         assert!(any_hidden(&hidden));
         assert!(!any_hidden(&[]));
+    }
+
+    /// The filtered `disc()` rows: 00000 (100 s, est 1000), 00001 (50 s,
+    /// est 500), 00002 (70 s, est 2000) — see [`disc`].
+    fn rows() -> Vec<PlaylistRow> {
+        playlist_rows(&disc())
+    }
+
+    /// The row names in order, for a compact order assertion.
+    fn names(rows: &[PlaylistRow]) -> Vec<&str> {
+        rows.iter().map(|row| row.name.as_str()).collect()
+    }
+
+    #[test]
+    fn click_starts_ascending_flips_on_repeat_and_resets_on_a_new_column() {
+        let first = Sort::click(None, SortColumn::Length);
+        assert_eq!(first, Sort { column: SortColumn::Length, ascending: true });
+        let second = Sort::click(Some(first), SortColumn::Length);
+        assert_eq!(second, Sort { column: SortColumn::Length, ascending: false });
+        let third = Sort::click(Some(second), SortColumn::Length);
+        assert_eq!(third, Sort { column: SortColumn::Length, ascending: true });
+        // A different column starts ascending even from a descending state.
+        let other = Sort::click(Some(second), SortColumn::File);
+        assert_eq!(other, Sort { column: SortColumn::File, ascending: true });
+    }
+
+    #[test]
+    fn sort_rows_orders_by_the_underlying_values_and_returns_the_permutation() {
+        // Length ascending: 00001 (50 s), 00002 (70 s), 00000 (100 s).
+        let mut by_length = rows();
+        let order = sort_rows(&mut by_length, Sort { column: SortColumn::Length, ascending: true });
+        assert_eq!(names(&by_length), ["00001.MPLS", "00002.MPLS", "00000.MPLS"]);
+        assert_eq!(order, [1, 2, 0]);
+        // Descending reverses it.
+        let mut desc = rows();
+        sort_rows(&mut desc, Sort { column: SortColumn::Length, ascending: false });
+        assert_eq!(names(&desc), ["00000.MPLS", "00002.MPLS", "00001.MPLS"]);
+        // File descending: ordinal on the name.
+        let mut by_file = rows();
+        sort_rows(&mut by_file, Sort { column: SortColumn::File, ascending: false });
+        assert_eq!(names(&by_file), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        // Estimated ascending: 500, 1000, 2000.
+        let mut by_est = rows();
+        sort_rows(&mut by_est, Sort { column: SortColumn::Estimated, ascending: true });
+        assert_eq!(names(&by_est), ["00001.MPLS", "00000.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn sort_rows_is_stable_on_ties() {
+        // Every measured size is 0 (nothing scanned), so a measured sort is all
+        // ties — the current (presentation) order must hold, both directions.
+        for ascending in [true, false] {
+            let mut tied = rows();
+            let order = sort_rows(&mut tied, Sort { column: SortColumn::Measured, ascending });
+            assert_eq!(names(&tied), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+            assert_eq!(order, [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn an_absent_estimated_size_orders_last_in_both_directions() {
+        // 00002's sizes zeroed → its estimate is the absent `-` cell.
+        let mut playlists = disc();
+        if let Some(playlist) = playlists.get_mut(2) {
+            playlist.file_size = 0;
+            playlist.interleaved_file_size = 0;
+        }
+        for ascending in [true, false] {
+            let mut sorted = playlist_rows(&playlists);
+            sort_rows(&mut sorted, Sort { column: SortColumn::Estimated, ascending });
+            assert_eq!(
+                sorted.last().map(|row| row.name.as_str()),
+                Some("00002.MPLS"),
+                "the dash sorts last (ascending: {ascending})"
+            );
+        }
     }
 
     #[test]

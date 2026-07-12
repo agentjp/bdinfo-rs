@@ -22,7 +22,7 @@ use std::time::Duration;
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
 use bdinfo_rs_core::report::text;
 
-use crate::model::{self, PlaylistRow, SelectableRow};
+use crate::model::{self, PlaylistRow, SelectableRow, Sort, SortColumn};
 use crate::panes::{self, CodecRow, StreamFileRow};
 use crate::progress::ProgressModel;
 use crate::scan::{Input, Structural};
@@ -68,6 +68,9 @@ struct Listing {
     /// The active (highlighted) row — the playlist whose clips and streams the
     /// master-detail panes show. Clamped into the row range (`0` when empty).
     active: usize,
+    /// The active column sort, replacing the grouped presentation order —
+    /// `None` until a header is clicked.
+    sort: Option<Sort>,
     /// Whether any listed playlist hides a stream (the CLI's footer note).
     show_hidden: bool,
     /// Structural-scan failures (a corrupt playlist) — a non-blocking banner.
@@ -91,6 +94,7 @@ impl Listing {
             rows,
             selection,
             active: 0,
+            sort: None,
             show_hidden,
             warnings: structural.warnings,
             error: None,
@@ -114,21 +118,42 @@ impl Listing {
         if self.selection.any() { self.selected_names() } else { self.all_names() }
     }
 
+    /// Applies `BDInfo`'s header-click rule for `column`, then re-sorts the
+    /// rows. Check-marks and the active-row highlight belong to PLAYLISTS, not
+    /// row positions: the selection flags and `active` are permuted along with
+    /// the rows, so the checked set (and thus [`scan_names`](Self::scan_names))
+    /// is unchanged by any sorting.
+    fn sort_by(&mut self, column: SortColumn) {
+        let sort = Sort::click(self.sort, column);
+        self.sort = Some(sort);
+        let order = model::sort_rows(&mut self.rows, sort);
+        self.selection.permute(&order);
+        self.active = order.iter().position(|&old| old == self.active).unwrap_or(0);
+    }
+
     /// Replaces the disc's playlists with the measured ones, rebuilding the rows
     /// so the table + panes show the measured sizes and bitrates. The measured
-    /// scan re-opened the same disc with the same filter, so the rows line up;
-    /// the selection survives when the count matches (it always does in
-    /// practice). The disc-level facts are unchanged by measurement, so only
-    /// `bdrom.playlists` is swapped.
+    /// scan re-opened the same disc with the same filter, so the same playlists
+    /// come back; the rebuild starts from the grouped presentation order and
+    /// re-applies the active column sort (measured values may have changed, so
+    /// the order is recomputed, not reused). Check-marks and the highlight are
+    /// re-attached by playlist NAME, so they survive any reordering. The
+    /// disc-level facts are unchanged by measurement, so only `bdrom.playlists`
+    /// is swapped.
     fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
-        let rows = model::playlist_rows(&playlists);
-        if rows.len() != self.rows.len() {
-            self.selection = Selection::new(rows.len());
+        let checked: BTreeSet<String> = self.selected_names().into_iter().collect();
+        let active_name = self.rows.get(self.active).map(|row| row.name.clone());
+        let mut rows = model::playlist_rows(&playlists);
+        if let Some(sort) = self.sort {
+            let _ = model::sort_rows(&mut rows, sort);
         }
+        self.selection =
+            Selection::from_flags(rows.iter().map(|row| checked.contains(&row.name)).collect());
+        self.active =
+            active_name.and_then(|name| rows.iter().position(|row| row.name == name)).unwrap_or(0);
         self.show_hidden = model::any_hidden(&rows);
         self.bdrom.playlists = playlists;
         self.rows = rows;
-        self.active = self.active.min(self.rows.len().saturating_sub(1));
     }
 
     /// The active row's playlist, resolved through its `playlist_index`.
@@ -252,6 +277,17 @@ impl Flow {
             && index < listing.rows.len()
         {
             listing.active = index;
+        }
+    }
+
+    /// Sorts the playlist table by `column` — `BDInfo`'s header-click rule:
+    /// the first click sorts ascending, a second click on the same column
+    /// flips to descending. Only while the table is editable ([`Stage::Listed`]
+    /// / [`Stage::Reported`]); the check-marks and the active-row highlight
+    /// travel with their playlists, so the scan set never changes.
+    pub fn sort_by(&mut self, column: SortColumn) {
+        if let Some(listing) = self.editable_listing_mut() {
+            listing.sort_by(column);
         }
     }
 
@@ -417,6 +453,24 @@ impl Flow {
     #[must_use]
     pub fn active_index(&self) -> Option<usize> {
         self.any_listing().map(|listing| listing.active)
+    }
+
+    /// The playlist table's active column sort — drives the header's
+    /// direction marker (`None` until a header is clicked).
+    #[must_use]
+    pub fn sort(&self) -> Option<Sort> {
+        self.any_listing().and_then(|listing| listing.sort)
+    }
+
+    /// The active playlist's `index`-th clip name — the real `xxxxx.m2ts`
+    /// stream-file name behind the Stream File pane's row `index` (its rows
+    /// are one per clip, in clip order) — the Ctrl+C copy target for that row.
+    #[must_use]
+    pub fn active_clip_name(&self, index: usize) -> Option<String> {
+        self.any_listing()
+            .and_then(Listing::active_playlist)
+            .and_then(|playlist| playlist.clips.get(index))
+            .map(|clip| clip.name.clone())
     }
 
     /// The active playlist's name (for the master-detail pane headers).
@@ -609,6 +663,7 @@ mod tests {
     use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
 
     use super::{Flow, Stage};
+    use crate::model::{Sort, SortColumn};
     use crate::scan::{Input, Structural};
 
     fn clip(name: &str) -> ClipSummary {
@@ -629,10 +684,14 @@ mod tests {
     }
 
     fn playlist(name: &str, length: f64, clips: &[&str]) -> PlaylistSummary {
+        playlist_sized(name, length, 1000, clips)
+    }
+
+    fn playlist_sized(name: &str, length: f64, file_size: u64, clips: &[&str]) -> PlaylistSummary {
         PlaylistSummary {
             name: name.to_owned(),
             total_length: length,
-            file_size: 1000,
+            file_size,
             interleaved_file_size: 0,
             chapter_count: 0,
             stream_count: 0,
@@ -681,6 +740,41 @@ mod tests {
     /// A flow listed from the two-playlist disc.
     fn listed() -> Flow {
         Flow::start_listing(input()).listed(&input(), Ok(structural()))
+    }
+
+    /// A three-playlist disc with varied lengths and sizes, so every sort
+    /// column has a meaningful order: 00000 (100 s, est 1000), 00001 (70 s,
+    /// absent estimate — the `-` cell), 00002 (50 s, est 500). Distinct clips,
+    /// so the presentation order is longest-first: 00000, 00001, 00002.
+    fn structural3() -> Structural {
+        Structural {
+            bdrom: bdrom(vec![
+                playlist_sized("00000.MPLS", 100.0, 1000, &["A.M2TS"]),
+                playlist_sized("00001.MPLS", 70.0, 0, &["B.M2TS"]),
+                playlist_sized("00002.MPLS", 50.0, 500, &["C.M2TS"]),
+            ]),
+            features: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A flow listed from the three-playlist disc.
+    fn listed3() -> Flow {
+        Flow::start_listing(input()).listed(&input(), Ok(structural3()))
+    }
+
+    /// The table's row names in display order.
+    fn row_names(flow: &Flow) -> Vec<String> {
+        flow.any_listing()
+            .map(|listing| listing.rows.iter().map(|row| row.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The checked playlist names as a set (order-independent).
+    fn checked_set(flow: &Flow) -> std::collections::BTreeSet<String> {
+        flow.any_listing()
+            .map(|listing| listing.selected_names().into_iter().collect())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -886,6 +980,77 @@ mod tests {
     }
 
     #[test]
+    fn sorting_permutes_the_selection_and_the_active_row_with_the_rows() {
+        let mut flow = listed3();
+        flow.toggle(0); // check 00000
+        flow.set_active(2); // highlight 00002
+        // Length ascending: 00002 (50 s), 00001 (70 s), 00000 (100 s).
+        flow.sort_by(SortColumn::Length);
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::Length, ascending: true }));
+        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        // The check-mark still belongs to 00000, the highlight to 00002.
+        assert_eq!(checked_set(&flow).into_iter().collect::<Vec<_>>(), ["00000.MPLS"]);
+        assert_eq!(flow.active_index(), Some(0));
+        assert_eq!(flow.active_playlist_name().as_deref(), Some("00002.MPLS"));
+        // A second click flips to descending; everything still travels.
+        flow.sort_by(SortColumn::Length);
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::Length, ascending: false }));
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+        assert_eq!(checked_set(&flow).into_iter().collect::<Vec<_>>(), ["00000.MPLS"]);
+        assert_eq!(flow.active_playlist_name().as_deref(), Some("00002.MPLS"));
+        // The scan request covers exactly the checked playlist, sort or no sort.
+        let request = flow.scan_request().expect("a request for the checked row");
+        assert_eq!(request.selection, ["00000.MPLS"]);
+        // Sorting is a view concern: the disc's playlist order is untouched.
+        let disc_order: Vec<_> = flow
+            .any_listing()
+            .expect("a loaded disc")
+            .bdrom
+            .playlists
+            .iter()
+            .map(|playlist| playlist.name.clone())
+            .collect();
+        assert_eq!(disc_order, ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn sorting_is_refused_while_a_scan_is_in_flight() {
+        let flow = listed3();
+        let mut flow = flow.start_scanning(1);
+        flow.sort_by(SortColumn::File);
+        assert_eq!(flow.sort(), None);
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn a_measured_rebuild_reapplies_the_sort_and_keeps_the_checked_names() {
+        let mut flow = listed3();
+        flow.toggle(1); // check 00001
+        flow.sort_by(SortColumn::File);
+        flow.sort_by(SortColumn::File); // File descending: 00002, 00001, 00000
+        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        flow.set_active(0); // highlight 00002
+        let flow = flow.start_scanning(1);
+        let flow = flow.finished(1, "R".to_owned(), Vec::new(), structural3().bdrom.playlists);
+        assert_eq!(flow.stage(), Stage::Reported);
+        // The rebuilt table is still sorted, the check-mark still on 00001,
+        // the highlight still on 00002.
+        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        assert_eq!(checked_set(&flow).into_iter().collect::<Vec<_>>(), ["00001.MPLS"]);
+        assert_eq!(flow.active_playlist_name().as_deref(), Some("00002.MPLS"));
+    }
+
+    #[test]
+    fn active_clip_name_resolves_the_stream_file_rows_clip() {
+        let mut flow = listed();
+        assert_eq!(flow.active_clip_name(0).as_deref(), Some("A.M2TS"));
+        assert_eq!(flow.active_clip_name(9), None);
+        flow.set_active(1);
+        assert_eq!(flow.active_clip_name(0).as_deref(), Some("B.M2TS"));
+        assert_eq!(Flow::idle().active_clip_name(0), None);
+    }
+
+    #[test]
     fn finishing_a_scan_refreshes_the_panes_with_measured_data() {
         let mut flow = listed();
         flow.toggle(0);
@@ -955,7 +1120,7 @@ mod tests {
         use proptest::prelude::*;
 
         use super::super::{Flow, Stage};
-        use super::{input, listed, structural};
+        use super::{SortColumn, checked_set, input, listed, listed3, row_names, structural};
 
         /// One driver event — the messages `update` would feed the flow.
         #[derive(Debug, Clone)]
@@ -963,6 +1128,7 @@ mod tests {
             Toggle(usize),
             SelectAll,
             SelectNone,
+            Sort(SortColumn),
             StartScan,
             Progress(u64),
             Finished(u64),
@@ -972,11 +1138,29 @@ mod tests {
             OpenRejected,
         }
 
+        /// One sorting-invariant op — a checkbox toggle or a header click.
+        #[derive(Debug, Clone)]
+        enum Op {
+            Toggle(usize),
+            Sort(SortColumn),
+        }
+
+        fn sort_column() -> impl Strategy<Value = SortColumn> {
+            prop_oneof![
+                Just(SortColumn::File),
+                Just(SortColumn::Group),
+                Just(SortColumn::Length),
+                Just(SortColumn::Estimated),
+                Just(SortColumn::Measured),
+            ]
+        }
+
         fn event() -> impl Strategy<Value = Event> {
             prop_oneof![
                 (0_usize..4).prop_map(Event::Toggle),
                 Just(Event::SelectAll),
                 Just(Event::SelectNone),
+                sort_column().prop_map(Event::Sort),
                 Just(Event::StartScan),
                 (0_u64..4).prop_map(Event::Progress),
                 (0_u64..4).prop_map(Event::Finished),
@@ -1000,6 +1184,13 @@ mod tests {
                         Event::Toggle(i) => flow.toggle(i),
                         Event::SelectAll => flow.select_all(),
                         Event::SelectNone => flow.select_none(),
+                        Event::Sort(column) => {
+                            let before = checked_set(&flow);
+                            flow.sort_by(column);
+                            // Sorting is a pure view permutation — the checked
+                            // playlist set never changes.
+                            prop_assert_eq!(checked_set(&flow), before);
+                        }
                         Event::StartScan => {
                             let could = flow.can_scan();
                             if could {
@@ -1079,6 +1270,54 @@ mod tests {
                         prop_assert!(flow.editable());
                         prop_assert!(flow.row_count() > 0);
                     }
+                }
+            }
+
+            // The sorting invariant: under ANY sequence of sorts and toggles,
+            // the set of checked playlist names tracks exactly the toggles (a
+            // sort never changes it), and the scan set is order-independent —
+            // a measured scan started after any amount of sorting scans
+            // exactly the same names as before sorting.
+            #[test]
+            fn sorts_and_toggles_preserve_the_checked_name_set(
+                ops in proptest::collection::vec(
+                    prop_oneof![
+                        (0_usize..4).prop_map(Op::Toggle),
+                        sort_column().prop_map(Op::Sort),
+                    ],
+                    0..64,
+                ),
+            ) {
+                let mut flow = listed3();
+                let all: std::collections::BTreeSet<String> =
+                    row_names(&flow).into_iter().collect();
+                let mut expected = std::collections::BTreeSet::new();
+                for op in ops {
+                    match op {
+                        // A toggle flips the playlist NAME currently at that
+                        // row position (an out-of-range index flips nothing).
+                        Op::Toggle(index) => {
+                            if let Some(name) = row_names(&flow).get(index).cloned()
+                                && !expected.remove(&name)
+                            {
+                                expected.insert(name);
+                            }
+                            flow.toggle(index);
+                        }
+                        Op::Sort(column) => flow.sort_by(column),
+                    }
+                    prop_assert_eq!(checked_set(&flow), expected.clone());
+                    // The sorted table still lists exactly the same playlists.
+                    let listed: std::collections::BTreeSet<String> =
+                        row_names(&flow).into_iter().collect();
+                    prop_assert_eq!(&listed, &all);
+                    // scan_names as a set: the checked names, or every listed
+                    // playlist when nothing is checked (scan-all).
+                    let request = flow.scan_request().expect("a listed disc can scan");
+                    let scan: std::collections::BTreeSet<String> =
+                        request.selection.into_iter().collect();
+                    let want = if expected.is_empty() { all.clone() } else { expected.clone() };
+                    prop_assert_eq!(scan, want);
                 }
             }
         }

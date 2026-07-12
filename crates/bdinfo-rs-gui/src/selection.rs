@@ -35,6 +35,20 @@ impl Selection {
         Self { checked: vec![false; len] }
     }
 
+    /// A selection with one given flag per row (row-parallel) — used when the
+    /// table is rebuilt and the checked set is re-attached to the new rows.
+    pub const fn from_flags(checked: Vec<bool>) -> Self {
+        Self { checked }
+    }
+
+    /// Reorders the flags by `order` — a sort permutation, `order[new] = old`
+    /// — so each check-mark travels with its row. An out-of-range entry reads
+    /// as unchecked (the flow only passes true permutations of the row range).
+    pub fn permute(&mut self, order: &[usize]) {
+        self.checked =
+            order.iter().map(|&index| self.checked.get(index).copied().unwrap_or(false)).collect();
+    }
+
     /// The number of rows the selection spans.
     pub const fn len(&self) -> usize {
         self.checked.len()
@@ -227,6 +241,34 @@ mod tests {
     fn all_is_false_for_an_empty_selection() {
         // An all-unchecked zero-row selection is not "all selected".
         assert!(!Selection::new(0).all());
+    }
+
+    #[test]
+    fn from_flags_takes_the_flags_verbatim() {
+        let selection = Selection::from_flags(vec![true, false, true]);
+        assert_eq!(selection.len(), 3);
+        assert!(selection.is_checked(0));
+        assert!(!selection.is_checked(1));
+        assert!(selection.is_checked(2));
+    }
+
+    #[test]
+    fn permute_moves_each_flag_with_its_row() {
+        let mut selection = Selection::from_flags(vec![true, false, false]);
+        // The sort moved row 0 to the end: new order = old rows [2, 1, 0].
+        selection.permute(&[2, 1, 0]);
+        assert!(!selection.is_checked(0));
+        assert!(!selection.is_checked(1));
+        assert!(selection.is_checked(2));
+        assert_eq!(selection.count(), 1);
+    }
+
+    #[test]
+    fn permute_reads_an_out_of_range_entry_as_unchecked() {
+        let mut selection = Selection::from_flags(vec![true, true]);
+        selection.permute(&[1, 9]);
+        assert!(selection.is_checked(0));
+        assert!(!selection.is_checked(1));
     }
 
     #[test]

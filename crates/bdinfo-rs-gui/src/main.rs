@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
-use bdinfo_rs_gui::model::{SelectableRow, format_file_size, group_n0};
+use bdinfo_rs_gui::model::{SelectableRow, Sort, SortColumn, format_file_size, group_n0};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
+use bdinfo_rs_gui::paths;
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
 use iced::alignment::{Horizontal, Vertical};
@@ -396,9 +397,14 @@ enum Message {
     RowHovered(Region, usize),
     /// The cursor left a row in `region` — clears the hover if it still owns it.
     RowUnhovered(Region, usize),
-    /// A lower-pane (Stream File / Codec) row was clicked — select it (the anchor
-    /// for a later "copy line" action).
+    /// A lower-pane (Stream File / Codec) row was clicked — select it (the
+    /// anchor the Ctrl+C copy acts on).
     PaneRowPressed(Region, usize),
+    /// A playlist-table column header was clicked — sort by that column
+    /// (first click ascending, a second click flips).
+    SortBy(SortColumn),
+    /// Ctrl+C (Cmd+C on macOS) — copy the highlighted row's file path.
+    CopyPath,
     /// "Select all" pressed.
     SelectAll,
     /// "Select none" pressed.
@@ -524,13 +530,7 @@ impl App {
                 self.flow.toggle(index);
                 Task::none()
             }
-            Message::RowActivated(index) => {
-                self.flow.set_active(index);
-                // The lower panes now show a different playlist — drop any
-                // pane-row selection that pointed into the old contents.
-                self.pane_selection = None;
-                Task::none()
-            }
+            Message::RowActivated(index) => self.activate_row(index),
             Message::RowHovered(region, index) => {
                 self.hovered = Some((region, index));
                 Task::none()
@@ -545,6 +545,11 @@ impl App {
                 self.pane_selection = Some((region, index));
                 Task::none()
             }
+            Message::SortBy(column) => {
+                self.flow.sort_by(column);
+                Task::none()
+            }
+            Message::CopyPath => self.copy_path(),
             Message::SelectAll => {
                 self.flow.select_all();
                 Task::none()
@@ -668,6 +673,20 @@ impl App {
             }
             iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
                 Some(Message::FilesHoveredLeft)
+            }
+            _ => None,
+        }));
+        // Ctrl+C (Cmd+C on macOS, iced's `command` modifier) copies the
+        // highlighted row's file path. Only events no widget consumed are
+        // taken; the guard rules (busy / report view / what is highlighted)
+        // live in the handler, so the subscription is a plain feed.
+        subs.push(iced::event::listen_with(|event, status, _window| match event {
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+                if status == iced::event::Status::Ignored
+                    && modifiers.command()
+                    && matches!(key.as_ref(), iced::keyboard::Key::Character("c")) =>
+            {
+                Some(Message::CopyPath)
             }
             _ => None,
         }));
@@ -858,6 +877,41 @@ impl App {
             Ok(()) => Some(format!("Report saved to: {}", target.display())),
             Err(err) => Some(format!("Save failed: {err}")),
         };
+    }
+
+    /// Makes `index` the active (highlighted) row. The lower panes now show a
+    /// different playlist, so any pane-row selection that pointed into the old
+    /// contents is dropped.
+    fn activate_row(&mut self, index: usize) -> Task<Message> {
+        self.flow.set_active(index);
+        self.pane_selection = None;
+        Task::none()
+    }
+
+    /// Copies the highlighted row's underlying file path — `BDInfo`'s Ctrl+C.
+    /// The last-clicked Stream File row wins (that clip's path); otherwise the
+    /// active playlist row copies its `.MPLS` path. A selected Codec row copies
+    /// nothing, matching `BDInfo`'s scope (its stream list doesn't respond).
+    /// Ignored while a scan is in flight or the report view covers the panes.
+    fn copy_path(&mut self) -> Task<Message> {
+        if self.is_busy() || self.showing_report {
+            return Task::none();
+        }
+        let Some(input) = self.flow.current_input() else { return Task::none() };
+        let target = match self.pane_selection {
+            Some((Region::StreamFile, index)) => {
+                self.flow.active_clip_name(index).map(|clip| paths::stream_path(input, &clip))
+            }
+            Some((Region::Codec, _)) => None,
+            _ => self.flow.active_playlist_name().map(|name| paths::playlist_path(input, &name)),
+        };
+        match target {
+            Some(path) => {
+                self.status = Some(format!("Copied: {path}"));
+                iced::clipboard::write(path)
+            }
+            None => Task::none(),
+        }
     }
 
     /// Copies the report to the clipboard via iced's clipboard task.
@@ -1200,11 +1254,16 @@ impl App {
     /// The hand-rolled playlist table: a sharp data grid with a quiet header over
     /// scrollable selectable rows.
     fn playlist_table(&self, p: Palette) -> Element<'_, Message> {
-        let header =
-            container(resizable_header(p, PLAYLIST_COLS, ColGrid::Shared, self.grid_w.to_vec()))
-                .width(Length::Fill)
-                .height(Length::Fixed(ui::HEADER_H))
-                .style(ui::table_header(p));
+        let header = container(resizable_header(
+            p,
+            PLAYLIST_COLS,
+            ColGrid::Shared,
+            self.grid_w.to_vec(),
+            Some((PLAYLIST_SORT_COLS, self.flow.sort())),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fixed(ui::HEADER_H))
+        .style(ui::table_header(p));
         let rule = container(Space::new())
             .width(Length::Fill)
             .height(Length::Fixed(1.0))
@@ -1488,7 +1547,12 @@ fn banner<'a>(p: Palette, kind: iced::Color, message: &str) -> Element<'a, Messa
 }
 
 /// One header cell: a muted label in a fixed-width, aligned box.
-fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Element<'_, Message> {
+fn header_cell<'a>(
+    p: Palette,
+    label: String,
+    width: Length,
+    align: Horizontal,
+) -> Element<'a, Message> {
     container(
         text(label)
             .size(ui::TEXT_XS)
@@ -1509,22 +1573,46 @@ fn header_cell(p: Palette, label: &str, width: Length, align: Horizontal) -> Ele
     .into()
 }
 
-/// A header cell (weight `width`) with an optional resize grab on its right edge.
-/// The grab is a `Stack` overlay wrapped in a `container(width)` — the
+/// A header cell (weight `width`) with an optional resize grab on its right edge
+/// and an optional sort action. The grab is a `Stack` overlay wrapped in a
+/// `container(width)` — the
 /// `FillPortion` lives on the container, exactly like a body cell, so it stays aligned
 /// with the rows. It shows a visible 1px separator inside a wide hit zone and a
 /// horizontal-resize cursor. Pressing it only *starts* the drag (carrying the
 /// column span `cols_width`); a global mouse subscription then tracks the cursor
 /// even as it leaves the zone, so the drag does not stop after a few pixels.
-fn header_col(
+///
+/// When `sort` names this column's [`SortColumn`], the label area becomes a
+/// click target dispatching that sort (the grab strip still wins on the right
+/// edge), and the active sort column carries an ↑/↓ marker after its label.
+fn header_col<'a>(
     p: Palette,
     label: &str,
     width: Length,
     align: Horizontal,
     grab: Option<(ColGrid, usize, f32)>,
-) -> Element<'_, Message> {
+    sort: Option<(SortColumn, Option<Sort>)>,
+) -> Element<'a, Message> {
+    let title = match sort {
+        Some((column, Some(active))) if active.column == column => {
+            format!("{label} {}", if active.ascending { "↑" } else { "↓" })
+        }
+        _ => label.to_owned(),
+    };
+    // The (possibly clickable) label cell at `w` — built twice below, once per
+    // layout (plain vs grab-overlaid).
+    let cell = |w: Length| -> Element<'a, Message> {
+        let plain = header_cell(p, title.clone(), w, align);
+        match sort {
+            Some((column, _)) => mouse_area(plain)
+                .interaction(iced::mouse::Interaction::Pointer)
+                .on_press(Message::SortBy(column))
+                .into(),
+            None => plain,
+        }
+    };
     let Some((grid, boundary, cols_width)) = grab else {
-        return header_cell(p, label, width, align);
+        return cell(width);
     };
     // A visible 1px line at the right edge (the boundary), inside a wide grab zone.
     let separator = Row::new()
@@ -1549,7 +1637,7 @@ fn header_col(
         Stack::new()
             .width(Length::Fill)
             .height(Length::Fill)
-            .push(header_cell(p, label, Length::Fill, align))
+            .push(cell(Length::Fill))
             .push(overlay),
     )
     .width(width)
@@ -1560,12 +1648,15 @@ fn header_col(
 /// Builds a resizable table header: a leading indent, one [`header_col`] per
 /// column (each with a right-edge drag grab, except the last), and the trailing
 /// scrollbar gutter — wrapped in `responsive` so the grabs know the column span.
-/// `weights` are the live column weights for `grid`.
+/// `weights` are the live column weights for `grid`. `sort_cols`, when given,
+/// makes every column a sort click target: the per-column [`SortColumn`] list
+/// (parallel to `cols`) plus the active sort for the direction marker.
 fn resizable_header<'a>(
     p: Palette,
     cols: &'static [Col],
     grid: ColGrid,
     weights: Vec<f32>,
+    sort_cols: Option<(&'static [SortColumn], Option<Sort>)>,
 ) -> Element<'a, Message> {
     responsive(move |size| {
         let cols_width = (size.width - ui::ROW_INDENT - ui::SCROLLBAR_GUTTER).max(1.0);
@@ -1578,7 +1669,9 @@ fn resizable_header<'a>(
         for (i, col) in cols.iter().enumerate() {
             let weight = weights.get(i).copied().unwrap_or(1.0);
             let grab = (i != last).then_some((grid, i, cols_width));
-            row = row.push(header_col(p, col.label, fill(weight), col.align, grab));
+            let sort = sort_cols
+                .and_then(|(columns, active)| columns.get(i).map(|&column| (column, active)));
+            row = row.push(header_col(p, col.label, fill(weight), col.align, grab, sort));
         }
         row.push(Space::new().width(Length::Fixed(ui::SCROLLBAR_GUTTER))).into()
     })
@@ -1720,6 +1813,16 @@ const PLAYLIST_COLS: &[Col] = &[
     Col { label: "Measured Size", align: Horizontal::Right, mono: true },
 ];
 
+/// The sort key behind each Playlist column, parallel to [`PLAYLIST_COLS`] —
+/// what a click on that header sorts by.
+const PLAYLIST_SORT_COLS: &[SortColumn] = &[
+    SortColumn::File,
+    SortColumn::Group,
+    SortColumn::Length,
+    SortColumn::Estimated,
+    SortColumn::Measured,
+];
+
 /// The "Stream File" pane columns — the SHARED grid, so they line up under the
 /// playlist's (Length / Estimated / Measured on the same grid lines).
 const STREAM_FILE_COLS: &[Col] = &[
@@ -1757,7 +1860,9 @@ fn data_table<'a>(
     hovered: Option<usize>,
     selected: Option<usize>,
 ) -> Element<'a, Message> {
-    let header = container(resizable_header(p, cols, grid, weights.to_vec()))
+    // No sort columns: like `BDInfo`, only the playlist list sorts on a header
+    // click — its Stream File list has no ColumnClick handler.
+    let header = container(resizable_header(p, cols, grid, weights.to_vec(), None))
         .width(Length::Fill)
         .height(Length::Fixed(ui::HEADER_H))
         .style(ui::table_header(p));
