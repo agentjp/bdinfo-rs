@@ -8,7 +8,7 @@
 //! palette tokens — never a raw colour.
 
 use iced::font::Weight;
-use iced::widget::{button, container, progress_bar};
+use iced::widget::{button, container, progress_bar, text_input};
 use iced::{Border, Color, Font, Shadow, Theme, Vector, border};
 
 use crate::theme::Palette;
@@ -257,6 +257,28 @@ pub fn check_box(p: Palette, selected: bool) -> impl Fn(&Theme) -> container::St
                 border: border::rounded(RADIUS_SM).color(p.line_strong).width(1.5),
                 ..container::Style::default()
             }
+        }
+    }
+}
+
+/// An editable text field (the Settings dialog's seconds box) — the
+/// [`path_field`] look made live: a quiet surface whose border lifts to the
+/// accent while focused.
+pub fn text_field(p: Palette) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
+    move |_, status| {
+        let border_color = match status {
+            text_input::Status::Focused { .. } => p.accent,
+            text_input::Status::Hovered => p.line_strong,
+            text_input::Status::Active => p.line,
+            text_input::Status::Disabled => p.line,
+        };
+        text_input::Style {
+            background: p.surface.into(),
+            border: border::rounded(RADIUS_SM).color(border_color).width(1.0),
+            icon: p.text_muted,
+            placeholder: p.text_faint,
+            value: p.text,
+            selection: with_alpha(p.accent, 0.35),
         }
     }
 }

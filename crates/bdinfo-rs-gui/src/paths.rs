@@ -46,6 +46,24 @@ pub fn stream_path(input: &Input, clip: &str) -> String {
     disc_path(input, "STREAM", clip)
 }
 
+/// The autosave destination for a finished measured scan's report —
+/// `BDInfo`'s `AutosaveReport` writes without asking, so the destination must
+/// be implied by the input: the **disc folder** (the directory holding
+/// `BDMV`) for folder input, the directory **next to the image** for `.iso`
+/// input. Pure path math; `None` when the input path has no parent to write
+/// into (not the case for any real disc path — the caller surfaces it as an
+/// ordinary save failure).
+#[must_use]
+pub fn autosave_dir(input: &Input) -> Option<PathBuf> {
+    let dir = match input {
+        Input::Folder(path) => bdmv_dir(path).parent().map(Path::to_path_buf),
+        Input::Iso(path) => path.parent().map(Path::to_path_buf),
+    };
+    // A bare relative name yields an empty parent — no destination, never an
+    // accidental write into the current directory.
+    dir.filter(|parent| !parent.as_os_str().is_empty())
+}
+
 /// Builds the copy target for the `BDMV/<dir>/<name>` disc entry.
 fn disc_path(input: &Input, dir: &str, name: &str) -> String {
     match input {
@@ -116,5 +134,27 @@ mod tests {
         let input = Input::Iso(PathBuf::from("disc.iso"));
         assert_eq!(playlist_path(&input, "00000.MPLS"), "disc.iso::BDMV/PLAYLIST/00000.MPLS");
         assert_eq!(stream_path(&input, "00001.M2TS"), "disc.iso::BDMV/STREAM/00001.M2TS");
+    }
+
+    #[test]
+    fn autosave_lands_in_the_disc_folder_for_folder_input() {
+        let root = Path::new("discs").join("MY_DISC");
+        // Whether the pick was the disc root, BDMV itself, or a directory
+        // inside it, the report autosaves into the disc folder — the CLI's
+        // default REPORT_DEST.
+        assert_eq!(super::autosave_dir(&Input::Folder(root.clone())), Some(root.clone()));
+        assert_eq!(super::autosave_dir(&Input::Folder(root.join("BDMV"))), Some(root.clone()));
+        assert_eq!(
+            super::autosave_dir(&Input::Folder(root.join("BDMV").join("PLAYLIST"))),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn autosave_lands_next_to_the_image_for_iso_input() {
+        let iso = Path::new("rips").join("disc.iso");
+        assert_eq!(super::autosave_dir(&Input::Iso(iso)), Some(PathBuf::from("rips")));
+        // A bare relative file name has no usable parent — no destination.
+        assert_eq!(super::autosave_dir(&Input::Iso(PathBuf::from("disc.iso"))), None);
     }
 }

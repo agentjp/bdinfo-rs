@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
-use bdinfo_rs_gui::model::{SelectableRow, Sort, SortColumn, format_file_size, group_n0};
+use bdinfo_rs_gui::model::{
+    SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
+};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
@@ -37,7 +39,7 @@ use bdinfo_rs_gui::{paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
-    responsive, scrollable, text,
+    responsive, scrollable, text, text_input,
 };
 use iced::{Element, Length, Task};
 
@@ -208,6 +210,9 @@ struct App {
     showing_report: bool,
     /// The "scan completed" confirmation, shown as a modal until dismissed.
     notice: Option<String>,
+    /// The Settings dialog's working copy — `Some` while the dialog is open;
+    /// OK applies it to `persisted`, Cancel just drops it.
+    settings_draft: Option<settings::Draft>,
     /// The row the cursor is currently over — one `(region, index)` across all
     /// three panes, so the whole row (not a sub-widget) lifts on hover.
     hovered: Option<(Region, usize)>,
@@ -254,6 +259,7 @@ impl Default for App {
             status: None,
             showing_report: false,
             notice: None,
+            settings_draft: None,
             hovered: None,
             hovered_header: None,
             pane_selection: None,
@@ -371,6 +377,8 @@ enum Command {
     SaveReport,
     /// Copy the report to the clipboard.
     CopyReport,
+    /// Open the Settings dialog.
+    Settings,
     /// Cycle the theme: Auto → Light → Dark.
     ToggleTheme,
 }
@@ -384,6 +392,7 @@ impl Command {
             Self::Rescan => "Rescan",
             Self::SaveReport => "Save report…",
             Self::CopyReport => "Copy",
+            Self::Settings => "Settings...",
             Self::ToggleTheme => "Theme",
         }
     }
@@ -396,9 +405,26 @@ impl Command {
             Self::Rescan => Message::Rescan,
             Self::SaveReport => Message::SaveReport,
             Self::CopyReport => Message::CopyReport,
+            Self::Settings => Message::OpenSettings,
             Self::ToggleTheme => Message::ToggleTheme,
         }
     }
+}
+
+/// One Settings checkbox — the field a [`Message::SettingsToggled`] flips on
+/// the open dialog's draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsField {
+    /// "Filter short playlists".
+    FilterShort,
+    /// "Filter playlists that contain loops".
+    FilterLoops,
+    /// "Stream sizes in human readable format".
+    HumanSizes,
+    /// "Display chapter count in Playlist view".
+    ChapterCount,
+    /// "Auto-save report on scan completion".
+    Autosave,
 }
 
 /// Everything the UI can ask the runtime to do.
@@ -479,6 +505,16 @@ enum Message {
     CopyReport,
     /// The "scan completed" confirmation modal was dismissed.
     DismissNotice,
+    /// "Settings..." pressed — open the dialog over a working copy.
+    OpenSettings,
+    /// A Settings checkbox toggled on the open dialog.
+    SettingsToggled(SettingsField),
+    /// The short-playlist seconds field was edited (sanitized to digits).
+    SettingsSeconds(String),
+    /// The Settings dialog's OK — apply + persist the draft.
+    SettingsOk,
+    /// The Settings dialog's Cancel (or a scrim click) — discard the draft.
+    SettingsCancel,
     /// The theme toggle pressed — cycle Auto → Light → Dark.
     ToggleTheme,
     /// The OS reported (or changed) its light/dark setting.
@@ -538,8 +574,9 @@ impl App {
     fn command_enabled(&self, command: Command) -> bool {
         match command {
             Command::ToggleTheme => true,
-            // Browsing / re-scanning is disabled while a scan is in flight.
-            Command::OpenFolder | Command::OpenIso => !self.is_busy(),
+            // Browsing / re-scanning / reconfiguring is disabled while a scan
+            // is in flight (`BDInfo` disables its Settings button then too).
+            Command::OpenFolder | Command::OpenIso | Command::Settings => !self.is_busy(),
             Command::Rescan => !self.is_busy() && self.flow.current_input().is_some(),
             Command::SaveReport | Command::CopyReport => self.flow.report_available(),
         }
@@ -651,6 +688,28 @@ impl App {
                 self.notice = None;
                 Task::none()
             }
+            Message::OpenSettings => {
+                self.settings_draft = Some(settings::Draft::from_settings(&self.persisted));
+                Task::none()
+            }
+            Message::SettingsToggled(field) => {
+                self.toggle_setting(field);
+                Task::none()
+            }
+            Message::SettingsSeconds(input) => {
+                if let Some(draft) = &mut self.settings_draft {
+                    draft.seconds_text = settings::sanitize_seconds(&input);
+                }
+                Task::none()
+            }
+            Message::SettingsOk => {
+                self.apply_settings();
+                Task::none()
+            }
+            Message::SettingsCancel => {
+                self.settings_draft = None;
+                Task::none()
+            }
             Message::ToggleTheme => self.toggle_theme(),
             Message::OsTheme(mode) => {
                 self.os_mode = mode;
@@ -679,6 +738,32 @@ impl App {
             }
             Message::CloseRequested(id) => close_with_geometry(id),
             Message::SaveAndClose { id, position, size } => self.save_and_close(id, position, size),
+        }
+    }
+
+    /// Flips one checkbox on the open Settings dialog's draft (a no-op when
+    /// the dialog is closed — a stray message changes nothing).
+    fn toggle_setting(&mut self, field: SettingsField) {
+        if let Some(draft) = &mut self.settings_draft {
+            let slot = match field {
+                SettingsField::FilterShort => &mut draft.filter_short_playlists,
+                SettingsField::FilterLoops => &mut draft.filter_looping_playlists,
+                SettingsField::HumanSizes => &mut draft.human_readable_sizes,
+                SettingsField::ChapterCount => &mut draft.display_chapter_count,
+                SettingsField::Autosave => &mut draft.autosave_report,
+            };
+            *slot = !*slot;
+        }
+    }
+
+    /// The Settings dialog's OK: persist the draft and hand the new view
+    /// settings to the flow — a filter change re-derives the table from the
+    /// retained disc (no rescan), a display change re-renders the cells.
+    fn apply_settings(&mut self) {
+        if let Some(draft) = self.settings_draft.take() {
+            draft.apply_to(&mut self.persisted);
+            settings::save(&self.persisted);
+            self.flow.set_view(ViewSettings::from_settings(&self.persisted));
         }
     }
 
@@ -819,7 +904,8 @@ impl App {
     /// hook (`BDINFO_GUI_SCAN=all`), selecting and scanning every playlist so
     /// a screenshot can show measured data.
     fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
-        self.flow = std::mem::take(&mut self.flow).listed(input, result);
+        let view = ViewSettings::from_settings(&self.persisted);
+        self.flow = std::mem::take(&mut self.flow).listed(input, result, view);
         // Only when THIS input just became the listing (not a superseded or
         // failed result) does it become the remembered source.
         if self.flow.stage() == Stage::Listed && self.flow.current_input() == Some(input) {
@@ -848,8 +934,23 @@ impl App {
         self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
             self.notice = Some(self.scan_outcome());
+            if self.persisted.autosave_report {
+                self.autosave_report();
+            }
         }
         Task::none()
+    }
+
+    /// Writes the finished report without asking — `BDInfo`'s `AutosaveReport`
+    /// on `ScanBDROMCompleted`. The destination is implied by the input (the
+    /// disc folder, or next to the `.iso`); the outcome lands in the status
+    /// line either way, a failure being the same non-blocking message a manual
+    /// save shows.
+    fn autosave_report(&mut self) {
+        match self.flow.current_input().and_then(paths::autosave_dir) {
+            Some(dir) => self.save_report(&dir),
+            None => self.status = Some("Save failed: no autosave destination".to_owned()),
+        }
     }
 
     /// Opens `path` — a dropped item or the boot argument — through the same
@@ -1080,8 +1181,11 @@ impl App {
         if self.flow.stage() == Stage::Listing {
             return scanning_modal(base, scanning_card(p));
         }
+        if let Some(draft) = &self.settings_draft {
+            return modal(base, settings_card(p, draft), Message::SettingsCancel);
+        }
         match &self.notice {
-            Some(notice) => modal(base, notice_card(p, notice)),
+            Some(notice) => modal(base, notice_card(p, notice), Message::DismissNotice),
             None => base,
         }
     }
@@ -1142,7 +1246,8 @@ impl App {
             .push(field)
             .push(self.labeled_command_button(p, "Browse...", Command::OpenFolder))
             .push(self.labeled_command_button(p, "ISO", Command::OpenIso))
-            .push(self.labeled_command_button(p, "Rescan", Command::Rescan));
+            .push(self.labeled_command_button(p, "Rescan", Command::Rescan))
+            .push(self.command_button(p, Command::Settings));
         container(bar).width(Length::Fill).padding([ui::GAP_3, ui::GAP_4]).into()
     }
 
@@ -2042,11 +2147,19 @@ fn data_table<'a>(
     .into()
 }
 
-/// Overlays `card` (centred over a dim scrim) on `base` — the scan-complete
-/// modal. Clicking the scrim dismisses it.
-fn modal<'a>(base: Element<'a, Message>, card: Element<'a, Message>) -> Element<'a, Message> {
-    let scrim = mouse_area(container(card).center(Length::Fill).style(ui::scrim()))
-        .on_press(Message::DismissNotice);
+/// Overlays `card` (centred over a dim scrim) on `base` — a dismissable modal
+/// (the scan-complete notice, the Settings dialog). Clicking the scrim
+/// dispatches `on_scrim` — dismiss for the notice, Cancel for Settings; the
+/// card itself is `opaque`, so a click inside it never counts as a scrim
+/// click (a mis-aimed click must not discard half-edited settings).
+fn modal<'a>(
+    base: Element<'a, Message>,
+    card: Element<'a, Message>,
+    on_scrim: Message,
+) -> Element<'a, Message> {
+    let scrim =
+        mouse_area(container(iced::widget::opaque(card)).center(Length::Fill).style(ui::scrim()))
+            .on_press(on_scrim);
     Stack::new().push(base).push(scrim).into()
 }
 
@@ -2075,6 +2188,99 @@ fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
                 .align_x(Horizontal::Center),
         );
     container(card).padding(ui::GAP_6).max_width(440.0).style(ui::hero_card(p)).into()
+}
+
+/// The Settings dialog card — `BDInfo`'s `FormSettings`, narrowed to what is
+/// safely in the GUI's own hands: the two playlist filters (+ the seconds
+/// threshold), the two display toggles, and autosave, with OK / Cancel
+/// (Cancel discards the draft). The wording mirrors the original's checkboxes.
+fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message> {
+    let seconds_field = text_input("20", &draft.seconds_text)
+        .on_input(Message::SettingsSeconds)
+        .width(Length::Fixed(72.0))
+        .padding([ui::GAP_1, ui::GAP_2])
+        .size(ui::TEXT_SM)
+        .font(ui::MONO)
+        .style(ui::text_field(p));
+    let short_row = Row::new()
+        .align_y(Vertical::Center)
+        .spacing(ui::GAP_2)
+        .push(setting_check(
+            p,
+            "Filter short playlists under",
+            draft.filter_short_playlists,
+            SettingsField::FilterShort,
+        ))
+        .push(seconds_field)
+        .push(text("seconds").size(ui::TEXT_SM).color(p.text_muted));
+
+    let actions = Row::new()
+        .width(Length::Fill)
+        .spacing(ui::GAP_2)
+        .push(Space::new().width(Length::Fill))
+        .push(
+            button(text("Cancel").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                .padding([ui::GAP_2, ui::GAP_4])
+                .style(ui::secondary_button(p))
+                .on_press(Message::SettingsCancel),
+        )
+        .push(
+            button(text("OK").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
+                .padding([ui::GAP_2, ui::GAP_6])
+                .style(ui::primary_button(p))
+                .on_press(Message::SettingsOk),
+        );
+
+    let card = Column::new()
+        .width(Length::Fixed(420.0))
+        .spacing(ui::GAP_3)
+        .push(text("Settings").size(ui::TEXT_MD).font(ui::UI_SEMIBOLD).color(p.text))
+        .push(short_row)
+        .push(setting_check(
+            p,
+            "Filter playlists that contain loops",
+            draft.filter_looping_playlists,
+            SettingsField::FilterLoops,
+        ))
+        .push(setting_check(
+            p,
+            "Stream sizes in human readable format",
+            draft.human_readable_sizes,
+            SettingsField::HumanSizes,
+        ))
+        .push(setting_check(
+            p,
+            "Display chapter count in Playlist view",
+            draft.display_chapter_count,
+            SettingsField::ChapterCount,
+        ))
+        .push(setting_check(
+            p,
+            "Auto-save report on scan completion",
+            draft.autosave_report,
+            SettingsField::Autosave,
+        ))
+        .push(actions);
+    container(card).padding(ui::GAP_6).style(ui::hero_card(p)).into()
+}
+
+/// One Settings checkbox line: the app's check chip + label, the whole line
+/// one click target (like the table rows, no chip-vs-label seam).
+fn setting_check<'a>(
+    p: Palette,
+    label: &str,
+    checked: bool,
+    field: SettingsField,
+) -> Element<'a, Message> {
+    let line = Row::new()
+        .align_y(Vertical::Center)
+        .spacing(ui::GAP_2)
+        .push(check_chip(p, checked))
+        .push(text(label.to_owned()).size(ui::TEXT_SM).color(p.text));
+    mouse_area(line)
+        .interaction(iced::mouse::Interaction::Pointer)
+        .on_press(Message::SettingsToggled(field))
+        .into()
 }
 
 /// The scan-complete card: the brand mark, the outcome text, and an OK button.
