@@ -15,6 +15,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
 use bdinfo_rs_core::error::{BdError, ScanError};
@@ -125,18 +126,20 @@ fn open(
     mode: ScanMode,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     match input {
         Input::Folder(path) => {
             let root = FsDir::new(path);
-            let report = BdRom::open_resilient_with(&root, mode, scan_files, progress)?;
+            let report = BdRom::open_resilient_with(&root, mode, scan_files, progress, cancel)?;
             let mut errors = report.errors;
             errors.extend(root.take_errors());
             Ok((report.bdrom, errors))
         }
         Input::Iso(path) => {
             let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-            let report = BdRom::open_resilient_with(&source.root(), mode, scan_files, progress)?;
+            let report =
+                BdRom::open_resilient_with(&source.root(), mode, scan_files, progress, cancel)?;
             let mut errors = report.errors;
             errors.extend(source.take_errors());
             Ok((report.bdrom, errors))
@@ -159,8 +162,9 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
     // `Codecs` mode runs the bounded quick pass — reads only the head of each
     // stream file — so the panes show full codec detail (profile / HDR / Dolby
     // Vision) right after opening, like BDInfo, without the whole-file bitrate scan.
-    let (bdrom, errors) =
-        open(input, ScanMode::Codecs, None, &mut |_| {}).map_err(|err| err.to_string())?;
+    // Bounded and fast, so it carries no cancel affordance: the flag never trips.
+    let (bdrom, errors) = open(input, ScanMode::Codecs, None, &mut |_| {}, &AtomicBool::new(false))
+        .map_err(|err| err.to_string())?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
 }
@@ -176,19 +180,25 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 /// (possibly multi-GB) playlist is never demuxed. Runs on the iced shell's worker
 /// thread, where native demux keeps its `thread::scope` parallelism.
 ///
+/// `cancel` is the shell's Cancel affordance: set it (from the UI thread) and
+/// the demux aborts at its next read chunk, so the worker returns within
+/// moments instead of scanning a possibly-90-GB disc to completion.
+///
 /// # Errors
 /// A short message when the structure is too damaged to open at all — the same
 /// hard error [`scan_structural`] surfaces (it cannot occur in practice, since
 /// the structural scan just located the same structure, but the result is
-/// reported rather than panicked).
+/// reported rather than panicked) — or when `cancel` was set mid-scan (the
+/// message is dropped by the shell's generation guard; no report escapes).
 pub fn scan_measured(
     input: &Input,
     selection: &[String],
     scan_files: &BTreeSet<String>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
 ) -> Result<Measured, String> {
-    let (bdrom, errors) =
-        open(input, ScanMode::Full, Some(scan_files), progress).map_err(|err| err.to_string())?;
+    let (bdrom, errors) = open(input, ScanMode::Full, Some(scan_files), progress, cancel)
+        .map_err(|err| err.to_string())?;
     let order = selection::selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors);
     Ok(Measured {

@@ -12,6 +12,7 @@
 //! vs the `.iso`'s UDF volume label), which the goldens already encode.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 use bdinfo_rs_gui::flow::Flow;
 use bdinfo_rs_gui::model::ViewSettings;
@@ -38,10 +39,36 @@ fn list_select_all_and_measure(input: &Input) -> (String, String) {
         Flow::start_listing(input.clone()).listed(input, Ok(structural), ViewSettings::default());
     flow.select_all();
     let request = flow.scan_request().expect("a request once every row is selected");
-    let measured =
-        scan::scan_measured(&request.input, &request.selection, &request.scan_files, &mut |_| {})
-            .expect("the fixture scans");
+    let measured = scan::scan_measured(
+        &request.input,
+        &request.selection,
+        &request.scan_files,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .expect("the fixture scans");
     (measured.report, measured.label)
+}
+
+#[test]
+fn a_cancelled_measured_scan_yields_no_report() {
+    // The shell's Cancel trips the flag; a scan that observes it must return
+    // the cancelled error — never a partial (or empty) report.
+    let input = Input::Folder(fixture("BigBuckBunny"));
+    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let mut flow =
+        Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
+    flow.select_all();
+    let request = flow.scan_request().expect("a request once every row is selected");
+    let err = scan::scan_measured(
+        &request.input,
+        &request.selection,
+        &request.scan_files,
+        &mut |_| {},
+        &AtomicBool::new(true),
+    )
+    .expect_err("a cancelled scan yields no report");
+    assert_eq!(err, "scan cancelled");
 }
 
 #[test]

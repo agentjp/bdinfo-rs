@@ -25,9 +25,11 @@ mod theme;
 mod ui;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
+use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::{
     SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
@@ -202,6 +204,11 @@ struct App {
     os_mode: iced::theme::Mode,
     /// Bumped on each "Scan selected"; the in-flight scan's id.
     generation: u64,
+    /// The in-flight measured scan's cooperative cancel flag — a fresh one per
+    /// scan (so cancelling an old scan can never touch a newer one), shared
+    /// with the worker thread, set by the Cancel button. The demux polls it
+    /// per read chunk and aborts, so Cancel really frees the machine.
+    scan_cancel: Option<Arc<AtomicBool>>,
     /// When the current measured scan started.
     scan_start: Option<Instant>,
     /// A one-line status (e.g. `Report saved to: …`), shown in the bottom bar.
@@ -255,6 +262,7 @@ impl Default for App {
             theme_pref: ThemePref::default(),
             os_mode: iced::theme::Mode::default(),
             generation: 0,
+            scan_cancel: None,
             scan_start: None,
             status: None,
             showing_report: false,
@@ -666,10 +674,7 @@ impl App {
                 self.flow = std::mem::take(&mut self.flow).scan_failed(generation, error);
                 Task::none()
             }
-            Message::Cancel => {
-                self.flow = std::mem::take(&mut self.flow).cancel();
-                Task::none()
-            }
+            Message::Cancel => self.cancel_scan(),
             Message::ShowReport => {
                 self.showing_report = self.flow.report_available();
                 Task::none()
@@ -935,6 +940,19 @@ impl App {
         Task::none()
     }
 
+    /// Cancels the in-flight measured scan for real: trips the worker's
+    /// cooperative stop flag — the demux exits at its next read chunk, freeing
+    /// CPU and IO — then returns the UI to the table. The worker's late "scan
+    /// failed (cancelled)" message is dropped by the generation guard (the
+    /// flow is no longer Scanning), so nothing else changes.
+    fn cancel_scan(&mut self) -> Task<Message> {
+        if let Some(cancel) = self.scan_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.flow = std::mem::take(&mut self.flow).cancel();
+        Task::none()
+    }
+
     /// Applies a finished measured scan, announcing a clean finish only when this
     /// event actually completed the in-flight scan (a stale finish leaves the
     /// stage unchanged, so no modal fires).
@@ -1032,6 +1050,11 @@ impl App {
         self.showing_report = false;
         self.notice = None;
         self.pane_selection = None;
+        // A fresh cancel flag per scan: the Cancel button sets it, the demux
+        // polls it per read chunk. Cancelling a superseded scan can never
+        // touch this one — it holds its own flag.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scan_cancel = Some(Arc::clone(&cancel));
 
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
@@ -1041,7 +1064,7 @@ impl App {
             // thousands; the CLI throttles its terminal redraw the same way.
             let mut last_sent: Option<Instant> = None;
             let mut last_file = String::new();
-            let result = scan::scan_measured(&input, &selection, &scan_files, &mut |progress| {
+            let mut on_progress = |progress: ScanProgress<'_>| {
                 let file_changed = progress.file != last_file;
                 let due = file_changed
                     || progress.done == progress.total
@@ -1059,7 +1082,9 @@ impl App {
                     done: progress.done,
                     total: progress.total,
                 });
-            });
+            };
+            let result =
+                scan::scan_measured(&input, &selection, &scan_files, &mut on_progress, &cancel);
             let outcome = match result {
                 Ok(measured) => Message::Finished {
                     generation,

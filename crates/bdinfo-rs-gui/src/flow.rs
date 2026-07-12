@@ -443,9 +443,13 @@ impl Flow {
         }
     }
 
-    /// Cancels the in-flight scan, returning to the table. The worker thread
-    /// keeps running in the background (the native scan has no mid-scan abort),
-    /// but its later messages are ignored — the generation no longer matches.
+    /// Cancels the in-flight scan, returning to the table. The shell trips the
+    /// worker's cooperative stop flag alongside this transition, so the demux
+    /// aborts within moments; the worker's late "cancelled" failure message is
+    /// ignored — a Listed flow is no longer Scanning, so `scan_failed` (and any
+    /// straggling progress) drops it. Starting a new scan immediately is safe:
+    /// it gets a fresh generation and its own cancel flag, and the old worker
+    /// only ever reads the disc.
     #[must_use]
     pub fn cancel(self) -> Self {
         match self.inner {
