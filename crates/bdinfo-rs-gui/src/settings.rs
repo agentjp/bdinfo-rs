@@ -19,6 +19,18 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+/// The config file's key for the short-playlist filter switch.
+const KEY_FILTER_SHORT: &str = "filter-short-playlists";
+/// The config file's key for the short-playlist threshold (whole seconds).
+const KEY_SHORT_SECONDS: &str = "short-playlist-seconds";
+/// The config file's key for the looping-playlist filter switch.
+const KEY_FILTER_LOOPS: &str = "filter-looping-playlists";
+/// The config file's key for the human-readable size toggle.
+const KEY_HUMAN_SIZES: &str = "human-readable-sizes";
+/// The config file's key for the chapter-count display toggle.
+const KEY_CHAPTER_COUNT: &str = "display-chapter-count";
+/// The config file's key for the autosave-report switch.
+const KEY_AUTOSAVE: &str = "autosave-report";
 /// The config file's key for the last opened source path.
 const KEY_LAST_PATH: &str = "last-path";
 /// The config file's key for the theme preference.
@@ -36,6 +48,11 @@ const KEY_WINDOW_Y: &str = "window-y";
 /// position beyond this (a corrupt file, a minimized window's fake Win32
 /// `-32000` position) is dropped rather than restored.
 const MAX_AXIS: f32 = 16_384.0;
+
+/// The largest accepted short-playlist threshold, in seconds (a full day) —
+/// a stored or typed value beyond it clamps here rather than filtering every
+/// playlist off a disc with a nonsense number.
+pub const MAX_SHORT_SECONDS: u32 = 86_400;
 
 /// The persisted theme preference — the storable form of the shell's
 /// System / Light / Dark cycle.
@@ -82,9 +99,10 @@ impl ThemeChoice {
 /// remembered fact.
 ///
 /// `Default` reproduces today's fresh-launch behaviour exactly (no geometry,
-/// no path, follow-the-OS theme), so a missing or corrupt config file
-/// changes nothing.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// no path, follow-the-OS theme, the standard filtered table with grouped
+/// bytes and the chapter suffix, no autosave), so a missing or corrupt
+/// config file changes nothing.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The window's logical size, `(width, height)`.
     pub window_size: Option<(f32, f32)>,
@@ -95,6 +113,47 @@ pub struct Settings {
     pub last_path: Option<PathBuf>,
     /// The theme preference.
     pub theme: ThemeChoice,
+    /// Drop playlists shorter than [`short_playlist_seconds`](Self::short_playlist_seconds)
+    /// from the table (`BDInfo`'s `FilterShortPlaylists`).
+    pub filter_short_playlists: bool,
+    /// The short-playlist threshold, in whole seconds
+    /// (`BDInfo`'s `FilterShortPlaylistsValue`).
+    pub short_playlist_seconds: u32,
+    /// Drop looping playlists from the table (`BDInfo`'s
+    /// `FilterLoopingPlaylists`).
+    pub filter_looping_playlists: bool,
+    /// Render the table's size cells human-readable (`72.64 GB`) instead of
+    /// thousands-grouped bytes (`BDInfo`'s `SizeFormatHR`).
+    pub human_readable_sizes: bool,
+    /// Append the ` [NN Chapters]` suffix in the Playlist File column
+    /// (`BDInfo`'s `DisplayChapterCount`).
+    pub display_chapter_count: bool,
+    /// Write the report unprompted when a measured scan completes
+    /// (`BDInfo`'s `AutosaveReport`).
+    pub autosave_report: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            window_size: None,
+            window_pos: None,
+            last_path: None,
+            theme: ThemeChoice::default(),
+            // The filter defaults are core's (on at 20 s) — today's table.
+            filter_short_playlists: true,
+            short_playlist_seconds: 20,
+            filter_looping_playlists: true,
+            // Two deliberate divergences from BDInfo's own defaults, chosen so
+            // a fresh config renders this GUI's table exactly as before the
+            // Settings dialog existed: BDInfo defaults SizeFormatHR ON (we
+            // ship grouped bytes) and DisplayChapterCount OFF (we show the
+            // chapter suffix).
+            human_readable_sizes: false,
+            display_chapter_count: true,
+            autosave_report: false,
+        }
+    }
 }
 
 impl Settings {
@@ -129,6 +188,16 @@ impl Settings {
                 KEY_WINDOW_HEIGHT => height = parse_axis(value),
                 KEY_WINDOW_X => x = parse_axis(value),
                 KEY_WINDOW_Y => y = parse_axis(value),
+                KEY_FILTER_SHORT => set_bool(&mut settings.filter_short_playlists, value),
+                KEY_SHORT_SECONDS => {
+                    if let Some(seconds) = parse_seconds(value) {
+                        settings.short_playlist_seconds = seconds;
+                    }
+                }
+                KEY_FILTER_LOOPS => set_bool(&mut settings.filter_looping_playlists, value),
+                KEY_HUMAN_SIZES => set_bool(&mut settings.human_readable_sizes, value),
+                KEY_CHAPTER_COUNT => set_bool(&mut settings.display_chapter_count, value),
+                KEY_AUTOSAVE => set_bool(&mut settings.autosave_report, value),
                 _ => {} // unknown key — a newer version's setting; ignored
             }
         }
@@ -145,7 +214,15 @@ impl Settings {
     /// non-UTF-8 or control-character path) is simply not persisted.
     #[must_use]
     pub fn render(&self) -> String {
-        let mut entries: Vec<(&str, String)> = vec![(KEY_THEME, self.theme.as_str().to_owned())];
+        let mut entries: Vec<(&str, String)> = vec![
+            (KEY_THEME, self.theme.as_str().to_owned()),
+            (KEY_FILTER_SHORT, self.filter_short_playlists.to_string()),
+            (KEY_SHORT_SECONDS, self.short_playlist_seconds.to_string()),
+            (KEY_FILTER_LOOPS, self.filter_looping_playlists.to_string()),
+            (KEY_HUMAN_SIZES, self.human_readable_sizes.to_string()),
+            (KEY_CHAPTER_COUNT, self.display_chapter_count.to_string()),
+            (KEY_AUTOSAVE, self.autosave_report.to_string()),
+        ];
         if let Some(path) = self.last_path.as_deref().and_then(Path::to_str)
             && !path.is_empty()
             && !path.contains(['\n', '\r'])
@@ -176,6 +253,87 @@ impl Settings {
 /// `None` (dropped, never clamped into pretend-validity).
 fn parse_axis(value: &str) -> Option<f32> {
     value.trim().parse::<f32>().ok().filter(|v| v.is_finite() && v.abs() <= MAX_AXIS)
+}
+
+/// Parses a short-playlist threshold: a whole number of seconds, clamped to
+/// [`MAX_SHORT_SECONDS`]; `None` for anything non-numeric (the caller keeps
+/// its current value).
+fn parse_seconds(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().map(|v| v.min(MAX_SHORT_SECONDS))
+}
+
+/// Applies one stored boolean: the exact `true` / `false` tokens set the
+/// slot; any other value keeps the default (a corrupt value never fails the
+/// load).
+fn set_bool(slot: &mut bool, value: &str) {
+    match value.trim() {
+        "true" => *slot = true,
+        "false" => *slot = false,
+        _ => {}
+    }
+}
+
+// ── the Settings dialog's working copy ───────────────────────────────────────
+
+/// The Settings dialog's draft — the checkbox states plus the short-playlist
+/// threshold **as typed**, so the field can sit empty or half-edited without
+/// touching the real settings. OK applies it ([`Draft::apply_to`]); Cancel
+/// just drops the value — the OK/Cancel semantics of `BDInfo`'s
+/// `FormSettings`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Draft {
+    /// The "Filter short playlists" checkbox.
+    pub filter_short_playlists: bool,
+    /// The seconds field's text, kept digits-only by [`sanitize_seconds`].
+    pub seconds_text: String,
+    /// The "Filter playlists that contain loops" checkbox.
+    pub filter_looping_playlists: bool,
+    /// The "Stream sizes in human readable format" checkbox.
+    pub human_readable_sizes: bool,
+    /// The "Display chapter count in Playlist view" checkbox.
+    pub display_chapter_count: bool,
+    /// The "Auto-save report on scan completion" checkbox.
+    pub autosave_report: bool,
+}
+
+impl Draft {
+    /// A fresh draft mirroring the current settings — what opening the
+    /// dialog edits.
+    #[must_use]
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self {
+            filter_short_playlists: settings.filter_short_playlists,
+            seconds_text: settings.short_playlist_seconds.to_string(),
+            filter_looping_playlists: settings.filter_looping_playlists,
+            human_readable_sizes: settings.human_readable_sizes,
+            display_chapter_count: settings.display_chapter_count,
+            autosave_report: settings.autosave_report,
+        }
+    }
+
+    /// Applies the draft to `settings` — the dialog's OK. The seconds text is
+    /// parsed defensively: a valid number lands (clamped to
+    /// [`MAX_SHORT_SECONDS`]); an empty or unparseable field keeps the prior
+    /// threshold, exactly like `BDInfo`'s `int.TryParse` guard.
+    pub fn apply_to(&self, settings: &mut Settings) {
+        settings.filter_short_playlists = self.filter_short_playlists;
+        settings.filter_looping_playlists = self.filter_looping_playlists;
+        settings.human_readable_sizes = self.human_readable_sizes;
+        settings.display_chapter_count = self.display_chapter_count;
+        settings.autosave_report = self.autosave_report;
+        if let Some(seconds) = parse_seconds(&self.seconds_text) {
+            settings.short_playlist_seconds = seconds;
+        }
+    }
+}
+
+/// Sanitizes the seconds field on every edit: digits only, capped at five
+/// characters — typed junk is dropped at the edge, so the field never holds
+/// anything [`Draft::apply_to`] could not parse (except emptiness, which
+/// keeps the prior value).
+#[must_use]
+pub fn sanitize_seconds(text: &str) -> String {
+    text.chars().filter(char::is_ascii_digit).take(5).collect()
 }
 
 // ── where the file lives ─────────────────────────────────────────────────────
@@ -294,6 +452,14 @@ mod tests {
         assert_eq!(settings.window_pos, None);
         assert_eq!(settings.last_path, None);
         assert_eq!(settings.theme, ThemeChoice::System);
+        // Today's exact table: the standard filter (on at 20 s), grouped
+        // bytes, the chapter suffix shown, no autosave.
+        assert!(settings.filter_short_playlists);
+        assert_eq!(settings.short_playlist_seconds, 20);
+        assert!(settings.filter_looping_playlists);
+        assert!(!settings.human_readable_sizes);
+        assert!(settings.display_chapter_count);
+        assert!(!settings.autosave_report);
     }
 
     #[test]
@@ -303,6 +469,12 @@ mod tests {
             window_pos: Some((-120.25, 64.0)),
             last_path: Some(PathBuf::from(r"D:\rips\MY_DISC")),
             theme: ThemeChoice::Dark,
+            filter_short_playlists: false,
+            short_playlist_seconds: 0,
+            filter_looping_playlists: false,
+            human_readable_sizes: true,
+            display_chapter_count: false,
+            autosave_report: true,
         };
         let text = settings.render();
         assert_eq!(Settings::parse(&text), settings);
@@ -326,10 +498,37 @@ mod tests {
     fn malformed_lines_degrade_to_defaults() {
         // No panic and no partial nonsense from any of these shapes.
         let text = "no separator here\n= empty key\nwindow-width = not a number\n\
-                    window-height = \ntheme = purple\nlast-path = \n";
+                    window-height = \ntheme = purple\nlast-path = \n\
+                    filter-short-playlists = maybe\nshort-playlist-seconds = -3\n\
+                    filter-looping-playlists = 1\nhuman-readable-sizes = TRUE\n\
+                    display-chapter-count = \nautosave-report = yes\n";
         assert_eq!(Settings::parse(text), Settings::default());
         assert_eq!(Settings::parse(""), Settings::default());
         assert_eq!(Settings::parse("\u{0}\u{FFFD}garbage\u{7F}"), Settings::default());
+    }
+
+    #[test]
+    fn the_report_settings_parse_their_exact_tokens() {
+        let text = "filter-short-playlists = false\nshort-playlist-seconds = 45\n\
+                    filter-looping-playlists = false\nhuman-readable-sizes = true\n\
+                    display-chapter-count = false\nautosave-report = true\n";
+        let settings = Settings::parse(text);
+        assert!(!settings.filter_short_playlists);
+        assert_eq!(settings.short_playlist_seconds, 45);
+        assert!(!settings.filter_looping_playlists);
+        assert!(settings.human_readable_sizes);
+        assert!(!settings.display_chapter_count);
+        assert!(settings.autosave_report);
+    }
+
+    #[test]
+    fn a_stored_threshold_clamps_to_the_sane_bound() {
+        // Numeric but absurd clamps (never filters a disc to nothing by
+        // accident); non-numeric keeps the default.
+        let clamped = Settings::parse("short-playlist-seconds = 4000000000\n");
+        assert_eq!(clamped.short_playlist_seconds, super::MAX_SHORT_SECONDS);
+        assert_eq!(Settings::parse("short-playlist-seconds = 20.5\n").short_playlist_seconds, 20);
+        assert_eq!(Settings::parse("short-playlist-seconds = 0\n").short_playlist_seconds, 0);
     }
 
     #[test]
@@ -379,6 +578,54 @@ mod tests {
         // drops the entry rather than corrupting the file.
         let settings = Settings { last_path: Some(PathBuf::from("a\nb")), ..Settings::default() };
         assert_eq!(Settings::parse(&settings.render()).last_path, None);
+    }
+
+    // ── the dialog draft ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_draft_mirrors_and_applies_the_settings() {
+        let mut settings = Settings { short_playlist_seconds: 30, ..Settings::default() };
+        let mut draft = super::Draft::from_settings(&settings);
+        assert_eq!(draft.seconds_text, "30");
+        assert!(draft.filter_short_playlists);
+        // Edit every field and apply: all of it lands.
+        draft.filter_short_playlists = false;
+        draft.seconds_text = "0".to_owned();
+        draft.filter_looping_playlists = false;
+        draft.human_readable_sizes = true;
+        draft.display_chapter_count = false;
+        draft.autosave_report = true;
+        draft.apply_to(&mut settings);
+        assert!(!settings.filter_short_playlists);
+        assert_eq!(settings.short_playlist_seconds, 0);
+        assert!(!settings.filter_looping_playlists);
+        assert!(settings.human_readable_sizes);
+        assert!(!settings.display_chapter_count);
+        assert!(settings.autosave_report);
+    }
+
+    #[test]
+    fn an_unparseable_seconds_field_keeps_the_prior_threshold() {
+        let mut settings = Settings { short_playlist_seconds: 30, ..Settings::default() };
+        let mut draft = super::Draft::from_settings(&settings);
+        // An emptied field is not a zero — BDInfo's TryParse guard.
+        draft.seconds_text = String::new();
+        draft.apply_to(&mut settings);
+        assert_eq!(settings.short_playlist_seconds, 30);
+        // A typed-over-the-top value clamps to the bound.
+        draft.seconds_text = "99999".to_owned();
+        draft.apply_to(&mut settings);
+        assert_eq!(settings.short_playlist_seconds, super::MAX_SHORT_SECONDS);
+    }
+
+    #[test]
+    fn sanitize_seconds_keeps_digits_only_and_caps_the_length() {
+        assert_eq!(super::sanitize_seconds("20"), "20");
+        assert_eq!(super::sanitize_seconds("2a0!x"), "20");
+        assert_eq!(super::sanitize_seconds("-15"), "15"); // no sign, no negatives
+        assert_eq!(super::sanitize_seconds(""), "");
+        assert_eq!(super::sanitize_seconds("1234567890"), "12345"); // capped
+        assert_eq!(super::sanitize_seconds("١٢٣"), ""); // ASCII digits only
     }
 
     // ── the per-platform path helpers (pure, host-independent) ──────────────
@@ -506,13 +753,32 @@ mod tests {
                 proptest::option::of((pos_axis(), pos_axis())),
                 proptest::option::of(path_string().prop_map(PathBuf::from)),
                 theme(),
+                (any::<bool>(), 0..=super::super::MAX_SHORT_SECONDS, any::<bool>()),
+                (any::<bool>(), any::<bool>(), any::<bool>()),
             )
-                .prop_map(|(window_size, window_pos, last_path, theme)| Settings {
-                    window_size,
-                    window_pos,
-                    last_path,
-                    theme,
-                })
+                .prop_map(
+                    |(
+                        window_size,
+                        window_pos,
+                        last_path,
+                        theme,
+                        (filter_short_playlists, short_playlist_seconds, filter_looping_playlists),
+                        (human_readable_sizes, display_chapter_count, autosave_report),
+                    )| {
+                        Settings {
+                            window_size,
+                            window_pos,
+                            last_path,
+                            theme,
+                            filter_short_playlists,
+                            short_playlist_seconds,
+                            filter_looping_playlists,
+                            human_readable_sizes,
+                            display_chapter_count,
+                            autosave_report,
+                        }
+                    },
+                )
         }
 
         proptest! {
