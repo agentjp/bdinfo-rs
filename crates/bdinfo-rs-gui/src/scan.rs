@@ -257,8 +257,8 @@ mod tests {
 
     #[test]
     fn classify_rejects_a_nonexistent_path() {
-        let message = Input::classify(fixture("no-such-thing.iso"))
-            .expect_err("a missing path is rejected");
+        let message =
+            Input::classify(fixture("no-such-thing.iso")).expect_err("a missing path is rejected");
         assert!(message.contains("does not exist"));
     }
 
