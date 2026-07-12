@@ -269,8 +269,7 @@ pub fn text_field(p: Palette) -> impl Fn(&Theme, text_input::Status) -> text_inp
         let border_color = match status {
             text_input::Status::Focused { .. } => p.accent,
             text_input::Status::Hovered => p.line_strong,
-            text_input::Status::Active => p.line,
-            text_input::Status::Disabled => p.line,
+            text_input::Status::Active | text_input::Status::Disabled => p.line,
         };
         text_input::Style {
             background: p.surface.into(),

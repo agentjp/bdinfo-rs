@@ -688,26 +688,12 @@ impl App {
                 self.notice = None;
                 Task::none()
             }
-            Message::OpenSettings => {
-                self.settings_draft = Some(settings::Draft::from_settings(&self.persisted));
-                Task::none()
-            }
-            Message::SettingsToggled(field) => {
-                self.toggle_setting(field);
-                Task::none()
-            }
-            Message::SettingsSeconds(input) => {
-                if let Some(draft) = &mut self.settings_draft {
-                    draft.seconds_text = settings::sanitize_seconds(&input);
-                }
-                Task::none()
-            }
-            Message::SettingsOk => {
-                self.apply_settings();
-                Task::none()
-            }
-            Message::SettingsCancel => {
-                self.settings_draft = None;
+            message @ (Message::OpenSettings
+            | Message::SettingsToggled(_)
+            | Message::SettingsSeconds(_)
+            | Message::SettingsOk
+            | Message::SettingsCancel) => {
+                self.on_settings(message);
                 Task::none()
             }
             Message::ToggleTheme => self.toggle_theme(),
@@ -724,16 +710,10 @@ impl App {
                 self.panes.resize(split, ratio);
                 Task::none()
             }
-            Message::ColDragStart(grid, boundary, cols_width) => {
-                self.col_drag = Some((grid, boundary, cols_width, None));
-                Task::none()
-            }
-            Message::ColDragMove(x) => {
-                self.column_drag(x);
-                Task::none()
-            }
-            Message::ColDragEnd => {
-                self.col_drag = None;
+            message @ (Message::ColDragStart(..)
+            | Message::ColDragMove(_)
+            | Message::ColDragEnd) => {
+                self.on_col_drag(&message);
                 Task::none()
             }
             Message::CloseRequested(id) => close_with_geometry(id),
@@ -741,9 +721,44 @@ impl App {
         }
     }
 
+    /// Handles the column-divider drag messages: a grab press starts the drag,
+    /// the global mouse feed moves the held boundary, release ends it.
+    fn on_col_drag(&mut self, message: &Message) {
+        match *message {
+            Message::ColDragStart(grid, boundary, cols_width) => {
+                self.col_drag = Some((grid, boundary, cols_width, None));
+            }
+            Message::ColDragMove(x) => self.column_drag(x),
+            Message::ColDragEnd => self.col_drag = None,
+            // Not a drag message — update() never routes one here.
+            _ => {}
+        }
+    }
+
+    /// Handles the Settings dialog's messages: open a fresh draft, edit it
+    /// (checkboxes / the digits-only seconds field), OK (apply + persist), or
+    /// Cancel (discard). A stray edit with no open dialog changes nothing.
+    fn on_settings(&mut self, message: Message) {
+        match message {
+            Message::OpenSettings => {
+                self.settings_draft = Some(settings::Draft::from_settings(&self.persisted));
+            }
+            Message::SettingsToggled(field) => self.toggle_setting(field),
+            Message::SettingsSeconds(input) => {
+                if let Some(draft) = &mut self.settings_draft {
+                    draft.seconds_text = settings::sanitize_seconds(&input);
+                }
+            }
+            Message::SettingsOk => self.apply_settings(),
+            Message::SettingsCancel => self.settings_draft = None,
+            // Not a Settings message — update() never routes one here.
+            _ => {}
+        }
+    }
+
     /// Flips one checkbox on the open Settings dialog's draft (a no-op when
     /// the dialog is closed — a stray message changes nothing).
-    fn toggle_setting(&mut self, field: SettingsField) {
+    const fn toggle_setting(&mut self, field: SettingsField) {
         if let Some(draft) = &mut self.settings_draft {
             let slot = match field {
                 SettingsField::FilterShort => &mut draft.filter_short_playlists,
@@ -2151,7 +2166,7 @@ fn data_table<'a>(
 /// (the scan-complete notice, the Settings dialog). Clicking the scrim
 /// dispatches `on_scrim` — dismiss for the notice, Cancel for Settings; the
 /// card itself is `opaque`, so a click inside it never counts as a scrim
-/// click (a mis-aimed click must not discard half-edited settings).
+/// click (a stray click must not discard half-edited settings).
 fn modal<'a>(
     base: Element<'a, Message>,
     card: Element<'a, Message>,

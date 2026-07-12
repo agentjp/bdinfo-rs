@@ -284,7 +284,12 @@ impl Flow {
     /// success → the table, filtered and rendered under `view`; failure → the
     /// fatal error state.
     #[must_use]
-    pub fn listed(self, input: &Input, result: Result<Structural, String>, view: ViewSettings) -> Self {
+    pub fn listed(
+        self,
+        input: &Input,
+        result: Result<Structural, String>,
+        view: ViewSettings,
+    ) -> Self {
         match &self.inner {
             Inner::Listing(pending) if pending == input => match result {
                 Ok(structural) => {
@@ -876,8 +881,11 @@ mod tests {
         assert_eq!(flow.input_display(), Some("disc".to_owned()));
         assert_eq!(flow.current_input(), Some(&input()));
         // The reopen takes the ordinary listing road.
-        let flow =
-            Flow::start_listing(input()).listed(&input(), Ok(structural()), ViewSettings::default());
+        let flow = Flow::start_listing(input()).listed(
+            &input(),
+            Ok(structural()),
+            ViewSettings::default(),
+        );
         assert_eq!(flow.stage(), Stage::Listed);
     }
 
@@ -911,8 +919,11 @@ mod tests {
 
     #[test]
     fn a_failed_structural_scan_is_fatal() {
-        let flow = Flow::start_listing(input())
-            .listed(&input(), Err("no BD".to_owned()), ViewSettings::default());
+        let flow = Flow::start_listing(input()).listed(
+            &input(),
+            Err("no BD".to_owned()),
+            ViewSettings::default(),
+        );
         assert_eq!(flow.stage(), Stage::Failed);
         assert_eq!(flow.error_message(), Some("no BD"));
     }
@@ -1040,8 +1051,11 @@ mod tests {
         assert!(Flow::idle().report().is_none());
         assert_eq!(Flow::idle().label(), None);
         // A fatal pick failure has no disc, hence no report either.
-        let failed = Flow::start_listing(input())
-            .listed(&input(), Err("no BD".to_owned()), ViewSettings::default());
+        let failed = Flow::start_listing(input()).listed(
+            &input(),
+            Err("no BD".to_owned()),
+            ViewSettings::default(),
+        );
         assert!(!failed.report_available());
         assert!(failed.report().is_none());
     }

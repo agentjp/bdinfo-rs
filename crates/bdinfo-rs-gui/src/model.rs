@@ -15,14 +15,20 @@ use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
 
 use crate::settings::Settings;
 
-/// The table's presentation settings — the projection of the persisted
-/// [`Settings`] the view-model reads: the playlist filter switches and the two
-/// display toggles. It travels with the loaded disc (the flow's `Listing`), so
-/// a settings change re-derives the rows from the retained `BdRom` — no
-/// rescan, mirroring `BDInfo`'s `LoadPlaylists()` re-run.
+/// The table's presentation settings — the slice of the persisted
+/// [`Settings`] the view-model reads.
+///
+/// The playlist filter switches and the two display toggles. It travels with
+/// the loaded disc (the flow's `Listing`), so a settings change re-derives
+/// the rows from the retained `BdRom` — no rescan, mirroring `BDInfo`'s
+/// `LoadPlaylists()` re-run.
 ///
 /// `Default` is the fresh-config table: the standard filter (on at 20 s),
 /// grouped-byte size cells, the chapter suffix shown.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is a distinct persisted on/off setting, mirroring BDInfo's"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewSettings {
     /// Drop playlists shorter than the threshold.
@@ -394,9 +400,9 @@ mod tests {
     use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 
     use super::{
-        PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell,
-        display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
-        playlist_display_name, playlist_rows, sort_rows, table_length, table_rows,
+        PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, display_rows,
+        estimated_bytes, estimated_cell, format_file_size, group_n0, playlist_display_name,
+        playlist_rows, sort_rows, table_length, table_rows,
     };
     use crate::settings::Settings;
 
@@ -469,10 +475,7 @@ mod tests {
             filter_looping_playlists: false,
             ..ViewSettings::default()
         };
-        assert_eq!(
-            table_rows(&disc(), &everything.filter()),
-            [(1, 0), (1, 1), (2, 2), (3, 3)]
-        );
+        assert_eq!(table_rows(&disc(), &everything.filter()), [(1, 0), (1, 1), (2, 2), (3, 3)]);
         // A zeroed threshold keeps it too, even with the switch on.
         let zero = ViewSettings { short_playlist_seconds: 0, ..ViewSettings::default() };
         assert_eq!(table_rows(&disc(), &zero.filter()).len(), 4);
@@ -541,7 +544,10 @@ mod tests {
         // The display rows are exactly the CLI table cells: positions/groups as
         // decimals, lengths as hh:mm:ss, estimated bytes thousands-grouped.
         assert_eq!(
-            display_rows(&playlist_rows(&disc(), &PlaylistFilter::default()), ViewSettings::default()),
+            display_rows(
+                &playlist_rows(&disc(), &PlaylistFilter::default()),
+                ViewSettings::default()
+            ),
             [
                 TableRow {
                     number: "1".to_owned(),

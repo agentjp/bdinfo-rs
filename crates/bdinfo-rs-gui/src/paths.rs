@@ -46,7 +46,8 @@ pub fn stream_path(input: &Input, clip: &str) -> String {
     disc_path(input, "STREAM", clip)
 }
 
-/// The autosave destination for a finished measured scan's report —
+/// The autosave destination for a finished measured scan's report.
+///
 /// `BDInfo`'s `AutosaveReport` writes without asking, so the destination must
 /// be implied by the input: the **disc folder** (the directory holding
 /// `BDMV`) for folder input, the directory **next to the image** for `.iso`

@@ -102,6 +102,10 @@ impl ThemeChoice {
 /// no path, follow-the-OS theme, the standard filtered table with grouped
 /// bytes and the chapter suffix, no autosave), so a missing or corrupt
 /// config file changes nothing.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is a distinct persisted on/off setting, mirroring BDInfo's"
+)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The window's logical size, `(width, height)`.
@@ -276,10 +280,15 @@ fn set_bool(slot: &mut bool, value: &str) {
 // ── the Settings dialog's working copy ───────────────────────────────────────
 
 /// The Settings dialog's draft — the checkbox states plus the short-playlist
-/// threshold **as typed**, so the field can sit empty or half-edited without
-/// touching the real settings. OK applies it ([`Draft::apply_to`]); Cancel
-/// just drops the value — the OK/Cancel semantics of `BDInfo`'s
-/// `FormSettings`.
+/// threshold **as typed**.
+///
+/// The seconds field can sit empty or half-edited without touching the real
+/// settings. OK applies the draft ([`Draft::apply_to`]); Cancel just drops
+/// the value — the OK/Cancel semantics of `BDInfo`'s `FormSettings`.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one bool per dialog checkbox, mirroring BDInfo's FormSettings"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
     /// The "Filter short playlists" checkbox.
@@ -313,7 +322,7 @@ impl Draft {
 
     /// Applies the draft to `settings` — the dialog's OK. The seconds text is
     /// parsed defensively: a valid number lands (clamped to
-    /// [`MAX_SHORT_SECONDS`]); an empty or unparseable field keeps the prior
+    /// [`MAX_SHORT_SECONDS`]); an empty or unparsable field keeps the prior
     /// threshold, exactly like `BDInfo`'s `int.TryParse` guard.
     pub fn apply_to(&self, settings: &mut Settings) {
         settings.filter_short_playlists = self.filter_short_playlists;
@@ -328,9 +337,11 @@ impl Draft {
 }
 
 /// Sanitizes the seconds field on every edit: digits only, capped at five
-/// characters — typed junk is dropped at the edge, so the field never holds
-/// anything [`Draft::apply_to`] could not parse (except emptiness, which
-/// keeps the prior value).
+/// characters.
+///
+/// Typed junk is dropped at the edge, so the field never holds anything
+/// [`Draft::apply_to`] could not parse (except emptiness, which keeps the
+/// prior value).
 #[must_use]
 pub fn sanitize_seconds(text: &str) -> String {
     text.chars().filter(char::is_ascii_digit).take(5).collect()
@@ -605,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_seconds_field_keeps_the_prior_threshold() {
+    fn an_unparsable_seconds_field_keeps_the_prior_threshold() {
         let mut settings = Settings { short_playlist_seconds: 30, ..Settings::default() };
         let mut draft = super::Draft::from_settings(&settings);
         // An emptied field is not a zero — BDInfo's TryParse guard.

@@ -54,9 +54,11 @@ pub struct CodecRow {
 }
 
 /// Builds the "Stream Files" rows for `playlist` — one per clip, the index
-/// counting the main (angle-0) clips. `human_sizes` switches the size cells to
-/// the human-readable form — `BDInfo` applies its `SizeFormatHR` setting to
-/// this grid exactly as to the playlist table.
+/// counting the main (angle-0) clips.
+///
+/// `human_sizes` switches the size cells to the human-readable form —
+/// `BDInfo` applies its `SizeFormatHR` setting to this grid exactly as to the
+/// playlist table.
 #[must_use]
 pub fn stream_file_rows(playlist: &PlaylistSummary, human_sizes: bool) -> Vec<StreamFileRow> {
     let mut rows = Vec::new();
@@ -285,14 +287,10 @@ mod tests {
         // The same grid BDInfo formats with SizeFormatHR: known sizes switch
         // to the short form, the unknown `-` stays a dash.
         let rows = stream_file_rows(&playlist(), true);
-        let cells: Vec<_> =
-            rows.into_iter().map(|row| (row.estimated, row.measured)).collect();
+        let cells: Vec<_> = rows.into_iter().map(|row| (row.estimated, row.measured)).collect();
         assert_eq!(
             cells,
-            [
-                ("488.28 KB".to_owned(), "187.50 KB".to_owned()),
-                ("-".to_owned(), "-".to_owned()),
-            ]
+            [("488.28 KB".to_owned(), "187.50 KB".to_owned()), ("-".to_owned(), "-".to_owned()),]
         );
     }
 
