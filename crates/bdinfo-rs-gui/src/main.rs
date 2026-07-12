@@ -9,7 +9,9 @@
 //! `view` is a thin projection of [`Flow`] onto widgets dressed in the
 //! "Projection Booth" identity ([`theme`] + [`ui`]). The only impure thing the
 //! shell owns is the measured-scan worker thread and the channel that streams its
-//! progress back as messages, plus the OS-theme and file-drop subscriptions.
+//! progress back as messages, plus the OS-theme and file-drop subscriptions and
+//! the best-effort config store ([`settings`]): window geometry, the last opened
+//! source, and the theme preference persist across launches.
 //! A disc can arrive three ways — the pickers, a drag-and-drop onto the window,
 //! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
 //! open flow.
@@ -29,9 +31,9 @@ use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::{SelectableRow, Sort, SortColumn, format_file_size, group_n0};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
-use bdinfo_rs_gui::paths;
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
+use bdinfo_rs_gui::{paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
@@ -56,7 +58,11 @@ const MIN_SIZE: (f32, f32) = (680.0, 540.0);
 const ICON_SIZE: u32 = 128;
 
 fn main() -> iced::Result {
-    iced::application(boot, App::update, App::view)
+    // One boot-time load of the persisted state: the geometry feeds the window
+    // settings, the rest seeds the app in `boot`.
+    let persisted = settings::load();
+    let window = window_settings(&persisted);
+    iced::application(move || boot(persisted.clone()), App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .style(App::style)
@@ -75,18 +81,27 @@ fn main() -> iced::Result {
             ))
             .as_slice(),
         )
-        .window(window_settings())
+        .window(window)
         .run()
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first
-/// frame matches the desktop's light/dark setting. A command-line path
+/// frame matches the desktop's light/dark setting. The persisted state seeds
+/// the launch: the stored theme preference applies, and the last opened source
+/// — when it still exists — shows in the Source field with "Rescan" live
+/// (`BDInfo` seeds its source box from `LastPath` the same way), but nothing
+/// scans until asked; a vanished path starts clean. A command-line path
 /// (`bdinfo-rs-gui <path>`, `BDInfo`'s `args[0]`) opens at boot through the same
 /// classify-and-list road a drop takes — read from the OS-native argv, so a
 /// non-UTF-8 path survives intact. In a **debug** build it also applies the
 /// screenshot-harness environment hooks (see [`debug_boot`]).
-fn boot() -> (App, Task<Message>) {
-    let app = App::default();
+fn boot(persisted: settings::Settings) -> (App, Task<Message>) {
+    let mut app =
+        App { theme_pref: ThemePref::from_choice(persisted.theme), persisted, ..App::default() };
+    if let Some(input) = app.persisted.last_path.clone().and_then(|path| Input::classify(path).ok())
+    {
+        app.flow = Flow::recall(input);
+    }
     let mut tasks = vec![iced::system::theme().map(Message::OsTheme)];
     if let Some(path) = std::env::args_os().nth(1) {
         tasks.push(Task::done(Message::OpenPath(PathBuf::from(path))));
@@ -144,13 +159,26 @@ fn debug_scan_delay() {
     }
 }
 
-/// The window settings: a sensible default + minimum size and the embedded app
-/// icon (drawn procedurally, so the binary stays self-contained).
-fn window_settings() -> iced::window::Settings {
+/// The window settings: last session's geometry (the stored size clamped to
+/// the minimum; the default size and OS placement when nothing sane is
+/// stored), the minimum size, and the embedded app icon (drawn procedurally,
+/// so the binary stays self-contained). Closing is handled manually
+/// (`exit_on_close_request: false`) so the geometry can be captured and saved
+/// on the way out — see [`Message::CloseRequested`].
+fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
+    let (width, height) =
+        persisted.window_size.map_or(WINDOW_SIZE, |(w, h)| (w.max(MIN_SIZE.0), h.max(MIN_SIZE.1)));
+    // The store validated the position's range; Wayland (no global positions)
+    // simply never stores one, so the platform default placement applies.
+    let position = persisted.window_pos.map_or(iced::window::Position::Default, |(x, y)| {
+        iced::window::Position::Specific(iced::Point::new(x, y))
+    });
     iced::window::Settings {
-        size: iced::Size::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
+        size: iced::Size::new(width, height),
+        position,
         min_size: Some(iced::Size::new(MIN_SIZE.0, MIN_SIZE.1)),
         icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok(),
+        exit_on_close_request: false,
         ..iced::window::Settings::default()
     }
 }
@@ -162,6 +190,10 @@ fn window_settings() -> iced::window::Settings {
 struct App {
     /// The flow state machine — `view` is a projection of it.
     flow: Flow,
+    /// The persisted state (geometry / last path / theme), as it will next be
+    /// written: updated alongside the live state and saved best-effort at the
+    /// change points (theme toggle, successful listing) and on close.
+    persisted: settings::Settings,
     /// Follow-the-OS / pinned light / pinned dark.
     theme_pref: ThemePref,
     /// The last light/dark setting reported by the OS.
@@ -214,6 +246,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             flow: Flow::default(),
+            persisted: settings::Settings::default(),
             theme_pref: ThemePref::default(),
             os_mode: iced::theme::Mode::default(),
             generation: 0,
@@ -463,6 +496,19 @@ enum Message {
     ColDragMove(f32),
     /// A column drag ended (the mouse button was released).
     ColDragEnd,
+    /// The user asked to close the window (`exit_on_close_request` is off) —
+    /// read the live geometry, then save and close.
+    CloseRequested(iced::window::Id),
+    /// The geometry readout for the closing window arrived — persist
+    /// everything and actually close (`BDInfo` saves at `FormClosing` too).
+    SaveAndClose {
+        /// The closing window.
+        id: iced::window::Id,
+        /// Its outer position — `None` on Wayland (no global positions).
+        position: Option<iced::Point>,
+        /// Its logical size.
+        size: iced::Size,
+    },
 }
 
 impl App {
@@ -605,10 +651,7 @@ impl App {
                 self.notice = None;
                 Task::none()
             }
-            Message::ToggleTheme => {
-                self.theme_pref = self.theme_pref.next();
-                Task::none()
-            }
+            Message::ToggleTheme => self.toggle_theme(),
             Message::OsTheme(mode) => {
                 self.os_mode = mode;
                 Task::none()
@@ -634,7 +677,35 @@ impl App {
                 self.col_drag = None;
                 Task::none()
             }
+            Message::CloseRequested(id) => close_with_geometry(id),
+            Message::SaveAndClose { id, position, size } => self.save_and_close(id, position, size),
         }
+    }
+
+    /// Cycles the theme preference (Auto → Light → Dark) and persists the
+    /// choice, so it sticks across launches.
+    fn toggle_theme(&mut self) -> Task<Message> {
+        self.theme_pref = self.theme_pref.next();
+        self.persisted.theme = self.theme_pref.choice();
+        settings::save(&self.persisted);
+        Task::none()
+    }
+
+    /// Persists the closing window's geometry (`BDInfo` saves at `FormClosing`
+    /// too) and really closes it. The position stays untouched when the
+    /// platform reports none (Wayland), so a size-only restore still works.
+    fn save_and_close(
+        &mut self,
+        id: iced::window::Id,
+        position: Option<iced::Point>,
+        size: iced::Size,
+    ) -> Task<Message> {
+        self.persisted.window_size = Some((size.width, size.height));
+        if let Some(point) = position {
+            self.persisted.window_pos = Some((point.x, point.y));
+        }
+        settings::save(&self.persisted);
+        iced::window::close(id)
     }
 
     /// Applies a column-divider drag: shifts weight across the held boundary by
@@ -675,6 +746,9 @@ impl App {
     /// window is not redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
+        // The close button / Alt+F4: closing is manual (so the geometry saves
+        // on the way out) — this feed is what makes the window closable at all.
+        subs.push(iced::window::close_requests().map(Message::CloseRequested));
         // Drag-and-drop, surfaced by winit as window events on every desktop
         // platform (Wayland excepted — winit does not implement file drops
         // there). Always on: the busy rule is applied where the drop lands.
@@ -739,11 +813,19 @@ impl App {
         matches!(self.flow.stage(), Stage::Listing | Stage::Scanning)
     }
 
-    /// Applies a finished structural scan. In a debug build it also honours the
-    /// capture harness's auto-scan hook (`BDINFO_GUI_SCAN=all`), selecting and
-    /// scanning every playlist so a screenshot can show measured data.
+    /// Applies a finished structural scan. A successful listing becomes the
+    /// remembered last path (saved now — `BDInfo` keeps `LastPath` the same
+    /// way). In a debug build it also honours the capture harness's auto-scan
+    /// hook (`BDINFO_GUI_SCAN=all`), selecting and scanning every playlist so
+    /// a screenshot can show measured data.
     fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
         self.flow = std::mem::take(&mut self.flow).listed(input, result);
+        // Only when THIS input just became the listing (not a superseded or
+        // failed result) does it become the remembered source.
+        if self.flow.stage() == Stage::Listed && self.flow.current_input() == Some(input) {
+            self.persisted.last_path = Some(input.path().to_path_buf());
+            settings::save(&self.persisted);
+        }
         #[cfg(debug_assertions)]
         if self.flow.stage() == Stage::Listed && debug_scan_all() {
             self.flow.select_all();
@@ -2039,6 +2121,17 @@ fn num_cell<'a>(
     .align_x(align)
     .padding([0.0, ui::GAP_2])
     .into()
+}
+
+/// Reads the closing window's live geometry (the outer position + logical
+/// size, the same coordinates [`window_settings`] restores) and forwards it
+/// to [`Message::SaveAndClose`]. The window stays open while the readout
+/// round-trips (`exit_on_close_request` is off) — `SaveAndClose` then really
+/// closes it.
+fn close_with_geometry(id: iced::window::Id) -> Task<Message> {
+    iced::window::position(id).then(move |position| {
+        iced::window::size(id).map(move |size| Message::SaveAndClose { id, position, size })
+    })
 }
 
 /// Opens the native folder picker (rfd, pure-Rust xdg-portal backend on Linux)

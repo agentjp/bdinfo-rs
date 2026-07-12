@@ -12,6 +12,7 @@
 //! resembling logic is [`ThemePref::resolve`] — the pure choice of light vs dark
 //! from the user's preference and the OS mode — which is unit-tested.
 
+use bdinfo_rs_gui::settings::ThemeChoice;
 use iced::{Color, Theme, theme};
 
 /// Creates an opaque [`Color`] from 8-bit channels (the form every token below
@@ -178,6 +179,27 @@ impl ThemePref {
         }
     }
 
+    /// The persisted form of this preference (the config store's
+    /// [`ThemeChoice`] — the store stays iced-free, so the mapping lives here).
+    #[must_use]
+    pub const fn choice(self) -> ThemeChoice {
+        match self {
+            Self::System => ThemeChoice::System,
+            Self::Light => ThemeChoice::Light,
+            Self::Dark => ThemeChoice::Dark,
+        }
+    }
+
+    /// Restores a preference from its persisted form.
+    #[must_use]
+    pub const fn from_choice(choice: ThemeChoice) -> Self {
+        match choice {
+            ThemeChoice::System => Self::System,
+            ThemeChoice::Light => Self::Light,
+            ThemeChoice::Dark => Self::Dark,
+        }
+    }
+
     /// A short label for the toolbar toggle, naming the *current* preference.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -232,6 +254,13 @@ mod tests {
             // The accent is warm (red channel dominant) in both modes.
             assert!(Palette::DARK.accent.r > Palette::DARK.accent.b);
             assert!(Palette::LIGHT.accent.r > Palette::LIGHT.accent.b);
+        }
+    }
+
+    #[test]
+    fn the_persisted_form_round_trips() {
+        for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
+            assert_eq!(ThemePref::from_choice(pref.choice()), pref);
         }
     }
 
