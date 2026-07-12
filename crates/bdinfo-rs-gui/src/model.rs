@@ -223,8 +223,8 @@ pub enum SortColumn {
     Measured,
 }
 
-/// The playlist table's active sort: a column and a direction, built by
-/// `BDInfo`'s header-click rule (the crate-private `Sort::click`).
+/// The playlist table's active sort: a column and a direction, built by the
+/// header-click rule (the crate-private `Sort::click`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sort {
     /// The column the table is sorted by.
@@ -234,25 +234,18 @@ pub struct Sort {
 }
 
 impl Sort {
-    /// `BDInfo`'s header-click rule (`listViewPlaylistFiles_ColumnClick`): a
-    /// click on the current sort column flips its direction; a click on any
-    /// other column starts it ascending — unless `rows` already read ascending
-    /// by that column, in which case it starts descending. That keeps every
-    /// click a visible re-order (`BDInfo`'s click always toggles off the
-    /// current order, so it never looks like a no-op either).
-    pub(crate) fn click(current: Option<Self>, column: SortColumn, rows: &[PlaylistRow]) -> Self {
+    /// The header-click rule: a click on the current sort column flips its
+    /// direction; a click on any other column starts it DESCENDING — the
+    /// questions a sort answers ("which playlist is biggest / longest?") want
+    /// the top value on top, and the presentation order already reads mostly
+    /// ascending, so descending-first also mirrors `BDInfo`'s feel of the
+    /// first click visibly toggling the list over.
+    pub(crate) fn click(current: Option<Self>, column: SortColumn) -> Self {
         match current {
             Some(sort) if sort.column == column => Self { column, ascending: !sort.ascending },
-            _ => Self { column, ascending: !is_ascending(rows, column) },
+            _ => Self { column, ascending: false },
         }
     }
-}
-
-/// Whether `rows` already read ascending by `column` (ties allowed) — the
-/// first-click direction probe behind [`Sort::click`].
-fn is_ascending(rows: &[PlaylistRow], column: SortColumn) -> bool {
-    let sort = Sort { column, ascending: true };
-    rows.is_sorted_by(|a, b| compare(a, b, sort) != Ordering::Greater)
 }
 
 /// Stable-sorts `rows` by `sort` and returns the applied permutation
@@ -534,31 +527,19 @@ mod tests {
     }
 
     #[test]
-    fn click_starts_ascending_and_flips_on_repeat() {
-        // The disc rows' lengths (100, 50, 70 s) are NOT ascending, so the
-        // first click on Length sorts ascending.
-        let first = Sort::click(None, SortColumn::Length, &rows());
-        assert_eq!(first, Sort { column: SortColumn::Length, ascending: true });
-        // A repeat click on the same column flips, whatever the rows read.
-        let second = Sort::click(Some(first), SortColumn::Length, &rows());
-        assert_eq!(second, Sort { column: SortColumn::Length, ascending: false });
-        let third = Sort::click(Some(second), SortColumn::Length, &rows());
-        assert_eq!(third, Sort { column: SortColumn::Length, ascending: true });
-    }
-
-    #[test]
-    fn a_first_click_on_an_already_ascending_column_goes_descending() {
-        // The presentation order is already ascending by name (00000, 00001,
-        // 00002), so the first click on File must visibly re-order: descending.
-        let by_name = Sort::click(None, SortColumn::File, &rows());
-        assert_eq!(by_name, Sort { column: SortColumn::File, ascending: false });
-        // Same probe when arriving from another column's sort.
-        let from_length = Sort { column: SortColumn::Length, ascending: false };
-        let moved = Sort::click(Some(from_length), SortColumn::File, &rows());
+    fn click_starts_descending_and_flips_on_repeat() {
+        // The first click on any column sorts descending (top value on top).
+        let first = Sort::click(None, SortColumn::Length);
+        assert_eq!(first, Sort { column: SortColumn::Length, ascending: false });
+        // A repeat click on the same column flips.
+        let second = Sort::click(Some(first), SortColumn::Length);
+        assert_eq!(second, Sort { column: SortColumn::Length, ascending: true });
+        let third = Sort::click(Some(second), SortColumn::Length);
+        assert_eq!(third, Sort { column: SortColumn::Length, ascending: false });
+        // Moving to another column starts it descending again, whatever the
+        // previous column's direction was.
+        let moved = Sort::click(Some(second), SortColumn::File);
         assert_eq!(moved, Sort { column: SortColumn::File, ascending: false });
-        // And a not-ascending target column still starts ascending.
-        let other = Sort::click(Some(from_length), SortColumn::Estimated, &rows());
-        assert_eq!(other, Sort { column: SortColumn::Estimated, ascending: true });
     }
 
     #[test]

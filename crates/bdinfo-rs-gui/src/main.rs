@@ -405,8 +405,7 @@ enum Message {
     /// anchor the Ctrl+C copy acts on).
     PaneRowPressed(Region, usize),
     /// A playlist-table column header was clicked — sort by that column
-    /// (ascending first — descending when the rows already read ascending —
-    /// and a repeat click flips).
+    /// (descending first, a repeat click flips).
     SortBy(SortColumn),
     /// The cursor entered a sortable playlist header cell.
     HeaderHovered(SortColumn),

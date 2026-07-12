@@ -124,7 +124,7 @@ impl Listing {
     /// the rows, so the checked set (and thus [`scan_names`](Self::scan_names))
     /// is unchanged by any sorting.
     fn sort_by(&mut self, column: SortColumn) {
-        let sort = Sort::click(self.sort, column, &self.rows);
+        let sort = Sort::click(self.sort, column);
         self.sort = Some(sort);
         let order = model::sort_rows(&mut self.rows, sort);
         self.selection.permute(&order);
@@ -280,13 +280,11 @@ impl Flow {
         }
     }
 
-    /// Sorts the playlist table by `column` — `BDInfo`'s header-click rule:
-    /// the first click sorts ascending (descending when the rows already read
-    /// ascending by that column, so a click always visibly re-orders), and a
-    /// repeat click on the same column flips. Only while the table is editable
-    /// ([`Stage::Listed`] / [`Stage::Reported`]); the check-marks and the
-    /// active-row highlight travel with their playlists, so the scan set never
-    /// changes.
+    /// Sorts the playlist table by `column`: the first click sorts descending
+    /// (top value on top), and a repeat click on the same column flips. Only
+    /// while the table is editable ([`Stage::Listed`] / [`Stage::Reported`]);
+    /// the check-marks and the active-row highlight travel with their
+    /// playlists, so the scan set never changes.
     pub fn sort_by(&mut self, column: SortColumn) {
         if let Some(listing) = self.editable_listing_mut() {
             listing.sort_by(column);
@@ -986,19 +984,18 @@ mod tests {
         let mut flow = listed3();
         flow.toggle(0); // check 00000
         flow.set_active(2); // highlight 00002
-        // Length ascending: 00002 (50 s), 00001 (70 s), 00000 (100 s).
-        flow.sort_by(SortColumn::Length);
-        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::Length, ascending: true }));
-        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
-        // The check-mark still belongs to 00000, the highlight to 00002.
-        assert_eq!(checked_set(&flow).into_iter().collect::<Vec<_>>(), ["00000.MPLS"]);
-        assert_eq!(flow.active_index(), Some(0));
-        assert_eq!(flow.active_playlist_name().as_deref(), Some("00002.MPLS"));
-        // A second click flips to descending; everything still travels.
+        // The first click sorts Length DESCENDING: 00000 (100 s), 00001
+        // (70 s), 00002 (50 s) — here the same order the table already showed.
         flow.sort_by(SortColumn::Length);
         assert_eq!(flow.sort(), Some(Sort { column: SortColumn::Length, ascending: false }));
         assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+        // A second click flips to ascending; the check-mark still belongs to
+        // 00000 and the highlight to 00002, wherever they land.
+        flow.sort_by(SortColumn::Length);
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::Length, ascending: true }));
+        assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
         assert_eq!(checked_set(&flow).into_iter().collect::<Vec<_>>(), ["00000.MPLS"]);
+        assert_eq!(flow.active_index(), Some(0));
         assert_eq!(flow.active_playlist_name().as_deref(), Some("00002.MPLS"));
         // The scan request covers exactly the checked playlist, sort or no sort.
         let request = flow.scan_request().expect("a request for the checked row");
@@ -1028,8 +1025,7 @@ mod tests {
     fn a_measured_rebuild_reapplies_the_sort_and_keeps_the_checked_names() {
         let mut flow = listed3();
         flow.toggle(1); // check 00001
-        // The presentation order already reads ascending by name, so the first
-        // File click goes straight to descending: 00002, 00001, 00000.
+        // The first File click sorts descending: 00002, 00001, 00000.
         flow.sort_by(SortColumn::File);
         assert_eq!(flow.sort(), Some(Sort { column: SortColumn::File, ascending: false }));
         assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
