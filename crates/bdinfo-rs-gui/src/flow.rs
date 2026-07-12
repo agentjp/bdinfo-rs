@@ -203,10 +203,21 @@ pub struct Flow {
 #[derive(Debug, Clone)]
 enum Inner {
     Idle,
+    /// Idle, but with last session's source remembered — shown in the Source
+    /// field with "Rescan" live, opened only when the user asks.
+    Recalled(Input),
     Listing(Input),
     Listed(Listing),
-    Scanning { listing: Listing, generation: u64, progress: Option<ProgressModel> },
-    Reported { listing: Listing, report: String, errors: Vec<String> },
+    Scanning {
+        listing: Listing,
+        generation: u64,
+        progress: Option<ProgressModel>,
+    },
+    Reported {
+        listing: Listing,
+        report: String,
+        errors: Vec<String>,
+    },
     Failed(String),
 }
 
@@ -221,6 +232,16 @@ impl Flow {
     #[must_use]
     pub const fn idle() -> Self {
         Self { inner: Inner::Idle }
+    }
+
+    /// The opening state with last session's source remembered ([`Stage::Idle`],
+    /// like [`Flow::idle`]): nothing is loaded and nothing scans, but the input
+    /// shows in the Source field ([`Flow::input_display`]) and "Rescan" is live
+    /// ([`Flow::current_input`]), so reopening it is one click — `BDInfo` seeds
+    /// its source box from `LastPath` the same way, without scanning.
+    #[must_use]
+    pub const fn recall(input: Input) -> Self {
+        Self { inner: Inner::Recalled(input) }
     }
 
     // ── transitions (update calls these) ────────────────────────────────────
@@ -394,7 +415,7 @@ impl Flow {
     #[must_use]
     pub const fn stage(&self) -> Stage {
         match &self.inner {
-            Inner::Idle => Stage::Idle,
+            Inner::Idle | Inner::Recalled(_) => Stage::Idle,
             Inner::Listing(_) => Stage::Listing,
             Inner::Listed(_) => Stage::Listed,
             Inner::Scanning { .. } => Stage::Scanning,
@@ -408,7 +429,7 @@ impl Flow {
     #[must_use]
     pub fn input_display(&self) -> Option<String> {
         self.any_listing().map(|listing| listing.input.display()).or_else(|| match &self.inner {
-            Inner::Listing(input) => Some(input.display()),
+            Inner::Listing(input) | Inner::Recalled(input) => Some(input.display()),
             _ => None,
         })
     }
@@ -419,7 +440,7 @@ impl Flow {
     #[must_use]
     pub fn current_input(&self) -> Option<&Input> {
         match &self.inner {
-            Inner::Listing(input) => Some(input),
+            Inner::Listing(input) | Inner::Recalled(input) => Some(input),
             _ => self.any_listing().map(|listing| &listing.input),
         }
     }
@@ -797,6 +818,22 @@ mod tests {
         assert_eq!(flow.table().len(), 2);
         assert!(flow.editable());
         assert!(flow.can_scan()); // scan-all is available as soon as a disc is listed
+    }
+
+    #[test]
+    fn a_recalled_source_idles_with_the_input_available() {
+        let flow = Flow::recall(input());
+        // Idle to the view (the opening prompt), so nothing scans at boot…
+        assert_eq!(flow.stage(), Stage::Idle);
+        assert!(flow.table().is_empty());
+        assert!(!flow.can_scan());
+        assert!(!flow.report_available());
+        // …but the source shows and "Rescan" resolves it, one click to reopen.
+        assert_eq!(flow.input_display(), Some("disc".to_owned()));
+        assert_eq!(flow.current_input(), Some(&input()));
+        // The reopen takes the ordinary listing road.
+        let flow = Flow::start_listing(input()).listed(&input(), Ok(structural()));
+        assert_eq!(flow.stage(), Stage::Listed);
     }
 
     #[test]
