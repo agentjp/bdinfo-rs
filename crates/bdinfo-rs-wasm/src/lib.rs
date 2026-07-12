@@ -50,6 +50,7 @@ use std::io::{self, BufRead, BufReader, Cursor};
 #[cfg(target_arch = "wasm32")]
 use std::io::{Read, Seek};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
@@ -932,13 +933,27 @@ fn render_selection(
     // found, so it cannot hit the only hard error (`StructureNotFound`); on that
     // unreachable failure it degrades to the structural disc (zero measured
     // tallies) rather than erroring.
-    let measured = BdRom::open_resilient_with(root, ScanMode::Full, Some(&files), progress)
-        .unwrap_or(structural);
+    // The browser exports carry no cancel affordance: the flag is never set.
+    let measured = BdRom::open_resilient_with(
+        root,
+        ScanMode::Full,
+        Some(&files),
+        progress,
+        &never_cancelled(),
+    )
+    .unwrap_or(structural);
     let order = selection_order(&measured.bdrom.playlists, &names);
     Ok(text::render_with(&measured.bdrom, &order, &measured.errors))
 }
 
 // ── shared render path ──────────────────────────────────────────────────────
+
+/// A cancel flag that never trips — the browser exports have no cancel
+/// affordance (a worker-side scan ends with the page), so every open passes
+/// this never-set flag.
+const fn never_cancelled() -> AtomicBool {
+    AtomicBool::new(false)
+}
 
 /// Runs the full **measured** scan over `root` and renders the classic disc
 /// report.
@@ -957,7 +972,8 @@ fn render_disc(
     root: &dyn BdDir,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, BdError> {
-    let report = BdRom::open_resilient_with(root, ScanMode::Full, None, progress)?;
+    let report =
+        BdRom::open_resilient_with(root, ScanMode::Full, None, progress, &never_cancelled())?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(text::render_with(&report.bdrom, &order, &report.errors))
 }
@@ -1613,6 +1629,8 @@ mod tests {
             ClipSummary {
                 name: name.to_owned(),
                 display_name: name.to_owned(),
+                file_size: 0,
+                interleaved_file_size: 0,
                 angle_index: 0,
                 relative_time_in: 0.0,
                 length,
