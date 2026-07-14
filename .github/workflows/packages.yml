@@ -198,6 +198,10 @@ jobs:
         with:
           pkgname: bdinfo-rs-bin
           pkgbuild: build/aur/PKGBUILD
+          # The AUR submission guidelines want the packaging scripts themselves
+          # licensed (0BSD): ship packaging/aur/LICENSE into the AUR repo root.
+          # (This licenses the PKGBUILD; the packaged binary stays LGPL.)
+          assets: packaging/aur/LICENSE
           updpkgsums: true # download the release tarballs and write real sha256sums
           test: true # build the package in an Arch container before pushing
           commit_username: bdinfo-rs CI
