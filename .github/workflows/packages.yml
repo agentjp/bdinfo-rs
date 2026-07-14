@@ -97,8 +97,7 @@ jobs:
     # package — it bases each new manifest on the prior version already in winget-pkgs —
     # so from here on every stable release auto-submits a new-version PR. (1.1.0 was
     # backfilled by hand with komac right after 1.0.0 merged; the first CI auto-submit is
-    # the next tag.) Now unconditional on a stable tag, like the deb/rpm jobs; only `aur`
-    # stays gated (AUR registration still pending).
+    # the next tag.) Unconditional on a stable tag, like the deb/rpm and aur jobs.
     needs: gate
     if: needs.gate.outputs.stable == 'true'
     env:
@@ -173,10 +172,10 @@ jobs:
     name: AUR (bdinfo-rs-bin)
     runs-on: ubuntu-latest
     environment: release # AUR_SSH_KEY is an env secret on `release` (see header)
-    # ON HOLD (2026-06-19): aur.archlinux.org account registration is currently
-    # disabled, so there is no AUR account/package to push to yet. Re-enable by
-    # setting the repo variable AUR_ENABLED=true (after registering the account and
-    # the AUR_SSH_KEY public key) — no code change needed; the secret is already set.
+    # LIVE since 2026-07-14: the aur.archlinux.org account exists and its SSH key is
+    # registered; AUR_SSH_KEY (release environment) holds the private half. The repo
+    # variable AUR_ENABLED=true arms this job — unset it to pause AUR publishing
+    # without a code change.
     needs: gate
     if: ${{ needs.gate.outputs.stable == 'true' && vars.AUR_ENABLED == 'true' }}
     env:
