@@ -47,6 +47,8 @@ const KEY_WINDOW_HEIGHT: &str = "window-height";
 const KEY_WINDOW_X: &str = "window-x";
 /// See [`KEY_WINDOW_X`].
 const KEY_WINDOW_Y: &str = "window-y";
+/// The config file's key for the window's maximized state.
+const KEY_WINDOW_MAXIMIZED: &str = "window-maximized";
 
 /// The largest believable window axis, in logical pixels — a stored size or
 /// position beyond this (a corrupt file, a minimized window's fake Win32
@@ -117,6 +119,11 @@ pub struct Settings {
     /// The window's logical outer position, `(x, y)` — absent on Wayland,
     /// which has no global window positions.
     pub window_pos: Option<(f32, f32)>,
+    /// The window was maximized at close (`BDInfo`'s `WindowState`). The
+    /// geometry pair above stays the *normal* (restore) bounds — a maximized
+    /// close never overwrites it — so unmaximizing after a restore returns
+    /// to the remembered size, like `BDInfo`'s `RestoreBounds`.
+    pub window_maximized: bool,
     /// The last successfully opened source (disc folder or `.iso`).
     pub last_path: Option<PathBuf>,
     /// The theme preference.
@@ -152,6 +159,7 @@ impl Default for Settings {
         Self {
             window_size: None,
             window_pos: None,
+            window_maximized: false,
             last_path: None,
             theme: ThemeChoice::default(),
             // The filter defaults are core's (on at 20 s) — today's table.
@@ -206,6 +214,7 @@ impl Settings {
                 KEY_WINDOW_HEIGHT => height = parse_axis(value),
                 KEY_WINDOW_X => x = parse_axis(value),
                 KEY_WINDOW_Y => y = parse_axis(value),
+                KEY_WINDOW_MAXIMIZED => set_bool(&mut settings.window_maximized, value),
                 KEY_FILTER_SHORT => set_bool(&mut settings.filter_short_playlists, value),
                 KEY_SHORT_SECONDS => {
                     if let Some(seconds) = parse_seconds(value) {
@@ -246,6 +255,7 @@ impl Settings {
             (KEY_AUTOSAVE, self.autosave_report.to_string()),
             (KEY_REPORT_DIAGNOSTICS, self.report_stream_diagnostics.to_string()),
             (KEY_REPORT_SUMMARY, self.report_quick_summary.to_string()),
+            (KEY_WINDOW_MAXIMIZED, self.window_maximized.to_string()),
         ];
         if let Some(path) = self.last_path.as_deref().and_then(Path::to_str)
             && !path.is_empty()
@@ -489,6 +499,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.window_size, None);
         assert_eq!(settings.window_pos, None);
+        assert!(!settings.window_maximized);
         assert_eq!(settings.last_path, None);
         assert_eq!(settings.theme, ThemeChoice::System);
         // Today's exact table: the standard filter (on at 20 s), grouped
@@ -509,6 +520,7 @@ mod tests {
         let settings = Settings {
             window_size: Some((880.0, 960.5)),
             window_pos: Some((-120.25, 64.0)),
+            window_maximized: true,
             last_path: Some(PathBuf::from(r"D:\rips\MY_DISC")),
             theme: ThemeChoice::Dark,
             filter_short_playlists: false,
@@ -545,7 +557,8 @@ mod tests {
                     window-height = \ntheme = purple\nlast-path = \n\
                     filter-short-playlists = maybe\nshort-playlist-seconds = -3\n\
                     filter-looping-playlists = 1\nhuman-readable-sizes = TRUE\n\
-                    display-chapter-count = \nautosave-report = yes\n";
+                    display-chapter-count = \nautosave-report = yes\n\
+                    window-maximized = maybe\n";
         assert_eq!(Settings::parse(text), Settings::default());
         assert_eq!(Settings::parse(""), Settings::default());
         assert_eq!(Settings::parse("\u{0}\u{FFFD}garbage\u{7F}"), Settings::default());
@@ -597,6 +610,19 @@ mod tests {
             Settings::parse("window-x = -1920\nwindow-y = 32\n").window_pos,
             Some((-1920.0, 32.0))
         );
+    }
+
+    #[test]
+    fn the_maximized_flag_parses_its_exact_tokens() {
+        assert!(Settings::parse("window-maximized = true\n").window_maximized);
+        assert!(!Settings::parse("window-maximized = false\n").window_maximized);
+        // Anything else keeps the default — a corrupt value never fails the load.
+        assert!(!Settings::parse("window-maximized = TRUE\n").window_maximized);
+        assert!(!Settings::parse("window-maximized = 1\n").window_maximized);
+        // The flag is orthogonal to the geometry: it restores alone.
+        let alone = Settings::parse("window-maximized = true\n");
+        assert_eq!(alone.window_size, None);
+        assert_eq!(alone.window_pos, None);
     }
 
     #[test]
@@ -808,7 +834,7 @@ mod tests {
                 theme(),
                 (any::<bool>(), 0..=super::super::MAX_SHORT_SECONDS, any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
-                (any::<bool>(), any::<bool>()),
+                (any::<bool>(), any::<bool>(), any::<bool>()),
             )
                 .prop_map(
                     |(
@@ -818,11 +844,12 @@ mod tests {
                         theme,
                         (filter_short_playlists, short_playlist_seconds, filter_looping_playlists),
                         (human_readable_sizes, display_chapter_count, autosave_report),
-                        (report_stream_diagnostics, report_quick_summary),
+                        (report_stream_diagnostics, report_quick_summary, window_maximized),
                     )| {
                         Settings {
                             window_size,
                             window_pos,
+                            window_maximized,
                             last_path,
                             theme,
                             filter_short_playlists,

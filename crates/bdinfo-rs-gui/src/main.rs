@@ -166,8 +166,10 @@ fn debug_scan_delay() {
 
 /// The window settings: last session's geometry (the stored size clamped to
 /// the minimum; the default size and OS placement when nothing sane is
-/// stored), the minimum size, and the embedded app icon (drawn procedurally,
-/// so the binary stays self-contained). Closing is handled manually
+/// stored), the maximized state layered on top (the geometry stays the
+/// restore bounds an unmaximize returns to), the minimum size, and the
+/// embedded app icon (drawn procedurally, so the binary stays
+/// self-contained). Closing is handled manually
 /// (`exit_on_close_request: false`) so the geometry can be captured and saved
 /// on the way out — see [`Message::CloseRequested`].
 fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
@@ -181,6 +183,7 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(width, height),
         position,
+        maximized: persisted.window_maximized,
         min_size: Some(iced::Size::new(MIN_SIZE.0, MIN_SIZE.1)),
         icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok(),
         exit_on_close_request: false,
@@ -559,6 +562,9 @@ enum Message {
         position: Option<iced::Point>,
         /// Its logical size.
         size: iced::Size,
+        /// Whether it is maximized (the position/size are then the maximized
+        /// rect, not the restore bounds — see [`App::save_and_close`]).
+        maximized: bool,
     },
 }
 
@@ -729,7 +735,9 @@ impl App {
                 Task::none()
             }
             Message::CloseRequested(id) => close_with_geometry(id),
-            Message::SaveAndClose { id, position, size } => self.save_and_close(id, position, size),
+            Message::SaveAndClose { id, position, size, maximized } => {
+                self.save_and_close(id, position, size, maximized)
+            }
         }
     }
 
@@ -808,15 +816,23 @@ impl App {
     /// Persists the closing window's geometry (`BDInfo` saves at `FormClosing`
     /// too) and really closes it. The position stays untouched when the
     /// platform reports none (Wayland), so a size-only restore still works.
+    /// A maximized close records only the flag: the live readout is then the
+    /// maximized rect, and iced exposes no restore bounds, so the stored
+    /// geometry keeps the last *normal* close's values — `BDInfo` persists its
+    /// `RestoreBounds` at that moment; this is the nearest reachable stand-in.
     fn save_and_close(
         &mut self,
         id: iced::window::Id,
         position: Option<iced::Point>,
         size: iced::Size,
+        maximized: bool,
     ) -> Task<Message> {
-        self.persisted.window_size = Some((size.width, size.height));
-        if let Some(point) = position {
-            self.persisted.window_pos = Some((point.x, point.y));
+        self.persisted.window_maximized = maximized;
+        if !maximized {
+            self.persisted.window_size = Some((size.width, size.height));
+            if let Some(point) = position {
+                self.persisted.window_pos = Some((point.x, point.y));
+            }
         }
         settings::save(&self.persisted);
         iced::window::close(id)
@@ -2402,13 +2418,20 @@ fn num_cell<'a>(
 }
 
 /// Reads the closing window's live geometry (the outer position + logical
-/// size, the same coordinates [`window_settings`] restores) and forwards it
-/// to [`Message::SaveAndClose`]. The window stays open while the readout
-/// round-trips (`exit_on_close_request` is off) — `SaveAndClose` then really
-/// closes it.
+/// size, the same coordinates [`window_settings`] restores) plus its
+/// maximized state, and forwards them to [`Message::SaveAndClose`]. The
+/// window stays open while the readouts round-trip
+/// (`exit_on_close_request` is off) — `SaveAndClose` then really closes it.
 fn close_with_geometry(id: iced::window::Id) -> Task<Message> {
     iced::window::position(id).then(move |position| {
-        iced::window::size(id).map(move |size| Message::SaveAndClose { id, position, size })
+        iced::window::size(id).then(move |size| {
+            iced::window::is_maximized(id).map(move |maximized| Message::SaveAndClose {
+                id,
+                position,
+                size,
+                maximized,
+            })
+        })
     })
 }
 
