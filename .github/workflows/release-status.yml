@@ -84,6 +84,20 @@ jobs:
           # WinGet — the version manifest directory in microsoft/winget-pkgs (an archive)
           if try3 gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver"; then add "WinGet" "PRESENT"; else add "WinGet" "ABSENT"; fi
 
+          # AUR — rolling like the Homebrew tap (one current version per package base).
+          # The public RPC reports the pkgver-pkgrel of bdinfo-rs-bin; compare the
+          # version BASE (strip the -<pkgrel>). resultcount 0 = package base absent.
+          aurv="?"; i=0
+          while [ "$i" -lt 3 ]; do
+            aurv=$(curl -sS -A "bdinfo-rs-release-status" "https://aur.archlinux.org/rpc/v5/info?arg[]=bdinfo-rs-bin" 2>/dev/null \
+              | jq -r 'if .resultcount == 0 then "none" else .results[0].Version end' 2>/dev/null || echo "?")
+            { [ "$aurv" != "?" ] && [ -n "$aurv" ]; } && break
+            i=$((i+1)); sleep 2
+          done
+          if [ "$aurv" = "?" ] || [ -z "$aurv" ]; then add "AUR bdinfo-rs-bin" "UNKNOWN (query failed)"
+          elif [ "${aurv%-*}" = "$ver" ]; then add "AUR bdinfo-rs-bin" "PRESENT (at $aurv)"
+          else add "AUR bdinfo-rs-bin" "ABSENT (at $aurv)"; fi
+
           # Cloudsmith deb/rpm — anonymous public API. Cloudsmith stores the packaging-
           # revisioned version (e.g. 1.2.0-1), so match the version BASE (strip -<revision>),
           # NOT a bare version: query. Expect 4 (deb+rpm x2 arch). Retry a transient failure.
