@@ -117,14 +117,14 @@ winget install agentjp.bdinfo-rs
 scoop bucket add agentjp https://github.com/agentjp/scoop-bucket
 scoop install bdinfo-rs
 
+# Arch Linux — AUR (bdinfo-rs-bin, with your AUR helper of choice)
+yay -S bdinfo-rs-bin
+
 # Rust — fetch the prebuilt binary (no compile)…
 cargo binstall bdinfo-rs
 # …or build it from crates.io
 cargo install bdinfo-rs
 ```
-
-An Arch Linux AUR package (`bdinfo-rs-bin`) is on the way but not available just yet — for now,
-Arch users can `cargo install` or grab a prebuilt binary.
 
 On Debian/Ubuntu and Fedora/RHEL/openSUSE, install **by name with updates** from the hosted
 package repository — add it once (like any third-party repo), then use your package manager
