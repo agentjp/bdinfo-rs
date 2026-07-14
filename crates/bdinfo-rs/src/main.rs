@@ -33,7 +33,19 @@
 //!
 //! Exit codes: `0` success, `1` malformed/not a BD structure or no matching
 //! playlist, `2` no such path / unusable `REPORT_DEST` / unwritable report
-//! file, `3` completed with errors (a partial report was written).
+//! file, `3` completed with errors (a partial report was written), `130` scan
+//! cancelled by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every
+//! platform; no report is written).
+//!
+//! Ctrl+C during the packet scan, on the styled (ANSI-terminal) progress
+//! path, cancels cooperatively: the terminal is put in raw mode for the scan
+//! so the press arrives as a key event, the first press aborts the scan
+//! cleanly (`Cancelling...` notice, cursor restored, exit `130`), and a
+//! second press while the cancellation is in flight exits at once. The plain
+//! path (piped stderr, CI) and every other phase of the flow keep the
+//! OS-default Ctrl+C. Only the interactive key press is intercepted —
+//! `kill`/SIGTERM stay OS-default: the scan is read-only and the report is
+//! only written at the end, so a hard kill corrupts nothing.
 #![forbid(unsafe_code)]
 // Under `cargo llvm-cov` on nightly (the `cov` gate step), enable the
 // `#[coverage(off)]` attribute so the platform-constant `ansi_supported` stub
@@ -45,7 +57,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
@@ -96,28 +108,30 @@ fn is_iso(path: &Path) -> bool {
 type ScanOutcome = (BdRom, Vec<ScanError>);
 
 /// The injectable packet-scan seam of [`scan_and_report`]: runs the scan,
-/// feeding the given progress observer.
-type ScanFn<'a> = dyn FnMut(&mut dyn FnMut(ScanProgress<'_>)) -> Result<ScanOutcome, BdError> + 'a;
+/// feeding the given progress observer and honouring the given cooperative
+/// cancel flag.
+type ScanFn<'a> =
+    dyn FnMut(&mut dyn FnMut(ScanProgress<'_>), &AtomicBool) -> Result<ScanOutcome, BdError> + 'a;
 
 /// Scans the Blu-ray `.iso` at `path` through the UDF reader, returning the same
 /// `BdRom` the folder path would (only the IO backend differs). The resilient
 /// scan merges its per-file failures with the reader's bad-sector recordings.
-/// `scan_files` narrows the packet scan and `progress` observes it (the
-/// library's `open_with` extras).
+/// `scan_files` narrows the packet scan, `progress` observes it, and `cancel`
+/// aborts it (the library's `open_with` extras).
 fn scan_iso(
     path: &str,
     run_packet_scan: bool,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
 ) -> Result<ScanOutcome, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-    // The CLI has no cancel affordance (yet): the flag is never set.
     let report = BdRom::open_resilient_with(
         &source.root(),
         scan_mode(run_packet_scan),
         scan_files,
         progress,
-        &AtomicBool::new(false),
+        cancel,
     )?;
     let mut errors = report.errors;
     errors.extend(source.take_errors());
@@ -132,15 +146,15 @@ fn scan_folder(
     run_packet_scan: bool,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
 ) -> Result<ScanOutcome, BdError> {
     let root = FsDir::new(location);
-    // The CLI has no cancel affordance (yet): the flag is never set.
     let report = BdRom::open_resilient_with(
         &root,
         scan_mode(run_packet_scan),
         scan_files,
         progress,
-        &AtomicBool::new(false),
+        cancel,
     )?;
     let mut errors = report.errors;
     errors.extend(root.take_errors());
@@ -168,12 +182,13 @@ fn scan_disc(
     run_packet_scan: bool,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
 ) -> Result<ScanOutcome, BdError> {
     let location = Path::new(path);
     if is_iso(location) {
-        scan_iso(path, run_packet_scan, scan_files, progress)
+        scan_iso(path, run_packet_scan, scan_files, progress, cancel)
     } else {
-        scan_folder(location, run_packet_scan, scan_files, progress)
+        scan_folder(location, run_packet_scan, scan_files, progress, cancel)
     }
 }
 
@@ -204,13 +219,14 @@ fn run(cli: &Cli) -> u8 {
     };
 
     println!("Please wait while we scan the disc...");
-    let (bdrom, errors) = match scan_disc(&cli.bd_path, false, None, &mut no_progress) {
-        Ok(scanned) => scanned,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return 1;
-        }
-    };
+    let (bdrom, errors) =
+        match scan_disc(&cli.bd_path, false, None, &mut no_progress, &AtomicBool::new(false)) {
+            Ok(scanned) => scanned,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return 1;
+            }
+        };
 
     let selection: Vec<String> = if cli.mpls.is_empty() {
         // Every mode but `--mpls` starts from the playlist table.
@@ -255,7 +271,7 @@ fn run(cli: &Cli) -> u8 {
     print!("{}", analyze_preamble(&bdrom.playlists, &selection));
     let scan_files = selection_stream_files(&bdrom.playlists, &selection);
     scan_and_report(
-        &mut |progress| scan_disc(&cli.bd_path, true, Some(&scan_files), progress),
+        &mut |progress, cancel| scan_disc(&cli.bd_path, true, Some(&scan_files), progress, cancel),
         &dest,
         &selection,
     )
@@ -269,7 +285,24 @@ fn run(cli: &Cli) -> u8 {
 /// between the two).
 fn scan_and_report(scan: &mut ScanFn<'_>, dest: &Path, selection: &[String]) -> u8 {
     let mut line = ProgressDisplay::new();
-    let scanned = scan(&mut |p: ScanProgress<'_>| line.observe(&p));
+    // The scan's Ctrl+C affordance, styled path only: raw mode makes the press
+    // arrive as a key event instead of killing the process, the per-tick poll
+    // turns the first press into the cooperative cancel and a second into the
+    // immediate exit. The plain path (piped stderr, CI, dumb terminals) keeps
+    // the OS-default Ctrl+C — there is no hidden cursor to leak there.
+    let cancel = AtomicBool::new(false);
+    let mut watch = CancelWatch::new();
+    let raw = RawModeScope::enter(line.styled);
+    let scanned = scan(
+        &mut |p: ScanProgress<'_>| {
+            observe_cancellable(&mut line, &mut watch, &cancel, raw.active, &p);
+        },
+        &cancel,
+    );
+    // Out of raw mode before anything prints a plain `\n` (Unix raw mode
+    // disables output post-processing, so a bare newline would not return
+    // the carriage).
+    drop(raw);
     match scanned {
         Ok((bdrom, errors)) => {
             line.finish(errors.is_empty());
@@ -284,10 +317,182 @@ fn scan_and_report(scan: &mut ScanFn<'_>, dest: &Path, selection: &[String]) -> 
             println!("Report saved to: {}", dest.display());
             finish_early(&errors)
         }
+        Err(BdError::ScanCancelled) => {
+            line.clear();
+            eprintln!("Scan cancelled.");
+            EXIT_CANCELLED
+        }
         Err(err) => {
             line.clear();
             eprintln!("error: {err}");
             1
+        }
+    }
+}
+
+/// The cancelled-scan exit code: the Unix `128 + SIGINT` spelling, distinct
+/// from `3` (scan errors) and recognizable everywhere — it carries no special
+/// meaning on Windows but is documented in the crate docs' exit-code list.
+const EXIT_CANCELLED: u8 = 130;
+
+/// The Ctrl+C interception decision for one observed press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelStep {
+    /// The first press: signal the cooperative cancel and show the notice.
+    Cancel,
+    /// A repeat press while the cancellation is in flight: exit immediately.
+    Exit,
+}
+
+/// The once/twice Ctrl+C state machine of the styled scan path — pure, so
+/// the decision logic is testable apart from the terminal event source.
+struct CancelWatch {
+    /// Whether the first press has already signalled the cancel.
+    cancelling: bool,
+}
+
+impl CancelWatch {
+    const fn new() -> Self {
+        Self { cancelling: false }
+    }
+
+    /// Whether a cancellation is in flight (the display then holds the
+    /// `Cancelling...` notice instead of the bar).
+    const fn cancelling(&self) -> bool {
+        self.cancelling
+    }
+
+    /// Records one Ctrl+C press, returning the action it triggers.
+    const fn press(&mut self) -> CancelStep {
+        if self.cancelling {
+            CancelStep::Exit
+        } else {
+            self.cancelling = true;
+            CancelStep::Cancel
+        }
+    }
+}
+
+/// One tick of the cancellable scan observer: a Ctrl+C press signals the
+/// cooperative cancel (first press) or requests the immediate exit (second
+/// press, returning `true`); otherwise the progress display redraws — unless
+/// a cancellation is already in flight, whose notice must not be overdrawn.
+fn scan_tick(
+    line: &mut ProgressDisplay,
+    watch: &mut CancelWatch,
+    cancel: &AtomicBool,
+    pressed: bool,
+    progress: &ScanProgress<'_>,
+) -> bool {
+    if pressed {
+        match watch.press() {
+            CancelStep::Cancel => {
+                cancel.store(true, Ordering::Relaxed);
+                line.notice("Cancelling...");
+            }
+            CancelStep::Exit => {
+                line.clear();
+                return true;
+            }
+        }
+    } else if !watch.cancelling() {
+        line.observe(progress);
+    }
+    false
+}
+
+/// The cancellable scan's progress observer: one [`scan_tick`] per event,
+/// with the environment-bound edges wired in — the live Ctrl+C poll on the
+/// way in, the process-fatal immediate exit on the way out. The decision
+/// logic is [`scan_tick`] (unit-tested); this composition is excluded from
+/// coverage with its edges, which no test process can drive.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn observe_cancellable(
+    line: &mut ProgressDisplay,
+    watch: &mut CancelWatch,
+    cancel: &AtomicBool,
+    intercepting: bool,
+    progress: &ScanProgress<'_>,
+) {
+    if scan_tick(line, watch, cancel, ctrl_c_pressed(intercepting), progress) {
+        exit_cancelled_now();
+    }
+}
+
+/// Drains every pending terminal event (a zero-timeout poll per pending
+/// event), reporting whether any was a Ctrl+C key press. Only asked on an
+/// active raw-mode scan, where Ctrl+C arrives as a key event on both console
+/// families: Windows reports it as keyboard input once `ENABLE_PROCESSED_INPUT`
+/// is off, Unix delivers the raw `0x03` byte once `ISIG` is off — crossterm's
+/// raw mode clears both, and its parser yields the same `KeyEvent` either way.
+/// The Windows console also delivers key-release records; only presses count.
+/// Environment-bound (a live console delivering key events), so excluded from
+/// coverage like [`terminal_columns`].
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn ctrl_c_pressed(intercepting: bool) -> bool {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    if !intercepting {
+        return false;
+    }
+    let mut pressed = false;
+    while crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+        // A read error ends the drain — nothing more can arrive through it.
+        let Ok(event) = crossterm::event::read() else {
+            break;
+        };
+        if let Event::Key(key) = event
+            && key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            pressed = true;
+        }
+    }
+    pressed
+}
+
+/// Restores the terminal and exits with the cancellation code at once — the
+/// second Ctrl+C must not wait for the in-flight scan to unwind. The caller's
+/// [`ProgressDisplay::clear`] has already re-shown the cursor; this drops raw
+/// mode (the RAII scope up the stack never unwinds through `exit`).
+/// Environment-bound and process-fatal, so excluded from coverage.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn exit_cancelled_now() -> ! {
+    let _ = terminal::disable_raw_mode().is_ok();
+    #[expect(
+        clippy::exit,
+        reason = "the immediate second-Ctrl+C exit cannot return through the in-flight scan"
+    )]
+    std::process::exit(i32::from(EXIT_CANCELLED))
+}
+
+/// Scoped terminal raw mode for the styled scan: entering (when `wanted`)
+/// makes Ctrl+C arrive as a key event instead of killing the process, and
+/// dropping guarantees the terminal is restored on every exit path, success
+/// or failure. A failed enable (no usable console) leaves `active` false —
+/// the scan then runs with the OS-default Ctrl+C, exactly like the plain
+/// path. Raw mode also disables echo and input line-processing; the scan
+/// reads no input, and the pending-event drain discards anything typed.
+struct RawModeScope {
+    /// Whether raw mode was actually enabled (and must be undone on drop).
+    active: bool,
+}
+
+impl RawModeScope {
+    /// Enters raw mode when `wanted` (the styled path). Environment-bound —
+    /// a test process must never toggle its console — so excluded from
+    /// coverage like [`terminal_columns`].
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn enter(wanted: bool) -> Self {
+        Self { active: wanted && terminal::enable_raw_mode().is_ok() }
+    }
+}
+
+impl Drop for RawModeScope {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drop(&mut self) {
+        if self.active {
+            let _ = terminal::disable_raw_mode().is_ok();
         }
     }
 }
@@ -582,6 +787,26 @@ impl ProgressDisplay {
         }
     }
 
+    /// Repaints the display line to `text` in place (stderr, like the bar) —
+    /// the `Cancelling...` notice that replaces the bar once a cancellation
+    /// is in flight. The cursor stays as the redraws left it;
+    /// [`clear`](Self::clear) restores it.
+    fn notice(&mut self, text: &str) {
+        self.drawn = Some(Instant::now());
+        if self.styled {
+            let mut sequence = String::new();
+            let _ = cursor::MoveToColumn(0).write_ansi(&mut sequence).is_ok();
+            let _ = terminal::Clear(terminal::ClearType::UntilNewLine)
+                .write_ansi(&mut sequence)
+                .is_ok();
+            sequence.push_str(text);
+            write_stderr(&sequence);
+        } else {
+            self.width = self.width.max(text.chars().count());
+            eprint!("\r{text:<width$}", width = self.width);
+        }
+    }
+
     /// Erases the progress display, if any was drawn.
     fn clear(&mut self) {
         if self.drawn.take().is_none() {
@@ -772,8 +997,8 @@ fn hms(seconds: u64) -> String {
 mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, ScanProgress};
     use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
@@ -1497,8 +1722,93 @@ mod tests {
         // the injectable seam makes the fatal arm deterministic.
         let dest = TempDest::new();
         let code =
-            super::scan_and_report(&mut |_| Err(BdError::StructureNotFound), &dest.root, &[]);
+            super::scan_and_report(&mut |_, _| Err(BdError::StructureNotFound), &dest.root, &[]);
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_cancelled_packet_scan_exits_130_and_writes_no_report() {
+        // The injectable seam plays the core's part: the observer runs like a
+        // real scan tick (a test process has no console, so no press is ever
+        // seen and the flag stays clear), then the scan aborts the way a
+        // signalled cancel flag makes `open_resilient_with` abort.
+        let dest = TempDest::new();
+        let code = super::scan_and_report(
+            &mut |progress, cancel| {
+                progress(ScanProgress { file: "00000.M2TS", done: 0, total: 100 });
+                assert!(!cancel.load(Ordering::Relaxed), "nothing pressed Ctrl+C");
+                Err(BdError::ScanCancelled)
+            },
+            &dest.root,
+            &[],
+        );
+        assert_eq!(code, super::EXIT_CANCELLED);
+        assert_eq!(code, 130, "the documented cancellation exit code");
+        let saved = std::fs::read_dir(&dest.root).expect("dest listing").next();
+        assert!(saved.is_none(), "a cancelled scan writes no report");
+    }
+
+    #[test]
+    fn the_ctrl_c_watch_cancels_once_then_exits() {
+        let mut watch = super::CancelWatch::new();
+        assert!(!watch.cancelling());
+        assert_eq!(watch.press(), super::CancelStep::Cancel);
+        assert!(watch.cancelling());
+        assert_eq!(watch.press(), super::CancelStep::Exit);
+        assert!(watch.cancelling(), "the exit decision keeps the state");
+    }
+
+    #[test]
+    fn scan_ticks_draw_then_cancel_then_freeze_then_exit() {
+        let progress = ScanProgress { file: "00000.M2TS", done: 10, total: 100 };
+        let mut line = ProgressDisplay::with_style(false);
+        let mut watch = super::CancelWatch::new();
+        let cancel = AtomicBool::new(false);
+        // An unpressed tick draws the progress line, nothing more.
+        assert!(!super::scan_tick(&mut line, &mut watch, &cancel, false, &progress));
+        assert!(line.drawn.is_some());
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(!watch.cancelling());
+        // The first press signals the cooperative cancel and repaints the
+        // line to the notice.
+        assert!(!super::scan_tick(&mut line, &mut watch, &cancel, true, &progress));
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(watch.cancelling());
+        // An unpressed tick during the in-flight cancellation must NOT
+        // overdraw the notice: with the throttle disarmed, an `observe` here
+        // would redraw (drawn would be set again) — the tick skips it.
+        line.drawn = None;
+        assert!(!super::scan_tick(&mut line, &mut watch, &cancel, false, &progress));
+        assert!(line.drawn.is_none(), "the notice stays; the bar does not return");
+        // The second press erases the display (the erase sequence re-shows
+        // the cursor) and requests the immediate exit.
+        line.drawn = Some(Instant::now());
+        assert!(super::scan_tick(&mut line, &mut watch, &cancel, true, &progress));
+        assert!(line.drawn.is_none(), "the display is cleared before the exit");
+    }
+
+    #[test]
+    fn the_notice_repaints_both_display_modes_in_place() {
+        let mut styled = ProgressDisplay::with_style(true);
+        styled.notice("Cancelling...");
+        assert!(styled.drawn.is_some());
+        assert_eq!(styled.width, 0, "styled mode never pads; the sequence wipes");
+        let mut plain = ProgressDisplay::with_style(false);
+        plain.notice("Cancelling...");
+        assert!(plain.drawn.is_some());
+        assert_eq!(plain.width, "Cancelling...".chars().count(), "plain mode pads over the bar");
+    }
+
+    #[test]
+    fn raw_mode_is_never_entered_when_unwanted() {
+        // The plain path never wants raw mode; a test process must never
+        // toggle its console, so only the unwanted arm is exercised here (the
+        // live arm is held by the manual acceptance run).
+        let scope = super::RawModeScope::enter(false);
+        assert!(!scope.active);
+        drop(scope);
+        // The Ctrl+C poll never reports a press when not intercepting.
+        assert!(!super::ctrl_c_pressed(false));
     }
 
     #[test]

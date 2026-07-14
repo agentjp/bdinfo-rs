@@ -163,6 +163,39 @@ exclude_re = [
     # terminal (piped stderr never styles).
     "main\\.rs:\\d+:\\d+: replace write_stderr with \\(\\)",
 
+    # CLI `ctrl_c_pressed` (the `-> false` replacement and every internal mutant):
+    # the poll drains a live console's pending key events — in a test process there
+    # is no console delivering a Ctrl+C press, so the real function and the `-> false`
+    # mutant both always answer false, and the loop body (the key-event match) never
+    # executes at all. The `-> true` replacement IS killable (every fixture scan then
+    # cancels itself and exits 130) and is deliberately NOT excluded. The once/twice
+    # decision the poll feeds is factored into `CancelWatch`/`scan_tick` and fully
+    # unit-tested; only the live event source is opaque.
+    # (The `delete !` on the not-intercepting early return is in the same class:
+    # both arms then reach a poll that answers false in every test environment —
+    # console-less runners error the poll, console-attached ones have no pending
+    # events. A 2026-07-15 run flagged it "caught", but the failing test was an
+    # unrelated core temp-dir pid collision, not a real kill.)
+    "main\\.rs:\\d+:\\d+: replace ctrl_c_pressed -> bool with false",
+    "main\\.rs:\\d+:\\d+: (replace|delete) .* in ctrl_c_pressed",
+
+    # CLI `RawModeScope` (enter's `&&` and drop's `()`): both sides toggle the
+    # process's real console mode, which no test can assert — and a test process
+    # must never flip its console raw. On a headless runner `enable_raw_mode`
+    # simply fails (no console), making `wanted && enable(...)` and
+    # `wanted || enable(...)` indistinguishable; the drop-side disable is equally
+    # unobservable. The scoping itself (raw strictly around the scan, restored on
+    # every exit path) is held by the manual acceptance run.
+    "main\\.rs:\\d+:\\d+:.*RawModeScope",
+
+    # CLI `observe_cancellable with ()`: the environment-bound composition wrapper —
+    # it wires the live console poll (`ctrl_c_pressed`) and the process-fatal
+    # immediate exit (`exit_cancelled_now`) around `scan_tick`. Its only observable
+    # effect in a test process is drawing progress on the real stderr, which a test
+    # cannot read (see `write_stderr`); the decision logic (`scan_tick`,
+    # `CancelWatch`) is unit-tested and mutation-covered on its own.
+    "main\\.rs:\\d+:\\d+: replace observe_cancellable with \\(\\)",
+
     # `vfs::fs::open_sequential -> Ok(Default::default())`: only viable on the
     # `#[cfg(not(windows))]` arm, whose body is never type-checked on a Windows
     # host; on Linux the mutant is UNVIABLE (`File` has no `Default`). The arm's
