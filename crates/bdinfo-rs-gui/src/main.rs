@@ -38,7 +38,7 @@ use bdinfo_rs_gui::model::{
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::ProgressModel;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
-use bdinfo_rs_gui::{paths, settings};
+use bdinfo_rs_gui::{clipboard, paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
@@ -1175,18 +1175,21 @@ impl App {
         match target {
             Some(path) => {
                 self.status = Some(format!("Copied: {path}"));
-                iced::clipboard::write(path)
+                iced::clipboard::write(clipboard::sanitize(path))
             }
             None => Task::none(),
         }
     }
 
-    /// Copies the report to the clipboard via iced's clipboard task.
+    /// Copies the report to the clipboard via iced's clipboard task. The text
+    /// is NUL-sanitized on the way ([`clipboard::sanitize`]) — a degenerate
+    /// disc's report carries literal NULs, and Windows' NUL-terminated
+    /// clipboard would truncate every paste there.
     fn copy_report(&mut self) -> Task<Message> {
         match self.flow.report() {
             Some(report) => {
                 self.status = Some("Report copied to the clipboard.".to_owned());
-                iced::clipboard::write(report)
+                iced::clipboard::write(clipboard::sanitize(report))
             }
             None => Task::none(),
         }

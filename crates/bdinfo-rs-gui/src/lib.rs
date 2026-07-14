@@ -3,7 +3,8 @@
 //! Holds the Tier-A logic — the playlist view-model ([`model`]), the
 //! master-detail pane view-models ([`panes`]), the selection model (`selection`),
 //! the live-progress model ([`progress`]), the flow state machine ([`flow`]),
-//! the copy-path helpers ([`paths`]), the persistent configuration
+//! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
+//! the persistent configuration
 //! ([`settings`]), and
 //! the scan seam ([`scan`]) — so the golden-tie + unit
 //! tests link them directly, and the `bdinfo-rs-gui` binary is the thin iced
@@ -17,6 +18,7 @@
 //! `forbid(unsafe_code)`: a native iced app needs no `unsafe` in our own code.
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
 pub mod flow;
 pub mod model;
 pub mod panes;
