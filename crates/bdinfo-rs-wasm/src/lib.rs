@@ -63,7 +63,7 @@ use bdinfo_rs_core::bdrom::order::presentation_groups;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
-use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -943,7 +943,7 @@ fn render_selection(
     )
     .unwrap_or(structural);
     let order = selection_order(&measured.bdrom.playlists, &names);
-    Ok(text::render_with(&measured.bdrom, &order, &measured.errors))
+    Ok(text::render_with(&measured.bdrom, &order, &measured.errors, RenderOptions::default()))
 }
 
 // ── shared render path ──────────────────────────────────────────────────────
@@ -975,7 +975,8 @@ fn render_disc(
     let report =
         BdRom::open_resilient_with(root, ScanMode::Full, None, progress, &never_cancelled())?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
-    Ok(text::render_with(&report.bdrom, &order, &report.errors))
+    // The browser exports carry no report options: always the default report.
+    Ok(text::render_with(&report.bdrom, &order, &report.errors, RenderOptions::default()))
 }
 
 /// Renders a measured scan of `root`, mapping any failure to a `JsValue`.
