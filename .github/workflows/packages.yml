@@ -201,7 +201,13 @@ jobs:
           # The AUR submission guidelines want the packaging scripts themselves
           # licensed (0BSD): ship packaging/aur/LICENSE into the AUR repo root.
           # (This licenses the PKGBUILD; the packaged binary stays LGPL.)
-          assets: packaging/aur/LICENSE
+          # GOTCHA: with assets set the action commits via `git add --all`, which
+          # sweeps in updpkgsums' downloaded tarballs + the test-built package —
+          # the AUR push hook rejects those (max blob 488 KiB). The .gitignore
+          # asset keeps them out; never drop it while assets are in use.
+          assets: |
+            packaging/aur/LICENSE
+            packaging/aur/.gitignore
           updpkgsums: true # download the release tarballs and write real sha256sums
           test: true # build the package in an Arch container before pushing
           commit_username: bdinfo-rs CI
