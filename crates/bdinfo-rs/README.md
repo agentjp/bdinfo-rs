@@ -14,9 +14,9 @@ single statically-linked binary — no runtime, no DLLs, no install.
 cargo install bdinfo-rs
 ```
 
-Also available via WinGet (`winget install agentjp.bdinfo-rs`), Homebrew, Scoop, `cargo binstall`,
-and `.deb`/`.rpm` repositories — see the [project README](https://github.com/agentjp/bdinfo-rs)
-for every install route. An Arch Linux AUR package is on the way.
+Also available via WinGet (`winget install agentjp.bdinfo-rs`), Homebrew, Scoop, the AUR
+(`bdinfo-rs-bin`), `cargo binstall`, and `.deb`/`.rpm` repositories — see the
+[project README](https://github.com/agentjp/bdinfo-rs) for every install route.
 
 ## Usage
 
