@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::{
     SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
@@ -433,6 +434,10 @@ enum SettingsField {
     ChapterCount,
     /// "Auto-save report on scan completion".
     Autosave,
+    /// "Include stream diagnostics in report".
+    StreamDiagnostics,
+    /// "Include quick text summary in report".
+    QuickSummary,
 }
 
 /// Everything the UI can ask the runtime to do.
@@ -490,11 +495,13 @@ enum Message {
     ScanSelected,
     /// A streamed scan-progress event from the worker thread.
     Progress { generation: u64, file: String, done: u64, total: u64 },
-    /// The worker's measured scan finished.
+    /// The worker's measured scan finished. The errors are typed (shared —
+    /// `ScanError` is not `Clone`) so the flow can re-render the report when
+    /// a report-section toggle changes.
     Finished {
         generation: u64,
         report: String,
-        errors: Vec<String>,
+        errors: Arc<Vec<ScanError>>,
         playlists: Vec<PlaylistSummary>,
     },
     /// The worker's measured scan failed fatally.
@@ -771,6 +778,8 @@ impl App {
                 SettingsField::HumanSizes => &mut draft.human_readable_sizes,
                 SettingsField::ChapterCount => &mut draft.display_chapter_count,
                 SettingsField::Autosave => &mut draft.autosave_report,
+                SettingsField::StreamDiagnostics => &mut draft.report_stream_diagnostics,
+                SettingsField::QuickSummary => &mut draft.report_quick_summary,
             };
             *slot = !*slot;
         }
@@ -960,7 +969,7 @@ impl App {
         &mut self,
         generation: u64,
         report: String,
-        errors: Vec<String>,
+        errors: Arc<Vec<ScanError>>,
         playlists: Vec<PlaylistSummary>,
     ) -> Task<Message> {
         let was_scanning = self.flow.stage() == Stage::Scanning;
@@ -1040,7 +1049,8 @@ impl App {
     /// `thread::scope` parallelism) and streams its progress + result back as
     /// messages. The UI thread stays free — only the channel is polled here.
     fn start_scan(&mut self) -> Task<Message> {
-        let Some(ScanRequest { input, selection, scan_files }) = self.flow.scan_request() else {
+        let Some(ScanRequest { input, selection, scan_files, options }) = self.flow.scan_request()
+        else {
             return Task::none();
         };
         self.generation = self.generation.wrapping_add(1);
@@ -1083,8 +1093,14 @@ impl App {
                     total: progress.total,
                 });
             };
-            let result =
-                scan::scan_measured(&input, &selection, &scan_files, &mut on_progress, &cancel);
+            let result = scan::scan_measured(
+                &input,
+                &selection,
+                &scan_files,
+                options,
+                &mut on_progress,
+                &cancel,
+            );
             let outcome = match result {
                 Ok(measured) => Message::Finished {
                     generation,
@@ -2232,8 +2248,9 @@ fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
 
 /// The Settings dialog card — `BDInfo`'s `FormSettings`, narrowed to what is
 /// safely in the GUI's own hands: the two playlist filters (+ the seconds
-/// threshold), the two display toggles, and autosave, with OK / Cancel
-/// (Cancel discards the draft). The wording mirrors the original's checkboxes.
+/// threshold), the two display toggles, the two report-section toggles, and
+/// autosave, with OK / Cancel (Cancel discards the draft). The wording
+/// mirrors the original's checkboxes.
 fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message> {
     let seconds_field = text_input("20", &draft.seconds_text)
         .on_input(Message::SettingsSeconds)
@@ -2293,6 +2310,18 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
             "Display chapter count in Playlist view",
             draft.display_chapter_count,
             SettingsField::ChapterCount,
+        ))
+        .push(setting_check(
+            p,
+            "Include stream diagnostics in report",
+            draft.report_stream_diagnostics,
+            SettingsField::StreamDiagnostics,
+        ))
+        .push(setting_check(
+            p,
+            "Include quick text summary in report",
+            draft.report_quick_summary,
+            SettingsField::QuickSummary,
         ))
         .push(setting_check(
             p,

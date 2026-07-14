@@ -15,11 +15,12 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
 use bdinfo_rs_core::error::{BdError, ScanError};
-use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
 
@@ -111,7 +112,10 @@ pub struct Measured {
     pub label: String,
     /// Any failures recorded during the measured scan — a non-empty list is the
     /// CLI's resilient "completed with errors" posture (the report still saves).
-    pub errors: Vec<String>,
+    /// Typed (and shared — [`ScanError`] is not `Clone`, and the shell's
+    /// messages are) so the flow can re-render the report's `WARNING` block
+    /// when a render option changes.
+    pub errors: Arc<Vec<ScanError>>,
     /// The measured playlists — the scanned disc's playlists with their packet
     /// sizes and bitrates filled in, so the master-detail panes refresh in place.
     pub playlists: Vec<PlaylistSummary>,
@@ -177,7 +181,8 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 /// `selection` is the chosen playlist names in table order, and `scan_files` the
 /// matching clip set (`selection::selection_stream_files`), both derived from
 /// the structural scan. The packet scan reads only `scan_files`, so an unselected
-/// (possibly multi-GB) playlist is never demuxed. Runs on the iced shell's worker
+/// (possibly multi-GB) playlist is never demuxed. `options` is the report's
+/// section switches at scan start. Runs on the iced shell's worker
 /// thread, where native demux keeps its `thread::scope` parallelism.
 ///
 /// `cancel` is the shell's Cancel affordance: set it (from the UI thread) and
@@ -194,17 +199,18 @@ pub fn scan_measured(
     input: &Input,
     selection: &[String],
     scan_files: &BTreeSet<String>,
+    options: RenderOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<Measured, String> {
     let (bdrom, errors) = open(input, ScanMode::Full, Some(scan_files), progress, cancel)
         .map_err(|err| err.to_string())?;
     let order = selection::selection_order(&bdrom.playlists, selection);
-    let report = text::render_with(&bdrom, &order, &errors);
+    let report = text::render_with(&bdrom, &order, &errors, options);
     Ok(Measured {
         report,
         label: bdrom.volume_label,
-        errors: error_lines(&errors),
+        errors: Arc::new(errors),
         playlists: bdrom.playlists,
     })
 }

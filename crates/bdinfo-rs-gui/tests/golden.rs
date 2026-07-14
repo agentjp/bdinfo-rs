@@ -43,6 +43,7 @@ fn list_select_all_and_measure(input: &Input) -> (String, String) {
         &request.input,
         &request.selection,
         &request.scan_files,
+        request.options,
         &mut |_| {},
         &AtomicBool::new(false),
     )
@@ -64,6 +65,7 @@ fn a_cancelled_measured_scan_yields_no_report() {
         &request.input,
         &request.selection,
         &request.scan_files,
+        request.options,
         &mut |_| {},
         &AtomicBool::new(true),
     )
@@ -83,6 +85,44 @@ fn the_iso_seam_matches_the_iso_golden_byte_for_byte() {
     let (report, label) = list_select_all_and_measure(&Input::Iso(fixture("BigBuckBunny.iso")));
     assert_eq!(report, ISO_GOLDEN, "the GUI's .iso wiring drifted from the golden");
     assert_eq!(label, "Blu-Ray", "the .iso label is the UDF volume label");
+}
+
+#[test]
+fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
+    // Flip the report-section toggles off and back on after a real measured
+    // scan: the OFF form omits the sections, and the back-ON re-render (which
+    // renders from the RETAINED disc, not the worker's) must reproduce the
+    // worker's report byte-for-byte.
+    let input = Input::Folder(fixture("BigBuckBunny"));
+    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let mut flow =
+        Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
+    flow.select_all();
+    let request = flow.scan_request().expect("a request once every row is selected");
+    let flow = flow.start_scanning(1);
+    let measured = scan::scan_measured(
+        &request.input,
+        &request.selection,
+        &request.scan_files,
+        request.options,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .expect("the fixture scans");
+    let mut flow = flow.finished(1, measured.report, measured.errors, measured.playlists);
+    assert_eq!(flow.report().as_deref(), Some(FOLDER_GOLDEN));
+    // OFF: both sections omitted from the measured report, no rescan.
+    flow.set_view(ViewSettings {
+        report_stream_diagnostics: false,
+        report_quick_summary: false,
+        ..ViewSettings::default()
+    });
+    let trimmed = flow.report().expect("a report stays available");
+    assert!(!trimmed.contains("STREAM DIAGNOSTICS:"), "diagnostics omitted");
+    assert!(!trimmed.contains("QUICK SUMMARY:"), "quick summary omitted");
+    // Back ON: byte-for-byte the golden again.
+    flow.set_view(ViewSettings::default());
+    assert_eq!(flow.report().as_deref(), Some(FOLDER_GOLDEN), "the re-render road drifted");
 }
 
 #[test]

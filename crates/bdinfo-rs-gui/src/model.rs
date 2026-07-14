@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
+use bdinfo_rs_core::report::text::RenderOptions;
 
 use crate::settings::Settings;
 
@@ -41,6 +42,10 @@ pub struct ViewSettings {
     pub human_readable_sizes: bool,
     /// Show the ` [NN Chapters]` suffix in the Playlist File column.
     pub display_chapter_count: bool,
+    /// Render the report's `STREAM DIAGNOSTICS` sections.
+    pub report_stream_diagnostics: bool,
+    /// Render the report's `QUICK SUMMARY` blocks.
+    pub report_quick_summary: bool,
 }
 
 impl Default for ViewSettings {
@@ -59,6 +64,8 @@ impl ViewSettings {
             filter_looping_playlists: settings.filter_looping_playlists,
             human_readable_sizes: settings.human_readable_sizes,
             display_chapter_count: settings.display_chapter_count,
+            report_stream_diagnostics: settings.report_stream_diagnostics,
+            report_quick_summary: settings.report_quick_summary,
         }
     }
 
@@ -71,6 +78,16 @@ impl ViewSettings {
             filter_short_playlists: self.filter_short_playlists,
             short_playlist_seconds: f64::from(self.short_playlist_seconds),
             filter_looping_playlists: self.filter_looping_playlists,
+        }
+    }
+
+    /// The core render options these settings build — the two report-section
+    /// switches every report render (structural and measured) applies.
+    #[must_use]
+    pub const fn render_options(&self) -> RenderOptions {
+        RenderOptions {
+            stream_diagnostics: self.report_stream_diagnostics,
+            quick_summary: self.report_quick_summary,
         }
     }
 }
@@ -498,6 +515,8 @@ mod tests {
             filter_looping_playlists: false,
             human_readable_sizes: true,
             display_chapter_count: false,
+            report_stream_diagnostics: false,
+            report_quick_summary: false,
             ..Settings::default()
         };
         let view = ViewSettings::from_settings(&stored);
@@ -506,10 +525,27 @@ mod tests {
         assert!(!view.filter_looping_playlists);
         assert!(view.human_readable_sizes);
         assert!(!view.display_chapter_count);
+        assert!(!view.report_stream_diagnostics);
+        assert!(!view.report_quick_summary);
         let filter = view.filter();
         assert!(!filter.filter_short_playlists);
         assert!((filter.short_playlist_seconds - 45.0).abs() < f64::EPSILON);
         assert!(!filter.filter_looping_playlists);
+    }
+
+    #[test]
+    fn render_options_project_the_two_report_switches() {
+        // The defaults build the locked default render (both sections on)…
+        let defaults = ViewSettings::default().render_options();
+        assert!(defaults.stream_diagnostics);
+        assert!(defaults.quick_summary);
+        // …and each switch reads through independently.
+        let trimmed = ViewSettings { report_stream_diagnostics: false, ..ViewSettings::default() };
+        assert!(!trimmed.render_options().stream_diagnostics);
+        assert!(trimmed.render_options().quick_summary);
+        let bare = ViewSettings { report_quick_summary: false, ..ViewSettings::default() };
+        assert!(bare.render_options().stream_diagnostics);
+        assert!(!bare.render_options().quick_summary);
     }
 
     #[test]

@@ -17,10 +17,12 @@
 //! proptested.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
-use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::error::ScanError;
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 
 use crate::model::{self, PlaylistRow, SelectableRow, Sort, SortColumn, ViewSettings};
 use crate::panes::{self, CodecRow, StreamFileRow};
@@ -198,7 +200,18 @@ impl Listing {
     /// so the report's `WARNING` block is left to the measured scan.)
     fn render_structural(&self) -> String {
         let order = selection::selection_order(&self.bdrom.playlists, &self.scan_names());
-        text::render_with(&self.bdrom, &order, &[])
+        text::render_with(&self.bdrom, &order, &[], self.view.render_options())
+    }
+
+    /// Renders the measured report from the retained disc — the scanned
+    /// playlists in their scan order (`scanned`, not the live selection, which
+    /// the user may have changed since) and the scan's recorded failures,
+    /// under the current render options. A finished scan swapped the measured
+    /// playlists into `bdrom`, so this reproduces the worker's render — the
+    /// road a report-section toggle re-renders on, with no rescan.
+    fn render_measured(&self, scanned: &[String], errors: &[ScanError]) -> String {
+        let order = selection::selection_order(&self.bdrom.playlists, scanned);
+        text::render_with(&self.bdrom, &order, errors, self.view.render_options())
     }
 }
 
@@ -214,6 +227,8 @@ pub struct ScanRequest {
     pub selection: Vec<String>,
     /// The selected playlists' clips — the packet scan reads only these.
     pub scan_files: BTreeSet<String>,
+    /// The report's section switches at scan start.
+    pub options: RenderOptions,
 }
 
 /// The flow state — an opaque value the shell drives and projects.
@@ -239,11 +254,19 @@ enum Inner {
         listing: Listing,
         generation: u64,
         progress: Option<ProgressModel>,
+        /// The names being scanned, in table order — the report's selection
+        /// order, carried into `Reported` for option-change re-renders.
+        scanned: Vec<String>,
     },
     Reported {
         listing: Listing,
         report: String,
         errors: Vec<String>,
+        /// The scanned playlist names — see `Scanning::scanned`.
+        scanned: Vec<String>,
+        /// The scan's typed failures — the report's `WARNING` block on an
+        /// option-change re-render (shared: `ScanError` is not `Clone`).
+        scan_errors: Arc<Vec<ScanError>>,
     },
     Failed(String),
 }
@@ -305,12 +328,19 @@ impl Flow {
     /// Applies a changed view configuration (the Settings dialog's OK): a
     /// filter change rebuilds the rows from the retained disc (the selection
     /// resets, the active row clamps); a display-only change re-renders the
-    /// cells. Only while the table is editable ([`Stage::Listed`] /
+    /// cells. On [`Stage::Reported`] the measured report is re-rendered from
+    /// the retained disc too, so a report-section toggle takes effect with no
+    /// rescan. Only while the table is editable ([`Stage::Listed`] /
     /// [`Stage::Reported`]) — the dialog cannot open mid-scan, and this
     /// enforces the same rule.
     pub fn set_view(&mut self, view: ViewSettings) {
-        if let Some(listing) = self.editable_listing_mut() {
-            listing.set_view(view);
+        match &mut self.inner {
+            Inner::Reported { listing, report, scanned, scan_errors, .. } => {
+                listing.set_view(view);
+                *report = listing.render_measured(scanned, scan_errors);
+            }
+            Inner::Listed(listing) => listing.set_view(view),
+            _ => {}
         }
     }
 
@@ -384,7 +414,8 @@ impl Flow {
                 if !listing.rows.is_empty() =>
             {
                 listing.error = None;
-                Self { inner: Inner::Scanning { listing, generation, progress: None } }
+                let scanned = listing.scan_names();
+                Self { inner: Inner::Scanning { listing, generation, progress: None, scanned } }
             }
             other => Self { inner: other },
         }
@@ -411,19 +442,24 @@ impl Flow {
 
     /// The measured scan finished — applied only when `generation` matches the
     /// in-flight scan; moves [`Stage::Scanning`] → [`Stage::Reported`]. The disc
-    /// label comes from the (unchanged) loaded disc, so it is not threaded here.
+    /// label comes from the (unchanged) loaded disc, so it is not threaded here;
+    /// the scan's typed `errors` render the banner lines and are retained for
+    /// option-change re-renders.
     #[must_use]
     pub fn finished(
         self,
         generation: u64,
         report: String,
-        errors: Vec<String>,
+        scan_errors: Arc<Vec<ScanError>>,
         playlists: Vec<PlaylistSummary>,
     ) -> Self {
         match self.inner {
-            Inner::Scanning { mut listing, generation: active, .. } if active == generation => {
+            Inner::Scanning { mut listing, generation: active, scanned, .. }
+                if active == generation =>
+            {
                 listing.apply_measured(playlists);
-                Self { inner: Inner::Reported { listing, report, errors } }
+                let errors = scan_errors.iter().map(ToString::to_string).collect();
+                Self { inner: Inner::Reported { listing, report, errors, scanned, scan_errors } }
             }
             other => Self { inner: other },
         }
@@ -646,7 +682,12 @@ impl Flow {
         let listing = self.any_listing()?;
         let selection = listing.scan_names();
         let scan_files = selection::selection_stream_files(&listing.bdrom.playlists, &selection);
-        Some(ScanRequest { input: listing.input.clone(), selection, scan_files })
+        Some(ScanRequest {
+            input: listing.input.clone(),
+            selection,
+            scan_files,
+            options: listing.view.render_options(),
+        })
     }
 
     /// The latest progress snapshot, while scanning.
@@ -734,6 +775,7 @@ impl Flow {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
@@ -1005,7 +1047,12 @@ mod tests {
         flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::ZERO);
         assert_eq!(flow.progress_view().map(|p| p.percent), Some(50));
 
-        let flow = flow.finished(1, "REPORT".to_owned(), Vec::new(), structural().bdrom.playlists);
+        let flow = flow.finished(
+            1,
+            "REPORT".to_owned(),
+            Arc::new(Vec::new()),
+            structural().bdrom.playlists,
+        );
         assert_eq!(flow.stage(), Stage::Reported);
         // Reported returns the measured report byte-for-byte (not a re-render).
         assert_eq!(flow.report().as_deref(), Some("REPORT"));
@@ -1137,7 +1184,8 @@ mod tests {
         assert_eq!(row_names(&flow), ["00002.MPLS", "00001.MPLS", "00000.MPLS"]);
         flow.set_active(0); // highlight 00002
         let flow = flow.start_scanning(1);
-        let flow = flow.finished(1, "R".to_owned(), Vec::new(), structural3().bdrom.playlists);
+        let flow =
+            flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), structural3().bdrom.playlists);
         assert_eq!(flow.stage(), Stage::Reported);
         // The rebuilt table is still sorted, the check-mark still on 00001,
         // the highlight still on 00002.
@@ -1166,7 +1214,7 @@ mod tests {
         if let Some(clip) = measured.first_mut().and_then(|p| p.clips.first_mut()) {
             clip.packet_count = 1000; // 1000 * 192 = 192,000 bytes
         }
-        let flow = flow.finished(1, "R".to_owned(), Vec::new(), measured);
+        let flow = flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
         // The active (first) row's stream-files pane shows the measured size.
         let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.measured).collect();
         assert_eq!(sizes, ["192,000"]);
@@ -1181,7 +1229,7 @@ mod tests {
         let mut probe = flow.clone();
         probe.progress(4, "x".to_owned(), 1, 1, Duration::ZERO);
         assert!(probe.progress_view().is_none(), "stale progress ignored");
-        let probe = flow.finished(4, "R".to_owned(), Vec::new(), Vec::new());
+        let probe = flow.finished(4, "R".to_owned(), Arc::new(Vec::new()), Vec::new());
         assert_eq!(probe.stage(), Stage::Scanning, "stale finish ignored");
     }
 
@@ -1192,7 +1240,7 @@ mod tests {
         let flow = flow.start_scanning(7).cancel();
         assert_eq!(flow.stage(), Stage::Listed);
         // A finish from the cancelled scan's generation must not reach Reported.
-        let flow = flow.finished(7, "R".to_owned(), Vec::new(), Vec::new());
+        let flow = flow.finished(7, "R".to_owned(), Arc::new(Vec::new()), Vec::new());
         assert_eq!(flow.stage(), Stage::Listed);
     }
 
@@ -1281,10 +1329,92 @@ mod tests {
         flow.set_view(raised);
         assert_eq!(flow.row_count(), 2);
         let flow = flow.start_scanning(1);
-        let flow = flow.finished(1, "R".to_owned(), Vec::new(), structural3().bdrom.playlists);
+        let flow =
+            flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), structural3().bdrom.playlists);
         assert_eq!(flow.stage(), Stage::Reported);
         // The rebuilt table still filters under the retained view settings.
         assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS"]);
+    }
+
+    #[test]
+    fn the_pre_scan_report_honors_the_report_section_toggles() {
+        let mut flow = listed();
+        let report = flow.report().expect("a structural report");
+        assert!(report.contains("STREAM DIAGNOSTICS:"));
+        assert!(report.contains("QUICK SUMMARY:"));
+        flow.set_view(ViewSettings {
+            report_stream_diagnostics: false,
+            report_quick_summary: false,
+            ..ViewSettings::default()
+        });
+        let report = flow.report().expect("a structural report");
+        assert!(!report.contains("STREAM DIAGNOSTICS:"));
+        assert!(!report.contains("QUICK SUMMARY:"));
+    }
+
+    #[test]
+    fn a_report_section_toggle_rerenders_the_measured_report_without_a_rescan() {
+        let mut flow = listed();
+        flow.toggle(0);
+        let flow = flow.start_scanning(1);
+        // The worker's rendered report arrives (a placeholder here — the
+        // re-render below replaces it from the retained disc).
+        let mut flow = flow.finished(
+            1,
+            "MEASURED".to_owned(),
+            Arc::new(Vec::new()),
+            structural().bdrom.playlists,
+        );
+        assert_eq!(flow.report().as_deref(), Some("MEASURED"));
+        // Turning a section off re-renders from the retained measured disc —
+        // still Reported, no rescan, and exactly that section is gone.
+        flow.set_view(ViewSettings { report_stream_diagnostics: false, ..ViewSettings::default() });
+        assert_eq!(flow.stage(), Stage::Reported);
+        let report = flow.report().expect("a report stays available");
+        assert!(!report.contains("STREAM DIAGNOSTICS:"));
+        assert!(report.contains("QUICK SUMMARY:"));
+        assert!(report.contains("00000.MPLS"));
+        // Turning it back on brings the section back.
+        flow.set_view(ViewSettings::default());
+        let report = flow.report().expect("a report stays available");
+        assert!(report.contains("STREAM DIAGNOSTICS:"));
+    }
+
+    #[test]
+    fn the_rerendered_report_keeps_the_scanned_selection_not_the_live_one() {
+        let mut flow = listed();
+        flow.toggle(0); // scan only 00000.MPLS
+        let flow = flow.start_scanning(1);
+        let mut flow =
+            flow.finished(1, "M".to_owned(), Arc::new(Vec::new()), structural().bdrom.playlists);
+        // Re-select for a NEXT scan: check the second row too. The displayed
+        // report still describes what was scanned.
+        flow.toggle(1);
+        flow.set_view(ViewSettings { report_quick_summary: false, ..ViewSettings::default() });
+        let report = flow.report().expect("a report stays available");
+        assert!(report.contains("00000.MPLS"));
+        assert!(!report.contains("00001.MPLS"));
+        assert!(!report.contains("QUICK SUMMARY:"));
+    }
+
+    #[test]
+    fn an_option_change_rerender_keeps_the_warning_block_and_banner() {
+        use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
+
+        let flow = listed().start_scanning(1);
+        let errors = Arc::new(vec![ScanError {
+            file: "A.M2TS".to_owned(),
+            stage: ScanStage::StreamFile,
+            reason: BdError::StructureNotFound,
+        }]);
+        let mut flow = flow.finished(1, "M".to_owned(), errors, structural().bdrom.playlists);
+        // The banner lines derive from the typed errors…
+        assert_eq!(flow.report_errors().len(), 1);
+        // …and the re-render reproduces the report's WARNING block from them.
+        flow.set_view(ViewSettings { report_quick_summary: false, ..ViewSettings::default() });
+        let report = flow.report().expect("a report stays available");
+        assert!(report.contains("WARNING: File errors were encountered during scan:"));
+        assert_eq!(flow.report_errors().len(), 1);
     }
 
     #[test]
@@ -1304,6 +1434,8 @@ mod tests {
     // unit cases: NO sequence of (possibly stale, possibly reordered) scan
     // messages may drive the flow into an inconsistent state.
     mod prop {
+        use std::sync::Arc;
+
         use proptest::prelude::*;
 
         use super::super::{Flow, Stage};
@@ -1409,7 +1541,7 @@ mod tests {
                             flow = flow.finished(
                                 g,
                                 "R".to_owned(),
-                                Vec::new(),
+                                Arc::new(Vec::new()),
                                 structural().bdrom.playlists,
                             );
                             // The ONLY way to enter Reported is finishing the

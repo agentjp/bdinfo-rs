@@ -31,6 +31,10 @@ const KEY_HUMAN_SIZES: &str = "human-readable-sizes";
 const KEY_CHAPTER_COUNT: &str = "display-chapter-count";
 /// The config file's key for the autosave-report switch.
 const KEY_AUTOSAVE: &str = "autosave-report";
+/// The config file's key for the report's stream-diagnostics sections.
+const KEY_REPORT_DIAGNOSTICS: &str = "report-stream-diagnostics";
+/// The config file's key for the report's quick-summary blocks.
+const KEY_REPORT_SUMMARY: &str = "report-quick-summary";
 /// The config file's key for the last opened source path.
 const KEY_LAST_PATH: &str = "last-path";
 /// The config file's key for the theme preference.
@@ -135,6 +139,12 @@ pub struct Settings {
     /// Write the report unprompted when a measured scan completes
     /// (`BDInfo`'s `AutosaveReport`).
     pub autosave_report: bool,
+    /// Render the report's `STREAM DIAGNOSTICS` sections (`BDInfo`'s
+    /// `GenerateStreamDiagnostics`). Off trims the report for pasting.
+    pub report_stream_diagnostics: bool,
+    /// Render the report's `QUICK SUMMARY` blocks (`BDInfo`'s
+    /// `GenerateTextSummary`).
+    pub report_quick_summary: bool,
 }
 
 impl Default for Settings {
@@ -156,6 +166,10 @@ impl Default for Settings {
             human_readable_sizes: false,
             display_chapter_count: true,
             autosave_report: false,
+            // Both report sections on — BDInfo's defaults, and the locked
+            // default report bytes.
+            report_stream_diagnostics: true,
+            report_quick_summary: true,
         }
     }
 }
@@ -202,6 +216,10 @@ impl Settings {
                 KEY_HUMAN_SIZES => set_bool(&mut settings.human_readable_sizes, value),
                 KEY_CHAPTER_COUNT => set_bool(&mut settings.display_chapter_count, value),
                 KEY_AUTOSAVE => set_bool(&mut settings.autosave_report, value),
+                KEY_REPORT_DIAGNOSTICS => {
+                    set_bool(&mut settings.report_stream_diagnostics, value);
+                }
+                KEY_REPORT_SUMMARY => set_bool(&mut settings.report_quick_summary, value),
                 _ => {} // unknown key — a newer version's setting; ignored
             }
         }
@@ -226,6 +244,8 @@ impl Settings {
             (KEY_HUMAN_SIZES, self.human_readable_sizes.to_string()),
             (KEY_CHAPTER_COUNT, self.display_chapter_count.to_string()),
             (KEY_AUTOSAVE, self.autosave_report.to_string()),
+            (KEY_REPORT_DIAGNOSTICS, self.report_stream_diagnostics.to_string()),
+            (KEY_REPORT_SUMMARY, self.report_quick_summary.to_string()),
         ];
         if let Some(path) = self.last_path.as_deref().and_then(Path::to_str)
             && !path.is_empty()
@@ -303,6 +323,10 @@ pub struct Draft {
     pub display_chapter_count: bool,
     /// The "Auto-save report on scan completion" checkbox.
     pub autosave_report: bool,
+    /// The "Include stream diagnostics in report" checkbox.
+    pub report_stream_diagnostics: bool,
+    /// The "Include quick text summary in report" checkbox.
+    pub report_quick_summary: bool,
 }
 
 impl Draft {
@@ -317,6 +341,8 @@ impl Draft {
             human_readable_sizes: settings.human_readable_sizes,
             display_chapter_count: settings.display_chapter_count,
             autosave_report: settings.autosave_report,
+            report_stream_diagnostics: settings.report_stream_diagnostics,
+            report_quick_summary: settings.report_quick_summary,
         }
     }
 
@@ -330,6 +356,8 @@ impl Draft {
         settings.human_readable_sizes = self.human_readable_sizes;
         settings.display_chapter_count = self.display_chapter_count;
         settings.autosave_report = self.autosave_report;
+        settings.report_stream_diagnostics = self.report_stream_diagnostics;
+        settings.report_quick_summary = self.report_quick_summary;
         if let Some(seconds) = parse_seconds(&self.seconds_text) {
             settings.short_playlist_seconds = seconds;
         }
@@ -471,6 +499,9 @@ mod tests {
         assert!(!settings.human_readable_sizes);
         assert!(settings.display_chapter_count);
         assert!(!settings.autosave_report);
+        // Both report sections on — the locked default report bytes.
+        assert!(settings.report_stream_diagnostics);
+        assert!(settings.report_quick_summary);
     }
 
     #[test]
@@ -486,6 +517,8 @@ mod tests {
             human_readable_sizes: true,
             display_chapter_count: false,
             autosave_report: true,
+            report_stream_diagnostics: false,
+            report_quick_summary: false,
         };
         let text = settings.render();
         assert_eq!(Settings::parse(&text), settings);
@@ -522,7 +555,8 @@ mod tests {
     fn the_report_settings_parse_their_exact_tokens() {
         let text = "filter-short-playlists = false\nshort-playlist-seconds = 45\n\
                     filter-looping-playlists = false\nhuman-readable-sizes = true\n\
-                    display-chapter-count = false\nautosave-report = true\n";
+                    display-chapter-count = false\nautosave-report = true\n\
+                    report-stream-diagnostics = false\nreport-quick-summary = false\n";
         let settings = Settings::parse(text);
         assert!(!settings.filter_short_playlists);
         assert_eq!(settings.short_playlist_seconds, 45);
@@ -530,6 +564,8 @@ mod tests {
         assert!(settings.human_readable_sizes);
         assert!(!settings.display_chapter_count);
         assert!(settings.autosave_report);
+        assert!(!settings.report_stream_diagnostics);
+        assert!(!settings.report_quick_summary);
     }
 
     #[test]
@@ -599,6 +635,8 @@ mod tests {
         let mut draft = super::Draft::from_settings(&settings);
         assert_eq!(draft.seconds_text, "30");
         assert!(draft.filter_short_playlists);
+        assert!(draft.report_stream_diagnostics);
+        assert!(draft.report_quick_summary);
         // Edit every field and apply: all of it lands.
         draft.filter_short_playlists = false;
         draft.seconds_text = "0".to_owned();
@@ -606,6 +644,8 @@ mod tests {
         draft.human_readable_sizes = true;
         draft.display_chapter_count = false;
         draft.autosave_report = true;
+        draft.report_stream_diagnostics = false;
+        draft.report_quick_summary = false;
         draft.apply_to(&mut settings);
         assert!(!settings.filter_short_playlists);
         assert_eq!(settings.short_playlist_seconds, 0);
@@ -613,6 +653,8 @@ mod tests {
         assert!(settings.human_readable_sizes);
         assert!(!settings.display_chapter_count);
         assert!(settings.autosave_report);
+        assert!(!settings.report_stream_diagnostics);
+        assert!(!settings.report_quick_summary);
     }
 
     #[test]
@@ -766,6 +808,7 @@ mod tests {
                 theme(),
                 (any::<bool>(), 0..=super::super::MAX_SHORT_SECONDS, any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
+                (any::<bool>(), any::<bool>()),
             )
                 .prop_map(
                     |(
@@ -775,6 +818,7 @@ mod tests {
                         theme,
                         (filter_short_playlists, short_playlist_seconds, filter_looping_playlists),
                         (human_readable_sizes, display_chapter_count, autosave_report),
+                        (report_stream_diagnostics, report_quick_summary),
                     )| {
                         Settings {
                             window_size,
@@ -787,6 +831,8 @@ mod tests {
                             human_readable_sizes,
                             display_chapter_count,
                             autosave_report,
+                            report_stream_diagnostics,
+                            report_quick_summary,
                         }
                     },
                 )
