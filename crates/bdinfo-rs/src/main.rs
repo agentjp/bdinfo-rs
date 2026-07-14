@@ -52,7 +52,7 @@ use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
 use bdinfo_rs_core::error::{BdError, ScanError};
-use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
 use clap::CommandFactory as _;
@@ -275,7 +275,9 @@ fn scan_and_report(scan: &mut ScanFn<'_>, dest: &Path, selection: &[String]) -> 
             line.finish(errors.is_empty());
             println!("Please wait while we generate the report...");
             let order = selection_order(&bdrom.playlists, selection);
-            let rendered = text::render_with(&bdrom, &order, &errors);
+            // The CLI has no report flags (the reference CLI lineage has
+            // none either), so it always renders the full default report.
+            let rendered = text::render_with(&bdrom, &order, &errors, RenderOptions::default());
             if let Err(code) = save_report(dest, &bdrom, &rendered) {
                 return code;
             }
