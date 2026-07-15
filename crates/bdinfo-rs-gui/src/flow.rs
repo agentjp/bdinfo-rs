@@ -683,17 +683,16 @@ impl Flow {
     /// is live as soon as a disc is listed.
     #[must_use]
     pub fn can_scan(&self) -> bool {
-        self.editable() && self.any_listing().is_some_and(|listing| !listing.rows.is_empty())
+        self.editable_listing().is_some_and(|listing| !listing.rows.is_empty())
     }
 
     /// The measured-scan request, when [`Flow::can_scan`]. Scans the checked
     /// playlists, or — when nothing is checked — every listed playlist (scan-all).
     #[must_use]
     pub fn scan_request(&self) -> Option<ScanRequest> {
-        if !self.can_scan() {
-            return None;
-        }
-        let listing = self.any_listing()?;
+        // The same gate as can_scan, through one fallible read: an editable
+        // listing with at least one row.
+        let listing = self.editable_listing().filter(|listing| !listing.rows.is_empty())?;
         let selection = listing.scan_names();
         let scan_files = selection::selection_stream_files(&listing.bdrom.playlists, &selection);
         Some(ScanRequest {
@@ -773,6 +772,15 @@ impl Flow {
             Inner::Listed(listing)
             | Inner::Scanning { listing, .. }
             | Inner::Reported { listing, .. } => Some(listing),
+            _ => None,
+        }
+    }
+
+    /// The listing behind an **editable** state (Listed / Reported) — the
+    /// read side of [`editable_listing_mut`](Self::editable_listing_mut).
+    const fn editable_listing(&self) -> Option<&Listing> {
+        match &self.inner {
+            Inner::Listed(listing) | Inner::Reported { listing, .. } => Some(listing),
             _ => None,
         }
     }
@@ -974,10 +982,14 @@ mod tests {
         assert_eq!(flow.disc_title(), Some("A Movie"));
         assert_eq!(flow.disc_size(), Some(78_000_000_000));
         assert_eq!(flow.disc_features(), ["Ultra HD"]);
+        assert_eq!(flow.input_display(), Some("disc".to_owned()));
+        assert!(flow.warnings().is_empty());
+        assert!(!flow.show_hidden_note());
         // Idle has no disc, so none of them resolve.
         assert_eq!(Flow::idle().disc_title(), None);
         assert_eq!(Flow::idle().disc_size(), None);
         assert!(Flow::idle().disc_features().is_empty());
+        assert_eq!(Flow::idle().input_display(), None);
     }
 
     #[test]
@@ -1124,6 +1136,9 @@ mod tests {
         assert!(!Flow::idle().report_available());
         assert!(Flow::idle().report().is_none());
         assert_eq!(Flow::idle().label(), None);
+        // No recorded scan errors outside Reported either.
+        assert!(Flow::idle().report_errors().is_empty());
+        assert!(listed().report_errors().is_empty());
         // A fatal pick failure has no disc, hence no report either.
         let failed = Flow::start_listing(input()).listed(
             &input(),
@@ -1234,9 +1249,11 @@ mod tests {
         let flow = flow.start_scanning(1);
         // The measured playlists carry the first clip's packet tally.
         let mut measured = structural().bdrom.playlists;
-        if let Some(clip) = measured.first_mut().and_then(|p| p.clips.first_mut()) {
-            clip.packet_count = 1000; // 1000 * 192 = 192,000 bytes
-        }
+        measured
+            .first_mut()
+            .and_then(|p| p.clips.first_mut())
+            .expect("the first clip")
+            .packet_count = 1000; // 1000 * 192 = 192,000 bytes
         let flow = flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
         // The active (first) row's stream-files pane shows the measured size.
         let sizes: Vec<_> = flow.stream_file_rows().into_iter().map(|row| row.measured).collect();
@@ -1301,6 +1318,20 @@ mod tests {
         };
         flow.set_view(everything);
         assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn a_filter_that_drops_every_row_empties_the_panes_too() {
+        // Raise the threshold past every playlist: no rows, nothing to scan,
+        // and the master-detail panes resolve no active playlist.
+        let mut flow = listed3();
+        flow.set_view(ViewSettings { short_playlist_seconds: 86_400, ..ViewSettings::default() });
+        assert_eq!(flow.row_count(), 0);
+        assert!(!flow.can_scan());
+        assert!(flow.scan_request().is_none());
+        assert_eq!(flow.active_playlist_name(), None);
+        assert!(flow.stream_file_rows().is_empty());
+        assert!(flow.codec_rows().is_empty());
     }
 
     #[test]

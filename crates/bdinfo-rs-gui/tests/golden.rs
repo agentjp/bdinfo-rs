@@ -44,7 +44,7 @@ fn list_select_all_and_measure(input: &Input) -> (String, String) {
         &request.selection,
         &request.scan_files,
         request.options,
-        &mut |_| {},
+        &mut scan::no_progress,
         &AtomicBool::new(false),
     )
     .expect("the fixture scans");
@@ -66,7 +66,7 @@ fn a_cancelled_measured_scan_yields_no_report() {
         &request.selection,
         &request.scan_files,
         request.options,
-        &mut |_| {},
+        &mut scan::no_progress,
         &AtomicBool::new(true),
     )
     .expect_err("a cancelled scan yields no report");
@@ -105,7 +105,7 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
         &request.selection,
         &request.scan_files,
         request.options,
-        &mut |_| {},
+        &mut scan::no_progress,
         &AtomicBool::new(false),
     )
     .expect("the fixture scans");
@@ -123,6 +123,46 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
     // Back ON: byte-for-byte the golden again.
     flow.set_view(ViewSettings::default());
     assert_eq!(flow.report().as_deref(), Some(FOLDER_GOLDEN), "the re-render road drifted");
+}
+
+#[test]
+fn a_missing_disc_fails_the_structural_scan_with_a_message() {
+    // The pick flow's hard-error road, driven through the same public seam:
+    // a path with no disc yields a user-facing message, never a panic.
+    let message = scan::scan_structural(&Input::Folder(fixture("does-not-exist")))
+        .expect_err("nothing to list");
+    assert!(!message.is_empty(), "the failure carries a user-facing message");
+}
+
+#[test]
+fn a_broken_iso_fails_the_structural_scan_with_a_message() {
+    // The `.iso` hard-error roads, through the same public seam this binary
+    // links (the lib's own tests cover them for its test build; each binary's
+    // coverage record needs its own exercise): bytes that are not a UDF volume
+    // at all, and a valid volume whose BDMV tree is unfindable (every BDMV
+    // byte run renamed in a copy of the fixture image).
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/golden-tests");
+    std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+    let garbage = dir.join("garbage.iso");
+    std::fs::write(&garbage, b"not a udf volume at all").expect("the scratch iso writes");
+    let message = scan::scan_structural(&Input::Iso(garbage)).expect_err("no UDF volume to open");
+    assert!(!message.is_empty(), "the failure carries a user-facing message");
+
+    let renamed = dir.join("renamed.iso");
+    let mut bytes = std::fs::read(fixture("BigBuckBunny.iso")).expect("the fixture reads");
+    let needle = b"BDMV";
+    let mut at = 0;
+    while let Some(hit) =
+        bytes.get(at..).and_then(|tail| tail.windows(needle.len()).position(|w| w == needle))
+    {
+        let start = at.checked_add(hit).expect("offset fits");
+        let end = start.checked_add(needle.len()).expect("offset fits");
+        bytes.get_mut(start..end).expect("the window is in range").copy_from_slice(b"XDMV");
+        at = start.checked_add(1).expect("offset fits");
+    }
+    std::fs::write(&renamed, bytes).expect("the scratch iso writes");
+    let message = scan::scan_structural(&Input::Iso(renamed)).expect_err("a volume with no BDMV");
+    assert!(!message.is_empty(), "the failure carries a user-facing message");
 }
 
 #[test]

@@ -787,6 +787,9 @@ mod tests {
         let blocker = scratch("blocker");
         super::save_to(&blocker, &Settings::default()); // creates dir + file
         super::save_to(&blocker.join("child.conf"), &Settings::default());
+        // A parentless path (the filesystem root) skips the directory step and
+        // swallows the doomed write the same way.
+        super::save_to(Path::new("/"), &Settings::default());
     }
 
     mod prop {

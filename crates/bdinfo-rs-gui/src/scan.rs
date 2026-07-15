@@ -156,6 +156,13 @@ fn error_lines(errors: &[ScanError]) -> Vec<String> {
     errors.iter().map(ToString::to_string).collect()
 }
 
+/// The no-op progress sink.
+///
+/// [`scan_structural`] always uses it (the bounded `Codecs` pass reports no
+/// progress), and a [`scan_measured`] caller that wants no live progress —
+/// the golden ties — passes it too.
+pub const fn no_progress(_: ScanProgress<'_>) {}
+
 /// Runs the **structural** scan over `input` (fast — no M2TS demux) and returns
 /// the playlist list + label for the selection table.
 ///
@@ -167,8 +174,9 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
     // stream file — so the panes show full codec detail (profile / HDR / Dolby
     // Vision) right after opening, like BDInfo, without the whole-file bitrate scan.
     // Bounded and fast, so it carries no cancel affordance: the flag never trips.
-    let (bdrom, errors) = open(input, ScanMode::Codecs, None, &mut |_| {}, &AtomicBool::new(false))
-        .map_err(|err| err.to_string())?;
+    let (bdrom, errors) =
+        open(input, ScanMode::Codecs, None, &mut no_progress, &AtomicBool::new(false))
+            .map_err(|err| err.to_string())?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
 }
@@ -299,6 +307,55 @@ mod tests {
     }
 
     #[test]
+    fn the_structural_progress_sink_is_a_no_op() {
+        // The Codecs pass never reports progress; the named sink pins that
+        // (it must do nothing, whatever event it is handed).
+        super::no_progress(bdinfo_rs_core::bdrom::disc::ScanProgress {
+            file: "00000.M2TS",
+            done: 1,
+            total: 2,
+        });
+    }
+
+    #[test]
+    fn a_garbage_iso_fails_the_structural_scan() {
+        // Bytes that are not a UDF volume: the `.iso` backend's open fails and
+        // the seam surfaces the same friendly message road as a bad folder.
+        let dir = scratch("garbage-iso");
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let iso = dir.join("garbage.iso");
+        std::fs::write(&iso, b"not a udf volume at all").expect("the scratch iso writes");
+        let message = super::scan_structural(&Input::Iso(iso)).expect_err("no UDF volume to open");
+        assert!(!message.is_empty(), "the failure carries a user-facing message");
+    }
+
+    #[test]
+    fn a_udf_volume_without_a_disc_structure_fails_the_structural_scan() {
+        // A VALID UDF image whose BDMV tree is unfindable: rename every BDMV
+        // byte run in a copy of the fixture image. The volume still opens (the
+        // anchor + descriptors are untouched), but the disc-structure walk
+        // finds no BDMV and fails — the post-open error road for `.iso` input.
+        let dir = scratch("bdmv-less-iso");
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let iso = dir.join("renamed.iso");
+        let mut bytes = std::fs::read(fixture("BigBuckBunny.iso")).expect("the fixture reads");
+        let needle = b"BDMV";
+        let mut at = 0;
+        while let Some(hit) =
+            bytes.get(at..).and_then(|tail| tail.windows(needle.len()).position(|w| w == needle))
+        {
+            let start = at.checked_add(hit).expect("offset fits");
+            let end = start.checked_add(needle.len()).expect("offset fits");
+            bytes.get_mut(start..end).expect("the window is in range").copy_from_slice(b"XDMV");
+            at = start.checked_add(1).expect("offset fits");
+        }
+        std::fs::write(&iso, bytes).expect("the scratch iso writes");
+        let message = super::scan_structural(&Input::Iso(iso))
+            .expect_err("a volume with no BDMV cannot list");
+        assert!(!message.is_empty(), "the failure carries a user-facing message");
+    }
+
+    #[test]
     fn a_structureless_folder_fails_the_structural_scan() {
         // A directory with no BDMV structure at all: the hard-error road —
         // the same message a bad pick surfaces in the failure state.
@@ -306,6 +363,25 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("the scratch dir creates");
         let message =
             super::scan_structural(&Input::Folder(dir)).expect_err("no Blu-ray structure to open");
+        assert!(!message.is_empty(), "the failure carries a user-facing message");
+    }
+
+    #[test]
+    fn a_structureless_folder_fails_the_measured_scan_too() {
+        // The measured road reports the same hard error instead of panicking
+        // (unreachable in practice — the structural scan just listed the same
+        // structure — but the result is a Result, not a hope).
+        let dir = scratch("empty-measured");
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let message = super::scan_measured(
+            &Input::Folder(dir),
+            &[],
+            &std::collections::BTreeSet::new(),
+            bdinfo_rs_core::report::text::RenderOptions::default(),
+            &mut super::no_progress,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .expect_err("no Blu-ray structure to open");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
     }
 

@@ -19,18 +19,16 @@ pub const MIN_WEIGHT: f32 = 4.0;
 /// The pair's sum is preserved, so only these two columns change width — the
 /// rest hold still. An out-of-range boundary is a no-op.
 pub fn adjust(weights: &mut [f32], boundary: usize, delta: f32) {
-    let (Some(&a), Some(&b)) = (weights.get(boundary), weights.get(boundary.wrapping_add(1)))
-    else {
-        return;
-    };
-    let pair = a + b;
-    let new_a = (a + delta).clamp(MIN_WEIGHT, (pair - MIN_WEIGHT).max(MIN_WEIGHT));
-    if let Some(slot) = weights.get_mut(boundary) {
-        *slot = new_a;
-    }
-    if let Some(slot) = weights.get_mut(boundary.wrapping_add(1)) {
-        *slot = pair - new_a;
-    }
+    // One fallible lookup: the two-column window at the boundary, as an array
+    // so the writes below are irrefutable (no unreachable not-found arms).
+    let pair = boundary
+        .checked_add(1)
+        .and_then(|end| weights.get_mut(boundary..=end))
+        .and_then(|window| <&mut [f32; 2]>::try_from(window).ok());
+    let Some([a, b]) = pair else { return };
+    let sum = *a + *b;
+    *a = (*a + delta).clamp(MIN_WEIGHT, (sum - MIN_WEIGHT).max(MIN_WEIGHT));
+    *b = sum - *a;
 }
 
 /// The weight delta for a cursor moving from `prev_x` to `x` while a boundary

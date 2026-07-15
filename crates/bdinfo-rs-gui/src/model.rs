@@ -348,12 +348,13 @@ fn is_ascending(rows: &[PlaylistRow], column: SortColumn) -> bool {
 /// active row — can travel with the rows. Ties keep their current relative
 /// order, like a repeated `ListView` sort.
 pub(crate) fn sort_rows(rows: &mut Vec<PlaylistRow>, sort: Sort) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&a, &b| match (rows.get(a), rows.get(b)) {
-        (Some(x), Some(y)) => compare(x, y, sort),
-        _ => Ordering::Equal,
-    });
-    *rows = order.iter().filter_map(|&index| rows.get(index).cloned()).collect();
+    // Sort the rows PAIRED with their old indices — no fallible index lookup
+    // (and no unreachable not-found arm), and the stable sort carries each
+    // row's origin along for the returned permutation.
+    let mut keyed: Vec<(usize, PlaylistRow)> = rows.drain(..).enumerate().collect();
+    keyed.sort_by(|(_, x), (_, y)| compare(x, y, sort));
+    let order = keyed.iter().map(|&(index, _)| index).collect();
+    *rows = keyed.into_iter().map(|(_, row)| row).collect();
     order
 }
 
@@ -417,9 +418,9 @@ mod tests {
     use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 
     use super::{
-        PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, display_rows,
-        estimated_bytes, estimated_cell, format_file_size, group_n0, playlist_display_name,
-        playlist_rows, sort_rows, table_length, table_rows,
+        PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, compare,
+        display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
+        playlist_display_name, playlist_rows, sort_rows, table_length, table_rows,
     };
     use crate::settings::Settings;
 
@@ -658,9 +659,7 @@ mod tests {
     #[test]
     fn the_display_toggles_reach_the_cells() {
         let mut playlists = disc();
-        if let Some(playlist) = playlists.get_mut(0) {
-            playlist.chapter_count = 12;
-        }
+        playlists.get_mut(0).expect("the first playlist").chapter_count = 12;
         let rows = playlist_rows(&playlists, &PlaylistFilter::default());
         let human = ViewSettings {
             human_readable_sizes: true,
@@ -794,10 +793,9 @@ mod tests {
     fn an_absent_estimated_size_orders_last_in_both_directions() {
         // 00002's sizes zeroed → its estimate is the absent `-` cell.
         let mut playlists = disc();
-        if let Some(playlist) = playlists.get_mut(2) {
-            playlist.file_size = 0;
-            playlist.interleaved_file_size = 0;
-        }
+        let dashed = playlists.get_mut(2).expect("the third playlist");
+        dashed.file_size = 0;
+        dashed.interleaved_file_size = 0;
         for ascending in [true, false] {
             let mut sorted = playlist_rows(&playlists, &PlaylistFilter::default());
             sort_rows(&mut sorted, Sort { column: SortColumn::Estimated, ascending });
@@ -806,6 +804,18 @@ mod tests {
                 Some("00002.MPLS"),
                 "the dash sorts last (ascending: {ascending})"
             );
+        }
+        // Every comparator arm with an absent side: a dash is Greater than any
+        // present value, Less the other way round, and two dashes tie —
+        // whatever the direction.
+        let rows = playlist_rows(&playlists, &PlaylistFilter::default());
+        let (some, none) = (rows.first().expect("a sized row"), rows.last().expect("the dash row"));
+        assert_eq!(none.estimated_bytes, None);
+        for ascending in [true, false] {
+            let sort = Sort { column: SortColumn::Estimated, ascending };
+            assert_eq!(compare(none, some, sort), std::cmp::Ordering::Greater);
+            assert_eq!(compare(some, none, sort), std::cmp::Ordering::Less);
+            assert_eq!(compare(none, none, sort), std::cmp::Ordering::Equal);
         }
     }
 

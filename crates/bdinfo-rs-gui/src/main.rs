@@ -2682,6 +2682,76 @@ mod interaction {
     }
 
     #[test]
+    fn a_progress_message_reaches_the_bottom_bar() {
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Progress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 1,
+            total: 2,
+        });
+        let fraction =
+            app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::fraction);
+        assert_eq!(fraction, Some(0.5));
+        assert!(sees(&app, "Scanning A.M2TS…"), "the lead line names the demuxing file");
+    }
+
+    #[test]
+    fn a_failed_scan_banners_over_the_still_usable_table() {
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::ScanFailed {
+            generation: app.generation,
+            error: "disc vanished".to_owned(),
+        });
+        assert_eq!(app.flow.stage(), Stage::Listed);
+        assert!(sees(&app, "disc vanished"), "the failure banner renders");
+        assert!(app.flow.editable(), "the table stays usable for a retry");
+    }
+
+    #[test]
+    fn a_checkbox_toggle_message_checks_its_row() {
+        // The checkbox has no text for the selector to find; the message it
+        // dispatches is pinned here through the real update road.
+        let mut app = listed_app();
+        let _ = app.update(Message::RowToggled(0));
+        assert_eq!(app.flow.selected_count(), 1);
+        let _ = app.update(Message::RowToggled(0));
+        assert_eq!(app.flow.selected_count(), 0);
+    }
+
+    #[test]
+    fn a_recalled_source_shows_with_rescan_live() {
+        // Last session's disc, remembered but not scanned — the Source field
+        // shows it and Rescan is clickable (it starts a listing of that path).
+        let recalled = bdinfo_rs_gui::flow::Flow::recall(bdinfo_rs_gui::scan::Input::Folder(
+            "remembered-disc".into(),
+        ));
+        let mut app = App { flow: recalled, ..App::default() };
+        assert!(sees(&app, "remembered-disc"));
+        click(&mut app, "Rescan");
+        assert_eq!(app.flow.stage(), Stage::Listing);
+    }
+
+    #[test]
+    fn ctrl_c_copies_the_selected_stream_file_path() {
+        let mut app = listed_app();
+        // Click the Stream File pane's row (the active playlist's clip), then
+        // the copy shortcut's message; the status line confirms the target.
+        click(&mut app, "A.M2TS");
+        assert_eq!(app.pane_selection, Some((super::Region::StreamFile, 0)));
+        let _ = app.update(Message::CopyPath);
+        assert_eq!(
+            app.status.as_deref(),
+            Some(
+                format!("Copied: disc{0}BDMV{0}STREAM{0}A.M2TS", std::path::MAIN_SEPARATOR)
+                    .as_str()
+            )
+        );
+    }
+
+    #[test]
     fn select_all_flips_to_unselect_all() {
         let mut app = listed_app();
         assert!(sees(&app, "Select All"));
@@ -2737,12 +2807,18 @@ mod interaction {
 
     #[test]
     fn a_bad_path_lands_in_the_friendly_failure_screen() {
+        // A REAL file that is not an `.iso` (this crate's own manifest), so
+        // the classifier's extension road runs before rejecting it.
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let mut app = App::default();
-        let _ = app.update(Message::OpenPath(PathBuf::from("definitely-not-a-disc.xyz")));
+        let _ = app.update(Message::OpenPath(manifest.clone()));
         assert_eq!(app.flow.stage(), Stage::Failed);
         assert!(sees(&app, "Couldn't open the disc"));
         // The classifier's whole message renders (the selector is exact-text).
-        assert!(sees(&app, "The path does not exist: definitely-not-a-disc.xyz"));
+        assert!(sees(
+            &app,
+            &format!("Not a Blu-ray disc folder or .iso image: {}", manifest.display())
+        ));
     }
 
     #[test]
