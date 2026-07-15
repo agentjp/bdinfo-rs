@@ -6,9 +6,52 @@
 //! pure — `(file, done, total, elapsed) -> ProgressModel` — so the iced progress
 //! bar + text line are a thin projection of it, and the boundary cases the CLI
 //! pins (an empty scan reads 100%, the first-second estimate already shows) are
-//! unit-testable here without a window.
+//! unit-testable here without a window. The two other pieces of progress-line
+//! decision logic live here for the same reason: the indeterminate bar's
+//! triangle wave ([`pulse_fraction`] / [`pulse_advance`]) and the worker's
+//! event-coalescing rule ([`emit_due`]).
 
 use std::time::Duration;
+
+/// The indeterminate-bar animation period (one full 0→1→0 breath).
+pub const PULSE_PERIOD: u16 = 1000;
+/// Half the period — the peak of the triangle wave.
+const PULSE_HALF: u16 = 500;
+/// The phase advance per animation frame (larger = faster breathing).
+const PULSE_STEP: u16 = 16;
+
+/// Advances the indeterminate-bar phase by one animation frame, wrapping at
+/// [`PULSE_PERIOD`] so the bar breathes forever.
+#[must_use]
+pub fn pulse_advance(phase: u16) -> u16 {
+    phase.wrapping_add(PULSE_STEP).checked_rem(PULSE_PERIOD).unwrap_or(0)
+}
+
+/// The indeterminate progress-bar fill for `phase` — a 0→1→0 triangle over the
+/// animation period, so the bar "breathes" rather than implying a measured
+/// percentage. Always in `0.0..=1.0`.
+#[must_use]
+pub fn pulse_fraction(phase: u16) -> f32 {
+    let phase = phase.checked_rem(PULSE_PERIOD).unwrap_or(0);
+    let rise = if phase <= PULSE_HALF { phase } else { PULSE_PERIOD.saturating_sub(phase) };
+    f32::from(rise) / f32::from(PULSE_HALF)
+}
+
+/// How often a mid-file progress event is worth a UI message — the worker's
+/// coalescing interval.
+const EMIT_EVERY: Duration = Duration::from_millis(100);
+
+/// Whether a scan-progress event should become a UI message.
+///
+/// The scan fires its callback every few MB — tens of thousands of times on a
+/// feature disc — so the worker coalesces to one message per `EMIT_EVERY`
+/// (100 ms), plus every file boundary and the final event, exactly like the
+/// CLI throttles its terminal redraw. `since_last` is the time since the last
+/// emitted message (`None` before the first, which always emits).
+#[must_use]
+pub fn emit_due(file_changed: bool, done: u64, total: u64, since_last: Option<Duration>) -> bool {
+    file_changed || done == total || since_last.is_none_or(|elapsed| elapsed >= EMIT_EVERY)
+}
 
 /// The percent / elapsed-seconds / remaining-seconds triple the progress line
 /// draws.
@@ -183,6 +226,43 @@ mod tests {
         assert!((model.fraction() - 1.0).abs() < f32::EPSILON);
     }
 
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the asserted phases divide the half period exactly in f32"
+    )]
+    fn the_pulse_rises_to_the_half_period_and_falls_back() {
+        // The triangle: 0 at rest, 1.0 exactly at the half period, 0 again at
+        // the wrap, symmetric on the way down.
+        assert_eq!(super::pulse_fraction(0), 0.0);
+        assert!((super::pulse_fraction(250) - 0.5).abs() < f32::EPSILON);
+        assert!((super::pulse_fraction(500) - 1.0).abs() < f32::EPSILON);
+        assert!((super::pulse_fraction(750) - 0.5).abs() < f32::EPSILON);
+        // A phase at (or past) the period reads like its wrapped remainder.
+        assert_eq!(super::pulse_fraction(1000), super::pulse_fraction(0));
+        assert_eq!(super::pulse_fraction(1250), super::pulse_fraction(250));
+    }
+
+    #[test]
+    fn the_pulse_phase_advances_and_wraps() {
+        assert_eq!(super::pulse_advance(0), 16);
+        assert_eq!(super::pulse_advance(984), 0); // 984 + 16 wraps the period
+        assert_eq!(super::pulse_advance(992), 8);
+    }
+
+    #[test]
+    fn progress_events_coalesce_to_the_emit_interval() {
+        // The first event of a scan always emits.
+        assert!(super::emit_due(false, 1, 100, None));
+        // A mid-file event inside the interval is dropped…
+        assert!(!super::emit_due(false, 2, 100, Some(Duration::from_millis(50))));
+        // …and emits once the interval has passed.
+        assert!(super::emit_due(false, 3, 100, Some(Duration::from_millis(100))));
+        // A file boundary and the final byte always emit, however recent.
+        assert!(super::emit_due(true, 4, 100, Some(Duration::ZERO)));
+        assert!(super::emit_due(false, 100, 100, Some(Duration::ZERO)));
+    }
+
     // The estimate math runs over hostile-shaped byte counts and durations, so
     // amplify the unit cases with property tests.
     mod prop {
@@ -225,6 +305,17 @@ mod tests {
                 );
                 let fraction = model.fraction();
                 prop_assert!((0.0..=1.0).contains(&fraction));
+            }
+
+            // The indeterminate bar's fill is a unit-range triangle from ANY
+            // phase (the shell only ever feeds wrapped phases, but the math
+            // stays total), and advancing stays inside the period.
+            #[test]
+            fn pulse_stays_in_range_from_any_phase(phase: u16) {
+                let fraction = super::super::pulse_fraction(phase);
+                prop_assert!((0.0..=1.0).contains(&fraction));
+                let next = super::super::pulse_advance(phase);
+                prop_assert!(next < super::super::PULSE_PERIOD);
             }
         }
     }

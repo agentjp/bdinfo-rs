@@ -825,9 +825,14 @@ mod tests {
     // The cell formatting is panic-safety-critical (it formats hostile disc
     // values), so amplify the unit cases with property tests.
     mod prop {
+        use bdinfo_rs_core::bdrom::order::PlaylistFilter;
         use proptest::prelude::*;
 
-        use super::super::{group_n0, table_length};
+        use super::super::{
+            Sort, SortColumn, ViewSettings, display_rows, group_n0, playlist_rows, sort_rows,
+            table_length,
+        };
+        use super::sample_playlist;
 
         proptest! {
             #[test]
@@ -854,6 +859,79 @@ mod tests {
                 prop_assert!(hours.is_some_and(|h| h < 24));
                 prop_assert!(minutes.is_some_and(|m| m < 60));
                 prop_assert!(secs.is_some_and(|s| s < 60));
+            }
+
+            // The whole table pipeline — build, format, sort — is total over
+            // arbitrary disc shapes: it never panics, positions stay 1-based
+            // and dense, every cell renders non-empty, and a sort is a true
+            // permutation of the same rows (the returned order re-derives it).
+            #[test]
+            fn the_table_pipeline_is_total_over_arbitrary_discs(
+                discs in proptest::collection::vec(
+                    (
+                        "[0-9]{5}\\.MPLS",
+                        -1.0e6_f64..1.0e6,
+                        any::<u64>(),
+                        any::<u64>(),
+                        0_usize..40,
+                        proptest::collection::vec("[A-D]\\.M2TS", 0..3),
+                    ),
+                    0..8,
+                ),
+                human in any::<bool>(),
+                chapters in any::<bool>(),
+                column_pick in 0_usize..5,
+                ascending in any::<bool>(),
+            ) {
+                let playlists: Vec<_> = discs
+                    .into_iter()
+                    .map(|(name, length, size, interleaved, chapter_count, clips)| {
+                        let clip_names: Vec<&str> =
+                            clips.iter().map(String::as_str).collect();
+                        let mut playlist =
+                            sample_playlist(&name, length, size, interleaved, &clip_names);
+                        playlist.chapter_count = chapter_count;
+                        playlist
+                    })
+                    .collect();
+                let mut rows = playlist_rows(&playlists, &PlaylistFilter::default());
+                for (index, row) in rows.iter().enumerate() {
+                    prop_assert_eq!(row.position, index.saturating_add(1));
+                    prop_assert!(row.playlist_index < playlists.len());
+                }
+                let view = ViewSettings {
+                    human_readable_sizes: human,
+                    display_chapter_count: chapters,
+                    ..ViewSettings::default()
+                };
+                for cells in display_rows(&rows, view) {
+                    prop_assert!(!cells.number.is_empty());
+                    prop_assert!(!cells.group.is_empty());
+                    prop_assert!(!cells.file.is_empty());
+                    prop_assert_eq!(cells.length.chars().count(), 8);
+                    prop_assert!(!cells.estimated_bytes.is_empty());
+                    prop_assert!(!cells.measured_bytes.is_empty());
+                }
+                let column = [
+                    SortColumn::File,
+                    SortColumn::Group,
+                    SortColumn::Length,
+                    SortColumn::Estimated,
+                    SortColumn::Measured,
+                ];
+                let sort = Sort {
+                    column: column.get(column_pick).copied().unwrap_or(SortColumn::File),
+                    ascending,
+                };
+                let before = rows.clone();
+                let order = sort_rows(&mut rows, sort);
+                // The order is a permutation of 0..n and re-derives the sort.
+                let mut sorted_order = order.clone();
+                sorted_order.sort_unstable();
+                prop_assert_eq!(sorted_order, (0..before.len()).collect::<Vec<_>>());
+                let expected: Vec<_> =
+                    order.iter().filter_map(|&old| before.get(old).cloned()).collect();
+                prop_assert_eq!(rows, expected);
             }
         }
     }

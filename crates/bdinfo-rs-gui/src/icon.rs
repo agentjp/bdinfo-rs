@@ -26,6 +26,23 @@ fn in_mark(r: f32) -> bool {
     r <= DOT_R || (RING_INNER..=RING_OUTER).contains(&r)
 }
 
+/// The normalized radius of the subpixel at `(dx, dy)` from the centre.
+///
+/// `sqrt(dx² + dy²)` from IEEE-exact multiply/add/sqrt — every step is
+/// correctly rounded on every architecture, so the rendered buffer is
+/// byte-identical across the 6 shipped targets and the pinned checksum in the
+/// tests holds everywhere. (`hypot` would be a libm call with
+/// platform-varying last-ulp behaviour.)
+#[expect(
+    clippy::imprecise_flops,
+    reason = "hypot's extra precision is irrelevant at |dx|,|dy| <= 0.5 with no \
+              overflow risk, and its platform-varying rounding would break the \
+              cross-arch byte-identity the pinned checksum asserts"
+)]
+fn radius(dx: f32, dy: f32) -> f32 {
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// Renders the aperture mark to a `size`×`size` RGBA8 buffer (row-major, 4 bytes
 /// per pixel), amber on transparent. The returned length is always
 /// `size * size * 4`.
@@ -51,7 +68,7 @@ pub fn rgba(size: u32) -> Vec<u8> {
                     let fy = y as f32 + (sy as f32 + 0.5) / SS as f32;
                     let dx = fx / extent - 0.5;
                     let dy = fy / extent - 0.5;
-                    if in_mark(dx.hypot(dy)) {
+                    if in_mark(radius(dx, dy)) {
                         coverage += 1.0;
                     }
                 }
@@ -68,7 +85,7 @@ pub fn rgba(size: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RING_OUTER, rgba};
+    use super::{DOT_R, RING_INNER, RING_OUTER, in_mark, radius, rgba};
 
     /// The expected buffer length, `size * size * 4`, via checked math (the gate
     /// forbids bare arithmetic operators).
@@ -118,5 +135,62 @@ mod tests {
         assert_eq!(buf.get(channel(97, 64, 3, w)).copied(), Some(0), "the gap is transparent");
         // Sanity: the outer ring radius is the largest filled band (compile-time).
         const { assert!(RING_OUTER < 0.5) };
+    }
+
+    #[test]
+    fn the_mark_bands_include_their_exact_boundaries() {
+        // The dot is a closed disc and the ring a closed band: each boundary
+        // radius is IN the mark, the gap and the outside are not.
+        assert!(in_mark(0.0));
+        assert!(in_mark(DOT_R));
+        assert!(!in_mark(0.26)); // squarely in the dot-to-ring gap
+        assert!(in_mark(RING_INNER));
+        assert!(in_mark(0.42)); // mid-ring
+        assert!(in_mark(RING_OUTER));
+        assert!(!in_mark(0.4999)); // just outside the ring
+        assert!(!in_mark(0.75));
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "a 3-4-5 triangle scaled by a power of two is exact in f32 end to end"
+    )]
+    fn the_radius_is_the_euclidean_distance() {
+        // A 3-4-5 triangle in exactly-representable f32.
+        assert_eq!(radius(0.3, 0.4), 0.5);
+        assert_eq!(radius(-0.3, 0.4), 0.5); // sign-independent
+        assert_eq!(radius(0.0, 0.25), 0.25); // each axis alone
+        assert_eq!(radius(0.25, 0.0), 0.25);
+    }
+
+    #[test]
+    fn the_edges_are_anti_aliased_and_the_channels_are_amber() {
+        let size = 64_u32;
+        let w = usize::try_from(size).expect("fits");
+        let buf = rgba(size);
+        // Every pixel carries the same amber RGB, whatever its alpha — the
+        // three channels in their exact order.
+        for pixel in buf.chunks_exact(4) {
+            assert_eq!(pixel.first().copied(), Some(242));
+            assert_eq!(pixel.get(1).copied(), Some(166));
+            assert_eq!(pixel.get(2).copied(), Some(90));
+        }
+        // The supersampled edges produce partial coverage: some alpha strictly
+        // between transparent and opaque exists (the anti-aliasing itself).
+        let partial = (0..w)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .any(|(x, y)| buf.get(channel(x, y, 3, w)).copied().is_some_and(|a| a > 0 && a < 255));
+        assert!(partial, "the mark's edges are anti-aliased");
+    }
+
+    #[test]
+    fn the_rendered_buffer_matches_the_pinned_checksum() {
+        // The exact-arithmetic pipeline (see `radius`) renders byte-identically
+        // on every arch, so the whole 64 px buffer is pinned by one checksum —
+        // any change to the mark geometry, the supersampling, or the alpha
+        // math shows up here.
+        let sum: u64 = rgba(64).iter().map(|&byte| u64::from(byte)).sum();
+        assert_eq!(sum, 2_485_612, "update the pinned checksum deliberately");
     }
 }

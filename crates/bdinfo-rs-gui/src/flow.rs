@@ -215,6 +215,20 @@ impl Listing {
     }
 }
 
+/// The scan-complete confirmation text for a scan that recorded `errors`
+/// failures.
+///
+/// A clean success, or a note that the resilient scan still wrote the report
+/// — the message the shell shows in its completion modal.
+#[must_use]
+pub fn scan_notice(errors: usize) -> String {
+    if errors == 0 {
+        "Scan completed successfully.".to_owned()
+    } else {
+        format!("Scan completed with {errors} error(s).\nThe report below was still written.")
+    }
+}
+
 /// What a measured scan needs, read from the [`Flow`] before spawning the worker.
 ///
 /// The input to re-open, the selected playlist names (the report order), and the
@@ -896,6 +910,15 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_notice_names_the_error_count() {
+        assert_eq!(super::scan_notice(0), "Scan completed successfully.");
+        assert_eq!(
+            super::scan_notice(2),
+            "Scan completed with 2 error(s).\nThe report below was still written."
+        );
+    }
+
+    #[test]
     fn idle_is_the_default() {
         assert_eq!(Flow::default().stage(), Stage::Idle);
         assert!(Flow::idle().table().is_empty());
@@ -1447,9 +1470,11 @@ mod tests {
         #[derive(Debug, Clone)]
         enum Event {
             Toggle(usize),
+            Activate(usize),
             SelectAll,
             SelectNone,
             Sort(SortColumn),
+            SetView(u8),
             StartScan,
             Progress(u64),
             Finished(u64),
@@ -1457,6 +1482,26 @@ mod tests {
             Cancel,
             Relist,
             OpenRejected,
+        }
+
+        /// One of a few representative view configurations — a filter change,
+        /// a looser filter, and display-only toggles.
+        fn view_variant(pick: u8) -> ViewSettings {
+            match pick {
+                0 => ViewSettings::default(),
+                1 => ViewSettings { short_playlist_seconds: 90, ..ViewSettings::default() },
+                2 => ViewSettings {
+                    filter_short_playlists: false,
+                    filter_looping_playlists: false,
+                    ..ViewSettings::default()
+                },
+                _ => ViewSettings {
+                    human_readable_sizes: true,
+                    display_chapter_count: false,
+                    report_quick_summary: false,
+                    ..ViewSettings::default()
+                },
+            }
         }
 
         /// One sorting-invariant op — a checkbox toggle or a header click.
@@ -1479,9 +1524,11 @@ mod tests {
         fn event() -> impl Strategy<Value = Event> {
             prop_oneof![
                 (0_usize..4).prop_map(Event::Toggle),
+                (0_usize..5).prop_map(Event::Activate),
                 Just(Event::SelectAll),
                 Just(Event::SelectNone),
                 sort_column().prop_map(Event::Sort),
+                (0_u8..4).prop_map(Event::SetView),
                 Just(Event::StartScan),
                 (0_u64..4).prop_map(Event::Progress),
                 (0_u64..4).prop_map(Event::Finished),
@@ -1503,8 +1550,10 @@ mod tests {
                     let scanning_gen = matches!(flow.stage(), Stage::Scanning).then_some(generation);
                     match ev {
                         Event::Toggle(i) => flow.toggle(i),
+                        Event::Activate(i) => flow.set_active(i),
                         Event::SelectAll => flow.select_all(),
                         Event::SelectNone => flow.select_none(),
+                        Event::SetView(pick) => flow.set_view(view_variant(pick)),
                         Event::Sort(column) => {
                             let before = checked_set(&flow);
                             flow.sort_by(column);
@@ -1590,6 +1639,12 @@ mod tests {
                     if flow.can_scan() {
                         prop_assert!(flow.editable());
                         prop_assert!(flow.row_count() > 0);
+                    }
+                    // The selection always parallels the rows, and the active
+                    // row stays inside the (possibly re-filtered) row range.
+                    prop_assert!(flow.selected_count() <= flow.row_count());
+                    if let Some(active) = flow.active_index() {
+                        prop_assert!(active < flow.row_count().max(1));
                     }
                 }
             }

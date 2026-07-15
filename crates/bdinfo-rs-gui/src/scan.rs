@@ -217,9 +217,29 @@ pub fn scan_measured(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::Input;
+
+    /// A scratch directory under the crate's target dir (unique per test).
+    fn scratch(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/scan-tests").join(name)
+    }
+
+    /// Recursively copies `src` into `dst` (the fixture tree is a handful of
+    /// small files).
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("the scratch dir creates");
+        for entry in std::fs::read_dir(src).expect("the source dir reads") {
+            let entry = entry.expect("the entry reads");
+            let target = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("the file copies");
+            }
+        }
+    }
 
     #[test]
     fn path_and_display_read_through() {
@@ -276,6 +296,41 @@ mod tests {
         let message =
             Input::classify(fixture("no-such-thing.iso")).expect_err("a missing path is rejected");
         assert!(message.contains("does not exist"));
+    }
+
+    #[test]
+    fn a_structureless_folder_fails_the_structural_scan() {
+        // A directory with no BDMV structure at all: the hard-error road —
+        // the same message a bad pick surfaces in the failure state.
+        let dir = scratch("empty");
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let message =
+            super::scan_structural(&Input::Folder(dir)).expect_err("no Blu-ray structure to open");
+        assert!(!message.is_empty(), "the failure carries a user-facing message");
+    }
+
+    #[test]
+    fn structural_warnings_surface_a_corrupt_playlist() {
+        // Copy the committed fixture and corrupt its one playlist: the
+        // resilient scan still opens the disc, records the parse failure, and
+        // the seam surfaces it as a warning line naming the file.
+        let root = scratch("corrupt");
+        let _ = std::fs::remove_dir_all(&root);
+        copy_tree(&fixture("BigBuckBunny"), &root);
+        std::fs::write(root.join("BDMV/PLAYLIST/00000.mpls"), b"garbage")
+            .expect("the playlist corrupts");
+        let structural =
+            super::scan_structural(&Input::Folder(root)).expect("the resilient scan still opens");
+        assert!(!structural.warnings.is_empty(), "the corrupt playlist is recorded");
+        assert!(
+            structural.warnings.iter().any(|warning| warning.contains("00000.mpls")),
+            "the warning names the file: {:?}",
+            structural.warnings
+        );
+        // The disc still lists: the core recovered the playlist from the
+        // disc's BDMV/BACKUP copy — resilience, not silence; the warning above
+        // is the record of the primary's corruption.
+        assert!(!structural.bdrom.playlists.is_empty());
     }
 
     #[cfg(windows)]

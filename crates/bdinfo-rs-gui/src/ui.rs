@@ -7,11 +7,10 @@
 //! (it is `Copy`) and return the `iced` style closure for a widget, reading only
 //! palette tokens — never a raw colour.
 
+use bdinfo_rs_gui::theme::Palette;
 use iced::font::Weight;
 use iced::widget::{button, container, progress_bar, text_input};
 use iced::{Border, Color, Font, Shadow, Theme, Vector, border};
-
-use crate::theme::Palette;
 
 // ── Typography ──────────────────────────────────────────────────────────────
 

@@ -8,12 +8,14 @@
 //! defined here as named tokens; the rest of the GUI reads them and never spells
 //! a raw hex value of its own.
 //!
-//! This is presentation glue (Tier B): it holds no disc logic. The only thing
-//! resembling logic is [`ThemePref::resolve`] — the pure choice of light vs dark
-//! from the user's preference and the OS mode — which is unit-tested.
+//! Tier A: the tokens and the resolve/cycle logic are pure data + decisions
+//! (iced's `Color`/`Theme` are plain values, native-testable), held to the
+//! core bar like the rest of the library; only the widgets that *consume*
+//! these tokens (the binary's `ui` style builders) are render glue.
 
-use bdinfo_rs_gui::settings::ThemeChoice;
 use iced::{Color, Theme, theme};
+
+use crate::settings::ThemeChoice;
 
 /// Creates an opaque [`Color`] from 8-bit channels (the form every token below
 /// is written in). `const` so the palettes are compile-time constants.
@@ -21,10 +23,12 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
 }
 
-/// A complete set of named colour tokens — one per role the UI draws. Both
-/// [`Palette::DARK`] and [`Palette::LIGHT`] fill every field, so a widget style
-/// reads `palette.accent` (etc.) and is correct in either mode. `Copy`, so a
-/// `view` style closure can capture it by value and ignore the `iced::Theme` arg.
+/// A complete set of named colour tokens — one per role the UI draws.
+///
+/// Both [`Palette::DARK`] and [`Palette::LIGHT`] fill every field, so a widget
+/// style reads `palette.accent` (etc.) and is correct in either mode. `Copy`,
+/// so a `view` style closure can capture it by value and ignore the
+/// `iced::Theme` arg.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
     /// Whether this is the dark palette — drives the OS-derived `iced::Theme`
@@ -269,5 +273,40 @@ mod tests {
         assert_eq!(ThemePref::System.label(), "Auto");
         assert_eq!(ThemePref::Light.label(), "Light");
         assert_eq!(ThemePref::Dark.label(), "Dark");
+    }
+
+    #[test]
+    fn rgb_maps_each_channel_onto_the_unit_range() {
+        // 51/255 = 0.2, 102/255 = 0.4, 204/255 = 0.8 — exact in f32, so the
+        // channel order and the /255 scaling are both pinned.
+        let color = super::rgb(51, 102, 204);
+        assert_eq!(color, iced::Color { r: 0.2, g: 0.4, b: 0.8, a: 1.0 });
+        assert_eq!(super::rgb(255, 0, 0), iced::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 });
+    }
+
+    #[test]
+    fn the_iced_theme_carries_the_palette_and_the_mode_name() {
+        // The custom theme's display name tags the mode…
+        assert_eq!(Palette::DARK.iced_theme().to_string(), "Projection Booth Dark");
+        assert_eq!(Palette::LIGHT.iced_theme().to_string(), "Projection Booth Light");
+        // …and every mapped slot reads back the palette token it was built from.
+        for p in [Palette::DARK, Palette::LIGHT] {
+            let theme = p.iced_theme().palette();
+            assert_eq!(theme.background, p.bg);
+            assert_eq!(theme.text, p.text);
+            assert_eq!(theme.primary, p.accent);
+            assert_eq!(theme.success, p.warning);
+            assert_eq!(theme.warning, p.warning);
+            assert_eq!(theme.danger, p.danger);
+        }
+    }
+
+    #[test]
+    fn the_base_style_is_the_window_background_and_text() {
+        for p in [Palette::DARK, Palette::LIGHT] {
+            let style = p.base_style();
+            assert_eq!(style.background_color, p.bg);
+            assert_eq!(style.text_color, p.text);
+        }
     }
 }

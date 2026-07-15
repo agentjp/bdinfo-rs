@@ -20,8 +20,6 @@
 // console so launching it does not flash a terminal. No effect on other targets.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
-mod icon;
-mod theme;
 mod ui;
 
 use std::path::PathBuf;
@@ -31,22 +29,21 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
 use bdinfo_rs_core::error::ScanError;
-use bdinfo_rs_gui::flow::{Flow, ScanRequest, Stage};
+use bdinfo_rs_gui::flow::{self, Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::{
     SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
 };
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
-use bdinfo_rs_gui::progress::ProgressModel;
+use bdinfo_rs_gui::progress::{self, ProgressModel};
 use bdinfo_rs_gui::scan::{self, Input, Structural};
-use bdinfo_rs_gui::{clipboard, paths, settings};
+use bdinfo_rs_gui::theme::{Palette, ThemePref};
+use bdinfo_rs_gui::{clipboard, columns, icon, paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
     responsive, scrollable, text, text_input,
 };
 use iced::{Element, Length, Task};
-
-use crate::theme::{Palette, ThemePref};
 
 /// The window's initial logical size — a **portrait-leaning** footprint (taller
 /// than wide), because the three master-detail panes are stacked vertically, so
@@ -63,11 +60,14 @@ const MIN_SIZE: (f32, f32) = (680.0, 540.0);
 const ICON_SIZE: u32 = 128;
 
 fn main() -> iced::Result {
-    // One boot-time load of the persisted state: the geometry feeds the window
-    // settings, the rest seeds the app in `boot`.
-    let persisted = settings::load();
+    // One boot-time resolution of the config path and load of the persisted
+    // state: the geometry feeds the window settings, the rest seeds the app in
+    // `boot`. The path travels into the app so every later save writes the
+    // same file (and a test-built `App` — path `None` — never writes at all).
+    let config = config_path();
+    let persisted = config.as_deref().map_or_else(settings::Settings::default, settings::load_from);
     let window = window_settings(&persisted);
-    iced::application(move || boot(persisted.clone()), App::update, App::view)
+    iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
         .title(App::title)
         .theme(App::theme)
         .style(App::style)
@@ -100,9 +100,13 @@ fn main() -> iced::Result {
 /// classify-and-list road a drop takes — read from the OS-native argv, so a
 /// non-UTF-8 path survives intact. In a **debug** build it also applies the
 /// screenshot-harness environment hooks (see [`debug_boot`]).
-fn boot(persisted: settings::Settings) -> (App, Task<Message>) {
-    let mut app =
-        App { theme_pref: ThemePref::from_choice(persisted.theme), persisted, ..App::default() };
+fn boot(config: Option<PathBuf>, persisted: settings::Settings) -> (App, Task<Message>) {
+    let mut app = App {
+        config,
+        theme_pref: ThemePref::from_choice(persisted.theme),
+        persisted,
+        ..App::default()
+    };
     if let Some(input) = app.persisted.last_path.clone().and_then(|path| Input::classify(path).ok())
     {
         app.flow = Flow::recall(input);
@@ -164,6 +168,28 @@ fn debug_scan_delay() {
     }
 }
 
+/// The per-platform config file location, resolved from the process
+/// environment — `None` when no base directory can be resolved (the app then
+/// runs without persistence). The one env-bound read in the config story; the
+/// per-platform path math it dispatches to is Tier A ([`settings`]).
+fn config_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        settings::windows_config_path(std::env::var_os("APPDATA").as_deref())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        settings::macos_config_path(std::env::var_os("HOME").as_deref())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        settings::unix_config_path(
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+}
+
 /// The window settings: last session's geometry (the stored size clamped to
 /// the minimum; the default size and OS placement when nothing sane is
 /// stored), the maximized state layered on top (the geometry stays the
@@ -173,8 +199,7 @@ fn debug_scan_delay() {
 /// (`exit_on_close_request: false`) so the geometry can be captured and saved
 /// on the way out — see [`Message::CloseRequested`].
 fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
-    let (width, height) =
-        persisted.window_size.map_or(WINDOW_SIZE, |(w, h)| (w.max(MIN_SIZE.0), h.max(MIN_SIZE.1)));
+    let (width, height) = settings::launch_size(persisted.window_size, WINDOW_SIZE, MIN_SIZE);
     // The store validated the position's range; Wayland (no global positions)
     // simply never stores one, so the platform default placement applies.
     let position = persisted.window_pos.map_or(iced::window::Position::Default, |(x, y)| {
@@ -198,6 +223,11 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
 struct App {
     /// The flow state machine — `view` is a projection of it.
     flow: Flow,
+    /// Where the persisted state lives — resolved once at boot, `None` when
+    /// the platform offers no config base (the app then runs without
+    /// persistence). Tests build the `App` directly with `None`, so no test
+    /// can ever touch the user's real config file.
+    config: Option<PathBuf>,
     /// The persisted state (geometry / last path / theme), as it will next be
     /// written: updated alongside the live state and saved best-effort at the
     /// change points (theme toggle, successful listing) and on close.
@@ -234,8 +264,9 @@ struct App {
     /// right-click "copy line" acts on. `None` until a Stream File / Codec row is
     /// clicked; reset when the active playlist changes.
     pane_selection: Option<(Region, usize)>,
-    /// The animation phase (`0..PULSE_PERIOD`) of the indeterminate "scanning"
-    /// bar shown during the initial disc scan; advanced by [`Message::Tick`].
+    /// The animation phase of the indeterminate "scanning" bar shown during
+    /// the initial disc scan; wraps at [`progress::PULSE_PERIOD`] and is
+    /// advanced by [`Message::Tick`].
     pulse: u16,
     /// The three master-detail panes and the two draggable splitters between
     /// them (Playlist / Stream File on top, Codec below). Holds the split ratios,
@@ -262,6 +293,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             flow: Flow::default(),
+            config: None,
             persisted: settings::Settings::default(),
             theme_pref: ThemePref::default(),
             os_mode: iced::theme::Mode::default(),
@@ -304,42 +336,11 @@ fn default_panes() -> pane_grid::State<Region> {
     })
 }
 
-/// Shifts `delta` weight across the boundary between column `boundary` and
-/// `boundary + 1`, clamped so neither drops below [`MIN_COL_WEIGHT`]. Their sum is
-/// preserved, so only these two columns change width — the rest hold still.
-fn adjust_weight(weights: &mut [f32], boundary: usize, delta: f32) {
-    let (Some(&a), Some(&b)) = (weights.get(boundary), weights.get(boundary.wrapping_add(1)))
-    else {
-        return;
-    };
-    let pair = a + b;
-    let new_a = (a + delta).clamp(MIN_COL_WEIGHT, (pair - MIN_COL_WEIGHT).max(MIN_COL_WEIGHT));
-    if let Some(slot) = weights.get_mut(boundary) {
-        *slot = new_a;
-    }
-    if let Some(slot) = weights.get_mut(boundary.wrapping_add(1)) {
-        *slot = pair - new_a;
-    }
-}
-
-/// A column weight as an `iced` `FillPortion` (scaled up so fractional weights
-/// keep resolution).
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "weight is clamped to a small positive range before the cast"
-)]
+/// A column weight as an `iced` `FillPortion` — the Tier-A scaling
+/// ([`columns::portion`]) wrapped in the layout type.
 fn fill(weight: f32) -> Length {
-    Length::FillPortion((weight * 10.0).round().clamp(1.0, 60000.0) as u16)
+    Length::FillPortion(columns::portion(weight))
 }
-
-/// The indeterminate-bar animation period (one full 0→1→0 breath).
-const PULSE_PERIOD: u16 = 1000;
-/// Half the period — the peak of the triangle wave.
-const PULSE_HALF: u16 = 500;
-/// The phase advance per animation frame (larger = faster breathing).
-const PULSE_STEP: u16 = 16;
 
 /// Which of the three master-detail panes a row belongs to — the hover / click
 /// messages carry it so one `hovered` slot serves all three.
@@ -364,9 +365,6 @@ enum ColGrid {
     Codec,
 }
 
-/// The minimum weight a column can be dragged down to (keeps every column
-/// visible). Weights are `BDInfo`-ratio units (they sum to ~98).
-const MIN_COL_WEIGHT: f32 = 4.0;
 /// The width of the grab strip on a header column's right edge — the zone that
 /// shows the resize cursor and drags the boundary (wide enough to hit easily).
 const GRAB_W: f32 = 14.0;
@@ -720,8 +718,7 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                self.pulse =
-                    self.pulse.wrapping_add(PULSE_STEP).checked_rem(PULSE_PERIOD).unwrap_or(0);
+                self.pulse = progress::pulse_advance(self.pulse);
                 Task::none()
             }
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -793,13 +790,22 @@ impl App {
         }
     }
 
+    /// Writes the persisted state to the boot-resolved config path,
+    /// best-effort — a no-op when no path resolved (and in every test-built
+    /// `App`, whose path is `None`).
+    fn persist(&self) {
+        if let Some(path) = &self.config {
+            settings::save_to(path, &self.persisted);
+        }
+    }
+
     /// The Settings dialog's OK: persist the draft and hand the new view
     /// settings to the flow — a filter change re-derives the table from the
     /// retained disc (no rescan), a display change re-renders the cells.
     fn apply_settings(&mut self) {
         if let Some(draft) = self.settings_draft.take() {
             draft.apply_to(&mut self.persisted);
-            settings::save(&self.persisted);
+            self.persist();
             self.flow.set_view(ViewSettings::from_settings(&self.persisted));
         }
     }
@@ -809,7 +815,7 @@ impl App {
     fn toggle_theme(&mut self) -> Task<Message> {
         self.theme_pref = self.theme_pref.next();
         self.persisted.theme = self.theme_pref.choice();
-        settings::save(&self.persisted);
+        self.persist();
         Task::none()
     }
 
@@ -834,7 +840,7 @@ impl App {
                 self.persisted.window_pos = Some((point.x, point.y));
             }
         }
-        settings::save(&self.persisted);
+        self.persist();
         iced::window::close(id)
     }
 
@@ -844,12 +850,10 @@ impl App {
     /// divider separates change; the rest hold, so far columns never shift.
     fn column_drag(&mut self, x: f32) {
         let Some((grid, boundary, cols_width, last_x)) = self.col_drag else { return };
-        if let Some(prev_x) = last_x
-            && cols_width > 0.0
-        {
+        if let Some(prev_x) = last_x {
             let total: f32 = self.column_weights(grid).iter().sum();
-            let delta = (x - prev_x) / cols_width * total;
-            adjust_weight(self.column_weights_mut(grid), boundary, delta);
+            let delta = columns::drag_delta(x, prev_x, cols_width, total);
+            columns::adjust(self.column_weights_mut(grid), boundary, delta);
         }
         self.col_drag = Some((grid, boundary, cols_width, Some(x)));
     }
@@ -925,18 +929,6 @@ impl App {
         iced::Subscription::batch(subs)
     }
 
-    /// The indeterminate progress-bar fill while scanning — a 0→1→0 triangle over
-    /// the animation phase, so the bar "breathes" rather than implying a measured
-    /// percentage.
-    fn pulse_fraction(&self) -> f32 {
-        let phase = if self.pulse <= PULSE_HALF {
-            self.pulse
-        } else {
-            PULSE_PERIOD.saturating_sub(self.pulse)
-        };
-        f32::from(phase) / f32::from(PULSE_HALF)
-    }
-
     /// Whether a scan (initial or measured) is in flight — the source controls are
     /// disabled while one runs, like `BDInfo`.
     const fn is_busy(&self) -> bool {
@@ -955,7 +947,7 @@ impl App {
         // failed result) does it become the remembered source.
         if self.flow.stage() == Stage::Listed && self.flow.current_input() == Some(input) {
             self.persisted.last_path = Some(input.path().to_path_buf());
-            settings::save(&self.persisted);
+            self.persist();
         }
         #[cfg(debug_assertions)]
         if self.flow.stage() == Stage::Listed && debug_scan_all() {
@@ -991,7 +983,7 @@ impl App {
         let was_scanning = self.flow.stage() == Stage::Scanning;
         self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
-            self.notice = Some(self.scan_outcome());
+            self.notice = Some(flow::scan_notice(self.flow.report_errors().len()));
             if self.persisted.autosave_report {
                 self.autosave_report();
             }
@@ -1092,10 +1084,8 @@ impl App {
             let mut last_file = String::new();
             let mut on_progress = |progress: ScanProgress<'_>| {
                 let file_changed = progress.file != last_file;
-                let due = file_changed
-                    || progress.done == progress.total
-                    || last_sent.is_none_or(|at| at.elapsed() >= Duration::from_millis(100));
-                if !due {
+                let since_last = last_sent.map(|at| at.elapsed());
+                if !progress::emit_due(file_changed, progress.done, progress.total, since_last) {
                     return;
                 }
                 last_sent = Some(Instant::now());
@@ -1208,17 +1198,6 @@ impl App {
                 iced::clipboard::write(clipboard::sanitize(report))
             }
             None => Task::none(),
-        }
-    }
-
-    /// The scan-complete confirmation text — a clean success, or a note that the
-    /// resilient scan recorded some errors but still wrote the report.
-    fn scan_outcome(&self) -> String {
-        let errors = self.flow.report_errors().len();
-        if errors == 0 {
-            "Scan completed successfully.".to_owned()
-        } else {
-            format!("Scan completed with {errors} error(s).\nThe report below was still written.")
         }
     }
 
@@ -1689,7 +1668,7 @@ impl App {
             Stage::Scanning => progress.map_or(0.0, ProgressModel::fraction),
             Stage::Reported => 1.0,
             // The initial scan has no measurable %, so the bar breathes.
-            Stage::Listing => self.pulse_fraction(),
+            Stage::Listing => progress::pulse_fraction(self.pulse),
             _ => 0.0,
         };
 

@@ -14,7 +14,11 @@
 //!
 //! The pure pieces — [`Settings::parse`] / [`Settings::render`] (a proptested
 //! round-trip) and the per-platform path helpers — are the Tier-A surface;
-//! [`load`] / [`save`] are the thin best-effort IO wrappers over them.
+//! [`load_from`] / [`save_to`] are the thin best-effort IO wrappers over them,
+//! taking an explicit path so they stay testable. Resolving the *real* config
+//! path from the process environment is the shell's job (`main.rs`): the one
+//! env-bound read stays out of this module, so everything here is exercisable
+//! against scratch paths.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -307,6 +311,22 @@ fn set_bool(slot: &mut bool, value: &str) {
     }
 }
 
+/// The window size to launch with.
+///
+/// The stored size, each axis clamped up to `floor` (the window's minimum
+/// size — a remembered size below it must not open an unusably small window),
+/// or `fallback` when nothing is stored. [`Settings::parse`] already
+/// validated the stored range; this is the UI's own floor, applied where the
+/// window is built.
+#[must_use]
+pub fn launch_size(
+    stored: Option<(f32, f32)>,
+    fallback: (f32, f32),
+    floor: (f32, f32),
+) -> (f32, f32) {
+    stored.map_or(fallback, |(width, height)| (width.max(floor.0), height.max(floor.1)))
+}
+
 // ── the Settings dialog's working copy ───────────────────────────────────────
 
 /// The Settings dialog's draft — the checkbox states plus the short-playlist
@@ -426,36 +446,7 @@ pub fn unix_config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -
     Some(Path::new(base).join(".config").join(APP_DIR).join(FILE_NAME))
 }
 
-/// The per-platform config file location, resolved from std env vars only —
-/// `None` when no base directory can be resolved (the app then runs without
-/// persistence).
-#[must_use]
-pub fn config_path() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        windows_config_path(std::env::var_os("APPDATA").as_deref())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos_config_path(std::env::var_os("HOME").as_deref())
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        unix_config_path(
-            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-            std::env::var_os("HOME").as_deref(),
-        )
-    }
-}
-
 // ── best-effort IO ───────────────────────────────────────────────────────────
-
-/// Loads the settings from the platform config path — defaults when there is
-/// no path, no file, or no readable content. Called once at boot.
-#[must_use]
-pub fn load() -> Settings {
-    config_path().as_deref().map_or_else(Settings::default, load_from)
-}
 
 /// Loads the settings from `path`. Any failure — missing file, permission
 /// error, garbage bytes — degrades to defaults; invalid UTF-8 is read
@@ -466,16 +457,6 @@ pub fn load_from(path: &Path) -> Settings {
         |_| Settings::default(),
         |bytes| Settings::parse(&String::from_utf8_lossy(&bytes)),
     )
-}
-
-/// Saves the settings to the platform config path, best-effort.
-///
-/// No resolvable path means no persistence, and a write failure is swallowed
-/// (an unwritable disk must not break the app — the store is a convenience).
-pub fn save(settings: &Settings) {
-    if let Some(path) = config_path() {
-        save_to(&path, settings);
-    }
 }
 
 /// Saves the settings to `path`, creating the parent directory on first save.
@@ -623,6 +604,19 @@ mod tests {
         let alone = Settings::parse("window-maximized = true\n");
         assert_eq!(alone.window_size, None);
         assert_eq!(alone.window_pos, None);
+    }
+
+    #[test]
+    fn launch_size_clamps_to_the_floor_and_falls_back() {
+        let floor = (680.0, 540.0);
+        let fallback = (880.0, 960.0);
+        // Nothing stored: the built-in default size.
+        assert_eq!(super::launch_size(None, fallback, floor), fallback);
+        // A sane stored size restores as-is.
+        assert_eq!(super::launch_size(Some((1000.0, 800.0)), fallback, floor), (1000.0, 800.0));
+        // Each axis clamps up to the window minimum independently.
+        assert_eq!(super::launch_size(Some((100.0, 800.0)), fallback, floor), (680.0, 800.0));
+        assert_eq!(super::launch_size(Some((1000.0, 100.0)), fallback, floor), (1000.0, 540.0));
     }
 
     #[test]
