@@ -1332,6 +1332,59 @@ mod tests {
         assert_eq!(flow.active_playlist_name(), None);
         assert!(flow.stream_file_rows().is_empty());
         assert!(flow.codec_rows().is_empty());
+        // And start_scanning refuses the empty table — the same gate as
+        // can_scan, on the transition itself.
+        let flow = flow.start_scanning(9);
+        assert_eq!(flow.stage(), Stage::Listed);
+    }
+
+    #[test]
+    fn warnings_hidden_streams_and_codec_rows_surface_through_the_flow() {
+        use bdinfo_rs_core::bdrom::disc::StreamSummary;
+        use bdinfo_rs_core::primitives::Pid;
+        use bdinfo_rs_core::stream::TsStreamType;
+
+        // A disc whose structural scan recorded a warning and whose feature
+        // playlist presents one HIDDEN stream: all three accessors the shell
+        // banners/marks from must surface it.
+        let mut structural = structural();
+        structural.warnings = vec!["BDMV/PLAYLIST/00000.mpls: unreadable".to_owned()];
+        structural.bdrom.playlists.first_mut().expect("the feature playlist").streams =
+            vec![StreamSummary {
+                pid: Pid::new(0x1011),
+                stream_type: TsStreamType::default(),
+                codec_short_name: String::new(),
+                codec_name: "MPEG-4 AVC Video".to_owned(),
+                codec_alt_name: "",
+                bitrate: 0,
+                active_bitrate: 0,
+                language_name: String::new(),
+                language_code: String::new(),
+                description: String::new(),
+                full_description: "1080p / 23.976 fps / 16:9".to_owned(),
+                channel_description: String::new(),
+                sample_rate: 0,
+                bit_depth: 0,
+                channel_count: 0,
+                height: 0,
+                angle_index: 0,
+                is_hidden: true,
+                ssif_only: false,
+            }];
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        // The structural warning reaches the banner accessor verbatim.
+        assert_eq!(flow.warnings(), ["BDMV/PLAYLIST/00000.mpls: unreadable"]);
+        // The hidden stream drives the footer note and the row's `*` marker.
+        assert!(flow.show_hidden_note());
+        assert!(flow.table().first().is_some_and(|row| row.has_hidden));
+        // The Streams pane lists the presented codec, flagged hidden.
+        let rows = flow.codec_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows.first().is_some_and(|row| row.hidden && row.codec == "MPEG-4 AVC Video"),
+            "the codec row carries the name and the hidden flag: {rows:?}"
+        );
     }
 
     #[test]
