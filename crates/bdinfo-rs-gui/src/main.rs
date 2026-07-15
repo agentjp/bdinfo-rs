@@ -147,6 +147,16 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
     let mut tasks = vec![base];
     tasks.extend(folder);
     tasks.extend(iso);
+    // BDINFO_GUI_SMOKE_MS=<ms>: exit cleanly after the delay — the headless
+    // launch smoke's seam ("the app opens, renders, exits 0"; see gui.yml).
+    // The sleep blocks one executor worker, which is fine for a debug hook.
+    if let Some(ms) = std::env::var("BDINFO_GUI_SMOKE_MS").ok().and_then(|v| v.parse::<u64>().ok())
+    {
+        tasks.push(Task::perform(
+            async move { std::thread::sleep(Duration::from_millis(ms)) },
+            |()| Message::SmokeExit,
+        ));
+    }
     (app, Task::batch(tasks))
 }
 
@@ -551,6 +561,10 @@ enum Message {
     /// The user asked to close the window (`exit_on_close_request` is off) —
     /// read the live geometry, then save and close.
     CloseRequested(iced::window::Id),
+    /// The debug smoke hook (`BDINFO_GUI_SMOKE_MS`) fired — end the event
+    /// loop cleanly so the launch smoke's process exits 0.
+    #[cfg(debug_assertions)]
+    SmokeExit,
     /// The geometry readout for the closing window arrived — persist
     /// everything and actually close (`BDInfo` saves at `FormClosing` too).
     SaveAndClose {
@@ -731,6 +745,8 @@ impl App {
                 self.on_col_drag(&message);
                 Task::none()
             }
+            #[cfg(debug_assertions)]
+            Message::SmokeExit => iced::exit(),
             Message::CloseRequested(id) => close_with_geometry(id),
             Message::SaveAndClose { id, position, size, maximized } => {
                 self.save_and_close(id, position, size, maximized)
@@ -2433,4 +2449,379 @@ async fn pick_iso() -> Option<PathBuf> {
         .pick_file()
         .await
         .map(|handle| handle.path().to_path_buf())
+}
+
+/// Test-only helpers shared by the `interaction` and `snapshots` suites: a
+/// synthetic listed disc, an `iced_test` Simulator over the app's live
+/// `view()` (bundled fonts loaded, so layout and pixels match the shipped
+/// window), a click-and-dispatch driver, and the snapshot-hash assert.
+#[cfg(test)]
+mod harness {
+    use std::path::PathBuf;
+
+    use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
+    use bdinfo_rs_gui::flow::Flow;
+    use bdinfo_rs_gui::model::ViewSettings;
+    use bdinfo_rs_gui::scan::{Input, Structural};
+    use iced_test::Simulator;
+
+    use super::{App, Message};
+
+    /// A `ClipSummary` carrying just a name (what the panes read here).
+    fn clip(name: &str) -> ClipSummary {
+        ClipSummary {
+            name: name.to_owned(),
+            display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
+            angle_index: 0,
+            relative_time_in: 0.0,
+            length: 0.0,
+            payload_bytes: 0,
+            packet_count: 0,
+            packet_seconds: 0.0,
+            file_seconds: 0.0,
+            streams: Vec::new(),
+        }
+    }
+
+    /// A `PlaylistSummary` with a name, length, estimated size, and clips.
+    fn playlist(name: &str, length: f64, file_size: u64, clips: &[&str]) -> PlaylistSummary {
+        PlaylistSummary {
+            name: name.to_owned(),
+            total_length: length,
+            file_size,
+            interleaved_file_size: 0,
+            chapter_count: 0,
+            stream_count: 0,
+            angle_count: 0,
+            has_loops: false,
+            streams: Vec::new(),
+            clips: clips.iter().map(|c| clip(c)).collect(),
+            chapters: Vec::new(),
+        }
+    }
+
+    /// The two-playlist synthetic disc the flow tests use: 00000 (100 s,
+    /// est 1000 B) and 00001 (70 s, est 500 B), distinct clips.
+    pub fn structural() -> Structural {
+        Structural {
+            bdrom: BdRom {
+                volume_label: "DISC".to_owned(),
+                disc_title: Some("A Movie".to_owned()),
+                size: 78_000_000_000,
+                interleaved_size: 0,
+                is_3d: false,
+                is_50hz: false,
+                is_uhd: false,
+                is_bd_plus: false,
+                is_bd_java: false,
+                is_dbox: false,
+                is_psp: false,
+                playlists: vec![
+                    playlist("00000.MPLS", 100.0, 1000, &["A.M2TS"]),
+                    playlist("00001.MPLS", 70.0, 500, &["B.M2TS"]),
+                ],
+            },
+            features: vec!["Ultra HD".to_owned()],
+            warnings: Vec::new(),
+        }
+    }
+
+    /// An app with the synthetic disc listed — the state most flows start
+    /// from. Its config path is `None` (the `App::default`), so nothing any
+    /// test does can ever write the user's real config.
+    pub fn listed_app() -> App {
+        let input = Input::Folder("disc".into());
+        let flow = Flow::start_listing(input.clone()).listed(
+            &input,
+            Ok(structural()),
+            ViewSettings::default(),
+        );
+        App { flow, ..App::default() }
+    }
+
+    /// The simulator settings: the bundled fonts, loaded exactly as `main`
+    /// loads them, and the same default face.
+    fn settings() -> iced::Settings {
+        iced::Settings {
+            fonts: vec![
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/assets/fonts/Inter-Variable.ttf"
+                ))
+                .as_slice()
+                .into(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/assets/fonts/JetBrainsMono-Regular.ttf"
+                ))
+                .as_slice()
+                .into(),
+            ],
+            default_font: crate::ui::UI,
+            ..iced::Settings::default()
+        }
+    }
+
+    /// A Simulator over the app's CURRENT `view()` (one frame; re-build it
+    /// after every state change, as iced would re-view).
+    pub fn ui(app: &App) -> Simulator<'_, Message> {
+        Simulator::with_settings(settings(), app.view())
+    }
+
+    /// Clicks the widget showing exactly `label` (the `&str` selector matches
+    /// a text widget's whole content) and feeds every produced message
+    /// through `update` — one real user interaction, end to end. Returns the
+    /// messages for shape asserts.
+    pub fn click(app: &mut App, label: &str) -> Vec<Message> {
+        let messages: Vec<Message> = {
+            let mut ui = ui(app);
+            ui.click(label).expect("the click target is on screen");
+            ui.into_messages().collect()
+        };
+        for message in messages.clone() {
+            let _ = app.update(message);
+        }
+        messages
+    }
+
+    /// Whether the app's current view shows a text widget reading exactly
+    /// `label`.
+    pub fn sees(app: &App, label: &str) -> bool {
+        ui(app).find(label).is_ok()
+    }
+
+    /// Renders the app's view offscreen and ties it to the committed SHA-256
+    /// under `snapshots/` (created on first run — commit it). On a mismatch
+    /// the rendered PNG is dumped under `target/snapshot-failures/` for eyes.
+    /// Requires the deterministic software backend: without
+    /// `ICED_TEST_BACKEND=tiny-skia` (the gate and CI set it) the tie is
+    /// skipped with a note rather than pinning GPU-varying pixels.
+    pub fn assert_snapshot(app: &App, name: &str) {
+        if std::env::var("ICED_TEST_BACKEND").as_deref() != Ok("tiny-skia") {
+            eprintln!(
+                "snapshot '{name}' skipped: set ICED_TEST_BACKEND=tiny-skia \
+                 (scripts/gui-compliance.ps1 and gui.yml do)"
+            );
+            return;
+        }
+        let mut ui = ui(app);
+        let snapshot = ui.snapshot(&app.theme()).expect("the snapshot renders");
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots");
+        let matches = snapshot.matches_hash(dir.join(name)).expect("the hash file is readable");
+        if !matches {
+            let dump = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/snapshot-failures");
+            let _ = std::fs::create_dir_all(&dump);
+            let _ = snapshot.matches_image(dump.join(name));
+        }
+        assert!(
+            matches,
+            "snapshot '{name}' drifted from the committed hash; the rendered PNG is \
+             under target/snapshot-failures/ — re-pin deliberately if the change is intended"
+        );
+    }
+}
+
+/// Tier-B interaction tests: `iced_test`'s Simulator renders the real
+/// `view()` offscreen, clicks it by visible text, and the produced messages
+/// run through the real `update` — so the widget wiring (what a click
+/// dispatches, what a state renders) is verified against the Tier-A state it
+/// must land in. No window, no Tasks, no subscriptions: worker completions
+/// are injected as the messages they would arrive as.
+#[cfg(test)]
+mod interaction {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use bdinfo_rs_gui::flow::Stage;
+    use bdinfo_rs_gui::model::{Sort, SortColumn};
+    use bdinfo_rs_gui::theme::ThemePref;
+
+    use super::harness::{click, listed_app, sees, structural};
+    use super::{App, Message};
+
+    #[test]
+    fn the_scan_flow_reaches_the_report_through_clicks() {
+        let mut app = listed_app();
+        // Check every row, then start the measured scan from the button.
+        click(&mut app, "Select All");
+        assert_eq!(app.flow.selected_count(), 2);
+        click(&mut app, "Scan Bitrates");
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        assert!(sees(&app, "Cancel"), "the scanning state offers Cancel");
+        // The worker's completion arrives (injected — the Simulator runs no
+        // Tasks; the real worker's stale failure is dropped by the guard).
+        let _ = app.update(Message::Finished {
+            generation: app.generation,
+            report: "THE REPORT BODY".to_owned(),
+            errors: Arc::new(Vec::new()),
+            playlists: structural().bdrom.playlists,
+        });
+        assert_eq!(app.flow.stage(), Stage::Reported);
+        assert_eq!(app.notice.as_deref(), Some("Scan completed successfully."));
+        // Dismiss the completion modal, open the report view, and come back.
+        click(&mut app, "OK");
+        assert!(app.notice.is_none());
+        click(&mut app, "View Report...");
+        assert!(app.showing_report);
+        assert!(sees(&app, "THE REPORT BODY"), "the report text is on screen");
+        click(&mut app, "← Back");
+        assert!(!app.showing_report);
+    }
+
+    #[test]
+    fn cancel_returns_the_scan_to_the_table() {
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates"); // nothing checked — scan-all
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        click(&mut app, "Cancel");
+        assert_eq!(app.flow.stage(), Stage::Listed);
+        // The cooperative stop flag was taken and tripped.
+        assert!(app.scan_cancel.is_none());
+    }
+
+    #[test]
+    fn select_all_flips_to_unselect_all() {
+        let mut app = listed_app();
+        assert!(sees(&app, "Select All"));
+        click(&mut app, "Select All");
+        assert!(app.flow.all_selected());
+        // The toggle re-labels; clicking it clears the selection.
+        click(&mut app, "Unselect All");
+        assert_eq!(app.flow.selected_count(), 0);
+    }
+
+    #[test]
+    fn a_row_click_activates_its_playlist() {
+        let mut app = listed_app();
+        let messages = click(&mut app, "00001.MPLS");
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::RowActivated(1))),
+            "the row's cells dispatch its activation: {messages:?}"
+        );
+        assert_eq!(app.flow.active_index(), Some(1));
+        assert_eq!(app.flow.active_playlist_name().as_deref(), Some("00001.MPLS"));
+    }
+
+    #[test]
+    fn a_header_click_sorts_the_table() {
+        let mut app = listed_app();
+        // The Group column reads ascending (1, 2) — BDInfo's rule makes the
+        // first click descend so it visibly re-orders.
+        click(&mut app, "Group");
+        assert_eq!(app.flow.sort(), Some(Sort { column: SortColumn::Group, ascending: false }));
+        let first = app.flow.table().into_iter().next().expect("a first row");
+        assert_eq!(first.cells.group, "2");
+    }
+
+    #[test]
+    fn the_settings_dialog_applies_on_ok_and_discards_on_cancel() {
+        let mut app = listed_app();
+        click(&mut app, "Settings...");
+        assert!(app.settings_draft.is_some());
+        click(&mut app, "Stream sizes in human readable format");
+        click(&mut app, "OK");
+        assert!(app.settings_draft.is_none());
+        assert!(app.persisted.human_readable_sizes);
+        // The retained disc re-rendered under the toggle — no rescan.
+        let first = app.flow.table().into_iter().next().expect("a first row");
+        assert_eq!(first.cells.estimated_bytes, "1,000.00 B");
+        // Cancel discards: flip a filter checkbox, then back out.
+        click(&mut app, "Settings...");
+        click(&mut app, "Filter playlists that contain loops");
+        click(&mut app, "Cancel");
+        assert!(app.settings_draft.is_none());
+        assert!(app.persisted.filter_looping_playlists, "the cancelled edit never landed");
+    }
+
+    #[test]
+    fn a_bad_path_lands_in_the_friendly_failure_screen() {
+        let mut app = App::default();
+        let _ = app.update(Message::OpenPath(PathBuf::from("definitely-not-a-disc.xyz")));
+        assert_eq!(app.flow.stage(), Stage::Failed);
+        assert!(sees(&app, "Couldn't open the disc"));
+        // The classifier's whole message renders (the selector is exact-text).
+        assert!(sees(&app, "The path does not exist: definitely-not-a-disc.xyz"));
+    }
+
+    #[test]
+    fn only_the_first_dropped_item_opens() {
+        // Two files dropped together: winit hovers both, then drops both. The
+        // first drop takes the hover flag and opens (here: fails classify);
+        // the second must be ignored, not clobber the first.
+        let mut app = App::default();
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::FileHovered);
+        let _ = app.update(Message::FileDropped(PathBuf::from("first.xyz")));
+        let _ = app.update(Message::FileDropped(PathBuf::from("second.xyz")));
+        assert_eq!(app.flow.stage(), Stage::Failed);
+        assert!(sees(&app, "The path does not exist: first.xyz"), "the FIRST item won the drop");
+        assert!(!sees(&app, "The path does not exist: second.xyz"));
+    }
+
+    #[test]
+    fn the_theme_toggle_cycles_and_persists_the_choice() {
+        let mut app = listed_app();
+        assert_eq!(app.theme_pref, ThemePref::System);
+        click(&mut app, "Theme: Auto");
+        assert_eq!(app.theme_pref, ThemePref::Light);
+        assert_eq!(app.persisted.theme, bdinfo_rs_gui::settings::ThemeChoice::Light);
+        click(&mut app, "Theme: Light");
+        assert_eq!(app.theme_pref, ThemePref::Dark);
+    }
+}
+
+/// Tier-B pixel ties: key states rendered offscreen on the deterministic
+/// tiny-skia backend with the bundled fonts, pinned as committed SHA-256
+/// hashes (`snapshots/*.sha256`) — iced's own cross-OS snapshot recipe. Run
+/// them via the gate (it sets `ICED_TEST_BACKEND=tiny-skia`); kept in their
+/// own module so CI can run them as a separate, initially-advisory step
+/// (`-E 'test(/^snapshots::/)'`).
+#[cfg(test)]
+mod snapshots {
+    use std::sync::Arc;
+
+    use bdinfo_rs_gui::settings;
+    use bdinfo_rs_gui::theme::ThemePref;
+
+    use super::harness::{assert_snapshot, listed_app, structural};
+    use super::{App, Message};
+
+    #[test]
+    fn idle_dark() {
+        let app = App { theme_pref: ThemePref::Dark, ..App::default() };
+        assert_snapshot(&app, "idle-dark");
+    }
+
+    #[test]
+    fn listed_light() {
+        let mut app = listed_app();
+        app.theme_pref = ThemePref::Light;
+        assert_snapshot(&app, "listed-light");
+    }
+
+    #[test]
+    fn reported_dark() {
+        let mut app = listed_app();
+        app.theme_pref = ThemePref::Dark;
+        let _ = app.update(Message::ScanSelected);
+        let _ = app.update(Message::Finished {
+            generation: app.generation,
+            report: "Disc Label: DISC\r\nA stable little report body.\r\n".to_owned(),
+            errors: Arc::new(Vec::new()),
+            playlists: structural().bdrom.playlists,
+        });
+        let _ = app.update(Message::DismissNotice);
+        let _ = app.update(Message::ShowReport);
+        assert_snapshot(&app, "report-dark");
+    }
+
+    #[test]
+    fn settings_dialog_dark() {
+        let mut app = listed_app();
+        app.theme_pref = ThemePref::Dark;
+        app.settings_draft = Some(settings::Draft::from_settings(&app.persisted));
+        assert_snapshot(&app, "settings-dark");
+    }
 }

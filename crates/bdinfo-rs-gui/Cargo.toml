@@ -41,6 +41,11 @@ iced = "0.14"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
+# Drive the real `view()` headlessly — click by text, drain the messages back
+# through `update` — and pin key states as tiny-skia RGBA snapshot hashes: the
+# Tier-B verification layer (Posture C's analogue of the wasm crate's
+# multi-runtime parity).
+iced_test = "0.14"
 # Amplify the Tier-A unit tests with property tests, like the wasm crate does.
 proptest = "1"
 
