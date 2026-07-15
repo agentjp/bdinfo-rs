@@ -1,23 +1,35 @@
 # cargo-mutants policy for the native GUI crate (its own workspace; the root
-# .cargo/mutants.toml is NOT inherited). Tier A — the target-agnostic pure logic
-# (the playlist view-model in `model`) — is held to 0 missed.
+# .cargo/mutants.toml is NOT inherited). Posture C, tiered like the wasm crate's
+# Posture B:
 #
-# Tier B is the iced render/IO glue: the `bdinfo-rs-gui` binary (Message/App/update/
-# view/the rfd dialog + scan tasks) and the IO-bound scan seam in `scan` (FsDir +
-# `BdRom::open_resilient*` + `text::render_with`). It is verified by the golden-tie
-# parity test (byte-exact report over the committed fixture) + running the app, not
-# by line-level mutation, so exclude it here by item name. (Phase 4 grows this to
-# full Posture C; for now the v0 gate does not run mutants.)
-exclude_re = [
-    "main", # the iced entry point
-    "update", # App::update — the message dispatch (Tier B)
-    "view", # App::view — the widget tree (Tier B)
-    "loaded_view", # the loaded screen's widget tree (Tier B)
-    "window_title", # the iced title fn
-    "pick_folder_dialog", # the rfd AsyncFileDialog future
-    "open_and_render", # FsDir -> open_resilient -> render_with (IO; golden-tied)
-    "scan_folder", # the public folder-scan seams (IO; golden-tied)
-]
+# Tier A — the LIBRARY (flow / model / selection / panes / progress / paths /
+# clipboard / columns / settings / theme / icon / scan) — is held to 0 missed.
+# Every mutant faces the whole suite: the unit + property tests, the golden-tie
+# parity tests (byte-exact reports over the committed fixture), and the
+# iced_test interaction + snapshot-hash tests in the binary (run the gate with
+# ICED_TEST_BACKEND=tiny-skia, as scripts/gui-compliance.ps1 and gui.yml do, so
+# the pixel ties participate — a palette or view-model mutation shifts the
+# rendered hash).
+#
+# Tier B — the two binary-only files — is excluded BY FILE, each with its proof:
+#
+#   src/main.rs  The iced shell: update/view/subscriptions, the rfd dialogs,
+#                the worker thread + channel, the window runtime. Environment-
+#                bound (display, dialogs, threads, the OS event loop) — a
+#                mutant here needs a running window to observe. Verified
+#                instead by the iced_test Simulator suite (which drives view →
+#                messages → update and asserts the Tier-A state), the snapshot
+#                hashes, the golden ties, and the headless launch smoke in CI.
+#
+#   src/ui.rs    The widget style vocabulary (Palette -> iced Style closures)
+#                and layout constants. Pure presentation whose only observable
+#                output is pixels: it is pinned byte-exactly by the tiny-skia
+#                snapshot hashes (any colour/border/spacing mutation shifts the
+#                rendered RGBA buffer), which is the Posture-B "byte-exact
+#                parity instead of line-level mutation" argument applied to
+#                pixels. Per-field unit assertions would restate every token
+#                twice without adding signal.
+exclude_globs = ["src/main.rs", "src/ui.rs"]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).
 additional_cargo_args = ["--locked"]

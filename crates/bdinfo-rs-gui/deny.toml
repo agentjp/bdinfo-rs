@@ -28,7 +28,24 @@ targets = [
 [advisories]
 version = 2
 # Add advisory IDs here ONLY with a comment explaining why the risk is accepted.
-ignore = []
+ignore = [
+    # `paste` (unmaintained, archived) — a proc-macro used at BUILD time by
+    # `metal`, the macOS wgpu backend. Compile-time only: it ships no code and
+    # never sees untrusted input. Clears when wgpu's metal stack drops it.
+    "RUSTSEC-2024-0436",
+    # `ttf-parser` (unmaintained, not vulnerable) — via ab_glyph -> sctk-adwaita,
+    # winit's Wayland client-side-decoration fallback, which rasterizes the
+    # WINDOW TITLE from system fonts. It never touches disc data. Clears when
+    # winit moves sctk-adwaita to a maintained glyph stack.
+    "RUSTSEC-2026-0192",
+    # quick-xml DoS advisories — via wayland-scanner, a BUILD-dependency that
+    # code-generates Wayland protocol bindings from the XML specs COMMITTED
+    # inside the wayland-* crates themselves. Build-time, trusted input,
+    # unreachable from any runtime path. wayland-scanner caps quick-xml below
+    # the fixed 0.41, so no lockfile bump resolves it yet.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 version = 2
