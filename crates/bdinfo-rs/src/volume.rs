@@ -41,6 +41,10 @@ const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 /// `label` reduced to a filesystem-safe report-file stem: each illegal or
 /// control character becomes `_`. A clean label — a folder name, a `.iso` volume
 /// identifier, a resolved drive label — passes through unchanged.
+///
+/// Replicated by the GUI's `paths::report_file_name`
+/// (`crates/bdinfo-rs-gui/src/paths.rs`), which must produce the same
+/// filename for the same disc — keep the two in lock-step.
 pub(crate) fn safe_report_stem(label: &str) -> String {
     label.chars().map(|c| if c.is_control() || ILLEGAL.contains(&c) { '_' } else { c }).collect()
 }

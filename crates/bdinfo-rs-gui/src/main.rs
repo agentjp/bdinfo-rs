@@ -1179,11 +1179,13 @@ impl App {
 
     /// Writes the rendered report into `dir` as `BDINFO.{label}.txt`, bytes
     /// verbatim (the locked CRLF / UTF-8 no-BOM contract — never re-encode).
+    /// The label is disc-controlled, so the filename goes through the Tier-A
+    /// sanitizer ([`paths::report_file_name`]) — the same name the CLI writes.
     fn save_report(&mut self, dir: &std::path::Path) {
         let (Some(report), Some(label)) = (self.flow.report(), self.flow.label()) else {
             return;
         };
-        let target = dir.join(format!("BDINFO.{label}.txt"));
+        let target = dir.join(paths::report_file_name(label));
         self.status = match std::fs::write(&target, report.as_bytes()) {
             Ok(()) => Some(format!("Report saved to: {}", target.display())),
             Err(err) => Some(format!("Save failed: {err}")),
@@ -2988,6 +2990,31 @@ mod interaction {
             std::fs::read(&target).expect("the report file was written"),
             b"THE MEASURED REPORT\r\n"
         );
+        assert!(
+            app.status.as_deref().is_some_and(|status| status.starts_with("Report saved to:")),
+            "the status line confirms the save: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_hostile_volume_label_saves_as_a_sanitized_flat_filename() {
+        // A disc controls its label bytes and autosave writes with no user in
+        // the loop: a separator-carrying label must land as ONE flat file
+        // inside the chosen directory — the same name the CLI writes.
+        let dir = scratch("save-hostile-label");
+        let mut hostile = structural();
+        hostile.bdrom.volume_label = r"..\..\EVIL".to_owned();
+        let input = bdinfo_rs_gui::scan::Input::Folder("disc".into());
+        let flow = bdinfo_rs_gui::flow::Flow::start_listing(input.clone()).listed(
+            &input,
+            Ok(hostile),
+            bdinfo_rs_gui::model::ViewSettings::default(),
+        );
+        let mut app = App { flow, ..App::default() };
+        let _ = app.update(Message::SaveDest(Some(dir.clone())));
+        let target = dir.join("BDINFO..._.._EVIL.txt");
+        assert!(target.exists(), "the sanitized name landed inside the chosen directory");
         assert!(
             app.status.as_deref().is_some_and(|status| status.starts_with("Report saved to:")),
             "the status line confirms the save: {:?}",

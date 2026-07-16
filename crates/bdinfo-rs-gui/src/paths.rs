@@ -9,6 +9,10 @@
 //! `<iso-path>::BDMV/PLAYLIST/<name>` (and `…::BDMV/STREAM/<clip>`): the
 //! image's OS path, a literal `::` separator, then the in-image path with `/`
 //! separators — unambiguous, and greppable back to the image.
+//!
+//! The report's save paths live here too: the autosave destination implied
+//! by the input ([`autosave_dir`]) and the disc-label-safe report filename
+//! ([`report_file_name`]).
 
 use std::path::{Path, PathBuf};
 
@@ -63,6 +67,32 @@ pub fn autosave_dir(input: &Input) -> Option<PathBuf> {
     // A bare relative name yields an empty parent — no destination, never an
     // accidental write into the current directory.
     dir.filter(|parent| !parent.as_os_str().is_empty())
+}
+
+/// Characters illegal in a Windows filename component, plus the separators
+/// that would re-root the report path. Replaced so `BDINFO.<stem>.txt` is
+/// always one writable file; applied uniformly on every platform so the
+/// report filename is identical everywhere. Replicates the CLI's
+/// `volume::ILLEGAL` (`crates/bdinfo-rs/src/volume.rs`) — keep in lock-step.
+const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// The report's save-file name for a disc labelled `label`:
+/// `BDINFO.<stem>.txt`, the stem being `label` with each illegal or control
+/// character replaced by `_`.
+///
+/// The same name the CLI writes for the same disc (its
+/// `volume::safe_report_stem`, replicated here because the crates share no
+/// code; keep the two in lock-step). A disc controls its label bytes and
+/// autosave writes with no user in the loop, so a hostile label (separators,
+/// `..\`, control chars) must never re-root the path or break the write; a
+/// clean label passes through unchanged.
+#[must_use]
+pub fn report_file_name(label: &str) -> String {
+    let stem: String = label
+        .chars()
+        .map(|c| if c.is_control() || ILLEGAL.contains(&c) { '_' } else { c })
+        .collect();
+    format!("BDINFO.{stem}.txt")
 }
 
 /// Builds the copy target for the `BDMV/<dir>/<name>` disc entry.
@@ -157,5 +187,48 @@ mod tests {
         assert_eq!(super::autosave_dir(&Input::Iso(iso)), Some(PathBuf::from("rips")));
         // A bare relative file name has no usable parent — no destination.
         assert_eq!(super::autosave_dir(&Input::Iso(PathBuf::from("disc.iso"))), None);
+    }
+
+    #[test]
+    fn report_file_name_passes_a_clean_label_through() {
+        // The same fixtures the CLI's `safe_report_stem` tests pin.
+        assert_eq!(super::report_file_name("MY_DISC"), "BDINFO.MY_DISC.txt");
+        assert_eq!(super::report_file_name("BigBuckBunny"), "BDINFO.BigBuckBunny.txt");
+        assert_eq!(super::report_file_name("Blu-Ray"), "BDINFO.Blu-Ray.txt");
+        assert_eq!(super::report_file_name(""), "BDINFO..txt");
+    }
+
+    #[test]
+    fn report_file_name_replaces_illegal_and_control_characters() {
+        assert_eq!(super::report_file_name(r"J:\"), "BDINFO.J__.txt");
+        assert_eq!(super::report_file_name("a/b"), "BDINFO.a_b.txt");
+        assert_eq!(super::report_file_name("x<y>z|?*\""), "BDINFO.x_y_z____.txt");
+        assert_eq!(super::report_file_name("tab\there"), "BDINFO.tab_here.txt");
+        // The disc-controlled relative-write shape: a label that would
+        // lexically escape the chosen directory stays one flat component.
+        assert_eq!(super::report_file_name(r"..\..\x"), "BDINFO..._.._x.txt");
+    }
+
+    mod prop {
+        use proptest::prelude::*;
+
+        proptest! {
+            // The write-safety contract: whatever bytes a disc puts in its
+            // label, the report filename is one flat component — no
+            // separators, no control characters, no illegal-on-Windows chars.
+            #[test]
+            fn report_file_name_is_always_one_safe_component(label in any::<String>()) {
+                let name = super::super::report_file_name(&label);
+                // Byte-exact prefix and suffix (strip, not ends_with — the
+                // `.txt` must match exactly, never case-insensitively).
+                let stem = name.strip_prefix("BDINFO.").and_then(|rest| rest.strip_suffix(".txt"));
+                prop_assert!(stem.is_some(), "the name keeps its fixed shape: {name}");
+                prop_assert!(
+                    !name.chars().any(|c| c.is_control() || super::super::ILLEGAL.contains(&c))
+                );
+                // Joining it onto a directory can never re-root the path.
+                prop_assert_eq!(std::path::Path::new(&name).components().count(), 1);
+            }
+        }
     }
 }
