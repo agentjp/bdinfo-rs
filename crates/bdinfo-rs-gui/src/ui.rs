@@ -322,24 +322,6 @@ pub fn secondary_button(p: Palette) -> impl Fn(&Theme, button::Status) -> button
     }
 }
 
-/// A quiet toolbar button (the theme toggle): no chrome until hover.
-pub fn toolbar_button(p: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_, status| {
-        let (bg, text) = match status {
-            button::Status::Hovered | button::Status::Pressed => (Some(p.hover.into()), p.text),
-            button::Status::Active => (None, p.text_muted),
-            button::Status::Disabled => (None, p.text_faint),
-        };
-        button::Style {
-            background: bg,
-            text_color: text,
-            border: border::rounded(RADIUS_SM),
-            shadow: Shadow::default(),
-            snap: true,
-        }
-    }
-}
-
 /// A flush, background-free click target — a row's checkbox or cells button. It
 /// draws no fill of its own in any state, so the row's [`row_surface`] container
 /// behind it owns the hover / selection band and the whole row lifts as one.

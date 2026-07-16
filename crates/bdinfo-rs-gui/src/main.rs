@@ -126,9 +126,10 @@ fn boot_with(app: App, base: Task<Message>) -> (App, Task<Message>) {
 }
 
 /// Debug: layer the screenshot-harness hooks over the boot. `BDINFO_GUI_THEME`
-/// (`light`/`dark`) pins the palette and `BDINFO_GUI_OPEN` / `BDINFO_GUI_ISO`
-/// auto-open a disc, so `scripts/gui-shoot.ps1` can drive the real window to a
-/// known state and capture it. Compiled out of every release build.
+/// (`light`/`dark`) pins the palette, `BDINFO_GUI_OPEN` / `BDINFO_GUI_ISO`
+/// auto-open a disc, and `BDINFO_GUI_SETTINGS` (any value) opens the Settings
+/// dialog, so `scripts/gui-shoot.ps1` can drive the real window to a known
+/// state and capture it. Compiled out of every release build.
 #[cfg(debug_assertions)]
 fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
     if let Ok(pref) = std::env::var("BDINFO_GUI_THEME") {
@@ -144,9 +145,12 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
     let iso = std::env::var("BDINFO_GUI_ISO")
         .ok()
         .map(|path| Task::done(Message::IsoPicked(Some(PathBuf::from(path)))));
+    let settings_dialog =
+        std::env::var("BDINFO_GUI_SETTINGS").ok().map(|_| Task::done(Message::OpenSettings));
     let mut tasks = vec![base];
     tasks.extend(folder);
     tasks.extend(iso);
+    tasks.extend(settings_dialog);
     // BDINFO_GUI_SMOKE_MS=<ms>: exit cleanly after the delay — the headless
     // launch smoke's seam ("the app opens, renders, exits 0"; see gui.yml).
     // The sleep blocks one executor worker, which is fine for a debug hook.
@@ -384,7 +388,7 @@ const GRAB_W: f32 = 14.0;
 /// reads them from here (and [`App::command_enabled`]), so wiring a native menu
 /// in a later phase is plumbing, not a rewrite. The intended native grouping is
 /// **File**: Open folder / Open ISO / Rescan / Save report (and the window's own
-/// Quit); **View**: the theme toggle.
+/// Quit); the theme lives inside the Settings dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     /// Open a Blu-ray disc folder.
@@ -399,8 +403,6 @@ enum Command {
     CopyReport,
     /// Open the Settings dialog.
     Settings,
-    /// Cycle the theme: Auto → Light → Dark.
-    ToggleTheme,
 }
 
 impl Command {
@@ -413,7 +415,6 @@ impl Command {
             Self::SaveReport => "Save report…",
             Self::CopyReport => "Copy",
             Self::Settings => "Settings...",
-            Self::ToggleTheme => "Theme",
         }
     }
 
@@ -426,7 +427,6 @@ impl Command {
             Self::SaveReport => Message::SaveReport,
             Self::CopyReport => Message::CopyReport,
             Self::Settings => Message::OpenSettings,
-            Self::ToggleTheme => Message::ToggleTheme,
         }
     }
 }
@@ -537,12 +537,12 @@ enum Message {
     SettingsToggled(SettingsField),
     /// The short-playlist seconds field was edited (sanitized to digits).
     SettingsSeconds(String),
+    /// A theme chip picked on the open dialog — previewed live via the draft.
+    SettingsTheme(settings::ThemeChoice),
     /// The Settings dialog's OK — apply + persist the draft.
     SettingsOk,
     /// The Settings dialog's Cancel (or a scrim click) — discard the draft.
     SettingsCancel,
-    /// The theme toggle pressed — cycle Auto → Light → Dark.
-    ToggleTheme,
     /// The OS reported (or changed) its light/dark setting.
     OsTheme(iced::theme::Mode),
     /// An animation frame — advances the indeterminate "scanning" bar.
@@ -582,8 +582,13 @@ enum Message {
 
 impl App {
     /// The current palette, resolved from the preference and the OS mode.
-    const fn palette(&self) -> Palette {
-        self.theme_pref.resolve(self.os_mode)
+    /// While the Settings dialog is open its draft's theme pick wins — the
+    /// live preview; Cancel drops the draft and the preview reverts with it.
+    fn palette(&self) -> Palette {
+        self.settings_draft
+            .as_ref()
+            .map_or(self.theme_pref, |draft| ThemePref::from_choice(draft.theme))
+            .resolve(self.os_mode)
     }
 
     /// The window title (an iced title function over the app state).
@@ -599,14 +604,13 @@ impl App {
     }
 
     /// The app-level base style: the window background + default text colour.
-    const fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
+    fn style(&self, _theme: &iced::Theme) -> iced::theme::Style {
         self.palette().base_style()
     }
 
     /// Whether a [`Command`] is currently actionable (drives its enabled state).
     fn command_enabled(&self, command: Command) -> bool {
         match command {
-            Command::ToggleTheme => true,
             // Browsing / re-scanning / reconfiguring is disabled while a scan
             // is in flight (`BDInfo` disables its Settings button then too).
             Command::OpenFolder | Command::OpenIso | Command::Settings => !self.is_busy(),
@@ -721,12 +725,12 @@ impl App {
             message @ (Message::OpenSettings
             | Message::SettingsToggled(_)
             | Message::SettingsSeconds(_)
+            | Message::SettingsTheme(_)
             | Message::SettingsOk
             | Message::SettingsCancel) => {
                 self.on_settings(message);
                 Task::none()
             }
-            Message::ToggleTheme => self.toggle_theme(),
             Message::OsTheme(mode) => {
                 self.os_mode = mode;
                 Task::none()
@@ -769,8 +773,9 @@ impl App {
     }
 
     /// Handles the Settings dialog's messages: open a fresh draft, edit it
-    /// (checkboxes / the digits-only seconds field), OK (apply + persist), or
-    /// Cancel (discard). A stray edit with no open dialog changes nothing.
+    /// (checkboxes / the digits-only seconds field / the theme chips), OK
+    /// (apply + persist), or Cancel (discard). A stray edit with no open
+    /// dialog changes nothing.
     fn on_settings(&mut self, message: Message) {
         match message {
             Message::OpenSettings => {
@@ -780,6 +785,13 @@ impl App {
             Message::SettingsSeconds(input) => {
                 if let Some(draft) = &mut self.settings_draft {
                     draft.seconds_text = settings::sanitize_seconds(&input);
+                }
+            }
+            Message::SettingsTheme(choice) => {
+                // The draft carries the pick; `palette()` previews it live
+                // while the dialog stays open, so Cancel reverts for free.
+                if let Some(draft) = &mut self.settings_draft {
+                    draft.theme = choice;
                 }
             }
             Message::SettingsOk => self.apply_settings(),
@@ -817,22 +829,15 @@ impl App {
 
     /// The Settings dialog's OK: persist the draft and hand the new view
     /// settings to the flow — a filter change re-derives the table from the
-    /// retained disc (no rescan), a display change re-renders the cells.
+    /// retained disc (no rescan), a display change re-renders the cells, and
+    /// the theme pick becomes the applied preference.
     fn apply_settings(&mut self) {
         if let Some(draft) = self.settings_draft.take() {
             draft.apply_to(&mut self.persisted);
+            self.theme_pref = ThemePref::from_choice(self.persisted.theme);
             self.persist();
             self.flow.set_view(ViewSettings::from_settings(&self.persisted));
         }
-    }
-
-    /// Cycles the theme preference (Auto → Light → Dark) and persists the
-    /// choice, so it sticks across launches.
-    fn toggle_theme(&mut self) -> Task<Message> {
-        self.theme_pref = self.theme_pref.next();
-        self.persisted.theme = self.theme_pref.choice();
-        self.persist();
-        Task::none()
     }
 
     /// Persists the closing window's geometry (`BDInfo` saves at `FormClosing`
@@ -1242,7 +1247,7 @@ impl App {
         let content = Column::new()
             .width(Length::Fill)
             .height(Length::Fill)
-            .push(self.toolbar(p))
+            .push(toolbar(p))
             .push(self.source_bar(p))
             .push(container(body).width(Length::Fill).height(Length::Fill).padding(ui::GAP_4))
             .push(self.bottom_bar(p));
@@ -1258,34 +1263,6 @@ impl App {
             Some(notice) => modal(base, notice_card(p, notice), Message::DismissNotice),
             None => base,
         }
-    }
-
-    /// The top toolbar: the brand mark + wordmark on the left, the theme toggle
-    /// (the `View` menu seam) on the right.
-    fn toolbar(&self, p: Palette) -> Element<'_, Message> {
-        let bar = Row::new()
-            .width(Length::Fill)
-            .align_y(Vertical::Center)
-            .spacing(ui::GAP_2)
-            .push(brand_mark(p))
-            .push(wordmark(p))
-            .push(Space::new().width(Length::Fill))
-            .push(self.theme_toggle(p));
-        container(bar)
-            .width(Length::Fill)
-            .padding([ui::GAP_2, ui::GAP_4])
-            .style(ui::toolbar(p))
-            .into()
-    }
-
-    /// The theme toggle button, naming the current preference (Auto/Light/Dark).
-    fn theme_toggle(&self, p: Palette) -> Element<'_, Message> {
-        let label = format!("Theme: {}", self.theme_pref.label());
-        button(text(label).size(ui::TEXT_SM).font(ui::UI_MEDIUM))
-            .padding([ui::GAP_1, ui::GAP_2])
-            .style(ui::toolbar_button(p))
-            .on_press(Command::ToggleTheme.message())
-            .into()
     }
 
     /// The source bar: a label, the read-only path field, and Browse / ISO /
@@ -1316,8 +1293,7 @@ impl App {
             .push(field)
             .push(self.labeled_command_button(p, "Browse...", Command::OpenFolder))
             .push(self.labeled_command_button(p, "ISO", Command::OpenIso))
-            .push(self.labeled_command_button(p, "Rescan", Command::Rescan))
-            .push(self.command_button(p, Command::Settings));
+            .push(self.labeled_command_button(p, "Rescan", Command::Rescan));
         container(bar).width(Length::Fill).padding([ui::GAP_3, ui::GAP_4]).into()
     }
 
@@ -1440,8 +1416,12 @@ impl App {
     /// other two carry a plain title.
     fn disc_panes(&self, p: Palette) -> Element<'_, Message> {
         PaneGrid::new(&self.panes, |_pane, region, _maximized| match *region {
-            Region::Playlist => pane_grid::Content::new(self.playlist_table(p))
-                .title_bar(pane_grid::TitleBar::new(self.select_bar(p))),
+            Region::Playlist => pane_grid::Content::new(self.playlist_table(p)).title_bar(
+                // The bottom padding keeps the select toggle clear of the
+                // table frame below it (a bare title bar sits flush on it).
+                pane_grid::TitleBar::new(self.select_bar(p))
+                    .padding(iced::padding::bottom(ui::GAP_2)),
+            ),
             Region::StreamFile => pane_grid::Content::new(data_table(
                 p,
                 STREAM_FILE_COLS,
@@ -1723,31 +1703,51 @@ impl App {
             .girth(Length::Fixed(8.0))
             .style(ui::progress(p));
 
-        let actions = if scanning {
-            Row::new().width(Length::Fill).push(Space::new().width(Length::Fill)).push(
-                button(text("Cancel").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
-                    .padding([ui::GAP_2, ui::GAP_4])
-                    .style(ui::secondary_button(p))
-                    .on_press(Message::Cancel),
-            )
+        // `BDInfo`'s bottom row, right-aligned: Scan Bitrates + View Report...
+        // (its order), then Settings... set apart on the far right. While a
+        // scan runs the pair swaps to Cancel in place; Settings... stays put,
+        // disabled ([`Self::command_enabled`]) — the row never jumps between
+        // states, and a not-yet-available report shows a disabled button, not
+        // a hole (`BDInfo` greys these too).
+        let scan_actions: Element<'_, Message> = if scanning {
+            button(text("Cancel").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                .padding([ui::GAP_2, ui::GAP_4])
+                .style(ui::secondary_button(p))
+                .on_press(Message::Cancel)
+                .into()
         } else {
-            let mut right = Row::new().spacing(ui::GAP_2);
-            if self.flow.report_available() {
-                right = right.push(
+            Row::new()
+                .spacing(ui::GAP_2)
+                .push(
+                    button(text("Scan Bitrates").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
+                        .padding([ui::GAP_2, ui::GAP_4])
+                        .style(ui::primary_button(p))
+                        .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected)),
+                )
+                .push(
                     button(text("View Report...").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                         .padding([ui::GAP_2, ui::GAP_4])
                         .style(ui::secondary_button(p))
-                        .on_press(Message::ShowReport),
-                );
-            }
-            right = right.push(
-                button(text("Scan Bitrates").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
-                    .padding([ui::GAP_2, ui::GAP_4])
-                    .style(ui::primary_button(p))
-                    .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected)),
-            );
-            Row::new().width(Length::Fill).push(Space::new().width(Length::Fill)).push(right)
+                        .on_press_maybe(
+                            self.flow.report_available().then_some(Message::ShowReport),
+                        ),
+                )
+                .into()
         };
+        let actions = Row::new()
+            .width(Length::Fill)
+            .push(Space::new().width(Length::Fill))
+            .push(scan_actions)
+            .push(Space::new().width(Length::Fixed(ui::GAP_6)))
+            .push(
+                button(text(Command::Settings.label()).size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+                    .padding([ui::GAP_2, ui::GAP_4])
+                    .style(ui::secondary_button(p))
+                    .on_press_maybe(
+                        self.command_enabled(Command::Settings)
+                            .then(|| Command::Settings.message()),
+                    ),
+            );
 
         let content =
             Column::new().width(Length::Fill).spacing(ui::GAP_2).push(top).push(bar).push(actions);
@@ -1765,6 +1765,18 @@ const HIDDEN_NOTE: &str =
     "(*) Some playlists on this disc have hidden tracks. These tracks are marked with an asterisk.";
 
 // ── stateless widget builders ────────────────────────────────────────────────
+
+/// The top toolbar: the brand mark + wordmark on the left — the quiet brand
+/// band (the theme control lives in the Settings dialog).
+fn toolbar<'a>(p: Palette) -> Element<'a, Message> {
+    let bar = Row::new()
+        .width(Length::Fill)
+        .align_y(Vertical::Center)
+        .spacing(ui::GAP_2)
+        .push(brand_mark(p))
+        .push(wordmark(p));
+    container(bar).width(Length::Fill).padding([ui::GAP_2, ui::GAP_4]).style(ui::toolbar(p)).into()
+}
 
 /// The 20 px brand "aperture" mark — a ring with a centre dot, mirroring the app
 /// icon, composed from styled widgets so it renders identically on every backend.
@@ -2285,6 +2297,21 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
         .push(seconds_field)
         .push(text("seconds").size(ui::TEXT_SM).color(p.text_muted));
 
+    // The appearance group, set off from BDInfo's scan settings above by a
+    // hairline: the Auto / Light / Dark picker, previewed live off the draft.
+    let rule = container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(ui::divider(p.line));
+    let theme_row = Row::new()
+        .align_y(Vertical::Center)
+        .spacing(ui::GAP_1)
+        .push(text("Theme").size(ui::TEXT_SM).color(p.text))
+        .push(Space::new().width(Length::Fill))
+        .push(theme_chip(p, settings::ThemeChoice::System, draft.theme))
+        .push(theme_chip(p, settings::ThemeChoice::Light, draft.theme))
+        .push(theme_chip(p, settings::ThemeChoice::Dark, draft.theme));
+
     let actions = Row::new()
         .width(Length::Fill)
         .spacing(ui::GAP_2)
@@ -2343,8 +2370,29 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
             draft.autosave_report,
             SettingsField::Autosave,
         ))
+        .push(rule)
+        .push(theme_row)
         .push(actions);
     container(card).padding(ui::GAP_6).style(ui::hero_card(p)).into()
+}
+
+/// One chip of the Settings dialog's Auto / Light / Dark theme picker — the
+/// picked choice takes the filled-accent (selection) look, the others stay
+/// quiet outlines. A click lands on the draft, so the pick previews live.
+fn theme_chip<'a>(
+    p: Palette,
+    choice: settings::ThemeChoice,
+    picked: settings::ThemeChoice,
+) -> Element<'a, Message> {
+    let label = ThemePref::from_choice(choice).label();
+    let chip =
+        button(text(label).size(ui::TEXT_SM).font(ui::UI_MEDIUM)).padding([ui::GAP_1, ui::GAP_3]);
+    let chip = if choice == picked {
+        chip.style(ui::primary_button(p))
+    } else {
+        chip.style(ui::secondary_button(p))
+    };
+    chip.on_press(Message::SettingsTheme(choice)).into()
 }
 
 /// One Settings checkbox line: the app's check chip + label, the whole line
@@ -2565,9 +2613,12 @@ mod harness {
     }
 
     /// A Simulator over the app's CURRENT `view()` (one frame; re-build it
-    /// after every state change, as iced would re-view).
+    /// after every state change, as iced would re-view), at the app's real
+    /// launch size — the Simulator's own default is a shorter landscape
+    /// viewport that clips the portrait layout's lower rows.
     pub fn ui(app: &App) -> Simulator<'_, Message> {
-        Simulator::with_settings(settings(), app.view())
+        let (width, height) = crate::WINDOW_SIZE;
+        Simulator::with_size(settings(), iced::Size::new(width, height), app.view())
     }
 
     /// Clicks the widget showing exactly `label` (the `&str` selector matches
@@ -2837,14 +2888,25 @@ mod interaction {
     }
 
     #[test]
-    fn the_theme_toggle_cycles_and_persists_the_choice() {
+    fn the_settings_theme_picker_previews_applies_and_reverts() {
         let mut app = listed_app();
         assert_eq!(app.theme_pref, ThemePref::System);
-        click(&mut app, "Theme: Auto");
-        assert_eq!(app.theme_pref, ThemePref::Light);
-        assert_eq!(app.persisted.theme, bdinfo_rs_gui::settings::ThemeChoice::Light);
-        click(&mut app, "Theme: Light");
+        // Picking a chip previews live off the draft — nothing applied yet.
+        click(&mut app, "Settings...");
+        click(&mut app, "Dark");
+        assert!(app.palette().is_dark, "the open dialog previews the pick");
+        assert_eq!(app.theme_pref, ThemePref::System);
+        // OK applies and persists the pick.
+        click(&mut app, "OK");
         assert_eq!(app.theme_pref, ThemePref::Dark);
+        assert_eq!(app.persisted.theme, bdinfo_rs_gui::settings::ThemeChoice::Dark);
+        // Cancel drops a previewed pick — the applied choice stands.
+        click(&mut app, "Settings...");
+        click(&mut app, "Light");
+        assert!(!app.palette().is_dark, "the preview switched to light");
+        click(&mut app, "Cancel");
+        assert_eq!(app.theme_pref, ThemePref::Dark);
+        assert!(app.palette().is_dark, "the cancelled preview reverted");
     }
 }
 

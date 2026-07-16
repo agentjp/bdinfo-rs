@@ -341,6 +341,10 @@ pub fn launch_size(
 )]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
+    /// The Theme picker (Auto / Light / Dark). The shell previews the pick
+    /// live while the dialog is open; Cancel drops the draft and the preview
+    /// with it.
+    pub theme: ThemeChoice,
     /// The "Filter short playlists" checkbox.
     pub filter_short_playlists: bool,
     /// The seconds field's text, kept digits-only by [`sanitize_seconds`].
@@ -365,6 +369,7 @@ impl Draft {
     #[must_use]
     pub fn from_settings(settings: &Settings) -> Self {
         Self {
+            theme: settings.theme,
             filter_short_playlists: settings.filter_short_playlists,
             seconds_text: settings.short_playlist_seconds.to_string(),
             filter_looping_playlists: settings.filter_looping_playlists,
@@ -381,6 +386,7 @@ impl Draft {
     /// [`MAX_SHORT_SECONDS`]); an empty or unparsable field keeps the prior
     /// threshold, exactly like `BDInfo`'s `int.TryParse` guard.
     pub fn apply_to(&self, settings: &mut Settings) {
+        settings.theme = self.theme;
         settings.filter_short_playlists = self.filter_short_playlists;
         settings.filter_looping_playlists = self.filter_looping_playlists;
         settings.human_readable_sizes = self.human_readable_sizes;
@@ -651,13 +657,19 @@ mod tests {
 
     #[test]
     fn a_draft_mirrors_and_applies_the_settings() {
-        let mut settings = Settings { short_playlist_seconds: 30, ..Settings::default() };
+        let mut settings = Settings {
+            short_playlist_seconds: 30,
+            theme: ThemeChoice::Light,
+            ..Settings::default()
+        };
         let mut draft = super::Draft::from_settings(&settings);
         assert_eq!(draft.seconds_text, "30");
+        assert_eq!(draft.theme, ThemeChoice::Light);
         assert!(draft.filter_short_playlists);
         assert!(draft.report_stream_diagnostics);
         assert!(draft.report_quick_summary);
         // Edit every field and apply: all of it lands.
+        draft.theme = ThemeChoice::Dark;
         draft.filter_short_playlists = false;
         draft.seconds_text = "0".to_owned();
         draft.filter_looping_playlists = false;
@@ -667,6 +679,7 @@ mod tests {
         draft.report_stream_diagnostics = false;
         draft.report_quick_summary = false;
         draft.apply_to(&mut settings);
+        assert_eq!(settings.theme, ThemeChoice::Dark);
         assert!(!settings.filter_short_playlists);
         assert_eq!(settings.short_playlist_seconds, 0);
         assert!(!settings.filter_looping_playlists);

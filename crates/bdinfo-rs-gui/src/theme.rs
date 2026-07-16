@@ -143,8 +143,8 @@ impl Palette {
 }
 
 /// The user's theme preference: follow the OS, or pin light/dark. Defaults to
-/// [`ThemePref::System`] so a fresh launch matches the desktop, and a click
-/// cycles System → Light → Dark.
+/// [`ThemePref::System`] so a fresh launch matches the desktop; the Settings
+/// dialog's Theme picker chooses between the three.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemePref {
     /// Follow the operating system's light/dark setting.
@@ -157,17 +157,6 @@ pub enum ThemePref {
 }
 
 impl ThemePref {
-    /// The next preference in the System → Light → Dark → System cycle (the
-    /// toolbar toggle).
-    #[must_use]
-    pub const fn next(self) -> Self {
-        match self {
-            Self::System => Self::Light,
-            Self::Light => Self::Dark,
-            Self::Dark => Self::System,
-        }
-    }
-
     /// Resolves the concrete [`Palette`] from this preference and the last-known
     /// OS mode. `System` follows the OS (defaulting to light when the OS gives no
     /// preference, `theme::Mode::None`); `Light`/`Dark` ignore the OS.
@@ -204,7 +193,8 @@ impl ThemePref {
         }
     }
 
-    /// A short label for the toolbar toggle, naming the *current* preference.
+    /// A short label for the Settings dialog's theme picker, naming the
+    /// preference.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -235,15 +225,6 @@ mod tests {
             assert_eq!(ThemePref::Light.resolve(os), Palette::LIGHT);
             assert_eq!(ThemePref::Dark.resolve(os), Palette::DARK);
         }
-    }
-
-    #[test]
-    fn the_toggle_cycles_system_light_dark() {
-        assert_eq!(ThemePref::System.next(), ThemePref::Light);
-        assert_eq!(ThemePref::Light.next(), ThemePref::Dark);
-        assert_eq!(ThemePref::Dark.next(), ThemePref::System);
-        // Three clicks return home.
-        assert_eq!(ThemePref::default().next().next().next(), ThemePref::default());
     }
 
     #[test]
