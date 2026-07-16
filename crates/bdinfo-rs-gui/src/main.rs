@@ -642,8 +642,8 @@ impl App {
             Message::FolderPicked(None) | Message::IsoPicked(None) | Message::SaveDest(None) => {
                 Task::none()
             }
-            Message::FolderPicked(Some(path)) => self.begin_listing(Input::Folder(path)),
-            Message::IsoPicked(Some(path)) => self.begin_listing(Input::Iso(path)),
+            Message::FolderPicked(Some(path)) => self.picked(Input::Folder(path)),
+            Message::IsoPicked(Some(path)) => self.picked(Input::Iso(path)),
             Message::OpenPath(path) => self.open_path(path),
             Message::FileHovered => {
                 self.drop_hover = true;
@@ -720,10 +720,7 @@ impl App {
                 Task::none()
             }
             Message::SaveReport => Task::perform(pick_folder(), Message::SaveDest),
-            Message::SaveDest(Some(dir)) => {
-                self.save_report(&dir);
-                Task::none()
-            }
+            Message::SaveDest(Some(dir)) => self.save_dest(&dir),
             Message::CopyReport => self.copy_report(),
             Message::DismissNotice => {
                 self.notice = None;
@@ -1031,6 +1028,31 @@ impl App {
             Some(dir) => self.save_report(&dir),
             None => self.status = Some("Save failed: no autosave destination".to_owned()),
         }
+    }
+
+    /// Applies a folder / `.iso` picker completion. rfd's dialogs are
+    /// parentless (non-modal), so one can sit open across a state change and
+    /// resolve into a stage it was never opened in — ignored while a scan is
+    /// in flight, the busy rule every other input road obeys (a late pick must
+    /// never replace a live scan and strand its worker's cancel flag).
+    fn picked(&mut self, input: Input) -> Task<Message> {
+        if self.is_busy() {
+            return Task::none();
+        }
+        self.begin_listing(input)
+    }
+
+    /// Applies a save-destination dialog completion. The dialog is non-modal
+    /// like the pickers, so a destination can resolve mid-scan — when
+    /// `flow.report()` is the structural (zero-bitrate) render, which would
+    /// silently overwrite the measured report on disk. Any settled stage may
+    /// save ([`Self::save_report`] itself requires an available report, and
+    /// the pre-scan structural save is a deliberate feature); a busy one never.
+    fn save_dest(&mut self, dir: &std::path::Path) -> Task<Message> {
+        if !self.is_busy() {
+            self.save_report(dir);
+        }
+        Task::none()
     }
 
     /// Opens `path` — a dropped item or the boot argument — through the same
@@ -2894,6 +2916,83 @@ mod interaction {
         assert_eq!(app.flow.stage(), Stage::Failed);
         assert!(sees(&app, "The path does not exist: first.xyz"), "the FIRST item won the drop");
         assert!(!sees(&app, "The path does not exist: second.xyz"));
+    }
+
+    /// A scratch directory under the crate's target dir (unique per test) for
+    /// the save-destination tests.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/interaction-tests").join(name);
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        dir
+    }
+
+    #[test]
+    fn a_picker_completion_never_interrupts_a_running_scan() {
+        // rfd dialogs are non-modal: a Browse / ISO dialog left open across a
+        // scan start resolves into Scanning. Both completions must be dropped
+        // — replacing the flow would strand the worker's cancel flag.
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("other-disc"))));
+        assert_eq!(
+            app.flow.stage(),
+            Stage::Scanning,
+            "a late folder pick must not replace the scan"
+        );
+        let _ = app.update(Message::IsoPicked(Some(PathBuf::from("other.iso"))));
+        assert_eq!(app.flow.stage(), Stage::Scanning, "a late .iso pick must not replace the scan");
+        assert!(app.scan_cancel.is_some(), "the worker's cancel flag is still owned");
+        // The loaded disc is still the one being scanned, not the late pick.
+        assert_eq!(
+            app.flow.current_input(),
+            Some(&bdinfo_rs_gui::scan::Input::Folder("disc".into()))
+        );
+    }
+
+    #[test]
+    fn a_save_destination_resolving_mid_scan_writes_nothing() {
+        // "Save report…" open → a new scan starts → the destination resolves:
+        // mid-scan `flow.report()` is the structural (zero-bitrate) render,
+        // which would silently overwrite the measured report on disk.
+        let dir = scratch("save-mid-scan");
+        let target = dir.join("BDINFO.DISC.txt");
+        let _ = std::fs::remove_file(&target);
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        let _ = app.update(Message::SaveDest(Some(dir)));
+        assert!(app.status.is_none(), "no save outcome is reported mid-scan");
+        assert!(!target.exists(), "nothing may be written while a scan is in flight");
+    }
+
+    #[test]
+    fn a_save_destination_in_a_settled_stage_writes_the_report() {
+        // The positive control: once the scan has settled into Reported, the
+        // same completion writes the measured report bytes verbatim.
+        let dir = scratch("save-settled");
+        let target = dir.join("BDINFO.DISC.txt");
+        let _ = std::fs::remove_file(&target);
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Finished {
+            generation: app.generation,
+            report: "THE MEASURED REPORT\r\n".to_owned(),
+            errors: Arc::new(Vec::new()),
+            playlists: structural().bdrom.playlists,
+        });
+        assert_eq!(app.flow.stage(), Stage::Reported);
+        let _ = app.update(Message::SaveDest(Some(dir)));
+        assert_eq!(
+            std::fs::read(&target).expect("the report file was written"),
+            b"THE MEASURED REPORT\r\n"
+        );
+        assert!(
+            app.status.as_deref().is_some_and(|status| status.starts_with("Report saved to:")),
+            "the status line confirms the save: {:?}",
+            app.status
+        );
     }
 
     #[test]
