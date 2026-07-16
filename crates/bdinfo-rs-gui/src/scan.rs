@@ -484,17 +484,18 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let fired = AtomicUsize::new(0);
-        // The success road: defused, so the alarm never fires.
-        super::PanicAlarm::new(|| {
+        // ONE closure (Copy — it captures a shared borrow) arms both alarms,
+        // so the payload that must stay silent on the defuse road is the very
+        // one proven to fire on the unwind road.
+        let bump = || {
             fired.fetch_add(1, Ordering::Relaxed);
-        })
-        .defuse();
+        };
+        // The success road: defused, so the alarm never fires.
+        super::PanicAlarm::new(bump).defuse();
         assert_eq!(fired.load(Ordering::Relaxed), 0);
         // The panic road: the unwind drops the armed alarm, which fires once.
         let unwound = catch_unwind(AssertUnwindSafe(|| {
-            let _alarm = super::PanicAlarm::new(|| {
-                fired.fetch_add(1, Ordering::Relaxed);
-            });
+            let _alarm = super::PanicAlarm::new(bump);
             panic!("worker died");
         }));
         assert!(unwound.is_err());
