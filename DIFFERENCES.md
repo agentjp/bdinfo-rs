@@ -24,6 +24,7 @@ actually see on a normal disc.
 | [DTS:X IMAX detection](#dtsx-imax-detection) | **Yes** — codec name | DTS:X IMAX tracks |
 | [HDR10+ without a mastering display](#hdr10-without-a-mastering-display) | **Yes** — HDR token | HDR10+ titles whose stream carries no static mastering-display SEI |
 | [AVC High 4:4:4 (profile 244)](#avc-high-444-profile-244) | **Yes** — profile token | Rare — Blu-ray video is almost always 4:2:0 |
+| [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
 | [HEVC `profile_idc` recovery](#correctness-fixes-with-no-effect-on-a-normal-disc) | Edge case only | Malformed headers with `general_profile_idc == 0` |
@@ -99,6 +100,24 @@ code (144), so 244 fell through to `Unknown Profile`; bdinfo-rs maps both to the
 <sub>Within the same fix, the CAVLC 4:4:4 code (44) and constraint-flag refinements are
 deliberately left at `Unknown Profile` — BDInfo has no string for them, and inventing one
 would break the locked report. Source: `crates/bdinfo-rs-core/src/codec/avc.rs`.</sub>
+
+### PGS forced-caption counts
+
+BDInfo reads a composition object's four cropping fields unconditionally; per the HDMV
+layout (FFmpeg `pgssubdec`, libbluray `pg_decode`) they are present only when the crop
+flag (`0x80`) is set. On a multi-object composition the over-read consumes the next
+object's bytes and then reads past the segment end into stale buffer memory, so the
+forced flag comes from leftover data — captions get randomly misreported as forced.
+bdinfo-rs parses the spec layout and reports the true normal/forced split.
+
+```diff
+- Presentation Graphics           English         33.00 kbps      1920x1080 / 1546 Captions (54 Forced Captions)
++ Presentation Graphics           English         33.00 kbps      1920x1080 / 1600 Captions
+```
+
+<sub>The total is unaffected — only the split; genuinely forced captions still render with
+BDInfo's existing forms. Source: `crates/bdinfo-rs-core/src/codec/pgs.rs` (PCS
+composition-object parse).</sub>
 
 ---
 
