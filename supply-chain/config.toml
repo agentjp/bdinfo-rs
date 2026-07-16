@@ -44,7 +44,7 @@ version = "1.5.1"
 criteria = "safe-to-run"
 
 [[exemptions.bitflags]]
-version = "2.13.0"
+version = "2.13.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.cfg-if]]
@@ -52,11 +52,11 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
-version = "4.6.1"
+version = "4.6.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_builder]]
-version = "4.6.0"
+version = "4.6.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_complete]]
