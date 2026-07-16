@@ -223,6 +223,59 @@ pub fn scan_measured(
     })
 }
 
+/// Runs `scan`, mapping a panic — a violation of the core's fuzz-held
+/// no-panic contract on some hostile disc — onto the same `Err` road an
+/// ordinary scan failure takes.
+///
+/// The shell wraps [`scan_structural`] in this so a panic lands in the
+/// friendly failure state instead of losing the completion message and
+/// sticking the non-dismissable "scanning" modal. `AssertUnwindSafe` is
+/// sound here: the closure and its captures are consumed either way, and the
+/// caller only ever reads the returned `Result`.
+///
+/// # Errors
+/// Whatever `scan` itself returned, passed through untouched — plus the one
+/// mapping this exists for: a panic becomes `Err("scan terminated
+/// unexpectedly")`.
+pub fn catch_scan_panic<T>(scan: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(scan))
+        .unwrap_or_else(|_| Err("scan terminated unexpectedly".to_owned()))
+}
+
+/// A defuse-on-success alarm for the measured-scan worker thread.
+///
+/// Unless [`defuse`](Self::defuse)d, dropping it runs `on_drop` — and a
+/// panic's unwind drops locals, so arming one at the top of the worker
+/// closure turns "the worker died and the message stream just ended, the UI
+/// stuck at Scanning" into an ordinary terminal failure message. Pure safe
+/// Rust; the shell's message carries the scan generation, so an alarm firing
+/// after the flow moved on is dropped like any other stale event.
+pub struct PanicAlarm<F: FnOnce()> {
+    /// The armed payload; `None` once defused.
+    on_drop: Option<F>,
+}
+
+impl<F: FnOnce()> PanicAlarm<F> {
+    /// Arms the alarm.
+    #[must_use]
+    pub const fn new(on_drop: F) -> Self {
+        Self { on_drop: Some(on_drop) }
+    }
+
+    /// Disarms it — the success path delivered its own terminal message.
+    pub fn defuse(mut self) {
+        self.on_drop = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for PanicAlarm<F> {
+    fn drop(&mut self) {
+        if let Some(fire) = self.on_drop.take() {
+            fire();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -407,6 +460,45 @@ mod tests {
         // disc's BDMV/BACKUP copy — resilience, not silence; the warning above
         // is the record of the primary's corruption.
         assert!(!structural.bdrom.playlists.is_empty());
+    }
+
+    #[test]
+    fn catch_scan_panic_passes_results_through() {
+        assert_eq!(super::catch_scan_panic(|| Ok(7_u8)), Ok(7));
+        assert_eq!(
+            super::catch_scan_panic::<u8>(|| Err("bad disc".to_owned())),
+            Err("bad disc".to_owned())
+        );
+    }
+
+    #[test]
+    fn catch_scan_panic_maps_a_panic_to_the_error_road() {
+        // The panic road: what a core no-panic-contract violation would take.
+        let result = super::catch_scan_panic::<u8>(|| panic!("core contract broken"));
+        assert_eq!(result, Err("scan terminated unexpectedly".to_owned()));
+    }
+
+    #[test]
+    fn the_panic_alarm_fires_on_unwind_and_not_when_defused() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fired = AtomicUsize::new(0);
+        // The success road: defused, so the alarm never fires.
+        super::PanicAlarm::new(|| {
+            fired.fetch_add(1, Ordering::Relaxed);
+        })
+        .defuse();
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+        // The panic road: the unwind drops the armed alarm, which fires once.
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let _alarm = super::PanicAlarm::new(|| {
+                fired.fetch_add(1, Ordering::Relaxed);
+            });
+            panic!("worker died");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(fired.load(Ordering::Relaxed), 1);
     }
 
     #[cfg(windows)]

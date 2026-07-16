@@ -1098,7 +1098,12 @@ impl App {
             async move {
                 #[cfg(debug_assertions)]
                 debug_scan_delay();
-                let result = scan::scan_structural(&input);
+                // The core is fuzz-held no-panic, but the exposure is exactly
+                // this untrusted-disc path — an escaped panic would lose the
+                // Listed message and stick the non-dismissable "scanning"
+                // modal, so it is caught onto the same friendly failure road
+                // a bad disc takes.
+                let result = scan::catch_scan_panic(|| scan::scan_structural(&input));
                 (input, result)
             },
             |(input, result)| Message::Listed { input, result },
@@ -1128,6 +1133,19 @@ impl App {
 
         let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
         std::thread::spawn(move || {
+            // A panic anywhere below would drop the sender and simply end the
+            // message stream — the UI stuck at Scanning with no hint. The
+            // armed alarm's Drop runs during that unwind and reports the
+            // death as an ordinary scan failure; the generation tag keeps a
+            // stale alarm harmless, and the success path defuses it after
+            // delivering its own terminal message.
+            let alarm_sender = sender.clone();
+            let alarm = scan::PanicAlarm::new(move || {
+                let _ = alarm_sender.unbounded_send(Message::ScanFailed {
+                    generation,
+                    error: "scan worker terminated unexpectedly".to_owned(),
+                });
+            });
             // The scan fires its progress callback every few MB — tens of thousands
             // of times on a feature disc. Coalesce to one message per ~100 ms (plus
             // every file boundary) so the UI re-renders a few times a second, not
@@ -1169,6 +1187,7 @@ impl App {
                 Err(error) => Message::ScanFailed { generation, error },
             };
             let _ = sender.unbounded_send(outcome);
+            alarm.defuse();
         });
 
         self.flow = std::mem::take(&mut self.flow).start_scanning(generation);
