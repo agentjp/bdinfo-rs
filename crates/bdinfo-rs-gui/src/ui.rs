@@ -62,7 +62,8 @@ pub const HEADER_H: f32 = 36.0;
 // ── Table column geometry ────────────────────────────────────────────────────
 //
 // Data-column WIDTHS are not fixed here: they are live, user-resizable weights
-// (`App::grid_w` / `App::codec_w`), rendered as `iced` `FillPortion`s so the
+// (`App::playlist_w` / `App::stream_w` / `App::codec_w`), rendered as `iced`
+// `FillPortion`s so the
 // columns stay proportional as the window resizes — like `BDInfo`, whose columns
 // are a fraction of the list width. Only the checkbox, the accent bar, and the
 // scrollbar gutter are fixed-width.

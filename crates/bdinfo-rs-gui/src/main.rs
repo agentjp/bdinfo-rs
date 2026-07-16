@@ -286,9 +286,13 @@ struct App {
     /// them (Playlist / Stream File on top, Codec below). Holds the split ratios,
     /// which the user drags and which resize proportionally with the window.
     panes: pane_grid::State<Region>,
-    /// The Playlist + Stream File shared column weights (Name / Int / Length /
-    /// Estimated / Measured) — the user drags header dividers to re-weight them.
-    grid_w: [f32; 5],
+    /// The Playlist pane column weights (Name / Group / Length / Estimated /
+    /// Measured) — the user drags header dividers to re-weight them.
+    playlist_w: [f32; 5],
+    /// The Stream File pane column weights (File / Index / Length / Estimated /
+    /// Measured) — its own set, so it resizes independently of the playlist's,
+    /// as in `BDInfo`.
+    stream_w: [f32; 5],
     /// The Codec pane column weights (Codec / Language / Bit Rate / Description).
     codec_w: [f32; 4],
     /// The in-flight column drag: which grid + boundary, the columns' pixel span
@@ -323,8 +327,10 @@ impl Default for App {
             pane_selection: None,
             pulse: 0,
             panes: default_panes(),
-            // BDInfo's playlist ratios; the Codec grid is its own 22/10/10/56.
-            grid_w: [30.0, 7.0, 19.0, 21.0, 21.0],
+            // BDInfo's playlist ratios (both upper grids open with the same
+            // proportions); the Codec grid is its own 22/10/10/56.
+            playlist_w: [30.0, 7.0, 19.0, 21.0, 21.0],
+            stream_w: [30.0, 7.0, 19.0, 21.0, 21.0],
             codec_w: [22.0, 10.0, 10.0, 56.0],
             col_drag: None,
             drop_hover: false,
@@ -368,13 +374,14 @@ enum Region {
     Codec,
 }
 
-/// Which set of resizable column weights a drag targets. The Playlist and Stream
-/// File panes share ONE weight set (`Shared`) so their columns stay locked
-/// together; the Codec pane has its own (`Codec`).
+/// Which set of resizable column weights a drag targets — one per pane, so
+/// each table's columns resize independently, as in `BDInfo`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColGrid {
-    /// The Playlist + Stream File shared column weights.
-    Shared,
+    /// The Playlist pane's column weights.
+    Playlist,
+    /// The Stream File pane's column weights.
+    StreamFile,
     /// The Codec pane's column weights.
     Codec,
 }
@@ -882,7 +889,8 @@ impl App {
     /// The live column weights for `grid`.
     const fn column_weights(&self, grid: ColGrid) -> &[f32] {
         match grid {
-            ColGrid::Shared => self.grid_w.as_slice(),
+            ColGrid::Playlist => self.playlist_w.as_slice(),
+            ColGrid::StreamFile => self.stream_w.as_slice(),
             ColGrid::Codec => self.codec_w.as_slice(),
         }
     }
@@ -890,7 +898,8 @@ impl App {
     /// The live column weights for `grid`, mutable.
     const fn column_weights_mut(&mut self, grid: ColGrid) -> &mut [f32] {
         match grid {
-            ColGrid::Shared => self.grid_w.as_mut_slice(),
+            ColGrid::Playlist => self.playlist_w.as_mut_slice(),
+            ColGrid::StreamFile => self.stream_w.as_mut_slice(),
             ColGrid::Codec => self.codec_w.as_mut_slice(),
         }
     }
@@ -1425,8 +1434,8 @@ impl App {
             Region::StreamFile => pane_grid::Content::new(data_table(
                 p,
                 STREAM_FILE_COLS,
-                &self.grid_w,
-                ColGrid::Shared,
+                &self.stream_w,
+                ColGrid::StreamFile,
                 self.stream_file_table_rows(),
                 Region::StreamFile,
                 self.pane_hovered(Region::StreamFile),
@@ -1522,8 +1531,8 @@ impl App {
         let header = container(resizable_header(
             p,
             PLAYLIST_COLS,
-            ColGrid::Shared,
-            self.grid_w.to_vec(),
+            ColGrid::Playlist,
+            self.playlist_w.to_vec(),
             Some((PLAYLIST_SORT_COLS, self.flow.sort(), self.hovered_header)),
         ))
         .width(Length::Fill)
@@ -1538,7 +1547,7 @@ impl App {
         let mut rows = Column::new().width(Length::Fill);
         for row_data in self.flow.table() {
             let hovered = self.hovered == Some((Region::Playlist, row_data.index));
-            rows = rows.push(table_row(p, &row_data, editable, hovered, &self.grid_w));
+            rows = rows.push(table_row(p, &row_data, editable, hovered, &self.playlist_w));
         }
         let body = scrollable(rows).width(Length::Fill).height(Length::Fill);
 
@@ -2099,8 +2108,8 @@ fn pane_title<'a>(p: Palette, title: &str) -> Element<'a, Message> {
 
 /// One read-only data column — its header label, alignment, and whether its
 /// cells render in the tabular monospace. The **width** is not fixed here: it
-/// comes from the live, user-resizable weights (see [`App::grid_w`] /
-/// [`App::codec_w`]).
+/// comes from the live, user-resizable weights (see [`App::playlist_w`] /
+/// [`App::stream_w`] / [`App::codec_w`]).
 struct Col {
     /// The header label.
     label: &'static str,
@@ -2110,8 +2119,8 @@ struct Col {
     mono: bool,
 }
 
-/// The Playlist columns (the shared grid). The checkbox is a separate leading
-/// column, so these are the five data columns only.
+/// The Playlist columns. The checkbox is a separate leading column, so these
+/// are the five data columns only.
 const PLAYLIST_COLS: &[Col] = &[
     Col { label: "Playlist File", align: Horizontal::Left, mono: true },
     Col { label: "Group", align: Horizontal::Center, mono: true },
@@ -2130,8 +2139,8 @@ const PLAYLIST_SORT_COLS: &[SortColumn] = &[
     SortColumn::Measured,
 ];
 
-/// The "Stream File" pane columns — the SHARED grid, so they line up under the
-/// playlist's (Length / Estimated / Measured on the same grid lines).
+/// The "Stream File" pane columns — its own grid, resized independently of the
+/// playlist's (they only *open* on the same proportions).
 const STREAM_FILE_COLS: &[Col] = &[
     Col { label: "Stream File", align: Horizontal::Left, mono: true },
     Col { label: "Index", align: Horizontal::Center, mono: true },
