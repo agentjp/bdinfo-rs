@@ -84,6 +84,12 @@ struct Listing {
     /// A failed measured scan returns here with its message — a banner over the
     /// still-usable table, so the user can re-select and retry.
     error: Option<String>,
+    /// The rendered structural (zero-bitrate) report over the playlists a scan
+    /// would cover now — `BDInfo`'s pre-scan "View Report", stored so the view
+    /// borrows it per rebuild instead of re-rendering per frame. Kept fresh by
+    /// [`refresh_report`](Self::refresh_report) at every mutation that could
+    /// change it.
+    structural_report: String,
 }
 
 impl Listing {
@@ -93,7 +99,7 @@ impl Listing {
         let rows = model::playlist_rows(&structural.bdrom.playlists, &view.filter());
         let show_hidden = model::any_hidden(&rows);
         let selection = Selection::new(rows.len());
-        Self {
+        let mut listing = Self {
             input,
             bdrom: structural.bdrom,
             features: structural.features,
@@ -105,7 +111,21 @@ impl Listing {
             show_hidden,
             warnings: structural.warnings,
             error: None,
-        }
+            structural_report: String::new(),
+        };
+        listing.refresh_report();
+        listing
+    }
+
+    /// Re-renders the retained structural report
+    /// ([`render_structural`](Self::render_structural)). Called
+    /// **unconditionally** by every mutation that could change it — selection
+    /// edits, sorting, a view change, the measured rebuild — mirroring the
+    /// settled `set_view` rule: a "did anything change?" guard is a known
+    /// equivalent-mutant trap, and re-rendering identical bytes on a click is
+    /// the accepted cost.
+    fn refresh_report(&mut self) {
+        self.structural_report = self.render_structural();
     }
 
     /// Applies a changed view configuration (the Settings dialog's OK). A
@@ -117,17 +137,19 @@ impl Listing {
     fn set_view(&mut self, view: ViewSettings) {
         let filter_changed = self.view.filter() != view.filter();
         self.view = view;
-        if !filter_changed {
-            return;
+        if filter_changed {
+            let mut rows = model::playlist_rows(&self.bdrom.playlists, &self.view.filter());
+            if let Some(sort) = self.sort {
+                let _ = model::sort_rows(&mut rows, sort);
+            }
+            self.selection = Selection::new(rows.len());
+            self.active = self.active.min(rows.len().saturating_sub(1));
+            self.show_hidden = model::any_hidden(&rows);
+            self.rows = rows;
         }
-        let mut rows = model::playlist_rows(&self.bdrom.playlists, &self.view.filter());
-        if let Some(sort) = self.sort {
-            let _ = model::sort_rows(&mut rows, sort);
-        }
-        self.selection = Selection::new(rows.len());
-        self.active = self.active.min(rows.len().saturating_sub(1));
-        self.show_hidden = model::any_hidden(&rows);
-        self.rows = rows;
+        // Display-only changes alter the render options too, so the retained
+        // report refreshes on EVERY view change, filtered or not.
+        self.refresh_report();
     }
 
     /// The checked rows' playlist names, in table order.
@@ -158,6 +180,9 @@ impl Listing {
         let order = model::sort_rows(&mut self.rows, sort);
         self.selection.permute(&order);
         self.active = order.iter().position(|&old| old == self.active).unwrap_or(0);
+        // The report renders the scan set in table order, so a re-sort
+        // re-orders the retained report too.
+        self.refresh_report();
     }
 
     /// Replaces the disc's playlists with the measured ones, rebuilding the rows
@@ -183,6 +208,9 @@ impl Listing {
         self.show_hidden = model::any_hidden(&rows);
         self.bdrom.playlists = playlists;
         self.rows = rows;
+        // The retained structural render must follow the measured disc — it
+        // is what a LATER scan serves while in flight.
+        self.refresh_report();
     }
 
     /// The active row's playlist, resolved through its `playlist_index`.
@@ -372,10 +400,12 @@ impl Flow {
     }
 
     /// Toggles the checkbox at `index` (only while the table is editable —
-    /// [`Stage::Listed`] / [`Stage::Reported`]).
+    /// [`Stage::Listed`] / [`Stage::Reported`]). The scan set changed, so the
+    /// retained pre-scan report refreshes with it.
     pub fn toggle(&mut self, index: usize) {
         if let Some(listing) = self.editable_listing_mut() {
             listing.selection.toggle(index);
+            listing.refresh_report();
         }
     }
 
@@ -403,17 +433,21 @@ impl Flow {
         }
     }
 
-    /// Checks every row ("Select all").
+    /// Checks every row ("Select all"). Refreshes the retained pre-scan
+    /// report like any selection edit.
     pub fn select_all(&mut self) {
         if let Some(listing) = self.editable_listing_mut() {
             listing.selection.set_all();
+            listing.refresh_report();
         }
     }
 
-    /// Unchecks every row ("Select none").
+    /// Unchecks every row ("Select none"). Refreshes the retained pre-scan
+    /// report like any selection edit.
     pub fn select_none(&mut self) {
         if let Some(listing) = self.editable_listing_mut() {
             listing.selection.clear();
+            listing.refresh_report();
         }
     }
 
@@ -715,9 +749,8 @@ impl Flow {
     /// Whether a report can be shown / saved / copied now — true whenever a disc
     /// is loaded ([`Stage::Listed`] / [`Stage::Scanning`] / [`Stage::Reported`]).
     /// Before the measured scan that report is the structural (zero-bitrate) one;
-    /// after, the measured one. A cheap predicate the view gates the "View Report"
-    /// button and Save / Copy on — unlike [`report`](Self::report) it never
-    /// renders, so it is safe to call every frame.
+    /// after, the measured one. The cheap predicate the view gates the "View
+    /// Report" button and Save / Copy on.
     #[must_use]
     pub const fn report_available(&self) -> bool {
         matches!(self.inner, Inner::Listed(_) | Inner::Scanning { .. } | Inner::Reported { .. })
@@ -725,19 +758,18 @@ impl Flow {
 
     /// The report to display / save / copy for the current stage: the measured
     /// report once a scan has finished ([`Stage::Reported`], byte-for-byte what
-    /// the scan rendered), else the structural (zero-bitrate) report rendered
-    /// from the loaded disc over the current selection ([`Stage::Listed`] /
-    /// [`Stage::Scanning`]) — `BDInfo`'s pre-scan "View Report".
+    /// the scan rendered), else the retained structural (zero-bitrate) render
+    /// over the current selection ([`Stage::Listed`] / [`Stage::Scanning`]) —
+    /// `BDInfo`'s pre-scan "View Report".
     ///
-    /// The structural case renders on demand, so call this only when actually
-    /// showing or writing the report; test availability with
-    /// [`report_available`](Self::report_available) instead.
+    /// Every road borrows a string stored at transition/refresh time (nothing
+    /// renders here), so the view calls this per rebuild for free.
     #[must_use]
-    pub fn report(&self) -> Option<String> {
+    pub fn report(&self) -> Option<&str> {
         match &self.inner {
-            Inner::Reported { report, .. } => Some(report.clone()),
+            Inner::Reported { report, .. } => Some(report),
             Inner::Listed(listing) | Inner::Scanning { listing, .. } => {
-                Some(listing.render_structural())
+                Some(&listing.structural_report)
             }
             _ => None,
         }
@@ -1090,7 +1122,7 @@ mod tests {
         );
         assert_eq!(flow.stage(), Stage::Reported);
         // Reported returns the measured report byte-for-byte (not a re-render).
-        assert_eq!(flow.report().as_deref(), Some("REPORT"));
+        assert_eq!(flow.report(), Some("REPORT"));
         assert_eq!(flow.label(), Some("DISC"));
         assert!(flow.report_errors().is_empty());
         assert!(flow.report_available());
@@ -1105,7 +1137,7 @@ mod tests {
         let mut flow = listed();
         assert!(flow.report_available());
         assert_eq!(flow.label(), Some("DISC")); // the disc label is available pre-scan
-        let whole = flow.report().expect("a structural report before scanning");
+        let whole = flow.report().expect("a structural report before scanning").to_owned();
         // The disc-level facts render even before measuring.
         assert!(whole.contains("Disc Label:"));
         assert!(whole.contains("DISC"));
@@ -1118,6 +1150,56 @@ mod tests {
         let one = flow.report().expect("a structural report for the selection");
         assert!(one.len() < whole.len());
         assert!(one.contains("00000.MPLS"));
+    }
+
+    #[test]
+    fn selection_edits_keep_the_pre_scan_report_fresh() {
+        // The pre-scan report is STORED (the view borrows it), so every
+        // selection edit must refresh it: a toggle narrows it, select-all
+        // widens it back, select-none returns it to scan-all.
+        let mut flow = listed();
+        let whole = flow.report().expect("a structural report").to_owned();
+        flow.toggle(0);
+        let one = flow.report().expect("a structural report").to_owned();
+        assert!(one.contains("00000.MPLS") && !one.contains("00001.MPLS"));
+        flow.select_all();
+        assert_eq!(flow.report(), Some(whole.as_str()), "select-all covers the disc again");
+        flow.toggle(0); // only 00001 stays checked
+        let second = flow.report().expect("a structural report").to_owned();
+        assert!(second.contains("00001.MPLS") && !second.contains("00000.MPLS"));
+        flow.select_none(); // nothing checked scans the whole disc
+        assert_eq!(flow.report(), Some(whole.as_str()), "select-none is a whole-disc report");
+    }
+
+    #[test]
+    fn sorting_reorders_the_pre_scan_report_with_the_table() {
+        // Presentation order is longest-first (00000, 00001); the first
+        // Length click sorts ascending and flips the table — the stored
+        // report renders the scan set in table order, so it must follow.
+        let mut flow = listed();
+        flow.sort_by(SortColumn::Length);
+        assert_eq!(row_names(&flow), ["00001.MPLS", "00000.MPLS"]);
+        let report = flow.report().expect("a structural report");
+        let first = report.find("00001.MPLS").expect("00001 is in the report");
+        let second = report.find("00000.MPLS").expect("00000 is in the report");
+        assert!(first < second, "the report lists playlists in table order");
+    }
+
+    #[test]
+    fn the_measured_rebuild_refreshes_the_retained_structural_report() {
+        // Scan-all, then a measured result that (for the test) lists only one
+        // playlist: the retained structural render — what a LATER in-flight
+        // scan serves as its pre-scan report — must follow the measured disc,
+        // not the original structural one.
+        let flow = listed().start_scanning(1);
+        let measured = vec![playlist("00000.MPLS", 100.0, &["A.M2TS"])];
+        let flow = flow.finished(1, "M".to_owned(), Arc::new(Vec::new()), measured);
+        assert_eq!(flow.stage(), Stage::Reported);
+        let flow = flow.start_scanning(2);
+        assert_eq!(flow.stage(), Stage::Scanning);
+        let report = flow.report().expect("the pre-scan render stays available mid-scan");
+        assert!(report.contains("00000.MPLS"));
+        assert!(!report.contains("00001.MPLS"), "the render follows the measured disc");
     }
 
     #[test]
@@ -1472,7 +1554,7 @@ mod tests {
             Arc::new(Vec::new()),
             structural().bdrom.playlists,
         );
-        assert_eq!(flow.report().as_deref(), Some("MEASURED"));
+        assert_eq!(flow.report(), Some("MEASURED"));
         // Turning a section off re-renders from the retained measured disc —
         // still Reported, no rescan, and exactly that section is gone.
         flow.set_view(ViewSettings { report_stream_diagnostics: false, ..ViewSettings::default() });

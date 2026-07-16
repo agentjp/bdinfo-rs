@@ -1268,7 +1268,9 @@ impl App {
         match self.flow.report() {
             Some(report) => {
                 self.status = Some("Report copied to the clipboard.".to_owned());
-                iced::clipboard::write(clipboard::sanitize(report))
+                // One owned copy for the clipboard task — a one-shot click
+                // cost; the flow keeps the stored string.
+                iced::clipboard::write(clipboard::sanitize(report.to_owned()))
             }
             None => Task::none(),
         }

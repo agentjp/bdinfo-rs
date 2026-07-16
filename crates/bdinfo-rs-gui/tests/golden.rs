@@ -110,7 +110,7 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
     )
     .expect("the fixture scans");
     let mut flow = flow.finished(1, measured.report, measured.errors, measured.playlists);
-    assert_eq!(flow.report().as_deref(), Some(FOLDER_GOLDEN));
+    assert_eq!(flow.report(), Some(FOLDER_GOLDEN));
     // OFF: both sections omitted from the measured report, no rescan.
     flow.set_view(ViewSettings {
         report_stream_diagnostics: false,
@@ -122,7 +122,7 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
     assert!(!trimmed.contains("QUICK SUMMARY:"), "quick summary omitted");
     // Back ON: byte-for-byte the golden again.
     flow.set_view(ViewSettings::default());
-    assert_eq!(flow.report().as_deref(), Some(FOLDER_GOLDEN), "the re-render road drifted");
+    assert_eq!(flow.report(), Some(FOLDER_GOLDEN), "the re-render road drifted");
 }
 
 #[test]
