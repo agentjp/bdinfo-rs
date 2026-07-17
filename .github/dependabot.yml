@@ -89,6 +89,28 @@ updates:
       prefix: build
       include: scope
 
+  # The native desktop GUI (crates/bdinfo-rs-gui) is ALSO an independent
+  # workspace (its own Cargo.lock, `exclude`d from the root), so the `/` cargo
+  # entry never sees its deps — yet iced / wgpu / winit / cosmic-text are
+  # compiled into the shipped binary. Watch them here with the same
+  # `build(deps):` no-bump subject as the other cargo entries.
+  - package-ecosystem: cargo
+    directory: "/crates/bdinfo-rs-gui"
+    schedule:
+      interval: daily
+    groups:
+      gui-cargo-dependencies:
+        patterns: ["*"]
+    # Transitive deps too (see the root cargo entry): direct-only is the
+    # default, so the large iced/wgpu/winit transitive tree would otherwise
+    # miss routine patch bumps. `all` = direct + indirect, in one grouped PR.
+    allow:
+      - dependency-type: "all"
+    labels: [dependencies]
+    commit-message:
+      prefix: build
+      include: scope
+
   # The fuzz harness (fuzz/) is ALSO an independent workspace (`exclude`d from the
   # root, its own Cargo.lock), so the `/` cargo entry never sees libfuzzer-sys / arbitrary
   # and their transitive tree. These never ship (dev-only adversarial amplifier) but
