@@ -32,6 +32,7 @@ name: gui
 #   gui build + test (macos-15-intel)
 #   gui build + test (macos-15)
 #   gui checks (lint + coverage + mutants + deny)
+#   gui msrv (rust 1.96)
 #   gui smoke (ubuntu-latest)
 #   gui smoke (windows-2025)
 # The macOS smoke stays soft (continue-on-error): the runner's paravirtual
@@ -99,6 +100,26 @@ jobs:
       - name: Test (unit + proptests + golden ties + iced_test interactions)
         working-directory: crates/bdinfo-rs-gui
         run: cargo nextest run --locked --no-tests=fail -E 'not test(/^snapshots::/)'
+
+      # The SHIPPED configuration — opt-level="s" + fat LTO + codegen-units=1 +
+      # strip + (Windows) windows_subsystem — compiles on every shipped arch.
+      # wgpu has LTO-breakage history; without this a green merge can hide a
+      # red first release. Build-only: the smoke env hooks are debug-only, so a
+      # release binary cannot auto-exit — launching it stays a human step.
+      - name: Build (release profile — the shipped configuration)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --release --locked
+
+      # One release-mode test leg: debug_assertions off and the optimizer at
+      # the shipped level over the full suite (every cfg(debug_assertions)
+      # site lives in the Tier-B bin, but overflow-checks and codegen differ
+      # crate-wide in release). Once is the signal — per-arch bugs are the
+      # debug matrix's job. Snapshots stay excluded: the advisory/hard split
+      # is decided on the debug matrix, not here.
+      - name: Test (release mode)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo nextest run --release --locked --no-tests=fail -E 'not test(/^snapshots::/)'
 
       # ADVISORY (for now): the tiny-skia snapshot ties against the committed
       # hashes. Byte-identity across all six arches is expected (iced's own CI
@@ -214,6 +235,32 @@ jobs:
       - name: Mutants (Tier A 0 missed)
         working-directory: crates/bdinfo-rs-gui
         run: cargo mutants --in-place
+
+  # The declared MSRV is enforced, not decorative: build with exactly the
+  # rust-version toolchain from Cargo.toml (1.96 — also the root workspace's,
+  # which the bdinfo-rs-core path dep inherits). Build-only by design:
+  # rust-version is a claim about building the package, not about the
+  # dev-dependency tree (iced_test may float its own MSRV). Drift self-detects:
+  # a rust-version bump past this toolchain makes cargo refuse the build here
+  # until the two move in lockstep.
+  msrv:
+    name: gui msrv (rust 1.96)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the MSRV toolchain
+        run: rustup toolchain install 1.96 --profile minimal
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+
+      - name: Build with the declared rust-version
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo +1.96 build --locked
 
   # The real-window launch smoke: the app opens, renders, and exits 0, driven
   # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
