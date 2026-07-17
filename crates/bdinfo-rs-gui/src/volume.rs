@@ -14,7 +14,8 @@
 //!
 //! [`resolve_folder_label`] replaces a nameless-drive-root label with the real
 //! UDF volume label — read off the raw volume device (`\\.\J:`) through the
-//! same [`UdfSource`] core the `.iso` path uses, the identical string Windows
+//! same `UdfSource` core the `.iso` path uses (no doc link: the import is
+//! Windows-only, so the name only resolves there), the identical string Windows
 //! Explorer and classic `BDInfo` show — falling back to the drive letter when
 //! that read is unavailable. The scan seam applies it to every folder scan
 //! (`scan::open`), so the structural listing and the measured report agree.
