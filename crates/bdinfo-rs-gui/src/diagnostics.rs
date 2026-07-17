@@ -170,11 +170,11 @@ mod tests {
 
     #[test]
     fn the_log_lives_next_to_the_config() {
-        let config = PathBuf::from(r"C:\Users\a\AppData\Roaming\bdinfo-rs\gui.conf");
-        assert_eq!(
-            log_path_from(Some(&config)),
-            Some(PathBuf::from(r"C:\Users\a\AppData\Roaming\bdinfo-rs").join("gui.log"))
-        );
+        // Built by joins, not path literals: a Windows-separator literal is one
+        // opaque component on Unix, where `parent()` would strip nothing.
+        let dir = PathBuf::from("config-home").join("bdinfo-rs");
+        let config = dir.join("gui.conf");
+        assert_eq!(log_path_from(Some(&config)), Some(dir.join("gui.log")));
         // No config location → no log location (run without either).
         assert_eq!(log_path_from(None), None);
         // A parentless config path can't have a sibling.
