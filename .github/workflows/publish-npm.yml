@@ -150,7 +150,7 @@ jobs:
       # get a modern Node/npm for OIDC, and the tag trigger is intrinsic to a
       # publish workflow, so this is an unavoidable false positive (cf. the inline
       # ref-version-mismatch ignore documented in .github/zizmor.yml).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.4.0 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           # The active Node line (26 -> LTS Oct 2026); kept in lockstep with
           # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).
