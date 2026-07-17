@@ -254,9 +254,40 @@ jobs:
       # uses it); reads the crate-local .cargo/mutants.toml Tier-B exclusions.
       # The snapshot ties participate (per-OS-family pins make them green on
       # this runner), keeping their mutant kill power in CI as locally.
+      #
+      # The sweep verifies the SUITE against the crate SOURCE, and both are
+      # captured exactly by the crate's git tree hash (the crate dir includes
+      # its lockfile and .cargo/mutants.toml) plus the toolchain file — so a
+      # marker hit means this byte-identical gui tree already passed a full
+      # sweep on an earlier run, and re-running it (~90 min) would re-verify
+      # unchanged inputs (e.g. a workflow-only push). The marker is saved only
+      # after a green sweep (implicit success() on the save steps' `if:`).
+      - name: Compute the full-mutants marker key (gui tree hash)
+        id: mutants-key
+        run: echo "key=gui-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-gui)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the full-mutants marker
+        id: mutants-marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.mutants-key.outputs.key }}
+
       - name: Mutants (Tier A 0 missed)
+        if: steps.mutants-marker.outputs.cache-hit != 'true'
         working-directory: crates/bdinfo-rs-gui
         run: cargo mutants --in-place
+
+      - name: Write the full-mutants marker
+        if: steps.mutants-marker.outputs.cache-hit != 'true'
+        run: echo ok > .mutants-ok
+
+      - name: Save the full-mutants marker
+        if: steps.mutants-marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.mutants-key.outputs.key }}
 
   # The declared MSRV is enforced, not decorative: build with exactly the
   # rust-version toolchain from Cargo.toml (1.96 — also the root workspace's,
