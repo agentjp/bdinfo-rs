@@ -31,5 +31,37 @@
 #                twice without adding signal.
 exclude_globs = ["src/main.rs", "src/ui.rs"]
 
+# Tier-A mutants that are provably untestable, each with its proof — the same
+# three adjudications as the root workspace's CLI `volume` module, whose code
+# this crate's `volume` replicates (the crates share no code; lock-step noted
+# in both files).
+exclude_re = [
+    # `volume::real_volume_label` (every mutant shape, both the Windows body
+    # and the `#[cfg(not(windows))]` `-> None` stub): opens a raw volume device
+    # (`\\.\J:`) and reads its UDF label — no test can exercise it without a
+    # mounted physical UDF disc, so every mutant is indistinguishable from the
+    # original in any test environment. The returned label is validated
+    # end-to-end against real hardware; the pure machinery it drives
+    # (AlignedReader, UdfSource::read_label, resolve_with, drive_root_letter)
+    # is unit-tested AND mutation-covered. cargo-mutants ignores `cfg`, so it
+    # also mutates the cfg'd-out non-Windows stub; both are matched here by the
+    # fn name.
+    "volume\\.rs:\\d+:\\d+:.*real_volume_label",
+
+    # `volume::add_signed`: `delta < 0` vs `delta <= 0` differ only at
+    # `delta == 0`, where BOTH arms return `base` — `base.checked_add(0)` and
+    # `base.checked_sub(0)` are each `Some(base)`. Adding or subtracting a
+    # zero magnitude is identical, so the two comparisons are equivalent.
+    "volume\\.rs:\\d+:\\d+: replace < with <= in add_signed",
+
+    # `volume::RawVolumeIso::open`: opens the raw volume device — env-bound
+    # like `real_volume_label` and uncatchable either way. On Windows the
+    # `Ok(Box::new(Default::default()))` mutant is UNVIABLE (`Box<dyn ReadSeek>`
+    # has no `Default`); on non-Windows the whole `#[cfg(windows)]` impl is
+    # compiled out, so cargo-mutants (which ignores `cfg`) lands the mutation
+    # in dead code and no test can observe it. Matched by the type name.
+    "volume\\.rs:\\d+:\\d+:.*RawVolumeIso",
+]
+
 # Enforce the committed lockfile on every mutant build (mirrors CI).
 additional_cargo_args = ["--locked"]

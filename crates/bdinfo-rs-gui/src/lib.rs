@@ -6,7 +6,8 @@
 //! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
 //! the column-weight math ([`columns`]), the persistent configuration
 //! ([`settings`]), the best-effort diagnostics log ([`diagnostics`]), the
-//! visual identity ([`theme`]) and window-icon rendering
+//! drive-root label recovery ([`volume`]), the visual identity ([`theme`])
+//! and window-icon rendering
 //! ([`icon`]), and the scan seam ([`scan`]) — so the golden-tie + unit
 //! tests link them directly, and the `bdinfo-rs-gui` binary is the thin iced
 //! (Tier-B) shell over this surface: it translates messages to calls here and
@@ -18,6 +19,10 @@
 //! iced/wgpu/winit tree stays out of the root gate — but it STAYS inside
 //! `forbid(unsafe_code)`: a native iced app needs no `unsafe` in our own code.
 #![forbid(unsafe_code)]
+// The nightly-only coverage attribute, active only under `cargo llvm-cov`
+// (which sets cfg(coverage_nightly)): lets the env-bound raw-device reads in
+// `volume` opt out of the 100% Tier-A floor, as in the CLI.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod clipboard;
 pub mod columns;
@@ -31,6 +36,7 @@ pub mod progress;
 pub mod scan;
 pub mod settings;
 pub mod theme;
+pub mod volume;
 // Private: the binary drives selection only through `flow`, never this module
 // directly (so public-API docs reference it as a plain code span, not a link).
 mod selection;

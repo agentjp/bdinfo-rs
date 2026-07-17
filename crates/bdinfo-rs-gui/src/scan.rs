@@ -24,7 +24,7 @@ use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
 
-use crate::selection;
+use crate::{selection, volume};
 
 /// The disc the user picked: a Blu-ray **folder** or a single `.iso` image.
 ///
@@ -35,7 +35,8 @@ use crate::selection;
 pub enum Input {
     /// A disc folder: the disc root, its `BDMV` directory, or any directory
     /// inside it (the scan walks up to the disc root). The label is the
-    /// directory name.
+    /// directory name — or, when the disc root is a nameless Windows drive
+    /// root, the real UDF label recovered by [`volume::resolve_folder_label`].
     Folder(PathBuf),
     /// A single `.iso` image. The label is the real UDF volume label.
     Iso(PathBuf),
@@ -138,7 +139,12 @@ fn open(
             let report = BdRom::open_resilient_with(&root, mode, scan_files, progress, cancel)?;
             let mut errors = report.errors;
             errors.extend(root.take_errors());
-            Ok((report.bdrom, errors))
+            let mut bdrom = report.bdrom;
+            // A folder scan labels the disc after its root directory; a disc
+            // at a bare Windows drive root (`J:\`) has no such name — recover
+            // the real UDF label, exactly like the CLI's `scan_folder`.
+            bdrom.volume_label = volume::resolve_folder_label(&bdrom.volume_label);
+            Ok((bdrom, errors))
         }
         Input::Iso(path) => {
             let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;

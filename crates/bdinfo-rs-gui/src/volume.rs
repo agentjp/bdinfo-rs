@@ -1,32 +1,27 @@
-//! Naming the disc report: a filesystem-safe file stem, and recovering the real
-//! disc label when a folder scan lands on a nameless drive root.
+//! Tier A — recovering the real disc label when a folder scan lands on a
+//! nameless Windows drive root.
 //!
 //! A folder scan labels the disc after its root directory's name. That works
 //! everywhere a disc is mounted at a *named* path — an extracted folder, or the
 //! label-named mount points macOS (`/Volumes/MY_DISC`) and Linux
-//! (`/media/<user>/MY_DISC`) use — but a physical disc mounted at a bare
-//! Windows drive root (`J:\`) has no such name: the disc root resolves to the
-//! drive root, whose path carries no final component, so the label degrades to
-//! the drive-root string itself (`"J:\"`). That is wrong in the report and, with
-//! its `:` and separator, an illegal `BDINFO.<label>.txt` filename — the write
-//! fails outright (issue: "Cannot save report from physical disc").
+//! (`/media/<user>/MY_DISC`) use — but a physical disc or mounted image at a
+//! bare Windows drive root (`J:\`) has no such name: the disc root resolves to
+//! the drive root, whose path carries no final component, so the label degrades
+//! to the drive-root string itself (`"J:\"`). That is wrong in the report's
+//! `Disc Label:` line, the info box, and the `BDINFO.<label>.txt` save name
+//! (whose *characters* `paths::report_file_name` already sanitizes — this
+//! module fixes the label's SOURCE).
 //!
-//! Two repairs live here:
-//! - [`resolve_folder_label`] replaces a nameless-drive-root label with the real UDF volume label —
-//!   read off the raw volume device (`\\.\J:`) through the same [`UdfSource`] core the `.iso` path
-//!   uses, the identical string Windows Explorer and classic `BDInfo` show — falling back to the
-//!   drive letter when that read is unavailable.
-//! - [`safe_report_stem`] reduces any label to a safe single filename component, a defensive net
-//!   that also covers a hostile `.iso` volume identifier.
+//! [`resolve_folder_label`] replaces a nameless-drive-root label with the real
+//! UDF volume label — read off the raw volume device (`\\.\J:`) through the
+//! same [`UdfSource`] core the `.iso` path uses, the identical string Windows
+//! Explorer and classic `BDInfo` show — falling back to the drive letter when
+//! that read is unavailable. The scan seam applies it to every folder scan
+//! (`scan::open`), so the structural listing and the measured report agree.
 //!
-//! The label recovery is replicated by the GUI's `volume` module
-//! (`crates/bdinfo-rs-gui/src/volume.rs`), which must resolve the same label
-//! for the same disc — the crates share no code; keep the two in lock-step.
-
-// In a binary, `pub` items are unexported (`unreachable_pub`), so the reachable
-// visibility for these crate-root helpers is `pub(crate)` — which the nursery
-// `redundant_pub_crate` then flags. `pub(crate)` is the correct choice here.
-#![expect(clippy::redundant_pub_crate, reason = "pub is unreachable_pub in a binary")]
+//! Replicates the CLI's `volume` module (`crates/bdinfo-rs/src/volume.rs`),
+//! which must resolve the same label for the same disc — the crates share no
+//! code, so keep the two in lock-step.
 
 #[cfg(any(windows, test))]
 use std::io::{self, Read, Seek, SeekFrom};
@@ -35,23 +30,6 @@ use std::io::{self, Read, Seek, SeekFrom};
 use bdinfo_rs_core::vfs::ReadSeek;
 #[cfg(windows)]
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
-
-/// Characters illegal in a Windows filename component, plus the separators that
-/// would re-root the report path. Replaced so `BDINFO.<stem>.txt` is always one
-/// writable file; applied uniformly on every platform so the report filename is
-/// identical everywhere.
-const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-
-/// `label` reduced to a filesystem-safe report-file stem: each illegal or
-/// control character becomes `_`. A clean label — a folder name, a `.iso` volume
-/// identifier, a resolved drive label — passes through unchanged.
-///
-/// Replicated by the GUI's `paths::report_file_name`
-/// (`crates/bdinfo-rs-gui/src/paths.rs`), which must produce the same
-/// filename for the same disc — keep the two in lock-step.
-pub(crate) fn safe_report_stem(label: &str) -> String {
-    label.chars().map(|c| if c.is_control() || ILLEGAL.contains(&c) { '_' } else { c }).collect()
-}
 
 /// The uppercase drive letter of a bare Windows drive-root label — `"J:\"`,
 /// `"k:/"`, or `"k:"` all yield `'J'`/`'K'` — or `None` for any real name.
@@ -69,12 +47,15 @@ fn drive_root_letter(label: &str) -> Option<char> {
         .then(|| letter.to_ascii_uppercase())
 }
 
-/// The report-worthy disc label for a folder scan: `scanned` unchanged for a
-/// real name, or — when `scanned` is a bare Windows drive root — the genuine UDF
-/// volume label read off the raw volume device, falling back to the drive letter
-/// when that read is unavailable (no disc, unreadable, or a non-Windows build).
-/// This is what recovers `MY_DISC` from a `J:\` scan.
-pub(crate) fn resolve_folder_label(scanned: &str) -> String {
+/// The report-worthy disc label for a folder scan.
+///
+/// `scanned` unchanged for a real name, or — when `scanned` is a bare Windows
+/// drive root — the genuine UDF volume label read off the raw volume device,
+/// falling back to the drive letter when that read is unavailable (no disc,
+/// unreadable, or a non-Windows build). This is what recovers `MY_DISC` from
+/// a `J:\` scan.
+#[must_use]
+pub fn resolve_folder_label(scanned: &str) -> String {
     resolve_with(scanned, real_volume_label)
 }
 
@@ -288,24 +269,7 @@ mod tests {
 
     use super::{
         AlignedReader, SECTOR, add_signed, drive_root_letter, resolve_folder_label, resolve_with,
-        safe_report_stem,
     };
-
-    #[test]
-    fn safe_report_stem_passes_clean_labels_through() {
-        assert_eq!(safe_report_stem("MY_DISC"), "MY_DISC");
-        assert_eq!(safe_report_stem("BigBuckBunny"), "BigBuckBunny");
-        assert_eq!(safe_report_stem("Blu-Ray"), "Blu-Ray");
-        assert_eq!(safe_report_stem(""), "");
-    }
-
-    #[test]
-    fn safe_report_stem_replaces_illegal_and_control_characters() {
-        assert_eq!(safe_report_stem(r"J:\"), "J__");
-        assert_eq!(safe_report_stem("a/b"), "a_b");
-        assert_eq!(safe_report_stem("x<y>z|?*\""), "x_y_z____");
-        assert_eq!(safe_report_stem("tab\there"), "tab_here");
-    }
 
     #[test]
     fn drive_root_letter_matches_every_bare_drive_root_spelling() {
@@ -516,5 +480,25 @@ mod tests {
     fn a_non_failing_inner_serves_an_empty_device() {
         // Seek and read both succeed but yield zero bytes → a read of 0.
         assert_eq!(failing(false, false).read(&mut [0_u8; 4]).expect("read"), 0);
+    }
+
+    mod prop {
+        use proptest::prelude::*;
+
+        proptest! {
+            // The resolution contract over arbitrary labels: a drive-root
+            // label always resolves to the injected read's answer (or the
+            // bare letter), and any other label passes through byte-exact —
+            // resolution can never corrupt a real name.
+            #[test]
+            fn resolution_is_identity_off_the_drive_root(label in any::<String>()) {
+                let resolved = super::super::resolve_with(&label, |_| None);
+                if let Some(letter) = super::super::drive_root_letter(&label) {
+                    prop_assert_eq!(resolved, letter.to_string());
+                } else {
+                    prop_assert_eq!(resolved, label);
+                }
+            }
+        }
     }
 }
