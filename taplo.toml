@@ -7,7 +7,9 @@ include = ["**/*.toml"]
 # Cargo.lock is generated (and is a .lock, not a .toml — never matched anyway);
 # supply-chain/{audits,config}.toml are written by cargo-vet — leave both to their
 # generators so taplo never fights them. target/ holds throwaway build artifacts.
-exclude = ["Cargo.lock", "supply-chain/**", "target/**"]
+# scratch/ is the gitignored local work area (see .gitignore) — it can hold
+# checkouts of OTHER projects, whose TOML is not this repo's to format.
+exclude = ["Cargo.lock", "supply-chain/**", "target/**", "scratch/**"]
 
 [formatting]
 # 4-space indent matches the repo's multi-line arrays (e.g. dist-workspace targets,
