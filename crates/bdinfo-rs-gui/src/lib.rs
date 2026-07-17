@@ -6,9 +6,10 @@
 //! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
 //! the column-weight math ([`columns`]), the persistent configuration
 //! ([`settings`]), the best-effort diagnostics log ([`diagnostics`]), the
-//! drive-root label recovery ([`volume`]), the visual identity ([`theme`])
-//! and window-icon rendering
-//! ([`icon`]), and the scan seam ([`scan`]) — so the golden-tie + unit
+//! drive-root label recovery ([`volume`]), the visual identity ([`theme`]),
+//! window-icon rendering ([`icon`]) with its Windows `.res` packer
+//! ([`winres`], shared with `build.rs`), and the scan seam ([`scan`]) — so the
+//! golden-tie + unit
 //! tests link them directly, and the `bdinfo-rs-gui` binary is the thin iced
 //! (Tier-B) shell over this surface: it translates messages to calls here and
 //! results to widgets, holding no business logic of its own. The one impure thing
@@ -37,6 +38,7 @@ pub mod scan;
 pub mod settings;
 pub mod theme;
 pub mod volume;
+pub mod winres;
 // Private: the binary drives selection only through `flow`, never this module
 // directly (so public-API docs reference it as a plain code span, not a link).
 mod selection;

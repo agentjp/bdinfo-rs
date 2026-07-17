@@ -3,7 +3,7 @@ name: gui
 # The PROPORTIONATE Posture-C gate for the native desktop GUI
 # (crates/bdinfo-rs-gui), mirrored 1:1 by the local scripts/gui-compliance.ps1.
 # Tier A — the crate's LIBRARY (flow / model / selection / panes / progress /
-# paths / clipboard / columns / settings / theme / icon / scan) — is held to the
+# paths / clipboard / columns / settings / theme / icon / winres / scan) — is held to the
 # core bar: clippy -D warnings, llvm-cov 100% lines/regions/functions,
 # cargo-mutants 0 missed, proptests, byte-exact golden ties. Tier B (the iced
 # shell main.rs + the style vocabulary ui.rs) is excluded from cov/mutants by

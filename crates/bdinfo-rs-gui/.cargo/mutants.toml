@@ -3,7 +3,8 @@
 # Posture B:
 #
 # Tier A — the LIBRARY (flow / model / selection / panes / progress / paths /
-# clipboard / columns / settings / theme / icon / scan) — is held to 0 missed.
+# clipboard / columns / settings / theme / icon / winres / scan) — is held to
+# 0 missed.
 # Every mutant faces the whole suite: the unit + property tests, the golden-tie
 # parity tests (byte-exact reports over the committed fixture), and the
 # iced_test interaction + snapshot-hash tests in the binary (run the gate with
@@ -29,7 +30,15 @@
 #                parity instead of line-level mutation" argument applied to
 #                pixels. Per-field unit assertions would restate every token
 #                twice without adding signal.
-exclude_globs = ["src/main.rs", "src/ui.rs"]
+#
+#   build.rs     The icon-embedding build script: env-bound glue (target
+#                cfg vars, OUT_DIR, cargo directives, the linker handoff) a
+#                test cannot observe without running a full cargo build. All
+#                its logic lives in src/icon.rs + src/winres.rs (Tier A,
+#                mutation-covered, incl. a pinned checksum of the exact .res
+#                it writes); the handoff itself is verified by the Windows CI
+#                builds linking the resource.
+exclude_globs = ["src/main.rs", "src/ui.rs", "build.rs"]
 
 # Tier-A mutants that are provably untestable, each with its proof — the same
 # three adjudications as the root workspace's CLI `volume` module, whose code
