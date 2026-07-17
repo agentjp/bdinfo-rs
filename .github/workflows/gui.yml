@@ -135,19 +135,22 @@ jobs:
         working-directory: crates/bdinfo-rs-gui
         run: cargo nextest run --release --locked --no-tests=fail -E 'not test(/^snapshots::/)'
 
-      # ADVISORY (for now): the tiny-skia snapshot ties against the committed
-      # hashes. Byte-identity across all six arches is expected (iced's own CI
-      # pins one hash across ubuntu/windows/macos) but unproven here — promote
-      # this step to blocking once the 6-arch PR runs hold; the local gate
-      # already runs it blocking on one host.
-      - name: Snapshot hashes (tiny-skia — ADVISORY per-arch)
+      # BLOCKING per-arch: the tiny-skia snapshot ties against the committed
+      # per-OS-family hashes (snapshots/{windows,unix}/ — the first 6-arch run
+      # disproved one-hash-across-OSes: bold text rasterizes differently
+      # between Windows and the unix family, but byte-identically across
+      # arches WITHIN each family, which is exactly what this step holds).
+      # This matrix is the only place non-Windows pixels are ever rendered —
+      # the dev loop runs Windows only — so these ties are the sole guard
+      # against style regressions on the other four arches. --no-fail-fast:
+      # report every tie's verdict, not just the first mismatch.
+      - name: Snapshot hashes (tiny-skia — per-OS-family pins)
         id: snapshots
-        continue-on-error: true
         working-directory: crates/bdinfo-rs-gui
-        run: cargo nextest run --locked --no-tests=fail -E 'test(/^snapshots::/)'
+        run: cargo nextest run --locked --no-tests=fail --no-fail-fast -E 'test(/^snapshots::/)'
 
       - name: Upload mismatched snapshot renders
-        if: steps.snapshots.outcome == 'failure'
+        if: failure() && steps.snapshots.outcome == 'failure'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gui-snapshot-mismatch-${{ matrix.os }}
@@ -222,6 +225,9 @@ jobs:
       # the same shape as the wasm gate, whose cfg'd-out Tier B never enters
       # its native build. Branch coverage is deliberately not enforced
       # (Posture C, like B).
+      # The full suite, snapshot ties included: the per-OS-family pins hold
+      # under coverage instrumentation too (verified — the instrumented
+      # nightly render is byte-identical to the stable one).
       - name: Coverage (llvm-cov nextest — Tier A 100% lines/regions/functions)
         working-directory: crates/bdinfo-rs-gui
         shell: pwsh
@@ -246,6 +252,8 @@ jobs:
       # Tier-A mutation, 0 missed. --in-place because the temp copy would not
       # carry the ../bdinfo-rs-core path dep (the same reason the wasm gate
       # uses it); reads the crate-local .cargo/mutants.toml Tier-B exclusions.
+      # The snapshot ties participate (per-OS-family pins make them green on
+      # this runner), keeping their mutant kill power in CI as locally.
       - name: Mutants (Tier A 0 missed)
         working-directory: crates/bdinfo-rs-gui
         run: cargo mutants --in-place
