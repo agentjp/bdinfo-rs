@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   # Refuse to publish a tag that is not on master — the same ancestry gate
-  # release.yml and publish-npm.yml use, via the same reusable workflow. A vX.Y.Z
+  # v-release.yml and publish-npm.yml use, via the same reusable workflow. A vX.Y.Z
   # tag pushed onto a side branch (so it never passed CI on master) cannot ship to
   # crates.io: the publish job `needs:` this one. crates.io publishing is LIVE and
   # IRREVERSIBLE (a version can be yanked but never re-uploaded), so the off-master

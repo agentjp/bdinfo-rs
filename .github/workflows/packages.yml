@@ -1,10 +1,10 @@
 name: packages
 
-# Fan-out package publishing, run AFTER release.yml ("Release") has built and
-# uploaded the GitHub Release. release.yml (cargo-dist) creates that release with
+# Fan-out package publishing, run AFTER v-release.yml ("Release") has built and
+# uploaded the GitHub Release. v-release.yml (cargo-dist) creates that release with
 # the default GITHUB_TOKEN, and GitHub suppresses the `release: released` event for
 # token-created releases — so a `release`-triggered workflow never fires. Instead
-# we chain off release.yml's completion via `workflow_run` (which DOES fire), and
+# we chain off v-release.yml's completion via `workflow_run` (which DOES fire), and
 # expose a manual `workflow_dispatch` for re-runs / backfills. Every job runs on a
 # Linux runner; every action is SHA-pinned.
 #
@@ -23,7 +23,7 @@ name: packages
 # matching the old `released`-event semantics and Homebrew's default.
 #
 # Channels handled ELSEWHERE (not here):
-#   - Homebrew  -> release.yml (cargo-dist homebrew publish job)
+#   - Homebrew  -> v-release.yml (cargo-dist homebrew publish job)
 #   - crates.io -> publish-crates.yml (OIDC)
 #   - Scoop     -> the agentjp/scoop-bucket repo (Excavator auto-update bot)
 #
@@ -59,7 +59,7 @@ permissions:
 
 jobs:
   # Resolve the release tag (from the dispatch input or the upstream run's tag)
-  # and gate the fan-out: proceed only for a successful release.yml run (or a
+  # and gate the fan-out: proceed only for a successful v-release.yml run (or a
   # manual dispatch) AND a stable vX.Y.Z tag (no prerelease suffix). The downstream
   # jobs read the tag from `needs.gate.outputs.version` into their own $VERSION.
   gate:

@@ -44,14 +44,14 @@ concurrency:
 
 jobs:
   # Refuse to publish a tag that is not on master — the same ancestry gate
-  # release.yml uses, via the same reusable workflow. A vX.Y.Z tag pushed onto a
+  # v-release.yml uses, via the same reusable workflow. A vX.Y.Z tag pushed onto a
   # side branch (so it never passed the gate) cannot ship to npm: the publish job
   # `needs:` this one.
   guard-ancestor:
     uses: ./.github/workflows/guard-ancestor.yml
     # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
     # `git merge-base` ancestry check), so inheriting them is needless privilege
-    # (and zizmor's secrets-inherit audit flags it). release.yml's generated copy
+    # (and zizmor's secrets-inherit audit flags it). v-release.yml's generated copy
     # carries `secrets: inherit`, but this hand-maintained workflow is hardened in
     # place rather than suppressed.
     permissions:

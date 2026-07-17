@@ -7,7 +7,7 @@ name: zizmor
 # known-vulnerable-actions checks that need the GitHub API — and hard-fails on any
 # finding, like the other quality gates. Daily too, so a newly-disclosed
 # vulnerable action surfaces between pushes. The only accepted residuals live in
-# .github/zizmor.yml (the cargo-dist-generated release.yml, which cannot be
+# .github/zizmor.yml (the cargo-dist-generated v-release.yml, which cannot be
 # hand-edited) and inline (the two architecturally-required workflow_run triggers);
 # every hand-maintained workflow is fixed in place, not suppressed.
 
@@ -42,7 +42,7 @@ jobs:
 
       # Audit every workflow at full strength. The token enables the online audits
       # (impostor-commit, known-vulnerable-actions); .github/zizmor.yml is
-      # auto-discovered for the accepted release.yml residuals. zizmor exits
+      # auto-discovered for the accepted v-release.yml residuals. zizmor exits
       # non-zero when any finding remains, which fails the gate.
       - name: Audit the workflows
         run: zizmor .github/workflows

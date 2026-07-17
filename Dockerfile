@@ -8,7 +8,7 @@
 # this build. So the binary inside the image is byte-for-byte the one users
 # download — same SHA-256, same cargo-auditable `.dep-v0` section, covered by the
 # SAME Sigstore attestation — with nothing to "prove equivalent" because it IS the
-# same artifact. cargo-dist owns that binary (release.yml); here we only package it.
+# same artifact. cargo-dist owns that binary (v-release.yml); here we only package it.
 #
 # There is no build stage and no RUN: the image only COPYs a prebuilt binary, so a
 # single `docker buildx --platform linux/amd64,linux/arm64` build needs no QEMU and

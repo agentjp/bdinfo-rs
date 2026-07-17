@@ -91,10 +91,10 @@ jobs:
       - name: Style/syntax-lint all YAML (ryl, strict)
         run: ryl -f github -o - -s .
 
-  # Drift guard: the committed release.yml is generated from dist-workspace.toml by
+  # Drift guard: the committed v-release.yml is generated from dist-workspace.toml by
   # dist. This regenerates it in-memory and fails if it differs from the on-disk
-  # file, so release.yml can never silently fall out of sync with the dist config.
-  # Pinned to the same dist version (cargo-dist-version) that release.yml installs.
+  # file, so v-release.yml can never silently fall out of sync with the dist config.
+  # Pinned to the same dist version (cargo-dist-version) that v-release.yml installs.
   release-yaml:
     name: release workflow in sync (dist generate --check)
     runs-on: ubuntu-latest
@@ -109,20 +109,20 @@ jobs:
         # pinned-dependencies / downloadThenRun).
         run: cargo install cargo-dist@0.32.0 --locked
 
-      - name: Check release.yml is in sync with dist-workspace.toml
+      - name: Check v-release.yml is in sync with dist-workspace.toml
         run: dist generate --check
 
       # Make the drift self-explanatory (no token / no extra permission — just an
       # annotation). The usual cause is a Dependabot bump of an action that appears
-      # in the GENERATED release.yml (checkout, upload-/download-artifact, attest):
-      # it edits release.yml but cannot edit dist-workspace.toml, so the pins drift.
+      # in the GENERATED v-release.yml (checkout, upload-/download-artifact, attest):
+      # it edits v-release.yml but cannot edit dist-workspace.toml, so the pins drift.
       - name: Explain the drift if the check failed
         if: failure()
         run: |
-          echo "::group::release.yml is out of sync with dist-workspace.toml"
+          echo "::group::v-release.yml is out of sync with dist-workspace.toml"
           drift=0
           for a in actions/checkout actions/upload-artifact actions/download-artifact actions/attest; do
-            rel=$(grep -oP "uses:\s*${a}@\K[0-9a-f]{40}\s*#\s*\S+" .github/workflows/release.yml | head -1)
+            rel=$(grep -oP "uses:\s*${a}@\K[0-9a-f]{40}\s*#\s*\S+" .github/workflows/v-release.yml | head -1)
             cfg=$(grep -oP "\"${a}\"\s*=\s*\"\K[^\"]+" dist-workspace.toml | head -1)
             if [ -n "$rel" ] && [ "$rel" != "$cfg" ]; then
               echo "::error::dist-workspace.toml pin stale for ${a} — set:  \"${a}\" = \"${rel}\""
@@ -130,7 +130,7 @@ jobs:
             fi
           done
           if [ "$drift" -eq 0 ]; then
-            echo "::error::release.yml differs from dist generate output, but not via a tracked action pin — run 'dist generate' locally and inspect the diff."
+            echo "::error::v-release.yml differs from dist generate output, but not via a tracked action pin — run 'dist generate' locally and inspect the diff."
           fi
           echo "Fix: run 'pwsh scripts/dist-sync.ps1 -Pr <this-PR> -Push' (cockpit helper), or paste the line(s) above into dist-workspace.toml and run 'dist generate', then commit on this branch."
           echo "::endgroup::"

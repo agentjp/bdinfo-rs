@@ -5,7 +5,7 @@ name: install-smoke-test
 # land in Homebrew's standard locations.
 #
 # Runs AUTOMATICALLY after every release — cargo-dist publishes the formula during
-# release.yml, so by the time that workflow completes the tap has the new version —
+# v-release.yml, so by the time that workflow completes the tap has the new version —
 # PLUS daily to catch Homebrew/macOS ecosystem drift between releases, PLUS on demand.
 #
 # Out of scope by design: Scoop, WinGet, and cargo install/binstall ship the bare
@@ -27,7 +27,7 @@ jobs:
   homebrew:
     name: Homebrew (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # When chained off release.yml, only run if the release actually succeeded
+    # When chained off v-release.yml, only run if the release actually succeeded
     # (nothing new is published otherwise). Schedule/manual runs always proceed.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
