@@ -193,7 +193,17 @@ impl Settings {
     /// this returns a usable value and never panics.
     #[must_use]
     pub fn parse(text: &str) -> Self {
+        Self::parse_reporting(text).0
+    }
+
+    /// [`parse`](Self::parse), also returning the unknown keys it ignored
+    /// (first-seen order, deduplicated) — the loader warns about them so a
+    /// `theem = dark` typo is diagnosable, while the parse itself stays
+    /// exactly as tolerant as before: reporting, not validation.
+    #[must_use]
+    pub fn parse_reporting(text: &str) -> (Self, Vec<String>) {
         let mut settings = Self::default();
+        let mut unknown: Vec<String> = Vec::new();
         let (mut width, mut height, mut x, mut y) = (None, None, None, None);
         for line in text.lines() {
             let Some((raw_key, raw_value)) = line.split_once('=') else {
@@ -206,8 +216,12 @@ impl Settings {
             match key {
                 // A path with a stray carriage return could never be
                 // re-rendered onto one line, so it is treated as corrupt.
-                KEY_LAST_PATH if !value.is_empty() && !value.contains('\r') => {
-                    settings.last_path = Some(PathBuf::from(value));
+                // (The check lives INSIDE the arm — a guard would fall
+                // through and misreport this known key as unknown.)
+                KEY_LAST_PATH => {
+                    if !value.is_empty() && !value.contains('\r') {
+                        settings.last_path = Some(PathBuf::from(value));
+                    }
                 }
                 KEY_THEME => {
                     if let Some(theme) = ThemeChoice::parse(value.trim()) {
@@ -233,14 +247,21 @@ impl Settings {
                     set_bool(&mut settings.report_stream_diagnostics, value);
                 }
                 KEY_REPORT_SUMMARY => set_bool(&mut settings.report_quick_summary, value),
-                _ => {} // unknown key — a newer version's setting; ignored
+                // Unknown key — a newer version's setting (or a typo);
+                // ignored as ever, but reported (once per key) so the caller
+                // can say so. An EMPTY key is malformed junk, not a nameable
+                // setting; a repeat falls through to the silent arm.
+                key if !key.is_empty() && !unknown.iter().any(|seen| seen == key) => {
+                    unknown.push(key.to_owned());
+                }
+                _ => {}
             }
         }
         // Geometry is restored only whole: a lone width (or a width whose
         // height was corrupt) restores nothing rather than something skewed.
         settings.window_size = width.zip(height).filter(|&(w, h)| w >= 1.0 && h >= 1.0);
         settings.window_pos = x.zip(y);
-        settings
+        (settings, unknown)
     }
 
     /// Renders the config file's text: one `key = value` line per stored
@@ -454,24 +475,36 @@ pub fn unix_config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -
 
 // ── best-effort IO ───────────────────────────────────────────────────────────
 
-/// Loads the settings from `path`. Any failure — missing file, permission
-/// error, garbage bytes — degrades to defaults; invalid UTF-8 is read
-/// lossily so the intact lines still count.
+/// Loads the settings from `path`.
+///
+/// Any failure — missing file, permission error, garbage bytes — degrades to
+/// defaults; invalid UTF-8 is read lossily so the intact lines still count.
+/// Unknown keys still load fine, but each earns one log line so a typo is
+/// diagnosable.
 #[must_use]
 pub fn load_from(path: &Path) -> Settings {
     std::fs::read(path).map_or_else(
         |_| Settings::default(),
-        |bytes| Settings::parse(&String::from_utf8_lossy(&bytes)),
+        |bytes| {
+            let (settings, unknown) = Settings::parse_reporting(&String::from_utf8_lossy(&bytes));
+            for key in unknown {
+                log::warn!("config: ignoring unknown setting key `{key}`");
+            }
+            settings
+        },
     )
 }
 
 /// Saves the settings to `path`, creating the parent directory on first save.
-/// Best-effort: every IO failure is swallowed.
+///
+/// Best-effort: every IO failure is swallowed — but logged with its swallow
+/// site, so a settings write that didn't stick leaves a trace.
 pub fn save_to(path: &Path, settings: &Settings) {
+    use crate::diagnostics::LogErr as _;
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::create_dir_all(dir).log_err("config-directory create");
     }
-    let _ = std::fs::write(path, settings.render());
+    let _ = std::fs::write(path, settings.render()).log_err("settings save");
 }
 
 #[cfg(test)]
@@ -535,6 +568,23 @@ mod tests {
         let settings = Settings::parse(text);
         assert_eq!(settings.theme, ThemeChoice::Light);
         assert_eq!(settings.window_size, None);
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_once_each_in_file_order() {
+        // The ignored keys come back for the loader to warn about —
+        // first-seen order, duplicates collapsed, known keys and malformed
+        // lines (no `=`, empty key) never reported.
+        let text = "future-key = 42\ntheme = light\nchart-style = bars\n\
+                    future-key = 43\nnot a key value line\n= empty key\n\
+                    last-path = \n";
+        let (settings, unknown) = Settings::parse_reporting(text);
+        assert_eq!(settings.theme, ThemeChoice::Light);
+        // `last-path` is a KNOWN key whose empty value was dropped — dropped
+        // values are not unknown keys.
+        assert_eq!(unknown, vec!["future-key".to_owned(), "chart-style".to_owned()]);
+        // A fully-known file reports nothing.
+        assert_eq!(Settings::parse_reporting("theme = dark\n").1, Vec::<String>::new());
     }
 
     #[test]
@@ -794,6 +844,16 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_unknown_keys_still_loads_the_known_ones() {
+        // The loader warns per unknown key (observability), but the load
+        // itself stays exactly as tolerant as ever.
+        let path = scratch("unknown-keys.conf");
+        super::save_to(&path, &Settings::default()); // ensure the dir exists
+        std::fs::write(&path, "future-key = 1\ntheme = dark\n").expect("scratch write");
+        assert_eq!(super::load_from(&path).theme, ThemeChoice::Dark);
+    }
+
+    #[test]
     fn an_unwritable_destination_is_swallowed() {
         // The parent is a FILE, so neither create_dir_all nor write can
         // succeed — save_to must still return without error.
@@ -878,10 +938,13 @@ mod tests {
         proptest! {
             // The store's core contract: everything written comes back
             // exactly (floats included — Rust renders the shortest string
-            // that re-parses to the same value).
+            // that re-parses to the same value), and nothing the writer
+            // emits is ever reported as an unknown key.
             #[test]
             fn every_settings_value_round_trips(settings in settings()) {
-                prop_assert_eq!(Settings::parse(&settings.render()), settings);
+                let (parsed, unknown) = Settings::parse_reporting(&settings.render());
+                prop_assert_eq!(parsed, settings);
+                prop_assert_eq!(unknown, Vec::<String>::new());
             }
 
             // Hostile-input discipline: ANY text parses without panicking,
