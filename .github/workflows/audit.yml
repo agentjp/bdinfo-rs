@@ -7,7 +7,9 @@ name: audit
 #   - the no-C-dependencies bans (cc/cmake/bindgen/… → guards the static binary)
 #   - crates.io-only sources (no git / unknown registries)
 # Runs on every push/PR and daily, so a newly-disclosed CVE surfaces between
-# pushes too.
+# pushes too. The cargo-deny job also audits the GUI crate's independent
+# workspace (its iced/wgpu tree is invisible to the root check), so the daily
+# cron covers that tree as well.
 
 on:
   push:
@@ -40,6 +42,14 @@ jobs:
 
       - name: Audit advisories + licenses + bans + sources
         run: cargo deny check
+
+      # The GUI crate's OWN dependency tree (iced / wgpu / winit — an excluded
+      # independent workspace, invisible to the root check above), against the
+      # crate-local crates/bdinfo-rs-gui/deny.toml. Duplicates gui.yml's
+      # per-push step ON PURPOSE: this workflow's daily cron is what surfaces
+      # a RUSTSEC advisory published between pushes.
+      - name: Audit the GUI crate's dependency tree
+        run: cargo deny --manifest-path crates/bdinfo-rs-gui/Cargo.toml check
 
   # Supply-chain audit: every dependency must be covered by a trusted third-party
   # audit, a recorded publisher-trust, or an explicit exemption in supply-chain/.
