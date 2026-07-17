@@ -59,6 +59,14 @@ const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);
 const MIN_SIZE: (f32, f32) = (680.0, 540.0);
 /// The window-icon resolution (procedurally drawn; winit downscales as needed).
 const ICON_SIZE: u32 = 128;
+/// The application identity handed to the windowing system — `Settings::id` on
+/// every platform, and (via [`window_settings`]) the Wayland/X11
+/// `application_id` on Linux. On Wayland the runtime RGBA icon is ignored by
+/// protocol: the dock icon, window grouping, and pinning come solely from a
+/// `.desktop` file matched against this id, so it must equal the shipped
+/// `.desktop` file's basename / `StartupWMClass` — an empty id (iced's Linux
+/// default) means a generic gear icon and broken grouping.
+const APP_ID: &str = "bdinfo-rs-gui";
 
 fn main() -> iced::Result {
     // One boot-time resolution of the config path and load of the persisted
@@ -88,6 +96,9 @@ fn main() -> iced::Result {
     let window = window_settings(&persisted);
     let result =
         iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
+            // Replaces the whole Settings, so it comes before the font
+            // builders below (which merge into it).
+            .settings(iced::Settings { id: Some(APP_ID.to_owned()), ..iced::Settings::default() })
             .title(App::title)
             .theme(App::theme)
             .style(App::style)
@@ -295,6 +306,15 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
             .log_err("window icon")
             .ok(),
         exit_on_close_request: false,
+        // Wayland ignores the RGBA icon above by protocol — the dock icon and
+        // window grouping key off this id, matched against the `.desktop`
+        // file ([`APP_ID`]). The field only exists on Linux; every other
+        // platform (the BSDs included) keeps its own platform defaults.
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: APP_ID.to_owned(),
+            ..iced::window::settings::PlatformSpecific::default()
+        },
         ..iced::window::Settings::default()
     }
 }
