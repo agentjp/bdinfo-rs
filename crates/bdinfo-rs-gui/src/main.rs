@@ -137,8 +137,10 @@ fn main() -> iced::Result {
 /// not end as an invisible exit 1: log it, then show it. rfd's synchronous
 /// message dialog is plain `MessageBoxW` on Windows — a native modal that
 /// needs no event loop, so it renders fine after `run()` has failed
-/// (verified live); on Linux it goes through the portal and on macOS through
-/// `NSAlert`, and wherever no dialog host exists it fails into the same log
+/// (verified live) — and `NSAlert` on macOS. On Linux it rides the desktop
+/// portal over zbus, whose tokio backend panics without an ambient runtime;
+/// the app's executor died with the boot, so the dialog runs inside a fresh
+/// one. Wherever no dialog host exists it fails into the same log
 /// (best-effort by construction — rfd routes its own errors to the facade).
 fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>) {
     log::error!("boot failed: {error}");
@@ -147,12 +149,25 @@ fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>)
         use std::fmt::Write as _;
         let _ = write!(description, "\n\nDiagnostic log: {}", path.display());
     }
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title("bdinfo-rs-gui")
-        .set_description(description)
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    let show = move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("bdinfo-rs-gui")
+            .set_description(description)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    };
+    #[cfg(target_os = "linux")]
+    match <iced::executor::Default as iced::Executor>::new() {
+        // The trait method by path: with the `tokio` feature the executor IS
+        // `tokio::runtime::Runtime`, whose inherent zero-arg `enter` shadows it.
+        Ok(executor) => iced::Executor::enter(&executor, show),
+        // No runtime → no portal call is possible; the log above already
+        // carries the boot error.
+        Err(spawn_error) => log::error!("boot-failure dialog unavailable: {spawn_error}"),
+    }
+    #[cfg(not(target_os = "linux"))]
+    show();
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first

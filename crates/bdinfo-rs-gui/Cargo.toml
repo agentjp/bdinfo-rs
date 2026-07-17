@@ -35,7 +35,13 @@ path = "src/main.rs"
 [dependencies]
 bdinfo-rs-core = { path = "../bdinfo-rs-core" }
 # Pure-Rust GUI: wgpu (+ tiny-skia CPU fallback) / cosmic-text / winit. No C.
-iced = "0.14"
+# `tokio` makes iced's executor a Tokio runtime — the ambient context zbus's
+# tokio backend (forced tree-wide by rfd below; cargo features are additive)
+# demands from every D-Bus call it drives: rfd's portal dialogs AND iced's own
+# mundy theme stream, which asks for zbus/async-io but gets the tokio backend.
+# Without it the default thread-pool executor's `enter` is a no-op and any
+# Linux portal call panics at boot (Halloy ships this exact iced+rfd pairing).
+iced = { version = "0.14", features = ["tokio"] }
 # The folder picker, on its pure-Rust `xdg-portal` backend — NOT the `gtk3`
 # backend, which links C (gtk-sys/glib-sys/gdk-sys via pkg-config). `xdg-portal`
 # reaches the desktop's file chooser over D-Bus (ashpd/zbus, pollster) on Linux,
