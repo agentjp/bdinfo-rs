@@ -1428,7 +1428,14 @@ impl App {
                 .color(field_color)
                 // A long path clips at the field's edge (like BDInfo's textbox)
                 // rather than wrapping to a second line when the window narrows.
-                .wrapping(text::Wrapping::None),
+                .wrapping(text::Wrapping::None)
+                // Disc-derived text (here: the disc's path) can legitimately be
+                // Japanese/Chinese; only Advanced shaping engages cosmic-text's
+                // per-script system-font fallback — Basic renders CJK as tofu
+                // even when matching system fonts exist. Chrome text (fixed
+                // ASCII labels, the table cells — ASCII by spec) stays Basic,
+                // which is cheaper to shape.
+                .shaping(text::Shaping::Advanced),
         )
         .width(Length::Fill)
         .clip(true)
@@ -1522,7 +1529,9 @@ impl App {
                     .size(ui::TEXT_SM)
                     .font(ui::MONO)
                     .color(p.text_muted)
-                    .align_x(Horizontal::Center),
+                    .align_x(Horizontal::Center)
+                    // The failure message embeds the offending path (CJK-able).
+                    .shaping(text::Shaping::Advanced),
             )
             .push(
                 text("Choose a Blu-ray disc folder or a .iso image and try again.")
@@ -1760,7 +1769,9 @@ impl App {
                 text(format!("Report — {label}"))
                     .size(ui::TEXT_MD)
                     .font(ui::UI_SEMIBOLD)
-                    .color(p.text),
+                    .color(p.text)
+                    // The volume label is disc-controlled (CJK-able).
+                    .shaping(text::Shaping::Advanced),
             )
             .push(Space::new().width(Length::Fill))
             .push(self.command_button(p, Command::SaveReport))
@@ -1782,13 +1793,19 @@ impl App {
         if let Some(report) = self.flow.report() {
             // Monospace, no wrapping — long report lines extend past the pane and
             // scroll horizontally, exactly like BDInfo's read-only text box.
+            // Advanced shaping because the report embeds the disc label and
+            // title (CJK-able); measured against Basic on a feature-disc-sized
+            // (270 KB) report under the debug software renderer, it adds ~20 ms
+            // to a relayout (~6% of a full render pass), paid once per
+            // open/resize — iced caches the shaped paragraph between frames.
             let body = scrollable(
                 container(
                     text(report)
                         .font(ui::MONO)
                         .size(ui::TEXT_SM)
                         .color(p.text)
-                        .wrapping(text::Wrapping::None),
+                        .wrapping(text::Wrapping::None)
+                        .shaping(text::Shaping::Advanced),
                 )
                 .padding(ui::GAP_3),
             )
@@ -1845,7 +1862,15 @@ impl App {
         let top = Row::new()
             .width(Length::Fill)
             .spacing(ui::GAP_3)
-            .push(text(lead).size(ui::TEXT_SM).color(p.text_muted).width(Length::Fill))
+            .push(
+                // The lead line embeds disc-derived paths ("Report saved
+                // to: …", "Copied: …" — CJK-able).
+                text(lead)
+                    .size(ui::TEXT_SM)
+                    .color(p.text_muted)
+                    .width(Length::Fill)
+                    .shaping(text::Shaping::Advanced),
+            )
             .push(text(times).size(ui::TEXT_SM).font(ui::MONO).color(p.text_muted));
 
         let bar = progress_bar(0.0..=1.0, fraction)
@@ -1985,7 +2010,13 @@ fn banner<'a>(p: Palette, kind: iced::Color, message: &str) -> Element<'a, Messa
         .align_y(Vertical::Center)
         .spacing(ui::GAP_2)
         .push(status_dot(kind))
-        .push(text(message.to_owned()).size(ui::TEXT_SM).color(p.text));
+        // A banner's message can embed disc-derived names/paths (CJK-able).
+        .push(
+            text(message.to_owned())
+                .size(ui::TEXT_SM)
+                .color(p.text)
+                .shaping(text::Shaping::Advanced),
+        );
     container(line)
         .width(Length::Fill)
         .padding([ui::GAP_2, ui::GAP_3])
@@ -2589,7 +2620,16 @@ fn info_line<'a>(p: Palette, label: &str, value: String, mono: bool) -> Element<
         .align_y(Vertical::Center)
         .spacing(ui::GAP_2)
         .push(text(label.to_owned()).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.text_muted))
-        .push(text(value).size(ui::TEXT_XS).font(font).color(p.text).wrapping(text::Wrapping::None))
+        .push(
+            // The values are disc-derived (title, folder path — CJK-able);
+            // the fixed labels stay on the default Basic shaping.
+            text(value)
+                .size(ui::TEXT_XS)
+                .font(font)
+                .color(p.text)
+                .wrapping(text::Wrapping::None)
+                .shaping(text::Shaping::Advanced),
+        )
         .into()
 }
 
