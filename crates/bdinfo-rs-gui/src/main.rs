@@ -2944,11 +2944,19 @@ mod harness {
     }
 
     /// Renders the app's view offscreen and ties it to the committed SHA-256
-    /// under `snapshots/` (created on first run — commit it). On a mismatch
-    /// the rendered PNG is dumped under `target/snapshot-failures/` for eyes.
-    /// Requires the deterministic software backend: without
+    /// under `snapshots/<family>/` (created on first run — commit it). On a
+    /// mismatch the rendered PNG is dumped under `target/snapshot-failures/`
+    /// for eyes. Requires the deterministic software backend: without
     /// `ICED_TEST_BACKEND=tiny-skia` (the gate and CI set it) the tie is
     /// skipped with a note rather than pinning GPU-varying pixels.
+    ///
+    /// Two pin families, keyed by OS family: the first 6-arch CI run proved
+    /// the render byte-identical across arches WITHIN a family (Windows
+    /// x86-64 = arm64; Linux x86-64 = arm64 = macOS Intel = arm), but the
+    /// bold text runs (brand, buttons, headings) rasterize differently
+    /// between Windows and the unix family — cosmic-text's font handling is
+    /// platform-conditional even with bundled fonts. Regular-weight text
+    /// (the tables, the whole report body) is identical everywhere.
     pub fn assert_snapshot(app: &App, name: &str) {
         if std::env::var("ICED_TEST_BACKEND").as_deref() != Ok("tiny-skia") {
             eprintln!(
@@ -2959,7 +2967,8 @@ mod harness {
         }
         let mut ui = ui(app);
         let snapshot = ui.snapshot(&app.theme()).expect("the snapshot renders");
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots");
+        let family = if cfg!(windows) { "windows" } else { "unix" };
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots").join(family);
         let matches = snapshot.matches_hash(dir.join(name)).expect("the hash file is readable");
         if !matches {
             let dump = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/snapshot-failures");
@@ -3355,9 +3364,10 @@ mod interaction {
 
 /// Tier-B pixel ties: key states rendered offscreen on the deterministic
 /// tiny-skia backend with the bundled fonts, pinned as committed SHA-256
-/// hashes (`snapshots/*.sha256`) — iced's own cross-OS snapshot recipe. Run
-/// them via the gate (it sets `ICED_TEST_BACKEND=tiny-skia`); kept in their
-/// own module so CI can run them as a separate, initially-advisory step
+/// hashes per OS family (`snapshots/{windows,unix}/*.sha256` — see
+/// [`harness::assert_snapshot`] for the family evidence). Run them via the
+/// gate (it sets `ICED_TEST_BACKEND=tiny-skia`); kept in their own module so
+/// CI can run them as its own blocking per-arch step
 /// (`-E 'test(/^snapshots::/)'`).
 #[cfg(test)]
 mod snapshots {
