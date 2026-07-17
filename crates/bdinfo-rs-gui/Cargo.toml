@@ -1,6 +1,9 @@
 [package]
 name = "bdinfo-rs-gui"
-version = "1.1.0"
+# Lock-stepped with the root workspace's version by hand (this independent
+# workspace cannot inherit [workspace.package]); publish = false makes it
+# cosmetic, but a public tree should not carry a stray number.
+version = "2.0.0"
 publish = false
 edition = "2024"
 rust-version = "1.96"
