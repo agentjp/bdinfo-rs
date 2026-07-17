@@ -5,7 +5,8 @@
 //! the live-progress model ([`progress`]), the flow state machine ([`flow`]),
 //! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
 //! the column-weight math ([`columns`]), the persistent configuration
-//! ([`settings`]), the visual identity ([`theme`]) and window-icon rendering
+//! ([`settings`]), the best-effort diagnostics log ([`diagnostics`]), the
+//! visual identity ([`theme`]) and window-icon rendering
 //! ([`icon`]), and the scan seam ([`scan`]) — so the golden-tie + unit
 //! tests link them directly, and the `bdinfo-rs-gui` binary is the thin iced
 //! (Tier-B) shell over this surface: it translates messages to calls here and
@@ -20,6 +21,7 @@
 
 pub mod clipboard;
 pub mod columns;
+pub mod diagnostics;
 pub mod flow;
 pub mod icon;
 pub mod model;

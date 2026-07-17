@@ -285,6 +285,7 @@ dependencies = [
  "bdinfo-rs-core",
  "iced",
  "iced_test",
+ "log",
  "proptest",
  "rfd",
 ]

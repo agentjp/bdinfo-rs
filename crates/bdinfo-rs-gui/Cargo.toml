@@ -39,6 +39,13 @@ iced = "0.14"
 # and uses the OS dialog (windows-sys / objc) on Windows/macOS — no C linked. The
 # no-C gate (`cargo tree --target all`) asserts no GTK crate ever appears.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }
+# The `log` FACADE only (pure Rust, ~no code): the iced/wgpu/rfd tree already
+# routes its diagnostics through it — iced_wgpu logs the selected adapter, rfd
+# logs the portal errors it swallows — so it was in this lockfile long before
+# this direct entry, which just lets our own code (and the hand-rolled std
+# sink in `diagnostics`) speak the same facade. No sink crate (fern/tracing):
+# the sink is ~40 lines of std.
+log = "0.4"
 
 [dev-dependencies]
 # Drive the real `view()` headlessly — click by text, drain the messages back
