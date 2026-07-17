@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
 use bdinfo_rs_core::error::ScanError;
+use bdinfo_rs_gui::diagnostics::{self, LogErr as _};
 use bdinfo_rs_gui::flow::{self, Flow, ScanRequest, Stage};
 use bdinfo_rs_gui::model::{
     SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
@@ -65,29 +66,77 @@ fn main() -> iced::Result {
     // `boot`. The path travels into the app so every later save writes the
     // same file (and a test-built `App` — path `None` — never writes at all).
     let config = config_path();
+    // Diagnostics come up before anything can fail: the per-launch log next
+    // to the config file, the panic hook (release too — a hidden Windows
+    // console leaves the log as the only witness), and a launch header. The
+    // renderer identity lands by itself: iced_wgpu logs its adapter selection
+    // through the same facade once the compositor initializes.
+    let log_path = diagnostics::log_path_from(config.as_deref());
+    diagnostics::init(log_path.as_deref());
+    diagnostics::install_panic_hook();
+    log::info!(
+        "bdinfo-rs-gui {} ({}, {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    match &config {
+        Some(path) => log::info!("config: {}", path.display()),
+        None => log::info!("config: no base directory resolved; running without persistence"),
+    }
     let persisted = config.as_deref().map_or_else(settings::Settings::default, settings::load_from);
     let window = window_settings(&persisted);
-    iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
-        .title(App::title)
-        .theme(App::theme)
-        .style(App::style)
-        // "Auto" tracks the desktop live; while the initial scan runs, also drive
-        // the indeterminate progress-bar animation.
-        .subscription(App::subscription)
-        .default_font(ui::UI)
-        .font(
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Variable.ttf"))
+    let result =
+        iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
+            .title(App::title)
+            .theme(App::theme)
+            .style(App::style)
+            // "Auto" tracks the desktop live; while the initial scan runs, also drive
+            // the indeterminate progress-bar animation.
+            .subscription(App::subscription)
+            .default_font(ui::UI)
+            .font(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/assets/fonts/Inter-Variable.ttf"
+                ))
                 .as_slice(),
-        )
-        .font(
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/assets/fonts/JetBrainsMono-Regular.ttf"
-            ))
-            .as_slice(),
-        )
-        .window(window)
-        .run()
+            )
+            .font(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/assets/fonts/JetBrainsMono-Regular.ttf"
+                ))
+                .as_slice(),
+            )
+            .window(window)
+            .run();
+    if let Err(error) = &result {
+        surface_boot_failure(error, log_path.as_deref());
+    }
+    result
+}
+
+/// A failed boot (both compositors declining, or the event loop dying) must
+/// not end as an invisible exit 1: log it, then show it. rfd's synchronous
+/// message dialog is plain `MessageBoxW` on Windows — a native modal that
+/// needs no event loop, so it renders fine after `run()` has failed
+/// (verified live); on Linux it goes through the portal and on macOS through
+/// `NSAlert`, and wherever no dialog host exists it fails into the same log
+/// (best-effort by construction — rfd routes its own errors to the facade).
+fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>) {
+    log::error!("boot failed: {error}");
+    let mut description = format!("The window could not be started.\n\n{error}");
+    if let Some(path) = log_path {
+        use std::fmt::Write as _;
+        let _ = write!(description, "\n\nDiagnostic log: {}", path.display());
+    }
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("bdinfo-rs-gui")
+        .set_description(description)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
 }
 
 /// Boots the app and fires a one-shot request for the OS theme, so the first
@@ -107,7 +156,11 @@ fn boot(config: Option<PathBuf>, persisted: settings::Settings) -> (App, Task<Me
         persisted,
         ..App::default()
     };
-    if let Some(input) = app.persisted.last_path.clone().and_then(|path| Input::classify(path).ok())
+    if let Some(input) = app
+        .persisted
+        .last_path
+        .clone()
+        .and_then(|path| Input::classify(path).log_err("last-path recall").ok())
     {
         app.flow = Flow::recall(input);
     }
@@ -182,6 +235,20 @@ fn debug_scan_delay() {
     }
 }
 
+/// Debug only: `BDINFO_GUI_PANIC` (any value) panics inside the measured-scan
+/// worker — the honest trigger for watching the diagnostics panic hook and the
+/// worker's [`scan::PanicAlarm`] drop-guard cooperate on a real unwind. No
+/// effect without the var; compiled out of every release build.
+#[cfg(debug_assertions)]
+fn debug_worker_panic() {
+    // `assert!` rather than a `panic!` in an `if` — the same real unwind,
+    // with the crate-wide clippy::panic deny left intact.
+    assert!(
+        std::env::var_os("BDINFO_GUI_PANIC").is_none(),
+        "BDINFO_GUI_PANIC: forced worker panic"
+    );
+}
+
 /// The per-platform config file location, resolved from the process
 /// environment — `None` when no base directory can be resolved (the app then
 /// runs without persistence). The one env-bound read in the config story; the
@@ -224,7 +291,9 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
         position,
         maximized: persisted.window_maximized,
         min_size: Some(iced::Size::new(MIN_SIZE.0, MIN_SIZE.1)),
-        icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE).ok(),
+        icon: iced::window::icon::from_rgba(icon::rgba(ICON_SIZE), ICON_SIZE, ICON_SIZE)
+            .log_err("window icon")
+            .ok(),
         exit_on_close_request: false,
         ..iced::window::Settings::default()
     }
@@ -1146,6 +1215,8 @@ impl App {
                     error: "scan worker terminated unexpectedly".to_owned(),
                 });
             });
+            #[cfg(debug_assertions)]
+            debug_worker_panic();
             // The scan fires its progress callback every few MB — tens of thousands
             // of times on a feature disc. Coalesce to one message per ~100 ms (plus
             // every file boundary) so the UI re-renders a few times a second, not
@@ -1207,7 +1278,12 @@ impl App {
         let target = dir.join(paths::report_file_name(label));
         self.status = match std::fs::write(&target, report.as_bytes()) {
             Ok(()) => Some(format!("Report saved to: {}", target.display())),
-            Err(err) => Some(format!("Save failed: {err}")),
+            Err(err) => {
+                // The status line is transient; autosave in particular runs
+                // with nobody watching, so the failure goes to the log too.
+                log::warn!("report save failed ({}): {err}", target.display());
+                Some(format!("Save failed: {err}"))
+            }
         };
     }
 
