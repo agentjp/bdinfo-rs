@@ -23,6 +23,7 @@ actually see on a normal disc.
 | [DTS core bit rate (1509 → 1536 kbps)](#dts-core-bit-rate) | **Yes** — bitrate number | **Common** — most DTS-HD MA cores and full-rate DTS tracks |
 | [DTS:X IMAX detection](#dtsx-imax-detection) | **Yes** — codec name | DTS:X IMAX tracks |
 | [HDR10+ without a mastering display](#hdr10-without-a-mastering-display) | **Yes** — HDR token | HDR10+ titles whose stream carries no static mastering-display SEI |
+| [MaxCLL unit label (`cd / m2` → `cd/m2`)](#maxcll-unit-label) | **Yes** — unit spelling | **Common** — every HDR title with a content-light-level SEI |
 | [AVC High 4:4:4 (profile 244)](#avc-high-444-profile-244) | **Yes** — profile token | Rare — Blu-ray video is almost always 4:2:0 |
 | [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
@@ -85,6 +86,22 @@ instead of dropping the descriptor entirely.
 <sub>Only changes output on the mastering-display-absent path; with a mastering display
 present, both tools already emit a label. Source: `crates/bdinfo-rs-core/src/codec/hevc.rs`
 (HDR-label gate).</sub>
+
+### MaxCLL unit label
+
+BDInfo's HEVC scanner prints the Maximum Content Light Level unit as `cd / m2` — spaced
+around the slash on that one line only, while the adjacent Maximum Frame-Average Light
+Level and both mastering-display luminance values use `cd/m2`. The spaced form is a typo
+in the original source (one string literal out of step with its neighbors); bdinfo-rs
+emits the `cd/m2` spelling BDInfo itself uses everywhere else.
+
+```diff
+- Video: MPEG-H HEVC Video / … / Maximum Content Light Level: 992 cd / m2 / Maximum Frame-Average Light Level: 772 cd/m2
++ Video: MPEG-H HEVC Video / … / Maximum Content Light Level: 992 cd/m2 / Maximum Frame-Average Light Level: 772 cd/m2
+```
+
+<sub>Only the unit spacing changes — the value and every other field are identical.
+Source: `crates/bdinfo-rs-core/src/codec/hevc.rs` (extended-format info).</sub>
 
 ### AVC High 4:4:4 (profile 244)
 
