@@ -23,7 +23,8 @@ env:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # PR-only: rapid sequential squash-merges must each keep their master run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:

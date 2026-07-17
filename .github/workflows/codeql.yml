@@ -15,6 +15,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: codeql-${{ github.ref }}
+  # PR-only: rapid sequential squash-merges must each keep their master run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
