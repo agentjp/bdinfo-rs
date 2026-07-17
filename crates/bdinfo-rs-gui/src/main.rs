@@ -2016,20 +2016,25 @@ fn toolbar<'a>(p: Palette) -> Element<'a, Message> {
     container(bar).width(Length::Fill).padding([ui::GAP_2, ui::GAP_4]).style(ui::toolbar(p)).into()
 }
 
-/// The 20 px brand "aperture" mark — a ring with a centre dot, mirroring the app
-/// icon, composed from styled widgets so it renders identically on every backend.
+/// The toolbar brand "aperture" mark — a ring with a centre dot, mirroring the
+/// app icon, composed from styled widgets so it renders identically on every
+/// backend.
 fn brand_mark<'a>(p: Palette) -> Element<'a, Message> {
-    aperture(p, 22.0, 2.0, 8.0)
+    aperture(p, 22.0)
 }
 
 /// The larger empty-state brand mark.
 fn brand_mark_large<'a>(p: Palette) -> Element<'a, Message> {
-    aperture(p, 56.0, 5.0, 18.0)
+    aperture(p, 56.0)
 }
 
-/// Builds the ring-and-dot aperture at `size`, with `ring` stroke width and a
-/// `dot` diameter — the in-app echo of the window icon.
-fn aperture<'a>(p: Palette, size: f32, ring: f32, dot: f32) -> Element<'a, Message> {
+/// Builds the ring-and-dot aperture at `size` — the in-app echo of the window
+/// icon, its stroke and dot derived from the icon's ratio constants so every
+/// rendering of the brand shares one geometry (the widget border draws inward
+/// from the box edge, so the ring occupies the icon's outer-to-inner band).
+fn aperture<'a>(p: Palette, size: f32) -> Element<'a, Message> {
+    let ring = (icon::RING_OUTER - icon::RING_INNER) * size;
+    let dot = 2.0 * icon::DOT_R * size;
     let center = container(Space::new())
         .width(Length::Fixed(dot))
         .height(Length::Fixed(dot))

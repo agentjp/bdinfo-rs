@@ -15,9 +15,13 @@
 //! little-endian by spec, unlike the big-endian disc structures the analyzer
 //! parses.
 
-/// The icon sizes embedded in the executable — the classic Windows ladder from
-/// the 16 px list view up to the 256 px Explorer tile.
-pub const SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+/// The icon sizes embedded in the executable.
+///
+/// The classic ladder from the 16 px list view to the 256 px tile, plus the
+/// fractional-DPI rungs (20, 28, 40, 96) the Windows shell requests at
+/// 125/150/175/200 % scale — without them it nearest-neighbour-upscales a
+/// smaller rung into visible jaggies.
+pub const SIZES: [u32; 11] = [16, 20, 24, 28, 32, 40, 48, 64, 96, 128, 256];
 
 /// `MOVEABLE | DISCARDABLE` — the 16-bit-era memory flags `rc` stamps on icon
 /// resources; Win32 ignores them but tools expect the conventional value.
@@ -337,9 +341,9 @@ mod tests {
         let icons: Vec<(u32, Vec<u8>)> =
             SIZES.iter().map(|&s| (s, dib(s, &icon::rgba(s)).expect("shipped size"))).collect();
         let out = res(&icons).expect("the shipped set is valid");
-        assert_eq!(out.len(), 372_800, "update the pinned length deliberately");
+        assert_eq!(out.len(), 422_808, "update the pinned length deliberately");
         let sum: u64 = out.iter().map(|&byte| u64::from(byte)).sum();
-        assert_eq!(sum, 54_754_185, "update the pinned checksum deliberately");
+        assert_eq!(sum, 62_004_853, "update the pinned checksum deliberately");
     }
 
     proptest! {
