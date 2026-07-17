@@ -43,6 +43,8 @@ const KEY_REPORT_SUMMARY: &str = "report-quick-summary";
 const KEY_LAST_PATH: &str = "last-path";
 /// The config file's key for the theme preference.
 const KEY_THEME: &str = "theme";
+/// The config file's key for the UI scale, in percent.
+const KEY_UI_SCALE: &str = "ui-scale-percent";
 /// The config file's keys for the window's logical size.
 const KEY_WINDOW_WIDTH: &str = "window-width";
 /// See [`KEY_WINDOW_WIDTH`].
@@ -63,6 +65,28 @@ const MAX_AXIS: f32 = 16_384.0;
 /// a stored or typed value beyond it clamps here rather than filtering every
 /// playlist off a disc with a nonsense number.
 pub const MAX_SHORT_SECONDS: u32 = 86_400;
+
+/// The smallest accepted UI scale, in percent of the platform-native scale.
+///
+/// The 50–200 range is deliberately tighter than the reference apps'
+/// (Sniffnet allows 30–300%, Halloy 10–300%): 50% fully compensates the
+/// worst real fractional-DPI wrongness (X11 reporting 2× for a 1× display)
+/// — smaller only shrinks the 680-px minimum window under ~340 physical
+/// pixels — and 200% covers both the inverse compensation (1× reported for
+/// a `HiDPI` panel) and the accessibility zoom Windows itself tops out at
+/// on standard displays; past 2× the portrait layout no longer fits even a
+/// 2160-px-tall screen.
+pub const MIN_UI_SCALE_PERCENT: u16 = 50;
+/// The largest accepted UI scale, in percent — see [`MIN_UI_SCALE_PERCENT`].
+pub const MAX_UI_SCALE_PERCENT: u16 = 200;
+
+/// The UI-scale ladder, in percent.
+///
+/// The Settings dialog offers exactly these as chips and the keyboard
+/// shortcut (Ctrl+'+' / Ctrl+'-', via [`scale_step`]) walks them. A
+/// hand-edited config may hold any percent within the bounds; the chips
+/// then simply show no pick until one is chosen.
+pub const UI_SCALE_PRESETS: &[u16] = &[50, 75, 100, 125, 150, 200];
 
 /// The persisted theme preference — the storable form of the shell's
 /// System / Light / Dark cycle.
@@ -118,7 +142,11 @@ impl ThemeChoice {
 )]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
-    /// The window's logical size, `(width, height)`.
+    /// The window's logical size, `(width, height)`, in the app's own
+    /// logical units — what layout sees, independent of both the OS DPI and
+    /// [`ui_scale_percent`](Self::ui_scale_percent): iced multiplies both
+    /// back in at restore exactly as it divided them out at the close-time
+    /// readout (verified symmetric; see `save_and_close` in the shell).
     pub window_size: Option<(f32, f32)>,
     /// The window's logical outer position, `(x, y)` — absent on Wayland,
     /// which has no global window positions.
@@ -132,6 +160,12 @@ pub struct Settings {
     pub last_path: Option<PathBuf>,
     /// The theme preference.
     pub theme: ThemeChoice,
+    /// The UI scale in percent (100 = the platform-native scale), applied
+    /// through the application scale factor ON TOP of the OS DPI — the
+    /// user-facing answer to X11/fractional-DPI wrongness, doubling as an
+    /// accessibility zoom. Clamped to
+    /// [`MIN_UI_SCALE_PERCENT`]..=[`MAX_UI_SCALE_PERCENT`] on load.
+    pub ui_scale_percent: u16,
     /// Drop playlists shorter than [`short_playlist_seconds`](Self::short_playlist_seconds)
     /// from the table (`BDInfo`'s `FilterShortPlaylists`).
     pub filter_short_playlists: bool,
@@ -166,6 +200,9 @@ impl Default for Settings {
             window_maximized: false,
             last_path: None,
             theme: ThemeChoice::default(),
+            // Native scale — a fresh install renders exactly as before the
+            // setting existed.
+            ui_scale_percent: 100,
             // The filter defaults are core's (on at 20 s) — today's table.
             filter_short_playlists: true,
             short_playlist_seconds: 20,
@@ -228,6 +265,11 @@ impl Settings {
                         settings.theme = theme;
                     }
                 }
+                KEY_UI_SCALE => {
+                    if let Some(percent) = parse_ui_scale(value) {
+                        settings.ui_scale_percent = percent;
+                    }
+                }
                 KEY_WINDOW_WIDTH => width = parse_axis(value),
                 KEY_WINDOW_HEIGHT => height = parse_axis(value),
                 KEY_WINDOW_X => x = parse_axis(value),
@@ -272,6 +314,7 @@ impl Settings {
     pub fn render(&self) -> String {
         let mut entries: Vec<(&str, String)> = vec![
             (KEY_THEME, self.theme.as_str().to_owned()),
+            (KEY_UI_SCALE, self.ui_scale_percent.to_string()),
             (KEY_FILTER_SHORT, self.filter_short_playlists.to_string()),
             (KEY_SHORT_SECONDS, self.short_playlist_seconds.to_string()),
             (KEY_FILTER_LOOPS, self.filter_looping_playlists.to_string()),
@@ -321,6 +364,38 @@ fn parse_seconds(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok().map(|v| v.min(MAX_SHORT_SECONDS))
 }
 
+/// Parses a UI-scale percent: a whole number, clamped into the
+/// [`MIN_UI_SCALE_PERCENT`]..=[`MAX_UI_SCALE_PERCENT`] bounds; `None` for
+/// anything non-numeric — including a number past `u16` — so a corrupt value
+/// keeps the 100% default.
+fn parse_ui_scale(value: &str) -> Option<u16> {
+    value.trim().parse::<u16>().ok().map(|v| v.clamp(MIN_UI_SCALE_PERCENT, MAX_UI_SCALE_PERCENT))
+}
+
+/// Steps the UI scale one [`UI_SCALE_PRESETS`] entry up or down — the
+/// Ctrl+'+' / Ctrl+'-' move.
+///
+/// Holds at the bound preset when there is nothing further; an off-ladder
+/// (hand-edited) value snaps to the nearest preset in the direction of
+/// travel.
+#[must_use]
+pub fn scale_step(current: u16, up: bool) -> u16 {
+    if up {
+        UI_SCALE_PRESETS
+            .iter()
+            .copied()
+            .find(|&preset| preset > current)
+            .unwrap_or(MAX_UI_SCALE_PERCENT)
+    } else {
+        UI_SCALE_PRESETS
+            .iter()
+            .copied()
+            .rev()
+            .find(|&preset| preset < current)
+            .unwrap_or(MIN_UI_SCALE_PERCENT)
+    }
+}
+
 /// Applies one stored boolean: the exact `true` / `false` tokens set the
 /// slot; any other value keeps the default (a corrupt value never fails the
 /// load).
@@ -366,6 +441,8 @@ pub struct Draft {
     /// live while the dialog is open; Cancel drops the draft and the preview
     /// with it.
     pub theme: ThemeChoice,
+    /// The UI-scale picker (percent chips), previewed live like the theme.
+    pub ui_scale_percent: u16,
     /// The "Filter short playlists" checkbox.
     pub filter_short_playlists: bool,
     /// The seconds field's text, kept digits-only by [`sanitize_seconds`].
@@ -391,6 +468,7 @@ impl Draft {
     pub fn from_settings(settings: &Settings) -> Self {
         Self {
             theme: settings.theme,
+            ui_scale_percent: settings.ui_scale_percent,
             filter_short_playlists: settings.filter_short_playlists,
             seconds_text: settings.short_playlist_seconds.to_string(),
             filter_looping_playlists: settings.filter_looping_playlists,
@@ -408,6 +486,7 @@ impl Draft {
     /// threshold, exactly like `BDInfo`'s `int.TryParse` guard.
     pub fn apply_to(&self, settings: &mut Settings) {
         settings.theme = self.theme;
+        settings.ui_scale_percent = self.ui_scale_percent;
         settings.filter_short_playlists = self.filter_short_playlists;
         settings.filter_looping_playlists = self.filter_looping_playlists;
         settings.human_readable_sizes = self.human_readable_sizes;
@@ -522,6 +601,7 @@ mod tests {
         assert!(!settings.window_maximized);
         assert_eq!(settings.last_path, None);
         assert_eq!(settings.theme, ThemeChoice::System);
+        assert_eq!(settings.ui_scale_percent, 100);
         // Today's exact table: the standard filter (on at 20 s), grouped
         // bytes, the chapter suffix shown, no autosave.
         assert!(settings.filter_short_playlists);
@@ -543,6 +623,7 @@ mod tests {
             window_maximized: true,
             last_path: Some(PathBuf::from(r"D:\rips\MY_DISC")),
             theme: ThemeChoice::Dark,
+            ui_scale_percent: 150,
             filter_short_playlists: false,
             short_playlist_seconds: 0,
             filter_looping_playlists: false,
@@ -616,6 +697,47 @@ mod tests {
         assert!(settings.autosave_report);
         assert!(!settings.report_stream_diagnostics);
         assert!(!settings.report_quick_summary);
+    }
+
+    #[test]
+    fn a_stored_ui_scale_parses_clamps_and_rejects_junk() {
+        // A percent inside the bounds lands as-is — presets and hand-edited
+        // off-ladder values alike.
+        assert_eq!(Settings::parse("ui-scale-percent = 125\n").ui_scale_percent, 125);
+        assert_eq!(Settings::parse("ui-scale-percent = 137\n").ui_scale_percent, 137);
+        // Numeric but absurd clamps into the bounds (never an unusable UI).
+        assert_eq!(
+            Settings::parse("ui-scale-percent = 10\n").ui_scale_percent,
+            super::MIN_UI_SCALE_PERCENT
+        );
+        assert_eq!(
+            Settings::parse("ui-scale-percent = 999\n").ui_scale_percent,
+            super::MAX_UI_SCALE_PERCENT
+        );
+        // Non-numeric (a fraction, junk, past u16) keeps the 100% default.
+        assert_eq!(Settings::parse("ui-scale-percent = 1.25\n").ui_scale_percent, 100);
+        assert_eq!(Settings::parse("ui-scale-percent = large\n").ui_scale_percent, 100);
+        assert_eq!(Settings::parse("ui-scale-percent = 70000\n").ui_scale_percent, 100);
+        assert_eq!(Settings::parse("ui-scale-percent = -50\n").ui_scale_percent, 100);
+    }
+
+    #[test]
+    fn scale_step_walks_the_presets_and_holds_at_the_bounds() {
+        // From a preset: one step in each direction.
+        assert_eq!(super::scale_step(100, true), 125);
+        assert_eq!(super::scale_step(100, false), 75);
+        // The bounds hold — no step past the ladder's ends.
+        assert_eq!(super::scale_step(super::MAX_UI_SCALE_PERCENT, true), 200);
+        assert_eq!(super::scale_step(super::MIN_UI_SCALE_PERCENT, false), 50);
+        // An off-ladder (hand-edited) value snaps to the nearest preset in
+        // the direction of travel.
+        assert_eq!(super::scale_step(137, true), 150);
+        assert_eq!(super::scale_step(137, false), 125);
+        // Total even outside the clamped range (defence in depth).
+        assert_eq!(super::scale_step(10, true), 50);
+        assert_eq!(super::scale_step(10, false), 50);
+        assert_eq!(super::scale_step(400, true), 200);
+        assert_eq!(super::scale_step(400, false), 200);
     }
 
     #[test]
@@ -710,16 +832,19 @@ mod tests {
         let mut settings = Settings {
             short_playlist_seconds: 30,
             theme: ThemeChoice::Light,
+            ui_scale_percent: 125,
             ..Settings::default()
         };
         let mut draft = super::Draft::from_settings(&settings);
         assert_eq!(draft.seconds_text, "30");
         assert_eq!(draft.theme, ThemeChoice::Light);
+        assert_eq!(draft.ui_scale_percent, 125);
         assert!(draft.filter_short_playlists);
         assert!(draft.report_stream_diagnostics);
         assert!(draft.report_quick_summary);
         // Edit every field and apply: all of it lands.
         draft.theme = ThemeChoice::Dark;
+        draft.ui_scale_percent = 150;
         draft.filter_short_playlists = false;
         draft.seconds_text = "0".to_owned();
         draft.filter_looping_playlists = false;
@@ -730,6 +855,7 @@ mod tests {
         draft.report_quick_summary = false;
         draft.apply_to(&mut settings);
         assert_eq!(settings.theme, ThemeChoice::Dark);
+        assert_eq!(settings.ui_scale_percent, 150);
         assert!(!settings.filter_short_playlists);
         assert_eq!(settings.short_playlist_seconds, 0);
         assert!(!settings.filter_looping_playlists);
@@ -902,6 +1028,7 @@ mod tests {
                 proptest::option::of((pos_axis(), pos_axis())),
                 proptest::option::of(path_string().prop_map(PathBuf::from)),
                 theme(),
+                super::super::MIN_UI_SCALE_PERCENT..=super::super::MAX_UI_SCALE_PERCENT,
                 (any::<bool>(), 0..=super::super::MAX_SHORT_SECONDS, any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
@@ -912,6 +1039,7 @@ mod tests {
                         window_pos,
                         last_path,
                         theme,
+                        ui_scale_percent,
                         (filter_short_playlists, short_playlist_seconds, filter_looping_playlists),
                         (human_readable_sizes, display_chapter_count, autosave_report),
                         (report_stream_diagnostics, report_quick_summary, window_maximized),
@@ -922,6 +1050,7 @@ mod tests {
                             window_maximized,
                             last_path,
                             theme,
+                            ui_scale_percent,
                             filter_short_playlists,
                             short_playlist_seconds,
                             filter_looping_playlists,

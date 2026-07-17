@@ -102,6 +102,11 @@ fn main() -> iced::Result {
             .title(App::title)
             .theme(App::theme)
             .style(App::style)
+            // The persisted UI scale, multiplied on top of the OS DPI — the
+            // X11 fractional-DPI escape hatch, doubling as an accessibility
+            // zoom. The open Settings dialog's draft previews its pick live,
+            // exactly like the theme chips.
+            .scale_factor(App::ui_scale)
             // "Auto" tracks the desktop live; while the initial scan runs, also drive
             // the indeterminate progress-bar animation.
             .subscription(App::subscription)
@@ -635,6 +640,13 @@ enum Message {
     SettingsSeconds(String),
     /// A theme chip picked on the open dialog — previewed live via the draft.
     SettingsTheme(settings::ThemeChoice),
+    /// A UI-scale chip picked on the open dialog — previewed live via the
+    /// draft, like the theme.
+    SettingsScale(u16),
+    /// Ctrl+'+' / Ctrl+'-' (`true` = up) — step the UI scale through the
+    /// presets: the open dialog's draft when there is one, else the applied
+    /// settings directly.
+    ScaleStepped(bool),
     /// The Settings dialog's OK — apply + persist the draft.
     SettingsOk,
     /// The Settings dialog's Cancel (or a scrim click) — discard the draft.
@@ -685,6 +697,18 @@ impl App {
             .as_ref()
             .map_or(self.theme_pref, |draft| ThemePref::from_choice(draft.theme))
             .resolve(self.os_mode)
+    }
+
+    /// The applied UI scale as the multiplier iced expects (1.0 = native),
+    /// from the persisted percent. While the Settings dialog is open its
+    /// draft's pick wins — the live preview; Cancel drops the draft and the
+    /// scale reverts with it.
+    fn ui_scale(&self) -> f32 {
+        let percent = self
+            .settings_draft
+            .as_ref()
+            .map_or(self.persisted.ui_scale_percent, |draft| draft.ui_scale_percent);
+        f32::from(percent) / 100.0
     }
 
     /// The window title (an iced title function over the app state).
@@ -819,6 +843,8 @@ impl App {
             | Message::SettingsToggled(_)
             | Message::SettingsSeconds(_)
             | Message::SettingsTheme(_)
+            | Message::SettingsScale(_)
+            | Message::ScaleStepped(_)
             | Message::SettingsOk
             | Message::SettingsCancel) => {
                 self.on_settings(message);
@@ -865,10 +891,11 @@ impl App {
         }
     }
 
-    /// Handles the Settings dialog's messages: open a fresh draft, edit it
-    /// (checkboxes / the digits-only seconds field / the theme chips), OK
-    /// (apply + persist), or Cancel (discard). A stray edit with no open
-    /// dialog changes nothing.
+    /// Handles the settings messages: open a fresh dialog draft, edit it
+    /// (checkboxes / the digits-only seconds field / the theme and UI-scale
+    /// chips), OK (apply + persist), Cancel (discard), or the UI-scale
+    /// keyboard step (which also works with no dialog open). A stray edit
+    /// with no open dialog changes nothing.
     fn on_settings(&mut self, message: Message) {
         match message {
             Message::OpenSettings => {
@@ -887,6 +914,13 @@ impl App {
                     draft.theme = choice;
                 }
             }
+            Message::SettingsScale(percent) => {
+                // Like the theme: `ui_scale()` previews the draft's pick live.
+                if let Some(draft) = &mut self.settings_draft {
+                    draft.ui_scale_percent = percent;
+                }
+            }
+            Message::ScaleStepped(up) => self.step_scale(up),
             Message::SettingsOk => self.apply_settings(),
             Message::SettingsCancel => self.settings_draft = None,
             // Not a Settings message — update() never routes one here.
@@ -908,6 +942,22 @@ impl App {
                 SettingsField::QuickSummary => &mut draft.report_quick_summary,
             };
             *slot = !*slot;
+        }
+    }
+
+    /// Steps the UI scale one preset up or down — the Ctrl+'+' / Ctrl+'-'
+    /// shortcut. With the Settings dialog open the step edits its draft (the
+    /// same live-preview, Cancel-reverts road as the chips); otherwise it
+    /// applies to the settings directly and persists.
+    fn step_scale(&mut self, up: bool) {
+        if let Some(draft) = &mut self.settings_draft {
+            draft.ui_scale_percent = settings::scale_step(draft.ui_scale_percent, up);
+        } else {
+            let stepped = settings::scale_step(self.persisted.ui_scale_percent, up);
+            if stepped != self.persisted.ui_scale_percent {
+                self.persisted.ui_scale_percent = stepped;
+                self.persist();
+            }
         }
     }
 
@@ -949,6 +999,13 @@ impl App {
     ) -> Task<Message> {
         self.persisted.window_maximized = maximized;
         if !maximized {
+            // Geometry round-trips VERIFIED symmetric at a non-100% UI scale
+            // (iced_winit 0.14: `conversion::window_attributes` multiplies
+            // `Settings.size` by the application scale factor at creation,
+            // and `window::size` divides the physical size by DPI × that
+            // same factor — so the stored size is app-logical on both
+            // roads; positions are DPI-logical on both). No adjustment, or
+            // the size would drift by the scale factor every launch.
             self.persisted.window_size = Some((size.width, size.height));
             if let Some(point) = position {
                 self.persisted.window_pos = Some((point.x, point.y));
@@ -1012,17 +1069,23 @@ impl App {
             }
             _ => None,
         }));
-        // Ctrl+C (Cmd+C on macOS, iced's `command` modifier) copies the
-        // highlighted row's file path. Only events no widget consumed are
-        // taken; the guard rules (busy / report view / what is highlighted)
-        // live in the handler, so the subscription is a plain feed.
+        // The command-key shortcuts (Ctrl on Windows/Linux, Cmd on macOS —
+        // iced's `command` modifier): Ctrl+C copies the highlighted row's
+        // file path; Ctrl+'+' / Ctrl+'-' step the UI scale ("=" is the
+        // unshifted '+' key on common layouts — the usual zoom-in binding).
+        // Only events no widget consumed are taken; the guard rules (busy /
+        // report view / what is highlighted) live in the handlers, so the
+        // subscription is a plain feed.
         subs.push(iced::event::listen_with(|event, status, _window| match event {
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
-                if status == iced::event::Status::Ignored
-                    && modifiers.command()
-                    && matches!(key.as_ref(), iced::keyboard::Key::Character("c")) =>
+                if status == iced::event::Status::Ignored && modifiers.command() =>
             {
-                Some(Message::CopyPath)
+                match key.as_ref() {
+                    iced::keyboard::Key::Character("c") => Some(Message::CopyPath),
+                    iced::keyboard::Key::Character("+" | "=") => Some(Message::ScaleStepped(true)),
+                    iced::keyboard::Key::Character("-") => Some(Message::ScaleStepped(false)),
+                    _ => None,
+                }
             }
             _ => None,
         }));
@@ -2493,6 +2556,17 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
         .push(theme_chip(p, settings::ThemeChoice::Light, draft.theme))
         .push(theme_chip(p, settings::ThemeChoice::Dark, draft.theme));
 
+    // The UI-scale picker, chips like the theme's (previewed live off the
+    // draft the same way). Slimmer padding — six chips share the row.
+    let scale_row = settings::UI_SCALE_PRESETS.iter().fold(
+        Row::new()
+            .align_y(Vertical::Center)
+            .spacing(ui::GAP_1)
+            .push(text("UI scale").size(ui::TEXT_SM).color(p.text))
+            .push(Space::new().width(Length::Fill)),
+        |row, &preset| row.push(scale_chip(p, preset, draft.ui_scale_percent)),
+    );
+
     let actions = Row::new()
         .width(Length::Fill)
         .spacing(ui::GAP_2)
@@ -2553,6 +2627,7 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
         ))
         .push(rule)
         .push(theme_row)
+        .push(scale_row)
         .push(actions);
     container(card).padding(ui::GAP_6).style(ui::hero_card(p)).into()
 }
@@ -2574,6 +2649,21 @@ fn theme_chip<'a>(
         chip.style(ui::secondary_button(p))
     };
     chip.on_press(Message::SettingsTheme(choice)).into()
+}
+
+/// One chip of the Settings dialog's UI-scale picker — the picked percent
+/// takes the filled-accent look, the rest stay quiet outlines, exactly like
+/// the theme chips above it. A click lands on the draft, so the scale
+/// previews live (the whole window re-scales) and Cancel reverts it.
+fn scale_chip<'a>(p: Palette, preset: u16, picked: u16) -> Element<'a, Message> {
+    let chip = button(text(format!("{preset}%")).size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+        .padding([ui::GAP_1, ui::GAP_2]);
+    let chip = if preset == picked {
+        chip.style(ui::primary_button(p))
+    } else {
+        chip.style(ui::secondary_button(p))
+    };
+    chip.on_press(Message::SettingsScale(preset)).into()
 }
 
 /// One Settings checkbox line: the app's check chip + label, the whole line
@@ -3044,6 +3134,47 @@ mod interaction {
         click(&mut app, "Cancel");
         assert!(app.settings_draft.is_none());
         assert!(app.persisted.filter_looping_playlists, "the cancelled edit never landed");
+    }
+
+    #[test]
+    fn the_scale_chips_preview_apply_and_revert() {
+        let mut app = listed_app();
+        assert_eq!(app.ui_scale().to_bits(), 1.0f32.to_bits());
+        // Picking a chip previews live off the draft — nothing applied yet.
+        click(&mut app, "Settings...");
+        click(&mut app, "150%");
+        assert_eq!(app.ui_scale().to_bits(), 1.5f32.to_bits(), "the open dialog previews");
+        assert_eq!(app.persisted.ui_scale_percent, 100);
+        // OK applies and persists the pick.
+        click(&mut app, "OK");
+        assert_eq!(app.persisted.ui_scale_percent, 150);
+        assert_eq!(app.ui_scale().to_bits(), 1.5f32.to_bits());
+        // Cancel drops a previewed pick — the applied percent stands.
+        click(&mut app, "Settings...");
+        click(&mut app, "75%");
+        assert_eq!(app.ui_scale().to_bits(), 0.75f32.to_bits(), "the preview switched");
+        click(&mut app, "Cancel");
+        assert_eq!(app.persisted.ui_scale_percent, 150);
+        assert_eq!(app.ui_scale().to_bits(), 1.5f32.to_bits(), "the cancelled preview reverted");
+    }
+
+    #[test]
+    fn the_scale_shortcut_steps_the_settings_or_the_open_draft() {
+        let mut app = listed_app();
+        // No dialog: the step lands on (and would persist) the settings.
+        let _ = app.update(Message::ScaleStepped(true));
+        assert_eq!(app.persisted.ui_scale_percent, 125);
+        let _ = app.update(Message::ScaleStepped(false));
+        let _ = app.update(Message::ScaleStepped(false));
+        assert_eq!(app.persisted.ui_scale_percent, 75);
+        // Dialog open: the step edits the draft only — OK applies it.
+        click(&mut app, "Settings...");
+        let _ = app.update(Message::ScaleStepped(true));
+        let draft = app.settings_draft.as_ref().expect("the dialog is open");
+        assert_eq!(draft.ui_scale_percent, 100);
+        assert_eq!(app.persisted.ui_scale_percent, 75, "the step previewed, not applied");
+        click(&mut app, "OK");
+        assert_eq!(app.persisted.ui_scale_percent, 100);
     }
 
     #[test]
