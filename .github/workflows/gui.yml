@@ -110,6 +110,20 @@ jobs:
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --release --locked
 
+      # Every PR run yields downloadable per-arch release binaries — including
+      # the arches this project has no hardware for — so any increment can be
+      # hand-tested on real machines without any release machinery. Short
+      # retention: these are throwaway smoke builds, not distribution.
+      - name: Upload the release binary (short-retention artifact)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bdinfo-rs-gui-${{ matrix.os }}
+          path: |
+            crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui
+            crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          retention-days: 7
+          if-no-files-found: error
+
       # One release-mode test leg: debug_assertions off and the optimizer at
       # the shipped level over the full suite (every cfg(debug_assertions)
       # site lives in the Tier-B bin, but overflow-checks and codegen differ
