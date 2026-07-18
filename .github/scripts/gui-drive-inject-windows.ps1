@@ -52,10 +52,23 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder sb, int max);
     // The top-level window that would receive a click at (x, y).
     public static IntPtr RootAt(int x, int y) {
         POINT p; p.X = x; p.Y = y;
         return GetAncestor(WindowFromPoint(p), 2); // GA_ROOT
+    }
+    // Who is that window — for the refusal diagnostics.
+    public static string Describe(IntPtr h) {
+        var t = new System.Text.StringBuilder(256); GetWindowText(h, t, 256);
+        var c = new System.Text.StringBuilder(256); GetClassName(h, c, 256);
+        return "hwnd=" + h + " class='" + c + "' title='" + t + "'";
+    }
+    // Pin the app above everything non-topmost, without moving or activating
+    // it (HWND_TOPMOST; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE).
+    public static bool MakeTopmost(IntPtr h) {
+        return SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0013);
     }
     // The real app window: owned by the pid, visible, titled "bdinfo-rs…".
     // Process.MainWindowHandle is NOT that — winit also creates hidden
@@ -165,6 +178,9 @@ for ($i = 0; $i -lt 60; $i++) {
 if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
 $minimized = [GuiInput]::MinimizeOthers($hwnd)
 Write-Host "==> minimized $minimized other top-level window(s) (runner provisioner etc.)"
+# Belt and braces: some overlays (UWP input hosts) refuse SW_MINIMIZE and
+# still hit-test above a normal window — pin the app topmost instead.
+if (-not [GuiInput]::MakeTopmost($hwnd)) { Write-Host '!! SetWindowPos(HWND_TOPMOST) failed' }
 
 $origin = New-Object GuiInput+POINT
 [void][GuiInput]::ClientToScreen($hwnd, [ref]$origin)
@@ -216,7 +232,8 @@ function Send-Click([double]$Lx, [double]$Ly) {
         Start-Sleep -Milliseconds 300
     }
     if (-not $clear) {
-        throw "another window sits under the cursor at $px,$py — refusing to inject blind clicks"
+        $who = [GuiInput]::Describe([GuiInput]::RootAt($px, $py))
+        throw "another window sits under the cursor at ${px},${py} ($who) — refusing to inject blind clicks"
     }
     [void][GuiInput]::Mouse(0x0002) # LEFTDOWN
     Start-Sleep -Milliseconds 80
