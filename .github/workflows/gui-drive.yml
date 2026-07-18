@@ -80,32 +80,27 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
 
-      # Pre-authorize screen capture so the TCC consent dialog ("bash is
-      # requesting to bypass the system private window picker") never spawns
-      # over the window mid-gallery. Hosted macOS runners ship with SIP
-      # disabled, which is what makes the direct TCC.db grant possible; the
-      # capture itself works either way (the dialog is cosmetic pollution),
-      # so a schema mismatch on a future image just logs and moves on.
-      - name: Pre-authorize screen capture (macOS TCC)
+      # displayplacer raises the mac desktop to 1920x1080 (best-effort; the
+      # paravirtual display may reject a mode — the harness then works at
+      # whatever it gets and crops to the window regardless).
+      - name: Install displayplacer (macOS resolution control)
         if: runner.os == 'macOS'
-        run: |
-          for client in /bin/bash /bin/zsh "$(command -v pwsh || true)"; do
-            [ -n "$client" ] || continue
-            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$client', 1, 2, 4, 1, 'UNUSED', 0, $(date +%s));" \
-              && echo "granted: $client" || echo "TCC grant failed for $client (schema drift?) — the consent dialog may appear in shots"
-          done
+        run: brew install displayplacer
 
       - name: Build (debug — the drive seam is debug-only)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --locked
 
+      # A 1920x1080 virtual display everywhere (the harness raises Windows/mac
+      # to match); the app runs at its natural 880x960 window and every shot is
+      # cropped to that window (via xdotool's window id here), so the galleries
+      # are identical across OSes and carry no desktop margin.
       - name: Drive the walk (xvfb + lavapipe)
         if: runner.os == 'Linux'
         run: >
-          xvfb-run -a pwsh .github/scripts/gui-drive-assisted.ps1
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-assisted.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
           -Gallery gallery
@@ -167,29 +162,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
 
-      - name: Install cliclick (macOS synthetic clicks)
+      - name: Install cliclick + displayplacer (macOS clicks + resolution)
         if: runner.os == 'macOS'
-        run: brew install cliclick
-
-      # Same TCC pre-grant as the assisted job — see the comment there.
-      - name: Pre-authorize screen capture (macOS TCC)
-        if: runner.os == 'macOS'
-        run: |
-          for client in /bin/bash /bin/zsh "$(command -v pwsh || true)"; do
-            [ -n "$client" ] || continue
-            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$client', 1, 2, 4, 1, 'UNUSED', 0, $(date +%s));" \
-              && echo "granted: $client" || echo "TCC grant failed for $client (schema drift?) — the consent dialog may appear in shots"
-          done
+        run: brew install cliclick displayplacer
 
       - name: Build (debug — the env hooks are debug-only)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --locked
 
+      # 1920x1080 virtual display, window-cropped capture — see the assisted note.
       - name: Inject the walk (xdotool under xvfb)
         if: runner.os == 'Linux'
         run: >
-          xvfb-run -a pwsh .github/scripts/gui-drive-inject-linux.ps1
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-inject-linux.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
           -Gallery gallery

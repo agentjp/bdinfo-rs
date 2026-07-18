@@ -41,6 +41,34 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    // Raise the desktop resolution. Set-DisplayResolution exists only on the
+    // Server image; ChangeDisplaySettings works on every Windows image
+    // (client + Server + arm). Try modes until one is accepted — the hosted
+    // virtual display may not offer 1080p.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    public struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+    [DllImport("user32.dll")] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+    public static string FitResolution(int minW, int minH) {
+        int[][] modes = { new[]{1920,1080}, new[]{1600,1200}, new[]{1440,1080}, new[]{1280,1024} };
+        foreach (var m in modes) {
+            if (m[0] < minW || m[1] < minH) continue;
+            DEVMODE dm = new DEVMODE();
+            dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            dm.dmPelsWidth = m[0]; dm.dmPelsHeight = m[1]; dm.dmBitsPerPel = 32;
+            dm.dmFields = 0x40000 | 0x80000 | 0x100000;
+            if (ChangeDisplaySettings(ref dm, 0) == 0) return m[0] + "x" + m[1];
+        }
+        return "unchanged";
+    }
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -178,14 +206,10 @@ Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProf
     -Name 'ScoobeSystemSettingEnabled' -Value 0 -Type DWord
 Write-Host '==> SCOOBE (second-chance OOBE nag) disabled in the registry'
 
-# Hosted images default the virtual display to 1024x768. Set-DisplayResolution
-# exists on the Server images (windows-2025) only — best effort, logged; the
-# BDINFO_GUI_WIN boot geometry below fits the window at ANY resolution.
-try {
-    Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
-    Write-Host '==> display set to 1920x1080'
-}
-catch { Write-Host "==> Set-DisplayResolution unavailable ($($_.Exception.Message.Trim())) — staying at the image default" }
+# Hosted images default the virtual display to 1024x768 — too short for the
+# 880x960 window (its bottom bar would hang off-screen and clicks miss). Raise
+# it so the whole window is on-screen and clickable.
+Write-Host "==> Windows display -> $([GuiInput]::FitResolution(1280, 1040))"
 
 $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $configDir = Join-Path $tempBase "gui-inject-config-$PID"
@@ -196,10 +220,10 @@ $env:BDINFO_GUI_OPEN = (Resolve-Path $Disc).Path
 $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
-# Boot geometry through the app's own seam: 880x640 logical at the origin
-# fits the smallest runner work area (768 - 48 taskbar), so no bottom-bar
-# click can ever land off-screen or on the taskbar.
-$env:BDINFO_GUI_WIN = '880x640+0+0'
+# Boot geometry through the app's own seam: the app's natural 880x960 design
+# size at the origin — the SHARED size across every driving leg. The display
+# was just raised so this fits fully on-screen.
+$env:BDINFO_GUI_WIN = '880x960+0+0'
 
 Write-Host "==> launch $Exe (OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru

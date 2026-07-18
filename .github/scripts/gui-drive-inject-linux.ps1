@@ -27,9 +27,9 @@ $env:BDINFO_GUI_OPEN = (Resolve-Path $Disc).Path
 $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
-# Boot geometry through the app's own seam (same shape as the Windows leg —
-# one coordinate table across all legs; the y coords derive from the height).
-$env:BDINFO_GUI_WIN = '880x640+0+0'
+# Boot geometry through the app's own seam — the shared 880x960 size across
+# every driving leg (the xvfb screen is 1920x1080, so it fits with room).
+$env:BDINFO_GUI_WIN = '880x960+0+0'
 
 Write-Host "==> launch $Exe (DISPLAY=$env:DISPLAY OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
@@ -57,7 +57,9 @@ $logicalH = $gh / $scale
 Write-Host "==> window $wid at $gx,$gy size ${gw}x${gh} (scale $scale, logical height $([int]$logicalH))"
 
 function Save-Shot([string]$Name) {
-    & import -window root (Join-Path $Gallery "$Name.png")
+    # Crop to the app window (not the whole 1920x1080 root) so the gallery
+    # carries no desktop margin and matches the other OSes' framing.
+    & import -window $wid (Join-Path $Gallery "$Name.png")
     if ($LASTEXITCODE -ne 0) { Write-Host "!! capture failed for $Name" }
 }
 

@@ -46,8 +46,8 @@ $configDir = Join-Path $tempBase "gui-drive-config-$PID"
 Remove-Item -Recurse -Force $driveDir, $configDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $driveDir, $configDir, $Gallery | Out-Null
 
-# Isolate the persisted config so the window opens at the default pinned
-# geometry (880x960 logical) with default settings, never a runner-cached one.
+# Isolate the persisted config so the window opens at a known geometry with
+# default settings, never a runner-cached one.
 if ($IsWindows) { $env:APPDATA = $configDir }
 elseif ($IsMacOS) { $env:HOME = $configDir }
 else { $env:XDG_CONFIG_HOME = $configDir }
@@ -57,6 +57,59 @@ $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_DRIVE = $driveDir
 $env:BDINFO_GUI_DRIVE_MS = "$DriveMs"
+# The SHARED window geometry across every driving leg (assisted + inject, all
+# six arches): the app's natural 880x960 design size at the desktop origin, so
+# the galleries are directly comparable. Every desktop is raised to 1920x1080
+# (xvfb in gui-drive.yml; the Windows/mac harness blocks below) so this window
+# always fits, and every shot is CROPPED to the window — no desktop margin,
+# identical framing on every OS.
+$env:BDINFO_GUI_WIN = '880x960+0+0'
+
+# Raise the desktop to 1920x1080 BEFORE launch so the window places on the full
+# canvas (Linux xvfb is already sized by gui-drive.yml). Best-effort: a display
+# that rejects the mode just stays as-is and the window/crop still work.
+if ($IsWindows) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GuiRes {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    public struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+        public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+    [DllImport("user32.dll")] public static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+    // Try each mode until one is accepted (DISP_CHANGE_SUCCESSFUL = 0); the
+    // hosted virtual display may not offer 1080p. Returns the mode that took.
+    public static string Fit(int minW, int minH) {
+        int[][] modes = { new[]{1920,1080}, new[]{1600,1200}, new[]{1440,1080}, new[]{1280,1024} };
+        foreach (var m in modes) {
+            if (m[0] < minW || m[1] < minH) continue;
+            DEVMODE dm = new DEVMODE();
+            dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            dm.dmPelsWidth = m[0]; dm.dmPelsHeight = m[1]; dm.dmBitsPerPel = 32;
+            dm.dmFields = 0x40000 | 0x80000 | 0x100000; // BITSPERPEL|PELSWIDTH|PELSHEIGHT
+            if (ChangeDisplaySettings(ref dm, 0) == 0) return m[0] + "x" + m[1];
+        }
+        return "unchanged";
+    }
+}
+"@
+    Write-Host "==> Windows display -> $([GuiRes]::Fit(1280, 1040))"
+}
+elseif ($IsMacOS) {
+    $disp = (& displayplacer list 2>$null | Select-String 'Persistent screen id:\s*(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
+    if ($disp) {
+        & displayplacer "id:$disp res:1920x1080" 2>$null
+        Write-Host "==> macOS display id $disp -> 1920x1080 (exit $LASTEXITCODE; best-effort)"
+    }
+}
 
 Write-Host "==> launch $Exe (drive markers: $driveDir)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
@@ -100,6 +153,46 @@ public static class GuiFind {
     if ($hwnd -eq 0 -and -not $proc.HasExited) { Write-Host '!! window handle never appeared' }
 }
 
+# Linux: the X11 window id, so shots crop to the app (not the whole 1920x1080
+# root). --sync blocks until the window exists.
+$xwid = $null
+if ($IsLinux) {
+    $xwid = & xdotool search --sync --onlyvisible --name '^bdinfo-rs' 2>$null | Select-Object -First 1
+    if ($xwid) { Write-Host "==> Linux window id: $xwid" } else { Write-Host '!! xdotool never found the window' }
+}
+
+# macOS: the first screencapture pops the Sequoia screen-recording consent
+# ("bash/pwsh is requesting to bypass the system private window picker").
+# Bait it with a throwaway shot, then CLICK its Allow button — which both
+# dismisses it and grants the permission, so it never reappears this session
+# (killing it, by contrast, just respawns the nag). Also read the window rect
+# once so every shot crops to the app instead of the whole runner desktop.
+$macRect = $null
+if ($IsMacOS) {
+    & screencapture -x (Join-Path ([IO.Path]::GetTempPath()) 'gui-drive-warmup.png') 2>$null
+    Start-Sleep -Milliseconds 2500
+    $clicked = & osascript -e 'tell application "System Events"
+        set n to 0
+        repeat with p in every process
+            try
+                if exists (button "Allow" of window 1 of p) then
+                    click button "Allow" of window 1 of p
+                    set n to n + 1
+                end if
+            end try
+        end repeat
+        return n
+    end tell' 2>$null
+    Write-Host "==> macOS screen-capture consent: clicked Allow on $clicked dialog(s)"
+    Start-Sleep -Milliseconds 800
+    $geom = & osascript -e 'tell application "System Events" to get {position, size} of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $geom) {
+        $p = @("$geom" -split ',\s*')
+        $macRect = "$([int]$p[0]),$([int]$p[1]),$([int]$p[2]),$([int]$p[3])"
+        Write-Host "==> macOS window rect: $macRect"
+    }
+}
+
 function Save-Shot([string]$Name) {
     $png = Join-Path $Gallery "$Name.png"
     try {
@@ -108,7 +201,12 @@ function Save-Shot([string]$Name) {
                 -File (Join-Path $PSScriptRoot 'gui-drive-capture-win.ps1') -Hwnd $hwnd -Out $png
             if ($LASTEXITCODE -ne 0) { Write-Host "!! capture failed for $Name ($LASTEXITCODE)" }
         }
-        elseif ($IsMacOS) { & screencapture -x $png }
+        elseif ($IsMacOS) {
+            # Crop to the window rect (comparable to the other OSes' window
+            # captures); fall back to the full screen if the rect is unknown.
+            if ($macRect) { & screencapture -x -R $macRect $png } else { & screencapture -x $png }
+        }
+        elseif ($xwid) { & import -window $xwid $png }
         else { & import -window root $png }
     }
     catch { Write-Host "!! capture failed for ${Name}: $_" }
