@@ -67,7 +67,7 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    // Every visible top-level except `keep`, as "pid|class|title" — the
+    // Every visible top-level except `keep`, as "pid|hwnd|class|title" — the
     // up-front desktop cleanup resolves each to its process and decides.
     public static string[] Others(IntPtr keep) {
         var list = new System.Collections.Generic.List<string>();
@@ -76,7 +76,7 @@ public static class GuiInput {
             var t = new System.Text.StringBuilder(256); GetWindowText(h, t, 256);
             var c = new System.Text.StringBuilder(256); GetClassName(h, c, 256);
             uint pid; GetWindowThreadProcessId(h, out pid);
-            list.Add(pid + "|" + c + "|" + t);
+            list.Add(pid + "|" + h + "|" + c + "|" + t);
             return true;
         }, IntPtr.Zero);
         return list.ToArray();
@@ -168,6 +168,16 @@ public static class GuiInput {
 "@
 [void][GuiInput]::SetProcessDPIAware()
 
+# The "Microsoft account" window the desktop dumps caught is SCOOBE — the
+# second-chance OOBE nag ("finish setting up your device"), not the real
+# first-boot OOBE (the desktop behind it is fully functional). This is its
+# documented off switch; the process cleanup below still removes one that is
+# already on screen when the job starts.
+New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' -Force | Out-Null
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' `
+    -Name 'ScoobeSystemSettingEnabled' -Value 0 -Type DWord
+Write-Host '==> SCOOBE (second-chance OOBE nag) disabled in the registry'
+
 # Hosted images default the virtual display to 1024x768. Set-DisplayResolution
 # exists on the Server images (windows-2025) only — best effort, logged; the
 # BDINFO_GUI_WIN boot geometry below fits the window at ANY resolution.
@@ -234,11 +244,23 @@ $protectedProc = 'explorer', 'conhost', 'OpenConsole', 'WindowsTerminal', 'cmd',
 'pwsh', 'powershell', 'Runner.Worker', 'Runner.Listener', 'hosted-compute-agent', 'node',
 'sihost', 'taskhostw'
 foreach ($entry in [GuiInput]::Others($hwnd)) {
-    $bpid, $class, $title = $entry -split '\|', 3
+    $bpid, $bhwnd, $class, $title = $entry -split '\|', 4
     if ($benignClass -contains $class) { continue }
+    # Never touch our own tree: a console window's reported owner is the
+    # ATTACHED process — for the debug app's console that is the app itself
+    # (run 9 killed its own app through exactly this).
+    if ([int]$bpid -eq $proc.Id -or [int]$bpid -eq $PID) { continue }
     $name = (Get-Process -Id ([int]$bpid) -ErrorAction SilentlyContinue).ProcessName
     if (-not $name -or $protectedProc -contains $name) {
-        Write-Host "    keeping $name (pid $bpid, $class '$title')"
+        # A nag hosted by a protected process (SCOOBE's Shell_OOBEProxy lives
+        # in explorer) can still be asked to close — WM_CLOSE works on it.
+        if ($class -eq 'Shell_OOBEProxy' -or $title -like '*Microsoft account*') {
+            Write-Host "    closing $name-hosted nag (pid $bpid, $class '$title')"
+            [void][GuiInput]::PostMessage([IntPtr][long]$bhwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        }
+        else {
+            Write-Host "    keeping $name (pid $bpid, $class '$title')"
+        }
         continue
     }
     Write-Host "    killing $name (pid $bpid, $class '$title')"
@@ -304,13 +326,8 @@ function Send-Click([double]$Lx, [double]$Ly) {
             Write-Host "==> closing blocker $([GuiInput]::Describe($root))"
             [void][GuiInput]::PostMessage($root, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
         }
-        if ($i -eq 6 -and $root -ne [IntPtr]::Zero) {
-            $bpid = [GuiInput]::PidOf($root)
-            if ($bpid -ne 0 -and $bpid -ne $proc.Id) {
-                Write-Host "==> killing blocker process $bpid ($([GuiInput]::Describe($root)))"
-                Stop-Process -Id $bpid -Force -ErrorAction SilentlyContinue
-            }
-        }
+        # No kill rung here: run 9's escalation shot down explorer. WM_CLOSE
+        # only — the up-front cleanup (with its protection list) owns killing.
         Start-Sleep -Milliseconds 400
     }
     if (-not $clear) {
