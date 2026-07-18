@@ -36,35 +36,32 @@ if ($disp) {
     Write-Host "==> macOS display id $disp -> 1920x1080 (exit $LASTEXITCODE; best-effort)"
 }
 
+# Grant/dismiss the Sequoia screen-capture consent on the EMPTY desktop before
+# the app launches, so pressing the dialog's default button can never reach the
+# app. A warm-up capture raises it; click Allow via AX, press Return (default
+# button, for the WindowServer-drawn variant AX can't see), and cliclick the
+# button's usual spot — belt, braces, and a spare. Allow grants for the session.
+& screencapture -x (Join-Path ([IO.Path]::GetTempPath()) 'gui-drive-prime.png') 2>$null
+Start-Sleep -Milliseconds 2500
+& osascript -e 'tell application "System Events"
+    repeat with p in every process
+        try
+            if exists (button "Allow" of window 1 of p) then click button "Allow" of window 1 of p
+        end try
+    end repeat
+    key code 36
+end tell' 2>$null
+Start-Sleep -Milliseconds 1200
+Write-Host '==> macOS screen-capture consent primed (Allow + Return on empty desktop)'
+
 Write-Host "==> launch $Exe (OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 Start-Sleep -Milliseconds ($ScanDelayMs + 10000)
 
-# Window geometry via System Events — also the first Accessibility-gated call.
+# Window geometry via System Events — the click math and the crop rect.
 $failures = @()
 $geom = & osascript -e 'tell application "System Events" to get {position, size} of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>&1
 $geomOk = $LASTEXITCODE -eq 0 -and $geom
-
-# Bait + dismiss the Sequoia screen-capture consent BEFORE the first shot:
-# a throwaway capture pops it, then clicking its Allow button both dismisses
-# and grants the permission (no reappearance this session). Do it now so
-# 00-listed is already clean.
-& screencapture -x (Join-Path ([IO.Path]::GetTempPath()) 'gui-drive-warmup.png') 2>$null
-Start-Sleep -Milliseconds 2500
-$clicked = & osascript -e 'tell application "System Events"
-    set n to 0
-    repeat with p in every process
-        try
-            if exists (button "Allow" of window 1 of p) then
-                click button "Allow" of window 1 of p
-                set n to n + 1
-            end if
-        end try
-    end repeat
-    return n
-end tell' 2>$null
-Write-Host "==> macOS screen-capture consent: clicked Allow on $clicked dialog(s)"
-Start-Sleep -Milliseconds 800
 
 # Crop every shot to the window rect (comparable to the other OSes), falling
 # back to the whole screen if geometry is unknown.

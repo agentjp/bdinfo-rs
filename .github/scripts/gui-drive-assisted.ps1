@@ -109,6 +109,24 @@ elseif ($IsMacOS) {
         & displayplacer "id:$disp res:1920x1080" 2>$null
         Write-Host "==> macOS display id $disp -> 1920x1080 (exit $LASTEXITCODE; best-effort)"
     }
+    # Grant/dismiss the Sequoia screen-capture consent NOW, on the empty
+    # desktop before the app exists — so pressing the dialog's default button
+    # (Return) can never reach the app. A warm-up capture raises it; we click
+    # Allow via AX and also press Return, since the dialog may be
+    # WindowServer-drawn (not AX-reachable). Clicking Allow grants the
+    # permission for the session, so no dialog pollutes the gallery.
+    & screencapture -x (Join-Path ([IO.Path]::GetTempPath()) 'gui-drive-prime.png') 2>$null
+    Start-Sleep -Milliseconds 2500
+    & osascript -e 'tell application "System Events"
+        repeat with p in every process
+            try
+                if exists (button "Allow" of window 1 of p) then click button "Allow" of window 1 of p
+            end try
+        end repeat
+        key code 36
+    end tell' 2>$null
+    Start-Sleep -Milliseconds 1200
+    Write-Host '==> macOS screen-capture consent primed (Allow + Return on empty desktop)'
 }
 
 Write-Host "==> launch $Exe (drive markers: $driveDir)"
@@ -161,30 +179,10 @@ if ($IsLinux) {
     if ($xwid) { Write-Host "==> Linux window id: $xwid" } else { Write-Host '!! xdotool never found the window' }
 }
 
-# macOS: the first screencapture pops the Sequoia screen-recording consent
-# ("bash/pwsh is requesting to bypass the system private window picker").
-# Bait it with a throwaway shot, then CLICK its Allow button — which both
-# dismisses it and grants the permission, so it never reappears this session
-# (killing it, by contrast, just respawns the nag). Also read the window rect
-# once so every shot crops to the app instead of the whole runner desktop.
+# macOS: read the window rect once so every shot crops to the app (the consent
+# dialog was already granted+dismissed pre-launch above).
 $macRect = $null
 if ($IsMacOS) {
-    & screencapture -x (Join-Path ([IO.Path]::GetTempPath()) 'gui-drive-warmup.png') 2>$null
-    Start-Sleep -Milliseconds 2500
-    $clicked = & osascript -e 'tell application "System Events"
-        set n to 0
-        repeat with p in every process
-            try
-                if exists (button "Allow" of window 1 of p) then
-                    click button "Allow" of window 1 of p
-                    set n to n + 1
-                end if
-            end try
-        end repeat
-        return n
-    end tell' 2>$null
-    Write-Host "==> macOS screen-capture consent: clicked Allow on $clicked dialog(s)"
-    Start-Sleep -Milliseconds 800
     $geom = & osascript -e 'tell application "System Events" to get {position, size} of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>$null
     if ($LASTEXITCODE -eq 0 -and $geom) {
         $p = @("$geom" -split ',\s*')
