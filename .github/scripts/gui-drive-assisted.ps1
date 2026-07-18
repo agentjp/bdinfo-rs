@@ -27,13 +27,18 @@ param(
     # powershell.exe + Add-Type spin-up (~3-4 s); import/screencapture are fast.
     [int]$DriveMs = $(if ($IsWindows) { 6000 } else { 2500 }),
     # Artificial scan delay, ms — holds the Scanning states up long enough to
-    # capture and gives the walk's Cancel step a window to land in.
-    [int]$ScanDelayMs = 6000,
+    # capture and gives the walk's Cancel step a window to land in. MUST
+    # comfortably exceed one capture window: the Cancel step arrives one
+    # settle + one window after scan-start, and a delay equal to the window
+    # loses that race (the first Windows CI run proved it). 0 = derive.
+    [int]$ScanDelayMs = 0,
     # Overall deadline for the walk, seconds.
     [int]$TimeoutSec = 900
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if ($ScanDelayMs -le 0) { $ScanDelayMs = [int][math]::Max(12000, (2 * $DriveMs) + 4000) }
 
 $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $driveDir = Join-Path $tempBase "gui-drive-markers-$PID"

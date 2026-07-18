@@ -85,13 +85,29 @@ for ($i = 0; $i -lt 300; $i++) {
 }
 if ($hwnd -eq [IntPtr]::Zero) { throw 'window never appeared' }
 
+Write-Host '==> waiting for the structural scan (delay + listing)'
+Start-Sleep -Milliseconds ($ScanDelayMs + 7000)
+
 # Client geometry -> the logical->screen transform (client px / 880 = scale).
+# Measured only now, after the listing rendered: the handle exists a beat
+# before winit applies the requested size (the first CI run read 0x0 and a
+# mid-layout 960x480), so poll until the rect is sane and stable.
 $rect = New-Object GuiInput+RECT
-[void][GuiInput]::GetClientRect($hwnd, [ref]$rect)
+$prev = 0
+for ($i = 0; $i -lt 60; $i++) {
+    [void][GuiInput]::GetClientRect($hwnd, [ref]$rect)
+    if ($rect.Right -ge 600 -and $rect.Bottom -ge 400 -and ($rect.Right * 100000) + $rect.Bottom -eq $prev) { break }
+    $prev = ($rect.Right * 100000) + $rect.Bottom
+    Start-Sleep -Milliseconds 500
+}
+if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
 $origin = New-Object GuiInput+POINT
 [void][GuiInput]::ClientToScreen($hwnd, [ref]$origin)
 $scale = $rect.Right / 880.0
-Write-Host ("==> client {0}x{1} at {2},{3} (scale {4})" -f $rect.Right, $rect.Bottom, $origin.X, $origin.Y, $scale)
+# The logical HEIGHT actually granted (a small runner display can clamp the
+# requested 960): the bottom action bar and the centred dialog track it.
+$logicalH = $rect.Bottom / $scale
+Write-Host ("==> client {0}x{1} at {2},{3} (scale {4}, logical height {5})" -f $rect.Right, $rect.Bottom, $origin.X, $origin.Y, $scale, [int]$logicalH)
 
 function Save-Shot([string]$Name) {
     & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass `
@@ -100,12 +116,17 @@ function Save-Shot([string]$Name) {
 }
 
 function Assert-Foreground {
-    if ([GuiInput]::GetForegroundWindow() -eq $hwnd) { return }
-    [void][GuiInput]::SetForegroundWindow($hwnd)
-    Start-Sleep -Milliseconds 400
-    if ([GuiInput]::GetForegroundWindow() -ne $hwnd) {
-        throw 'the app is not the foreground window — refusing to inject blind clicks'
+    # SetForegroundWindow from an unrelated process is throttled by the
+    # foreground lock; the documented release is that the CALLER received the
+    # last input event, so tap a bare ALT first, then retry.
+    for ($i = 0; $i -lt 10; $i++) {
+        if ([GuiInput]::GetForegroundWindow() -eq $hwnd) { return }
+        [void][GuiInput]::Key(0x12, $false) # VK_MENU down
+        [void][GuiInput]::Key(0x12, $true)
+        [void][GuiInput]::SetForegroundWindow($hwnd)
+        Start-Sleep -Milliseconds 500
     }
+    throw 'the app never became the foreground window — refusing to inject blind clicks'
 }
 
 function Send-Click([double]$Lx, [double]$Ly) {
@@ -120,19 +141,18 @@ function Send-Click([double]$Lx, [double]$Ly) {
     Start-Sleep -Milliseconds 900   # let the resulting state render
 }
 
-# Logical client coordinates of the click targets at the default 880x960
+# Logical client coordinates of the click targets at the default 880-wide
 # layout (dark theme, 100% UI scale) — measured from a pinned-geometry
-# capture; the layout is deterministic at a fixed size, so they hold on any
-# 100%-DPI runner and rescale with $scale elsewhere.
+# capture. Top-anchored rows are fixed offsets; the bottom action bar and the
+# centred dialog buttons track the granted logical height (960 requested, but
+# a small runner display can clamp it — the macOS probe got 681).
 $SelectAll = @(111, 127)
 $LengthHeader = @(484, 170)
 $FirstRow = @(110, 206)
-$SettingsBtn = @(817, 931)
-$DialogCancel = @(538, 645)
-$ScanBtn = @(566, 932)
+$SettingsBtn = @(817, ($logicalH - 29))
+$DialogCancel = @(538, (($logicalH / 2) + 165))
+$ScanBtn = @(566, ($logicalH - 28))
 
-Write-Host '==> waiting for the structural scan (delay + listing)'
-Start-Sleep -Milliseconds ($ScanDelayMs + 7000)
 Save-Shot '00-listed'
 
 Send-Click @SelectAll; Save-Shot '01-select-all'

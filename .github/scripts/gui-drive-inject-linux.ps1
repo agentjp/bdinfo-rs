@@ -36,12 +36,22 @@ $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 $wid = & xdotool search --sync --onlyvisible --name '^bdinfo-rs' | Select-Object -First 1
 if (-not $wid) { throw 'xdotool never found the window' }
 & xdotool windowfocus --sync $wid
+
+Write-Host '==> waiting for the structural scan (delay + listing)'
+Start-Sleep -Milliseconds ($ScanDelayMs + 7000)
+
+# Geometry only now, after the listing rendered (winit applies the requested
+# size a beat after the window exists). Under bare Xvfb the undecorated
+# window IS the client area.
 $geo = & xdotool getwindowgeometry --shell $wid
 $gx = [int](($geo | Select-String '^X=(\-?\d+)').Matches.Groups[1].Value)
 $gy = [int](($geo | Select-String '^Y=(\-?\d+)').Matches.Groups[1].Value)
 $gw = [int](($geo | Select-String '^WIDTH=(\d+)').Matches.Groups[1].Value)
+$gh = [int](($geo | Select-String '^HEIGHT=(\d+)').Matches.Groups[1].Value)
 $scale = $gw / 880.0
-Write-Host "==> window $wid at $gx,$gy width $gw (scale $scale)"
+# The logical height actually granted — the bottom bar and dialog track it.
+$logicalH = $gh / $scale
+Write-Host "==> window $wid at $gx,$gy size ${gw}x${gh} (scale $scale, logical height $([int]$logicalH))"
 
 function Save-Shot([string]$Name) {
     & import -window root (Join-Path $Gallery "$Name.png")
@@ -59,12 +69,10 @@ function Send-Click([double]$Lx, [double]$Ly) {
 $SelectAll = @(111, 127)
 $LengthHeader = @(484, 170)
 $FirstRow = @(110, 206)
-$SettingsBtn = @(817, 931)
-$DialogCancel = @(538, 645)
-$ScanBtn = @(566, 932)
+$SettingsBtn = @(817, ($logicalH - 29))
+$DialogCancel = @(538, (($logicalH / 2) + 165))
+$ScanBtn = @(566, ($logicalH - 28))
 
-Write-Host '==> waiting for the structural scan (delay + listing)'
-Start-Sleep -Milliseconds ($ScanDelayMs + 7000)
 Save-Shot '00-listed'
 
 Send-Click @SelectAll; Save-Shot '01-select-all'

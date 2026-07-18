@@ -45,12 +45,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 else {
     Write-Host "==> window geometry: $geom"
+    # {position, size} = x, y, w, h of the whole window, TITLE BAR INCLUDED;
+    # the content area starts ~28 pt below. The runner's paravirtual display
+    # is small enough to clamp the requested 960 height (the first run got
+    # 681), so the bottom bar and the centred dialog track the granted height.
     $parts = @("$geom" -split ',\s*')
-    $gx = [double]$parts[0]; $gy = [double]$parts[1]; $gw = [double]$parts[2]
+    $gx = [double]$parts[0]; $gy = [double]$parts[1]; $gw = [double]$parts[2]; $gh = [double]$parts[3]
+    $title = 28.0
     $scale = $gw / 880.0
+    $logicalH = ($gh - $title) / $scale
     function Send-Click([double]$Lx, [double]$Ly) {
         $px = [int][math]::Round($gx + ($Lx * $scale))
-        $py = [int][math]::Round($gy + ($Ly * $scale))
+        $py = [int][math]::Round($gy + $title + ($Ly * $scale))
         $out = & cliclick "c:$px,$py" 2>&1
         if ($LASTEXITCODE -ne 0) { $script:failures += "cliclick c:${px},${py}: $out"; Write-Host "!! $out" }
         Start-Sleep -Milliseconds 900
@@ -58,8 +64,16 @@ else {
     # The shared logical coordinate table — see gui-drive-inject-windows.ps1.
     Send-Click 111 127; Save-Shot '01-select-all'
     Send-Click 484 170; Save-Shot '02-sort-length'
-    Send-Click 817 931; Save-Shot '04-settings-open'
-    Send-Click 538 645; Save-Shot '05-settings-cancel'
+    Send-Click 817 ($logicalH - 29); Save-Shot '04-settings-open'
+    Send-Click 538 (($logicalH / 2) + 165); Save-Shot '05-settings-cancel'
+    # The same assert as the other legs, but WEAK here: screencapture grabs
+    # the whole screen, so the menu-bar clock can change pixels on its own.
+    # It can only false-pass, never false-fail — the gallery is the judge.
+    $before = Get-FileHash (Join-Path $Gallery '02-sort-length.png') -ErrorAction SilentlyContinue
+    $after = Get-FileHash (Join-Path $Gallery '04-settings-open.png') -ErrorAction SilentlyContinue
+    $landed = $before -and $after -and ($before.Hash -ne $after.Hash)
+    Write-Host "==> settings-click pixel change: $landed"
+    if (-not $landed) { $failures += 'the Settings click changed no pixels (missed or blocked)' }
 }
 
 Write-Host '==> waiting for the smoke-deadline exit'
