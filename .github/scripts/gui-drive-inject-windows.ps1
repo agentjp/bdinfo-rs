@@ -65,6 +65,24 @@ public static class GuiInput {
         var c = new System.Text.StringBuilder(256); GetClassName(h, c, 256);
         return "hwnd=" + h + " class='" + c + "' title='" + t + "'";
     }
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+    public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
+    // The desktop composition — every visible top-level with its rect and
+    // topmost flag, so a failing run documents exactly what shares the
+    // runner desktop with the app instead of leaving it to guesswork.
+    public static string[] DumpDesktop() {
+        var list = new System.Collections.Generic.List<string>();
+        EnumWindows((h, l) => {
+            if (!IsWindowVisible(h)) return true;
+            RECT r; GetWindowRect(h, out r);
+            bool topmost = (GetWindowLong(h, -20) & 0x8) != 0; // GWL_EXSTYLE, WS_EX_TOPMOST
+            list.Add(Describe(h) + " rect=" + r.Left + "," + r.Top + "," + (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + (topmost ? " TOPMOST" : ""));
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
+    }
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     // Pin the app above everything non-topmost, without moving or activating
     // it (HWND_TOPMOST; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE).
     public static bool MakeTopmost(IntPtr h) {
@@ -176,6 +194,8 @@ for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Milliseconds 500
 }
 if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
+Write-Host '==> desktop composition before the walk:'
+[GuiInput]::DumpDesktop() | ForEach-Object { Write-Host "    $_" }
 $minimized = [GuiInput]::MinimizeOthers($hwnd)
 Write-Host "==> minimized $minimized other top-level window(s) (runner provisioner etc.)"
 # Belt and braces: some overlays (UWP input hosts) refuse SW_MINIMIZE and
@@ -225,11 +245,26 @@ function Send-Click([double]$Lx, [double]$Ly) {
     # The precise no-blind-clicks guard: the top-level window that will
     # receive this click must be the app — stronger than a foreground check,
     # because injected mouse input routes by cursor position, not focus.
-    # Retried briefly: transient overlays (a closing conhost, a toast) clear.
+    # A blocker gets escalated, not worked around: UWP immersive windows (the
+    # runner image ships a "Microsoft account" OOBE CoreWindow) sit in a
+    # z-band ABOVE HWND_TOPMOST and ignore SW_MINIMIZE, so ask it to close
+    # (WM_CLOSE), then kill its process — a throwaway CI desktop, by design.
     $clear = $false
     for ($i = 0; $i -lt 10; $i++) {
-        if ([GuiInput]::RootAt($px, $py) -eq $hwnd) { $clear = $true; break }
-        Start-Sleep -Milliseconds 300
+        $root = [GuiInput]::RootAt($px, $py)
+        if ($root -eq $hwnd) { $clear = $true; break }
+        if ($i -eq 2 -and $root -ne [IntPtr]::Zero) {
+            Write-Host "==> closing blocker $([GuiInput]::Describe($root))"
+            [void][GuiInput]::PostMessage($root, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+        }
+        if ($i -eq 6 -and $root -ne [IntPtr]::Zero) {
+            $bpid = [GuiInput]::PidOf($root)
+            if ($bpid -ne 0 -and $bpid -ne $proc.Id) {
+                Write-Host "==> killing blocker process $bpid ($([GuiInput]::Describe($root)))"
+                Stop-Process -Id $bpid -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Start-Sleep -Milliseconds 400
     }
     if (-not $clear) {
         $who = [GuiInput]::Describe([GuiInput]::RootAt($px, $py))
