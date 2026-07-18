@@ -500,6 +500,15 @@ jobs:
   # ADVISORY posture and false-TIMEOUT rationale as `mutants` above: not
   # required, not in ci-ok's needs. The authoritative full-crate 0-missed bar
   # lives in sweep.yml (daily when the crate changed + release tags).
+  #
+  # The sweep's tree-hash marker short-circuits this job too, RESTORE-ONLY: a
+  # marker hit means this byte-identical crate tree (+ toolchain) already
+  # passed a green FULL sweep, which subsumes any diff slice of it — mutating
+  # the slice again would re-verify unchanged inputs. Only a green full sweep
+  # ever writes the marker; this job must never save it (a diff slice proves
+  # nothing about the rest of the crate). The guard is what keeps a
+  # crate-sized PR diff (e.g. the branch that introduces a crate) from
+  # re-paying the ~50-min sweep on every push that leaves the crate untouched.
   gui-mutants:
     name: gui mutation testing (PR diff)
     needs: plan
@@ -516,18 +525,32 @@ jobs:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
+      - name: Compute the full-sweep marker key (crate tree hash)
+        id: key
+        run: echo "key=gui-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-gui)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the full-sweep marker (restore-only)
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
       # Default save-if: PR-only job, so a master-gated save would never write;
       # its own PR-scoped save speeds the next push to the same PR.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.marker.outputs.cache-hit != 'true'
         with:
           workspaces: crates/bdinfo-rs-gui
 
       - name: Install mutation tools
+        if: steps.marker.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
         with:
           tool: cargo-mutants,cargo-nextest
 
       - name: Mutate the crate's PR diff
+        if: steps.marker.outputs.cache-hit != 'true'
         working-directory: crates/bdinfo-rs-gui
         run: |
           git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
@@ -540,8 +563,8 @@ jobs:
   # The wasm twin of gui-mutants: advisory in-diff mutation over the wasm
   # crate's own PR diff (--relative + --in-place for the same path-dep reason;
   # the crate-local .cargo/mutants.toml carries the Tier-B cfg(wasm32)
-  # exclusions). Not required, not in ci-ok's needs; the full-crate bar lives
-  # in sweep.yml.
+  # exclusions), with the same restore-only full-sweep marker short-circuit.
+  # Not required, not in ci-ok's needs; the full-crate bar lives in sweep.yml.
   wasm-mutants:
     name: wasm mutation testing (PR diff)
     needs: plan
@@ -553,17 +576,31 @@ jobs:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
+      - name: Compute the full-sweep marker key (crate tree hash)
+        id: key
+        run: echo "key=wasm-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-wasm)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the full-sweep marker (restore-only)
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
       # Default save-if: PR-only job (see gui-mutants).
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.marker.outputs.cache-hit != 'true'
         with:
           workspaces: crates/bdinfo-rs-wasm
 
       - name: Install mutation tools
+        if: steps.marker.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
         with:
           tool: cargo-mutants,cargo-nextest
 
       - name: Mutate the crate's PR diff
+        if: steps.marker.outputs.cache-hit != 'true'
         working-directory: crates/bdinfo-rs-wasm
         run: |
           git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
