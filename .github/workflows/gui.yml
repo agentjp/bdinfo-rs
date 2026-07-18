@@ -559,3 +559,39 @@ jobs:
           path: gallery/
           retention-days: 7
           if-no-files-found: warn
+
+  # The run's showcase artifact: every drive leg's `00-listed` shot at NATIVE
+  # resolution in one labelled 2x5 image (assisted top row, inject bottom,
+  # matrix column order) — all ten rendered windows at a glance without
+  # opening ten gallery artifacts. Fan-in over the leg uploads; `!cancelled()`
+  # so a red leg still yields the partial evidence (a missing shot renders as
+  # a labelled dark tile; only zero shots fails, by which point the legs have
+  # already reddened the gate). A WINDOWS runner because the composer is
+  # System.Drawing (GDI+) with the true Segoe UI / Consolas faces.
+  drive-mosaic:
+    name: gui drive mosaic
+    needs: [drive-assisted, drive-inject]
+    if: ${{ !cancelled() }}
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download the leg galleries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: gui-drive-*
+          path: shots
+
+      - name: Compose the mosaic
+        shell: pwsh
+        run: .github/scripts/gui-drive-mosaic.ps1 -Root shots -Out gui-drive-mosaic.png
+
+      - name: Upload the mosaic
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-drive-mosaic
+          path: gui-drive-mosaic.png
+          retention-days: 7
+          if-no-files-found: error
