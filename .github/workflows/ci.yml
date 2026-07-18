@@ -1,5 +1,21 @@
 name: CI
 
+# The PR/master gate, organized as ONE plan-gated orchestrator (the pattern
+# uv, cargo, zed and wgpu converged on independently): a ~10 s `plan` job
+# classifies the event's diff into AREAS, every gate job runs only when its
+# area fired, and a final `ci-ok` fan-in job is the single branch-protection
+# context. The gating loses nothing: sweep.yml re-runs this whole orchestrator
+# UNGATED on master daily (workflow_call, every area forced), so untouched
+# areas are re-verified within 24 h and environment drift (runner images,
+# toolchain point releases) cannot hide behind a skipped job.
+#
+# WHY plan + `if:`, never `on.paths:`, on anything required: a job skipped via
+# `if:` still reports a check-run with conclusion `skipped`, which satisfies a
+# required status check — but a workflow filtered out by `on.paths:` never
+# reports at all and leaves the PR's required check "Expected" forever. For
+# the same reason, never rename or delete a job whose `name:` string is a
+# live required context (contexts match on that string).
+#
 # Build and test on every supported OS. The pinned stable toolchain installs
 # itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
 # compile time, so a green build is also the memory-safety guarantee. Every
@@ -11,6 +27,10 @@ on:
   push:
     branches: [master]
   pull_request:
+  # sweep.yml invokes the whole orchestrator daily (and on demand) with every
+  # area forced — the completeness backstop that makes the PR-path gating
+  # provably non-weakening.
+  workflow_call:
 
 permissions:
   contents: read
@@ -27,31 +47,180 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Classify the event's changed files into areas. Areas are unions of
+  # pathspecs; one file can hit several. Cross-crate dependency edges are
+  # encoded HERE (core → gui/wasm/fuzz), never guessed at runtime; the one
+  # deliberate exception is a root Cargo.lock-only change, which does NOT
+  # propagate to gui/wasm — they are excluded workspaces with their own
+  # lockfiles, so the daily Dependabot root-lockfile chore cannot re-fire
+  # their gates.
+  #
+  # Fail-safes: if the diff cannot be computed (missing before-SHA,
+  # force-push, git error) every area fires; so does the `ci-full` PR label.
+  # Labels are read from the event payload, so apply the label BEFORE a push
+  # or a close/reopen — a bare re-run replays the old payload without it.
+  plan:
+    name: plan (classify the diff into areas)
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.classify.outputs.core }}
+      gui: ${{ steps.classify.outputs.gui }}
+      wasm: ${{ steps.classify.outputs.wasm }}
+      fuzz: ${{ steps.classify.outputs.fuzz }}
+      deps: ${{ steps.classify.outputs.deps }}
+      meta: ${{ steps.classify.outputs.meta }}
+      dist: ${{ steps.classify.outputs.dist }}
+      pkg: ${{ steps.classify.outputs.pkg }}
+      toml: ${{ steps.classify.outputs.toml }}
+      docs: ${{ steps.classify.outputs.docs }}
+      test: ${{ steps.classify.outputs.test }}
+      test-os: ${{ steps.classify.outputs.test-os }}
+    steps:
+      # Full commit graph, no blobs (a name-only diff walks trees), no
+      # working-tree payload beyond .github — the fixture discs never
+      # materialize here.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: Classify the changed files into areas
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          CI_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+        run: |
+          # ---- pick the file list (mode=all = the fail-safe: everything fires)
+          mode=diff
+          reason=""
+          changed=""
+          if [ "$CI_FULL" = "true" ]; then
+            mode=all; reason="ci-full label"
+          elif [ "$EVENT" = "pull_request" ]; then
+            # HEAD is the PR merge commit, so parent 1 is the up-to-date base
+            # tip and this two-dot diff is exactly the PR's effective diff
+            # against master.
+            changed=$(git diff --name-only HEAD^1 HEAD) || { mode=all; reason="git diff failed"; }
+          elif [ "$EVENT" = "push" ]; then
+            # event.before...after is exactly the squash-merge's diff. A zero
+            # or missing before (branch creation, history rewrite) fails safe.
+            case "$BEFORE" in
+              ""|0000000000000000000000000000000000000000) mode=all; reason="no usable before SHA" ;;
+              *) changed=$(git diff --name-only "$BEFORE" "$AFTER") || { mode=all; reason="git diff failed"; } ;;
+            esac
+          else
+            # workflow_call from sweep.yml (schedule / workflow_dispatch).
+            mode=all; reason="$EVENT event — the sweep runs everything"
+          fi
+
+          core=false; gui=false; wasm=false; fuzz=false; deps=false
+          meta=false; dist=false; pkg=false; toml=false; docs=false
+          # core minus root Cargo.lock: what propagates over the core→gui/wasm
+          # dependency edges (see the job comment).
+          core_edge=false
+
+          if [ "$mode" = "all" ]; then
+            core=true; gui=true; wasm=true; fuzz=true; deps=true
+            meta=true; dist=true; pkg=true; toml=true; docs=true
+          else
+            # `case` patterns: `*` crosses `/`, so `crates/bdinfo-rs/*` matches
+            # the whole subtree.
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              case "$f" in
+                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core=true ;;
+              esac
+              case "$f" in
+                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core_edge=true ;;
+              esac
+              case "$f" in crates/bdinfo-rs-gui/*) gui=true ;; esac
+              case "$f" in crates/bdinfo-rs-wasm/*) wasm=true ;; esac
+              case "$f" in fuzz/*) fuzz=true ;; esac
+              case "$f" in Cargo.lock|Cargo.toml|*/Cargo.toml|deny.toml|supply-chain/*|crates/*/deny.toml) deps=true ;; esac
+              case "$f" in .github/*|.yamllint.yml) meta=true ;; esac
+              case "$f" in .github/workflows/v-release.yml|dist-workspace.toml|.github/build-setup.yml|Cargo.toml) dist=true ;; esac
+              case "$f" in .github/build-linux-packages.sh|crates/bdinfo-rs/debian/*|dist-workspace.toml|Cargo.lock|crates/bdinfo-rs/Cargo.toml) pkg=true ;; esac
+              case "$f" in *.toml) toml=true ;; esac
+              case "$f" in *.md|*.rs) docs=true ;; esac
+            done <<< "$changed"
+            # Cross-crate dependency edges: the sibling crates path-dep
+            # bdinfo-rs-core, so core changes re-fire their gates — except the
+            # root-lockfile-only case (core_edge). The fuzz targets link the
+            # core parsers and DO resolve against the root lockfile via their
+            # path deps' source, so full core re-fires the replay.
+            if [ "$core_edge" = "true" ]; then gui=true; wasm=true; fi
+            if [ "$core" = "true" ]; then fuzz=true; fi
+          fi
+
+          # The canary (D3, "most complete cheap option"): meta-only events —
+          # CI plumbing changed but no code — still build + test on one leg
+          # per OS/shell family, exercising the changed checkout / rust-cache /
+          # install-action plumbing from both sides without the 6-arch fleet.
+          # The list stays full when the job is skipped, so every
+          # required-name leg still reports (as `skipped`).
+          test=false
+          test_os='["ubuntu-latest","ubuntu-24.04-arm","windows-2025","windows-11-arm","macos-15-intel","macos-15"]'
+          if [ "$core" = "true" ]; then
+            test=true
+          elif [ "$meta" = "true" ]; then
+            test=true
+            test_os='["ubuntu-latest","windows-2025"]'
+          fi
+
+          {
+            echo "core=$core"; echo "gui=$gui"; echo "wasm=$wasm"
+            echo "fuzz=$fuzz"; echo "deps=$deps"; echo "meta=$meta"
+            echo "dist=$dist"; echo "pkg=$pkg"; echo "toml=$toml"
+            echo "docs=$docs"; echo "test=$test"; echo "test-os=$test_os"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "mode: $mode${reason:+ ($reason)}"
+          if [ "$mode" = "diff" ]; then
+            echo "changed files:"
+            printf '%s\n' "$changed" | sed 's/^/  /'
+          fi
+          echo "areas: core=$core gui=$gui wasm=$wasm fuzz=$fuzz deps=$deps meta=$meta dist=$dist pkg=$pkg toml=$toml docs=$docs"
+          echo "build+test: run=$test os=$test_os"
+
   test:
     name: build + test (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.test == 'true'
     runs-on: ${{ matrix.os }}
     # One native runner per RELEASED binary — x86_64 AND aarch64 across Linux,
     # Windows and macOS — so `cargo test` (including the real-disc end-to-end scan
     # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
     # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
-    # runners, free for public repos. Keep this in lockstep with the six dist
-    # targets in dist-workspace.toml.
+    # runners, free for public repos. The OS list is plan output — the full six
+    # for `core`, the 2-leg canary for meta-only events; keep the plan job's
+    # list in lockstep with the six dist targets in dist-workspace.toml.
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest      # x86_64-unknown-linux-musl
-          - ubuntu-24.04-arm   # aarch64-unknown-linux-musl
-          - windows-2025       # x86_64-pc-windows-msvc
-          - windows-11-arm     # aarch64-pc-windows-msvc
-          - macos-15-intel     # x86_64-apple-darwin
-          - macos-15           # aarch64-apple-darwin
+        os: ${{ fromJson(needs.plan.outputs.test-os) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Cache write-discipline (wgpu): PR-branch saves are invisible to
+          # every other PR, so only master runs (pushes + the daily sweep)
+          # save; PRs restore the master-seeded cache.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Clippy on EVERY build+test leg (D6, "standardize up"): the ubuntu-only
+      # lint job never clips the #[cfg(windows)] arms (e.g. the vfs/fs.rs
+      # raw-volume reader), so per-arch lint bugs used to sail through CI.
+      # Cheap: shares this leg's dep build. The alias is the tracked `lt`
+      # (clippy --workspace --all-targets --locked -- -D warnings).
+      - name: Clippy (-D warnings, pedantic/nursery/restriction)
+        run: cargo lt
 
       - name: Build
         run: cargo build --workspace --locked
@@ -68,15 +237,40 @@ jobs:
   # action-validator's workflow-only schema can't read. Mirrors the local gate.
   yaml:
     name: lint YAML (action-validator + ryl)
+    needs: plan
+    if: needs.plan.outputs.meta == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Neither tool ships via taiki-e/install-action, so cache the compiled
+      # binaries instead of paying the from-source compile every run. ryl is
+      # version-pinned (reproducible lint verdicts; watched by
+      # version-freshness.yml); action-validator deliberately floats at latest
+      # (a schema checker self-updates), so its half of the key tracks the
+      # latest crates.io release — a new release recompiles once, then caches.
+      # A failed lookup salts the key with the run id: a guaranteed miss and a
+      # fresh install rather than a silently stale binary.
+      - name: Resolve the latest action-validator (cache key)
+        id: av
+        run: |
+          v=$(curl -fsSL --retry 3 -A 'bdinfo-rs-ci (github actions)' https://crates.io/api/v1/crates/action-validator | jq -r '.crate.max_stable_version // empty') || v=""
+          echo "version=${v:-unknown-$GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "latest action-validator: ${v:-unknown (cache bypassed this run)}"
 
-      - name: Install action-validator + ryl
+      - name: Cache the YAML lint binaries
+        id: yaml-tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/action-validator
+            ~/.cargo/bin/ryl
+          key: yaml-tools-${{ runner.os }}-av-${{ steps.av.outputs.version }}-ryl-0.21.0
+
+      - name: Install action-validator + ryl (cache miss)
+        if: steps.yaml-tools.outputs.cache-hit != 'true'
         run: |
           cargo install action-validator --locked
           cargo install ryl --version 0.21.0 --locked
@@ -97,16 +291,29 @@ jobs:
   # Pinned to the same dist version (cargo-dist-version) that v-release.yml installs.
   release-yaml:
     name: release workflow in sync (dist generate --check)
+    needs: plan
+    if: needs.plan.outputs.dist == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
-      - name: Install pinned dist
-        # cargo install from crates.io (version-pinned) instead of the curl|sh
-        # installer, so the dependency isn't an unhashed piped script (Scorecard
-        # pinned-dependencies / downloadThenRun).
+      # No prebuilt channel passes the pinning bar (the upstream installer is
+      # an unhashed curl|sh — Scorecard pinned-dependencies / downloadThenRun),
+      # so the version-pinned binary is compiled from crates.io once and
+      # cached. Keying on dist-workspace.toml couples the cache to
+      # cargo-dist-version, which version-freshness.yml keeps equal to the
+      # install pin below.
+      - name: Cache the pinned dist binary
+        id: dist-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/dist
+          key: cargo-dist-${{ runner.os }}-${{ hashFiles('dist-workspace.toml') }}
+
+      - name: Install pinned dist (cache miss)
+        if: steps.dist-bin.outputs.cache-hit != 'true'
         run: cargo install cargo-dist@0.32.0 --locked
 
       - name: Check v-release.yml is in sync with dist-workspace.toml
@@ -140,10 +347,13 @@ jobs:
   # typos.toml are tracked so clippy/typos behave identically. Format uses the
   # pinned nightly (rustfmt.toml has nightly-only options). Public repo = free
   # minutes, so the heavy quality checks run here too — incremental mutants run
-  # per-PR (the `mutants` job below) and fuzzing runs in fuzz.yml; only the full
-  # mutants sweep + the Windows-via-Docker local fuzz stay local.
+  # per-PR (the `mutants` job below) and the fuzz corpus replays per-PR (the
+  # `replay` job); only the full core mutants sweep + the Windows-via-Docker
+  # local fuzz stay local.
   lint:
     name: lint (clippy, fmt, typos, doc, deps, semver)
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -155,6 +365,8 @@ jobs:
         run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install gate tools
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
@@ -211,6 +423,8 @@ jobs:
   # the contributor's local gate enforces the branch floors on their own platform.
   coverage:
     name: coverage (100% lines/regions/functions)
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -221,6 +435,8 @@ jobs:
         run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component llvm-tools-preview
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install coverage tools
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
@@ -238,15 +454,17 @@ jobs:
   # published, so CI mutates exactly as the local gate does.
   #
   # ADVISORY, by design: this job is intentionally NOT in branch protection's
-  # required status checks. cargo-mutants --in-diff can false-TIMEOUT on the
-  # 4-core hosted runners (a hang-prone loop-guard mutant runs in ceil(n/cores)
-  # nextest-terminate waves), so gating merges on it would let an environment
-  # artifact block an unrelated PR. The AUTHORITATIVE "0 missed mutants" gate is
-  # the local full sweep run before each release (per CLAUDE.md); this surfaces
-  # regressions early but does not block. Keep it out of the required set.
+  # required status checks AND NOT in ci-ok's `needs`. cargo-mutants --in-diff
+  # can false-TIMEOUT on the 4-core hosted runners (a hang-prone loop-guard
+  # mutant runs in ceil(n/cores) nextest-terminate waves), so gating merges on
+  # it would let an environment artifact block an unrelated PR. The
+  # AUTHORITATIVE "0 missed mutants" gate is the local full sweep run before
+  # each release (per CLAUDE.md); this surfaces regressions early but does not
+  # block. Keep it out of the required set and out of ci-ok.
   mutants:
     name: mutation testing (PR diff)
-    if: github.event_name == 'pull_request'
+    needs: plan
+    if: github.event_name == 'pull_request' && needs.plan.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -254,6 +472,9 @@ jobs:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
+      # Default save-if: the job is PR-only, so a master-gated save would never
+      # write; its own PR-scoped save is what speeds the next push to the same
+      # PR.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install mutation tools
@@ -271,13 +492,16 @@ jobs:
   # committed fixture disc, and confirm the report is byte-identical to the golden.
   # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
   # so this exercises the actual RELEASE/static artifact (not the debug test binary)
-  # on hardware we don't own — Linux builds the static musl target it ships. Runs
-  # last, after the rest of the gate. (Running the binary in TOTAL isolation — FROM
-  # scratch, zero runtime deps — is the separate `isolation` job below; docker.yml
-  # ships that same scratch image on release.)
+  # on hardware we don't own — Linux builds the static musl target it ships.
+  # Deliberately NOT `needs:`-chained behind test/lint/coverage (D5): that chain
+  # was pure scheduling — ci-ok still requires e2e green, so running it in
+  # parallel changes nothing but the wall-clock. (Running the binary in TOTAL
+  # isolation — FROM scratch, zero runtime deps — is the separate `isolation`
+  # job below; docker.yml ships that same scratch image on release.)
   e2e:
     name: real-world install + scan (${{ matrix.os }})
-    needs: [test, lint, coverage]
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -295,6 +519,8 @@ jobs:
           persist-credentials: false
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # "Install" the way a user would: build from source and drop the binary in a
       # bin dir — exactly what `cargo install bdinfo-rs` does off crates.io. On Linux
@@ -341,6 +567,8 @@ jobs:
   # no empty-container equivalent). docker.yml ships this same image on release.
   isolation:
     name: zero-deps scan FROM scratch (${{ matrix.target }})
+    needs: plan
+    if: needs.plan.outputs.core == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -354,6 +582,8 @@ jobs:
           persist-credentials: false
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # Build the actual shipped artifact: the fully static musl release binary.
       # Pure-Rust (no C deps), so the musl target needs no C toolchain.
@@ -382,3 +612,36 @@ jobs:
           docker run --rm -v "$fix:/fix:ro" -v "$ctx/out-whole:/out" bdinfo-scratch -w /fix/BigBuckBunny /out
           cmp "$ctx/out-whole/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
           echo "OK — scanned both discs FROM scratch, byte-identical to golden (incl. --whole)"
+
+  # The fan-in: the ONE result branch protection will require (session 3 of the
+  # CI overhaul swaps the 28 name-matched contexts for this job + the three
+  # standalone checks). Green = every gate job either succeeded or was skipped
+  # by the plan; red = anything failed, was cancelled, or never ran because a
+  # `needs` upstream failed.
+  #
+  # A skipped job is considered a success by GitHub, so overwrite `if:`.
+  # ALL THE PREVIOUS JOBS NEED TO BE ADDED TO THE `needs` SECTION OF THIS JOB!
+  # (cargo's warning, kept verbatim: a job missing from `needs` silently stops
+  # gating merges.) The deliberate exceptions are the ADVISORY mutation jobs
+  # (`mutants` — see its header: false-TIMEOUTs on 4-core runners must not
+  # block unrelated PRs), which stay visible on the PR but do not gate.
+  # `!cancelled()` rather than `always()`: a manually-cancelled run must not
+  # end green.
+  ci-ok:
+    name: ci-ok
+    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every gate job succeeded or was skipped
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | jq .
+          failing=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key): \(.value.result)"')
+          if [ -n "$failing" ]; then
+            echo "not green:"
+            echo "$failing"
+            exit 1
+          fi
+          echo "ci-ok: every gate job succeeded or was skipped"
