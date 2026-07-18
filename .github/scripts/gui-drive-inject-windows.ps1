@@ -50,6 +50,13 @@ public static class GuiInput {
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    // The top-level window that would receive a click at (x, y).
+    public static IntPtr RootAt(int x, int y) {
+        POINT p; p.X = x; p.Y = y;
+        return GetAncestor(WindowFromPoint(p), 2); // GA_ROOT
+    }
     // The real app window: owned by the pid, visible, titled "bdinfo-rs…".
     // Process.MainWindowHandle is NOT that — winit also creates hidden
     // zero-sized top-level helpers and MainWindowHandle can pick one.
@@ -153,26 +160,33 @@ function Save-Shot([string]$Name) {
     if ($LASTEXITCODE -ne 0) { Write-Host "!! capture failed for $Name" }
 }
 
-function Assert-Foreground {
-    # SetForegroundWindow from an unrelated process is throttled by the
-    # foreground lock: tap a bare ALT (the caller-received-input release),
-    # then the AttachThreadInput takeover, and retry.
-    for ($i = 0; $i -lt 10; $i++) {
-        if ([GuiInput]::GetForegroundWindow() -eq $hwnd) { return }
+function Request-Foreground {
+    # Best-effort only — mouse clicks land by CURSOR POSITION, not focus, and
+    # Send-Click verifies the window under the cursor per click. Focus is
+    # needed only by the keyboard probe. Runs the ALT-tap release plus the
+    # AttachThreadInput takeover; hosted runner sessions can still refuse
+    # (run 3: both Windows legs held the lock through both techniques).
+    for ($i = 0; $i -lt 5; $i++) {
+        if ([GuiInput]::GetForegroundWindow() -eq $hwnd) { return $true }
         [void][GuiInput]::Key(0x12, $false) # VK_MENU down
         [void][GuiInput]::Key(0x12, $true)
-        if ([GuiInput]::ForceForeground($hwnd)) { return }
-        Start-Sleep -Milliseconds 500
+        if ([GuiInput]::ForceForeground($hwnd)) { return $true }
+        Start-Sleep -Milliseconds 400
     }
-    throw 'the app never became the foreground window — refusing to inject blind clicks'
+    return $false
 }
 
 function Send-Click([double]$Lx, [double]$Ly) {
-    Assert-Foreground
     $px = [int][math]::Round($origin.X + ($Lx * $scale))
     $py = [int][math]::Round($origin.Y + ($Ly * $scale))
     [void][GuiInput]::SetCursorPos($px, $py)
     Start-Sleep -Milliseconds 150
+    # The precise no-blind-clicks guard: the top-level window that will
+    # receive this click must be the app — stronger than a foreground check,
+    # because injected mouse input routes by cursor position, not focus.
+    if ([GuiInput]::RootAt($px, $py) -ne $hwnd) {
+        throw "another window sits under the cursor at $px,$py — refusing to inject blind clicks"
+    }
     [void][GuiInput]::Mouse(0x0002) # LEFTDOWN
     Start-Sleep -Milliseconds 80
     [void][GuiInput]::Mouse(0x0004) # LEFTUP
@@ -206,16 +220,23 @@ Start-Sleep -Milliseconds ($ScanDelayMs + 25000)
 Save-Shot '07-scanned'
 
 # Keyboard probe: Ctrl + numpad-plus steps the UI scale — a whole-window
-# visible effect if the key path works (recorded, not asserted).
-Assert-Foreground
-[void][GuiInput]::Key(0x11, $false) # VK_CONTROL down
-Start-Sleep -Milliseconds 60
-[void][GuiInput]::Key(0x6B, $false) # VK_ADD down
-Start-Sleep -Milliseconds 60
-[void][GuiInput]::Key(0x6B, $true)
-[void][GuiInput]::Key(0x11, $true)
-Start-Sleep -Milliseconds 900
-Save-Shot '08-scale-step'
+# visible effect if the key path works (recorded, not asserted). Keyboard
+# routes by FOCUS, so this one genuinely needs the foreground; when the
+# runner session refuses to hand it over, record that instead of failing
+# the mouse-path verdict.
+if (Request-Foreground) {
+    [void][GuiInput]::Key(0x11, $false) # VK_CONTROL down
+    Start-Sleep -Milliseconds 60
+    [void][GuiInput]::Key(0x6B, $false) # VK_ADD down
+    Start-Sleep -Milliseconds 60
+    [void][GuiInput]::Key(0x6B, $true)
+    [void][GuiInput]::Key(0x11, $true)
+    Start-Sleep -Milliseconds 900
+    Save-Shot '08-scale-step'
+}
+else {
+    Write-Host '!! keyboard probe SKIPPED: the session never granted the app foreground'
+}
 
 # Hard assert that injection reached the app: the Settings dialog shot must
 # render different pixels from the shot before the click. Nothing else on the
