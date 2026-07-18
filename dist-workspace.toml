@@ -1,5 +1,5 @@
 # dist (axodotdev cargo-dist) configuration — the source of truth for the release
-# pipeline. `.github/workflows/release.yml` is GENERATED from this file by
+# pipeline. `.github/workflows/v-release.yml` is GENERATED from this file by
 # `dist generate`; never hand-edit the workflow. CI guards drift with
 # `dist generate --check`. The size-tuned build profile lives in the root
 # Cargo.toml as `[profile.dist]` (dist builds with `--profile dist`).
@@ -17,6 +17,17 @@ ci = "github"
 # (the `dist generate --check` guard in ci.yml already covers config/workflow
 # drift on PRs).
 pr-run-mode = "skip"
+
+# Namespace the trigger to tags that START with `v`: the default glob
+# (`**[0-9]+.[0-9]+.[0-9]+*`) matches ANY tag carrying a semver triple, so a
+# future GUI release tag (gui-vX.Y.Z, hand-rolled lane) would fire this pipeline
+# too and die in `dist plan` (no package named "gui"). The namespace narrows the
+# glob to `v**[0-9]+.[0-9]+.[0-9]+*` without touching tag parsing, so the
+# existing vX.Y.Z release flow is unchanged. Side effect (dist hardcodes it, "to
+# co-exist with other release workflows"): the generated workflow is written to
+# v-release.yml, not the unprefixed default name — .github/zizmor.yml's
+# whole-file ignores and ci.yml's pin-drift grep are keyed to the new filename.
+tag-namespace = "v"
 
 # The six shipped targets, every one a single static binary. musl is fully
 # static (dist forces -Ctarget-feature=+crt-static -Clink-self-contained=yes for
@@ -82,7 +93,7 @@ github-attestations = true
 # grype, osv-scanner — closing the loop our build-time cargo-deny/cargo-vet don't:
 # those check the source we build, this lets downstream re-check the binary. dist
 # runs `cargo auditable build`/`cargo auditable zigbuild` instead of plain
-# `cargo build`, and the generated release.yml installs cargo-auditable on each
+# `cargo build`, and the generated v-release.yml installs cargo-auditable on each
 # runner (the `need_cargo_auditable` matrix step). Requires dist >= 0.32 — that
 # release lifted the prior cargo-auditable⊕zigbuild mutual exclusion, so our two
 # musl (zigbuild) targets get the section too, not just the cargo-build ones. The
@@ -115,7 +126,7 @@ publish-jobs = ["./homebrew"]
 
 # A reusable workflow wired in at the start of CI (before any build): it fails the
 # whole release unless the tagged commit is an ancestor of origin/master. dist
-# only generates the WIRING in release.yml, not the referenced file, so the guard
+# only generates the WIRING in v-release.yml, not the referenced file, so the guard
 # survives `dist generate --check`.
 plan-jobs = ["./guard-ancestor"]
 
@@ -160,11 +171,11 @@ runner = "windows-11-arm"
 host = "aarch64-pc-windows-msvc"
 
 # Pin every action dist emits to a full-length commit SHA so the GENERATED
-# release.yml satisfies Scorecard's pinned-dependencies check — without detaching
+# v-release.yml satisfies Scorecard's pinned-dependencies check — without detaching
 # from dist (the `dist generate --check` drift guard in ci.yml stays green because
 # this IS what dist now generates). The trailing comment names the EXACT immutable
 # tag the SHA resolves to (`# vX.Y.Z`, not the moving major `# vN`): it rides along
-# in the value (dist renders `{name}@{value}` verbatim) so release.yml satisfies
+# in the value (dist renders `{name}@{value}` verbatim) so v-release.yml satisfies
 # zizmor's ref-version-mismatch audit like the hand-maintained workflows, and a
 # stale pin can never make the comment lie (an exact tag is immutable, a moving
 # major is not). Dependabot bumps the SHA and the comment together. The SHA is

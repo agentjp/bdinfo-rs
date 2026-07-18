@@ -1,7 +1,8 @@
 /// <reference lib="webworker" />
 // The scan Worker: hosts the WebAssembly module OFF the main thread. It serves
 // two requests over the same module instance:
-//   - `list`: the fast STRUCTURAL scan → the playlist selection table (JSON).
+//   - `list`: the fast STRUCTURAL scan → the playlist selection table (parsed
+//     here, so the main thread receives structured rows, not JSON text).
 //   - `scan`: the FULL measured scan over the picked (or selected) playlists.
 // The wasm reads each file's bytes synchronously at byte offsets through
 // `FileReaderSync` (the reason this must be a Worker — that API exists only in a
@@ -61,10 +62,13 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     };
     switch (data.kind) {
       case "list":
-        self.postMessage({ type: "rows", rows: list_playlists(data.paths, data.files) });
+        self.postMessage({
+          type: "rows",
+          rows: JSON.parse(list_playlists(data.paths, data.files)),
+        });
         break;
       case "list-iso":
-        self.postMessage({ type: "rows", rows: list_iso_playlists(data.file) });
+        self.postMessage({ type: "rows", rows: JSON.parse(list_iso_playlists(data.file)) });
         break;
       case "scan":
         self.postMessage({

@@ -38,10 +38,10 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-// The read-ahead pipeline runs on a scoped worker thread on every native target;
-// `wasm32-unknown-unknown` has no threads, so the wasm build takes a sequential
-// read-then-parse path instead (see `scan_chunked`) and never names these.
-#[cfg(not(target_arch = "wasm32"))]
+// The cancel flag is polled on every target; the channel/thread machinery of
+// the read-ahead pipeline exists only where threads do —
+// `wasm32-unknown-unknown` has none, so the wasm build takes a sequential
+// read-then-parse path instead (see `scan_chunked_with`) and never names them.
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
@@ -124,7 +124,19 @@ fn apply_vbr_bitrate(stream: &mut TsStream, packet_seconds: f64) {
 
 /// Fills `buf` from `reader`, returning the number of bytes read (0 at EOF),
 /// looping to tolerate short reads.
-fn fill_buffer(reader: &mut dyn Read, buf: &mut [u8]) -> Result<usize, BdError> {
+///
+/// Polls the cooperative `cancel` flag before reading: a set flag aborts with
+/// [`BdError::ScanCancelled`] instead of pulling more bytes — the per-chunk
+/// cancellation point both the threaded and the sequential scan paths share
+/// (one relaxed load per chunk; the per-byte hot path never sees it).
+fn fill_buffer(
+    reader: &mut dyn Read,
+    buf: &mut [u8],
+    cancel: &AtomicBool,
+) -> Result<usize, BdError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(BdError::ScanCancelled);
+    }
     let mut total: usize = 0;
     // `filter` stops the loop once the destination slice is empty (buffer full),
     // so there is no `total < len` boundary to mutate equivalently.
@@ -474,10 +486,46 @@ impl TsStreamFile {
         self.scan_chunked(reader, playlists, is_full_scan, DATA_SIZE, &mut |_, _| {})
     }
 
+    /// [`scan`](Self::scan) with a cooperative `cancel` flag — the demux entry
+    /// the disc-level open drives. The flag is polled once per read chunk
+    /// ([`fill_buffer`]); when set, the scan aborts promptly with
+    /// [`BdError::ScanCancelled`] instead of reading further.
+    pub(crate) fn scan_cancellable(
+        &mut self,
+        reader: &mut dyn Read,
+        playlists: &mut [TsPlaylistFile],
+        is_full_scan: bool,
+        cancel: &AtomicBool,
+    ) -> Result<(), BdError> {
+        self.scan_chunked_with(reader, playlists, is_full_scan, DATA_SIZE, cancel, &mut |_, _| {})
+    }
+
     /// [`scan`](Self::scan) with an explicit read-chunk size and a codec-seam
     /// observer (the point where the assembled buffer is decoded);
     /// `observe(pid, buffer)` runs just before the buffer is reset. Used by tests
-    /// to drive cross-chunk boundaries and inspect the assembled PES payload.
+    /// to drive cross-chunk boundaries and inspect the assembled PES payload
+    /// (never cancelled — the cancellation tests drive
+    /// [`scan_chunked_with`](Self::scan_chunked_with) directly).
+    pub(crate) fn scan_chunked(
+        &mut self,
+        reader: &mut dyn Read,
+        playlists: &mut [TsPlaylistFile],
+        is_full_scan: bool,
+        chunk_size: usize,
+        observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
+    ) -> Result<(), BdError> {
+        self.scan_chunked_with(
+            reader,
+            playlists,
+            is_full_scan,
+            chunk_size,
+            &AtomicBool::new(false),
+            observe,
+        )
+    }
+
+    /// The full-parameter scan body behind every entry above: explicit chunk
+    /// size, cooperative `cancel` flag, and codec-seam observer.
     ///
     /// The scan is a two-stage pipeline: the reader stays on the calling thread
     /// (whose progress callback it drives), while the packet state machine runs
@@ -487,6 +535,11 @@ impl TsStreamFile {
     /// `wasm32-unknown-unknown` has no threads, so the wasm build collapses this
     /// to a sequential read-then-parse loop that drives `parse_chunk` over the
     /// identical chunks in the identical order — byte-for-byte the same demux.
+    /// Both paths pull every chunk through [`fill_buffer`], whose `cancel` poll
+    /// aborts the scan between chunks with [`BdError::ScanCancelled`] — on the
+    /// threaded path that is the reader side: it stops feeding, the worker
+    /// drains and exits without the bitrate tail (the read-failure road), and
+    /// the cancelled error is returned.
     #[cfg_attr(
         not(target_arch = "wasm32"),
         expect(
@@ -494,12 +547,13 @@ impl TsStreamFile {
             reason = "one function carries both the threaded and the sequential read-ahead paths under cfg; splitting it would duplicate the shared per-clip setup"
         )
     )]
-    pub(crate) fn scan_chunked(
+    fn scan_chunked_with(
         &mut self,
         reader: &mut dyn Read,
         playlists: &mut [TsPlaylistFile],
         is_full_scan: bool,
         chunk_size: usize,
+        cancel: &AtomicBool,
         observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
     ) -> Result<(), BdError> {
         if playlists.is_empty() {
@@ -587,7 +641,7 @@ impl TsStreamFile {
                         }
                     };
                     buffer.resize(chunk_size, 0);
-                    match fill_buffer(reader, &mut buffer) {
+                    match fill_buffer(reader, &mut buffer, cancel) {
                         Ok(0) => break,
                         Ok(n) => {
                             buffer.truncate(n);
@@ -626,7 +680,7 @@ impl TsStreamFile {
             let mut buffer = vec![0_u8; chunk_size];
             loop {
                 buffer.resize(chunk_size, 0);
-                match fill_buffer(reader, &mut buffer) {
+                match fill_buffer(reader, &mut buffer, cancel) {
                     Ok(0) => break,
                     Ok(n) => {
                         buffer.truncate(n);
@@ -1833,6 +1887,7 @@ pub mod packets {
 mod tests {
     use std::collections::BTreeMap;
     use std::io::{self, Cursor, Read};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
 
@@ -1840,7 +1895,9 @@ mod tests {
         encode_pts, packet, packet_raw, pat_payload, pes_dts, pes_dts_padded, pes_none, pes_pts,
         pes_pts_padded, pes_variable, pmt_payload, pmt_section,
     };
-    use super::{TsInterleavedFile, TsStreamDiagnostics, TsStreamFile, pts_to_f64, round_long};
+    use super::{
+        DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics, TsStreamFile, pts_to_f64, round_long,
+    };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::interleaved::MemBdFile;
     use crate::bdrom::mpls::TsPlaylistFile;
@@ -2799,6 +2856,52 @@ mod tests {
         let mut pls = [empty_playlist()];
         let err = file.scan(&mut AlwaysError, &mut pls, true).unwrap_err();
         assert_eq!(err.to_string(), "io error: read failed");
+    }
+
+    #[test]
+    fn a_preset_cancel_flag_aborts_before_the_first_read() {
+        // The reader always errors, so reaching it at all would surface `Io` —
+        // the returned `ScanCancelled` proves the flag is polled BEFORE the
+        // first read (a pre-cancelled scan pulls no bytes at all).
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [empty_playlist()];
+        let err = file
+            .scan_cancellable(&mut AlwaysError, &mut pls, true, &AtomicBool::new(true))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "scan cancelled");
+    }
+
+    /// A reader that trips the cancel flag as it serves each chunk — the shape
+    /// every real driver has (a UI button, a Ctrl+C handler): the flag flips
+    /// while a chunk is in flight, and the scan must stop at the next chunk
+    /// boundary instead of reading on to EOF.
+    struct TripAfterServing<'a> {
+        inner: Cursor<Vec<u8>>,
+        cancel: &'a AtomicBool,
+    }
+
+    impl Read for TripAfterServing<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf);
+            self.cancel.store(true, Ordering::Relaxed);
+            n
+        }
+    }
+
+    #[test]
+    fn a_mid_scan_cancel_stops_at_the_next_chunk_boundary() {
+        // A stream one byte longer than a read chunk; serving the first chunk
+        // trips the flag, so the scan aborts with `ScanCancelled` before the
+        // second chunk and the tail is never read.
+        let cancel = AtomicBool::new(false);
+        let bytes = vec![0_u8; DATA_SIZE.wrapping_add(1)];
+        let mut reader = TripAfterServing { inner: Cursor::new(bytes), cancel: &cancel };
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [empty_playlist()];
+        let err = file.scan_cancellable(&mut reader, &mut pls, true, &cancel).unwrap_err();
+        assert_eq!(err.to_string(), "scan cancelled");
+        let consumed = usize::try_from(reader.inner.position()).expect("position fits");
+        assert!(consumed < reader.inner.get_ref().len(), "the tail is never read");
     }
 
     /// The decoded marker the demux records for a video update whose timestamp is

@@ -8,10 +8,17 @@
       name="description"
       content="Analyze a Blu-ray disc (BDMV) entirely in your browser. No upload — the bdinfo-rs measured scan, compiled to WebAssembly."
     />
+    <!-- The bdinfo-rs aperture mark (crates/bdinfo-rs-gui/assets/icon.svg is
+         the vector source of truth): PNG for browsers without SVG favicon
+         support (Safari), the inline SVG for everything newer, and the
+         opaque touch icon for iOS home screens. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234cc2ff' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Ccircle cx='12' cy='12' r='2'/%3E%3C/svg%3E"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='54.4' fill='none' stroke='%23F2A65A' stroke-width='16.64'/%3E%3Ccircle cx='64' cy='64' r='20.48' fill='%23F2A65A'/%3E%3C/svg%3E"
     />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
     <style>
       :root {
         --bg: #0b0d10;

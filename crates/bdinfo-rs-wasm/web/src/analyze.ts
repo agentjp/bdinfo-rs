@@ -55,14 +55,15 @@ export interface PlaylistRow {
 /** Optional overrides for {@link analyze} and {@link listPlaylists}. */
 export interface AnalyzeOptions {
   /**
-   * The URL of the scan Worker module to spawn. Defaults to
-   * `new URL("./worker.js", import.meta.url)`, which any bundler that follows
-   * the `new Worker(new URL(..., import.meta.url))` convention (Vite, webpack 5,
-   * native ESM) rewrites to the emitted asset. Set this when your toolchain
-   * can't follow that pattern and you host `worker.js` (and the `.wasm` it
-   * loads) yourself — pass the URL your bundler produced for `worker.js`.
+   * A factory constructing the scan Worker to use. Defaults to
+   * `new Worker(new URL("./worker.js", import.meta.url), { type: "module" })`,
+   * which any bundler that follows the `new Worker(new URL(..., import.meta.url))`
+   * convention (Vite, webpack 5, native ESM) rewrites to the emitted asset. Set
+   * this when your toolchain can't follow that pattern and you host `worker.js`
+   * (and the `.wasm` it loads) yourself — construct the module Worker from the
+   * URL your bundler produced for `worker.js` and return it.
    */
-  workerUrl?: string | URL;
+  createWorker?: () => Worker;
   /**
    * The playlists to measure, by {@link PlaylistRow.name} — the browser
    * equivalent of the CLI's `--mpls`, measured unfiltered in the given order.
@@ -83,7 +84,7 @@ export interface AnalyzeOptions {
 type WorkerMessage =
   | ({ type: "progress" } & ScanProgress)
   | { type: "done"; report: string }
-  | { type: "rows"; rows: string }
+  | { type: "rows"; rows: PlaylistRow[] }
   | { type: "error"; message: string };
 
 /** Spawns the scan Worker (a module worker by the bundler-aware convention). */
@@ -91,12 +92,12 @@ function spawnWorker(options?: AnalyzeOptions): Worker {
   // The default path MUST stay a bare `new Worker(new URL("./worker.js",
   // import.meta.url), …)` literal: that exact shape is what Vite and webpack 5
   // statically detect to compile the Worker into a chunk and emit the `.wasm` it
-  // loads as an asset. Folding it into `options?.workerUrl ?? new URL(...)` makes
-  // the first argument an expression rather than a `new URL(...)` node, which
-  // defeats that detection (the bundler then ships a broken worker and no wasm),
-  // so the override is a separate branch that keeps the default literal intact.
-  if (options?.workerUrl) {
-    return new Worker(options.workerUrl, { type: "module" });
+  // loads as an asset. Folding the override into that call would make the first
+  // argument an expression rather than a `new URL(...)` node, which defeats that
+  // detection (the bundler then ships a broken worker and no wasm), so the
+  // override is a separate branch that keeps the default literal intact.
+  if (options?.createWorker) {
+    return options.createWorker();
   }
   return new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 }
@@ -137,7 +138,7 @@ export function listPlaylists(files: BdmvFile[], options?: AnalyzeOptions): Prom
       const message = event.data;
       if (message.type === "rows") {
         worker.terminate();
-        resolve(JSON.parse(message.rows) as PlaylistRow[]);
+        resolve(message.rows);
       } else if (message.type === "error") {
         worker.terminate();
         reject(new Error(message.message));
@@ -170,7 +171,7 @@ export function listPlaylistsIso(file: File, options?: AnalyzeOptions): Promise<
       const message = event.data;
       if (message.type === "rows") {
         worker.terminate();
-        resolve(JSON.parse(message.rows) as PlaylistRow[]);
+        resolve(message.rows);
       } else if (message.type === "error") {
         worker.terminate();
         reject(new Error(message.message));
@@ -191,7 +192,7 @@ export function listPlaylistsIso(file: File, options?: AnalyzeOptions): Promise<
  * disc report. `onProgress`, if given, is called as the scan demuxes;
  * `options.selection` measures only the named playlists (see
  * {@link AnalyzeOptions}), defaulting to the standard `--whole` set.
- * `options.workerUrl` overrides where the scan Worker is loaded from.
+ * `options.createWorker` overrides how the scan Worker is constructed.
  *
  * Everything runs locally: no bytes leave the page.
  */

@@ -14,7 +14,7 @@ name: homebrew
 # to the tap ourselves: ONE commit per release, reusing dist's correct multi-arch
 # url/sha generation. Nothing else dist does changes.
 #
-# dist regenerates only the CALL to this workflow in release.yml (passing `plan`
+# dist regenerates only the CALL to this workflow in v-release.yml (passing `plan`
 # and `secrets: inherit`), never this file, so it survives `dist generate --check`.
 
 on:
@@ -44,7 +44,7 @@ jobs:
     name: publish the Homebrew formula (with man page + completions)
     runs-on: ubuntu-latest
     # HOMEBREW_TAP_TOKEN is an ENVIRONMENT secret on `release` (not a repo secret), so
-    # only a release run can read it. release.yml is tag-triggered, so this reusable
+    # only a release run can read it. v-release.yml is tag-triggered, so this reusable
     # job's github.ref is the `vX.Y.Z` tag → the environment's `v*` tag deployment rule
     # admits it. The caller already passes `secrets: inherit`; with `environment:` set
     # here at the job level, the env secret resolves — the documented reusable-workflow

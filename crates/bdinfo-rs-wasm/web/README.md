@@ -87,19 +87,21 @@ pattern. Any bundler that understands it works out of the box:
 - **Native ES modules** (no bundler — served straight from the package on a
   static host or via an import map) — works as published.
 
-If your bundler can't follow that pattern, host the Worker yourself and pass its
-URL explicitly. The package's `exports` map deliberately keeps the internals
-private (`dist/worker.js` and `pkg/` are not importable subpaths), so copy
+If your bundler can't follow that pattern, host the Worker yourself and pass a
+factory constructing it. The package's `exports` map deliberately keeps the
+internals private (`dist/worker.js` and `pkg/` are not importable subpaths), so copy
 `dist/worker.js` **together with the `pkg/` directory** out of `node_modules`
 into your own source, preserving their relative layout — `worker.js` loads the
 wasm-bindgen glue and `.wasm` via `import "../pkg/bdinfo_rs_wasm.js"`, so `pkg/`
-must stay one level below it. Then pass the URL your bundler produces for the
-copied worker:
+must stay one level below it. Then construct the module Worker from the URL your
+bundler produces for the copied worker:
 
 ```ts
 import workerUrl from "./worker.js?worker&url"; // however your bundler exposes it
 
-await analyze(picked, onProgress, { workerUrl });
+await analyze(picked, onProgress, {
+  createWorker: () => new Worker(workerUrl, { type: "module" }),
+});
 ```
 
 The raw wasm-bindgen module is also exported directly for advanced use:

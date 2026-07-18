@@ -1,5 +1,6 @@
-# taplo configuration — TOML formatter + linter, enforced by the `toml` CI job and
-# the local gate (scripts/compliance.ps1 `tp` step). The formatting options below
+# taplo configuration — TOML formatter + linter, enforced by the orchestrator's
+# `taplo` job (ci.yml, `toml` area) and the local gate (scripts/compliance.ps1 `tp`
+# step). The formatting options below
 # are tuned to match the repo's existing hand-formatting, so the one-time baseline
 # reformat normalizes only spacing/commas and never re-flows the author's chosen
 # array line breaks.
@@ -7,7 +8,9 @@ include = ["**/*.toml"]
 # Cargo.lock is generated (and is a .lock, not a .toml — never matched anyway);
 # supply-chain/{audits,config}.toml are written by cargo-vet — leave both to their
 # generators so taplo never fights them. target/ holds throwaway build artifacts.
-exclude = ["Cargo.lock", "supply-chain/**", "target/**"]
+# scratch/ is the gitignored local work area (see .gitignore) — it can hold
+# checkouts of OTHER projects, whose TOML is not this repo's to format.
+exclude = ["Cargo.lock", "supply-chain/**", "target/**", "scratch/**"]
 
 [formatting]
 # 4-space indent matches the repo's multi-line arrays (e.g. dist-workspace targets,

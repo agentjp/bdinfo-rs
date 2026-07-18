@@ -33,8 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: 0   # need base..head history to walk the PR's commits
           persist-credentials: false
+
+      # The commit walks below need full base..head history but only ever read
+      # commit MESSAGES, so fetch commits + trees and leave every blob lazy —
+      # far cheaper than a fetch-depth: 0 clone, which would drag in the whole
+      # object graph including the committed disc fixtures.
+      - name: Fetch full history without blobs
+        run: git fetch --no-tags --filter=blob:none --unshallow origin
 
       - name: Install convco (prebuilt, no from-source compile)
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3

@@ -4,8 +4,8 @@ name: deploy-pages
 # Cloudflare Pages (Direct Upload) at bdinfo.hyperslop.dev. The wasm toolchain
 # runs HERE on GitHub, where it already works; Cloudflare only HOSTS the prebuilt
 # static files (its build image has no Rust / wasm-bindgen). The npm package ships
-# lean (no demo); this deploys the FULL demo (index.html + dist/ + pkg/) assembled
-# into site/.
+# lean (no demo); this deploys the FULL demo (index.html + the favicon PNGs +
+# dist/ + pkg/) assembled into site/.
 #
 # ONE-TIME human prerequisites (until both are done, the auto-run on master fails
 # harmlessly — this is NOT a required check, so it never blocks a merge):
@@ -13,7 +13,7 @@ name: deploy-pages
 #      bdinfo.hyperslop.dev via the Pages dashboard (auto-CNAME, the zone is
 #      already on Cloudflare). The FIRST deploy is manual:
 #        cd crates/bdinfo-rs-wasm/web && npm ci && npm run build
-#        # assemble site/ (index.html + _headers + dist/ + pkg/), then:
+#        # assemble site/ (index.html + icons + _headers + dist/ + pkg/), then:
 #        npx wrangler login
 #        npx wrangler pages deploy site --project-name=bdinfo-rs
 #      Set the project's production branch to `master` so this workflow's
@@ -76,7 +76,7 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm/web
         run: npm run build
 
-      - name: Assemble the static site (index.html + _headers + dist/ + pkg/)
+      - name: Assemble the static site (index.html + icons + _headers + dist/ + pkg/)
         working-directory: crates/bdinfo-rs-wasm/web
         shell: pwsh
         run: |
@@ -84,6 +84,8 @@ jobs:
           if (Test-Path $site) { Remove-Item -Recurse -Force $site }
           New-Item -ItemType Directory -Path $site | Out-Null
           Copy-Item index.html $site/
+          Copy-Item favicon-32.png $site/
+          Copy-Item apple-touch-icon.png $site/
           Copy-Item _headers $site/
           Copy-Item -Recurse dist $site/dist
           Copy-Item -Recurse pkg $site/pkg

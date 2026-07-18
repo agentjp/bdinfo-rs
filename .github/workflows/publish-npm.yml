@@ -44,14 +44,14 @@ concurrency:
 
 jobs:
   # Refuse to publish a tag that is not on master — the same ancestry gate
-  # release.yml uses, via the same reusable workflow. A vX.Y.Z tag pushed onto a
+  # v-release.yml uses, via the same reusable workflow. A vX.Y.Z tag pushed onto a
   # side branch (so it never passed the gate) cannot ship to npm: the publish job
   # `needs:` this one.
   guard-ancestor:
     uses: ./.github/workflows/guard-ancestor.yml
     # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
     # `git merge-base` ancestry check), so inheriting them is needless privilege
-    # (and zizmor's secrets-inherit audit flags it). release.yml's generated copy
+    # (and zizmor's secrets-inherit audit flags it). v-release.yml's generated copy
     # carries `secrets: inherit`, but this hand-maintained workflow is hardened in
     # place rather than suppressed.
     permissions:
@@ -150,7 +150,7 @@ jobs:
       # get a modern Node/npm for OIDC, and the tag trigger is intrinsic to a
       # publish workflow, so this is an unavoidable false positive (cf. the inline
       # ref-version-mismatch ignore documented in .github/zizmor.yml).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6.4.0 # zizmor: ignore[cache-poisoning]
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           # The active Node line (26 -> LTS Oct 2026); kept in lockstep with
           # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).

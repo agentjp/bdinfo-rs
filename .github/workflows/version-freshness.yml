@@ -3,13 +3,14 @@ name: version-freshness
 # Several versions in this repo are pinned for reproducibility but rot SILENTLY —
 # nothing else watches them:
 #   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY pin, which is
-#     hardcoded in ci.yml + fuzz.yml + wasm.yml + publish-npm.yml and cross-checked
-#     for agreement here so a bump to one can't silently drift the rest),
+#     hardcoded in ci.yml + fuzz.yml + wasm.yml + gui.yml + publish-npm.yml and
+#     cross-checked for agreement here so a bump to one can't silently drift the
+#     rest),
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
-#   - cargo-vet (the `--version` pin in audit.yml),
+#   - cargo-vet (the `--version` pin in ci.yml's vet job),
 #   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
-#   - taplo (the `tool: taplo-cli@X` pin in toml.yml — a formatter, pinned like
+#   - taplo (the `tool: taplo-cli@X` pin in ci.yml's TOML job — a formatter, pinned like
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
@@ -168,18 +169,20 @@ jobs:
           if ($nightlyAgeDays -gt 30) {
             Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY) is $nightlyAgeDays days old"
           }
-          # The nightly is hardcoded in FOUR places (ci.yml/fuzz.yml/wasm.yml NIGHTLY
-          # env + publish-npm.yml's rustup install) that Dependabot can't see, so a
-          # bump to one silently drifts the rest. Cross-check they AGREE (like the
-          # cargo-dist / wasm-bindgen-cli / Node pin agreements).
+          # The nightly is hardcoded in FIVE places (ci.yml/fuzz.yml/wasm.yml/gui.yml
+          # NIGHTLY env + publish-npm.yml's rustup install) that Dependabot can't see,
+          # so a bump to one silently drifts the rest. Cross-check they AGREE (like
+          # the cargo-dist / wasm-bindgen-cli / Node pin agreements).
           $nightlyFuzz = Read-Pin '.github/workflows/fuzz.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
           $nightlyWasm = Read-Pin '.github/workflows/wasm.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
+          $nightlyGui  = Read-Pin '.github/workflows/gui.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
           $nightlyNpm  = Read-Pin '.github/workflows/publish-npm.yml' 'install nightly-(\d{4}-\d{2}-\d{2})'
           if (-not $nightlyFuzz) { throw 'No NIGHTLY pin in fuzz.yml' }
           if (-not $nightlyWasm) { throw 'No NIGHTLY pin in wasm.yml' }
+          if (-not $nightlyGui)  { throw 'No NIGHTLY pin in gui.yml' }
           if (-not $nightlyNpm)  { throw 'No nightly install pin in publish-npm.yml' }
-          if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyNpm)) {
-            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
+          if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyGui) -or ($nightlyPin -ne $nightlyNpm)) {
+            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / gui.yml ``$nightlyGui`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
           }
 
           # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
@@ -197,14 +200,14 @@ jobs:
             Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
           }
 
-          # --- cargo-vet: audit.yml vs mozilla/cargo-vet -----------------------
-          $vetPin = Read-Pin '.github/workflows/audit.yml' 'cargo-vet --version ([0-9.]+)'
-          if (-not $vetPin) { throw 'No cargo-vet --version pin in audit.yml' }
+          # --- cargo-vet: ci.yml vs mozilla/cargo-vet --------------------------
+          $vetPin = Read-Pin '.github/workflows/ci.yml' 'cargo-vet --version ([0-9.]+)'
+          if (-not $vetPin) { throw 'No cargo-vet --version pin in ci.yml' }
           $vetLatest = Latest-Semver 'mozilla/cargo-vet'
           if (-not $vetLatest) {
             Add-Problem 'cargo-vet (query failed)' '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
           } elseif ([version]$vetLatest -gt [version]$vetPin) {
-            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
+            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (ci.yml) is behind the latest release ``$vetLatest``"
           }
 
           # --- ryl: ci.yml YAML-lint pin vs crates.io --------------------------
@@ -219,16 +222,16 @@ jobs:
             Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
           }
 
-          # --- taplo: toml.yml `tool: taplo-cli@X` pin vs crates.io -------------
+          # --- taplo: ci.yml `tool: taplo-cli@X` pin vs crates.io ---------------
           # Pinned like ryl so the TOML format/lint stays reproducible; nothing
           # else watches it.
-          $taploPin = Read-Pin '.github/workflows/toml.yml' 'tool:\s*taplo-cli@([0-9.]+)'
-          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in toml.yml' }
+          $taploPin = Read-Pin '.github/workflows/ci.yml' 'tool:\s*taplo-cli@([0-9.]+)'
+          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in ci.yml' }
           $taploLatest = Latest-CratesIo 'taplo-cli'
           if (-not $taploLatest) {
             Add-Problem 'taplo (query failed)' '- could not query the latest taplo release (crates.io taplo-cli)'
           } elseif ([version]$taploLatest -gt [version]$taploPin) {
-            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
+            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (ci.yml) is behind the latest release ``$taploLatest``"
           }
 
           # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
@@ -453,7 +456,7 @@ jobs:
             ''
             $bodyLines
             ''
-            'Bump deliberately: update the pin(s) in the file(s) named above, keep the four NIGHTLY pins (ci.yml / fuzz.yml / wasm.yml / publish-npm.yml) identical, and re-run `dist generate` after any cargo-dist bump. CI re-validates on the next push.'
+            'Bump deliberately: update the pin(s) in the file(s) named above, keep the five NIGHTLY pins (ci.yml / fuzz.yml / wasm.yml / gui.yml / publish-npm.yml) identical, and re-run `dist generate` after any cargo-dist bump. CI re-validates on the next push.'
           ) -join "`n"
 
           # One rolling issue, tracked by a stable label (the title now varies, so it

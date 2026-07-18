@@ -10,21 +10,26 @@ name: wasm
 # native CLI e2e test scans) — proven in Node and in real headless browsers
 # (Chrome + Firefox via wasm-bindgen-test).
 #
-# This file is the GATE only (push to a branch + PRs) — deliberately NOT triggered
-# on tags, so its build caches are never a publishing-time cache-poisoning vector.
-# The tag-driven npm publish lives beside publish-crates.yml in publish-npm.yml.
+# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the
+# `wasm` area (a crate-dir change, or a core change via the encoded path-dep
+# edge — root-Cargo.lock-only bumps excluded), and the daily sweep re-runs it
+# ungated through the same orchestrator. Trigger/concurrency policy is the
+# caller's; the gate still deliberately NEVER runs on tags, so its build
+# caches are never a publishing-time cache-poisoning vector (the tag-driven
+# npm publish lives beside publish-crates.yml in publish-npm.yml). The
+# full-crate mutants sweep moved to sweep.yml (daily when the crate tree
+# changed since the last green sweep, plus release tags — the authoritative
+# 0-missed checkpoints); the PR path gets the advisory in-diff mutants job in
+# ci.yml (`wasm mutation testing (PR diff)`) instead (D1). Inside the
+# reusable this gate renders as `wasm / wasm gate (build + size + parity)`;
+# it gates merges through the caller job and ci-ok, not by its own name —
+# branch protection requires `ci-ok` alone among the CI jobs.
 
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: wasm-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + ci.yml
@@ -64,6 +69,10 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-wasm
+          # Cache write-discipline (wgpu): PR-branch saves are invisible to
+          # every other PR, so only master runs (pushes + the daily sweep)
+          # save; PRs restore the master-seeded cache.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install wasm-bindgen-cli (pinned to the crate version)
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
@@ -87,10 +96,10 @@ jobs:
             throw "wasm-bindgen mismatch: Cargo.lock=$lock CLI=$cli. Set wasm-bindgen-cli@$lock in wasm.yml + publish-npm.yml + deploy-pages.yml (or run: pwsh scripts/wasm-sync.ps1)."
           }
 
-      - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / typos)
+      - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / typos)
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
         with:
-          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,cargo-deny,typos-cli
+          tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -176,10 +185,6 @@ jobs:
             if ($covered -lt $count) { $fail += "$m $covered/$count" }
           }
           if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
-
-      - name: Mutants (native — Tier A 0 missed)
-        working-directory: crates/bdinfo-rs-wasm
-        run: cargo mutants --in-place
 
       - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
         working-directory: crates/bdinfo-rs-wasm/web

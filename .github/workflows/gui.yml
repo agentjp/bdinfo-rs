@@ -1,0 +1,366 @@
+name: gui
+
+# The PROPORTIONATE Posture-C gate for the native desktop GUI
+# (crates/bdinfo-rs-gui), mirrored 1:1 by the local scripts/gui-compliance.ps1.
+# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the `gui`
+# area (a crate-dir change, or a core change via the encoded path-dep edge —
+# root-Cargo.lock-only bumps excluded), and the daily sweep re-runs it ungated
+# through the same orchestrator. This file carries no triggers or concurrency
+# of its own — both are the caller's — so it can never fire on its own and
+# never needs a paths filter.
+#
+# Tier A — the crate's LIBRARY (flow / model / selection / panes / progress /
+# paths / clipboard / columns / settings / theme / icon / winres / scan) — is held to the
+# core bar: clippy -D warnings, llvm-cov 100% lines/regions/functions,
+# cargo-mutants 0 missed, proptests, byte-exact golden ties. Tier B (the iced
+# shell main.rs + the style vocabulary ui.rs) is excluded from cov/mutants by
+# the crate-local .cargo/mutants.toml (proofs there) and verified instead by
+# the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, and
+# the headless launch smoke below.
+#
+# The Tier-A mutation bar is NOT enforced here: the full-crate sweep (~50 min)
+# was rescheduled off the PR path (D1) into sweep.yml, which runs it daily —
+# only when the crate tree changed since the last green sweep — and on release
+# tags, the authoritative 0-missed checkpoints. The PR path gets the advisory
+# in-diff mutants job in ci.yml (`gui mutation testing (PR diff)`) instead.
+#
+# Job shape — the repo's standing pattern (same reasoning as the core/CLI in
+# ci.yml): arch bugs live in build + test, which runs on all six shipped
+# arches; coverage measures test quality of platform-independent logic, so
+# once (ubuntu) is the signal. The snapshot-hash ties are a hard per-arch
+# gate: the first 6-arch runs proved tiny-skia renders byte-identically per OS
+# family, pinned in snapshots/{windows,unix}/. The text-report goldens stay
+# HARD everywhere — byte-exactness lives on the report, not the pixels.
+#
+# Check contexts: these jobs render as `gui / gui build + test (…)` etc. and
+# were never individually required; they gate merges through ci.yml's `ci-ok`
+# fan-in (a red here reddens ci-ok). The staged plan to add 10 gui contexts to
+# branch protection at merge time is superseded by the ci-ok swap.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + ci.yml (cross-checked by version-freshness.yml)
+  # Every iced_test renderer (interaction, snapshots, and the same tests under
+  # coverage/mutants) must be the deterministic tiny-skia software backend —
+  # never a GPU whose pixels vary by driver. Also what makes the suites run on
+  # GPU-less runners at all.
+  ICED_TEST_BACKEND: tiny-skia
+
+jobs:
+  # Build + the full test suite on every shipped arch — where per-platform bugs
+  # actually live. The snapshot ties run as their own BLOCKING per-arch step
+  # below (excluded from the plain test step so their verdict reports alone).
+  test:
+    name: gui build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - windows-2025
+          - windows-11-arm
+          - macos-15-intel
+          - macos-15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          # Cache write-discipline (wgpu): PR-branch saves are invisible to
+          # every other PR, so only master runs (pushes + the daily sweep)
+          # save; PRs restore the master-seeded cache.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-nextest
+
+      - name: Clippy (calibrated, -D warnings)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      - name: Test (unit + proptests + golden ties + iced_test interactions)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo nextest run --locked --no-tests=fail -E 'not test(/^snapshots::/)'
+
+      # The SHIPPED configuration — opt-level="s" + fat LTO + codegen-units=1 +
+      # strip + (Windows) windows_subsystem — compiles on every shipped arch.
+      # wgpu has LTO-breakage history; without this a green merge can hide a
+      # red first release. Build-only: the smoke env hooks are debug-only, so a
+      # release binary cannot auto-exit — launching it stays a human step.
+      - name: Build (release profile — the shipped configuration)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --release --locked
+
+      # Every PR run yields downloadable per-arch release binaries — including
+      # the arches this project has no hardware for — so any increment can be
+      # hand-tested on real machines without any release machinery. Short
+      # retention: these are throwaway smoke builds, not distribution.
+      - name: Upload the release binary (short-retention artifact)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bdinfo-rs-gui-${{ matrix.os }}
+          path: |
+            crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui
+            crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          retention-days: 7
+          if-no-files-found: error
+
+      # One release-mode test leg: debug_assertions off and the optimizer at
+      # the shipped level over the full suite (every cfg(debug_assertions)
+      # site lives in the Tier-B bin, but overflow-checks and codegen differ
+      # crate-wide in release). Once is the signal — per-arch bugs are the
+      # debug matrix's job. Snapshots stay excluded: the per-OS-family ties
+      # are the debug matrix's verdict, not this leg's.
+      - name: Test (release mode)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo nextest run --release --locked --no-tests=fail -E 'not test(/^snapshots::/)'
+
+      # BLOCKING per-arch: the tiny-skia snapshot ties against the committed
+      # per-OS-family hashes (snapshots/{windows,unix}/ — the first 6-arch run
+      # disproved one-hash-across-OSes: bold text rasterizes differently
+      # between Windows and the unix family, but byte-identically across
+      # arches WITHIN each family, which is exactly what this step holds).
+      # This matrix is the only place non-Windows pixels are ever rendered —
+      # the dev loop runs Windows only — so these ties are the sole guard
+      # against style regressions on the other four arches. --no-fail-fast:
+      # report every tie's verdict, not just the first mismatch.
+      - name: Snapshot hashes (tiny-skia — per-OS-family pins)
+        id: snapshots
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo nextest run --locked --no-tests=fail --no-fail-fast -E 'test(/^snapshots::/)'
+
+      - name: Upload mismatched snapshot renders
+        if: failure() && steps.snapshots.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-snapshot-mismatch-${{ matrix.os }}
+          path: crates/bdinfo-rs-gui/target/snapshot-failures/
+          if-no-files-found: ignore
+
+  # The once-is-the-signal tier: the tripwires and lints, the crate-local
+  # supply-chain audit, and Tier-A coverage at the 100% floor —
+  # platform-independent measurements, run on one runner. (Tier-A mutation
+  # moved to sweep.yml + the release-tag leg; see the header.)
+  checks:
+    name: gui checks (lint + coverage + deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt --component llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
+
+      # The no-C tripwire (cargo tree over the 6 shipped targets: GTK/C bans,
+      # the -sys/-dl allowlist, verified-inert cc/pkg-config wrappers, and the
+      # positive ashpd/xdg-portal assert on Linux) + the forbid(unsafe_code)
+      # assertion — the single-source script the local gate runs too.
+      - name: GUI tripwires (no-C + forbid(unsafe_code))
+        shell: pwsh
+        run: .github/scripts/gui-rules.ps1
+
+      - name: Format (nightly rustfmt)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo "+$NIGHTLY" fmt --check
+
+      - name: Typos
+        working-directory: crates/bdinfo-rs-gui
+        run: typos
+
+      - name: Machete (unused deps)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo machete
+
+      - name: Shear (unused deps, AST)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo shear
+
+      # Supply-chain audit of the GUI crate's OWN dependency tree (iced / wgpu /
+      # winit / cosmic-text — compiled into the shipped binary but invisible to
+      # the root audit, which `exclude`s this independent workspace). Uses the
+      # crate-local crates/bdinfo-rs-gui/deny.toml; deliberately deny-only — no
+      # cargo-vet for this leaf (the wasm precedent). Run from the repo root so
+      # the manifest path resolves.
+      - name: cargo-deny (gui dep audit — advisories / licenses / bans / sources)
+        run: cargo deny --manifest-path crates/bdinfo-rs-gui/Cargo.toml check
+
+      - name: Doc (warnings = errors)
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items --locked
+
+      # Tier-A coverage at the 100% floor. main.rs + ui.rs are Tier B (the iced
+      # shell and the style vocabulary, verified by the interaction suite +
+      # snapshot hashes + the smoke below) and excluded from the denominator —
+      # the same shape as the wasm gate, whose cfg'd-out Tier B never enters
+      # its native build. Branch coverage is deliberately not enforced
+      # (Posture C, like B).
+      # The full suite, snapshot ties included: the per-OS-family pins hold
+      # under coverage instrumentation too (verified — the instrumented
+      # nightly render is byte-identical to the stable one).
+      - name: Coverage (llvm-cov nextest — Tier A 100% lines/regions/functions)
+        working-directory: crates/bdinfo-rs-gui
+        shell: pwsh
+        run: |
+          $json = Join-Path $env:RUNNER_TEMP 'gui-cov.json'
+          cargo "+$env:NIGHTLY" llvm-cov nextest --locked --no-tests=fail --json --output-path $json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @((Get-Content -Raw $json | ConvertFrom-Json).data[0].files |
+              Where-Object { $_.filename -match 'bdinfo-rs-gui[\\/]src[\\/]' -and
+                  $_.filename -notmatch '[\\/]src[\\/](main|ui)\.rs$' })
+          if (-not $files.Count) { Write-Host 'no Tier-A src files in the coverage report'; exit 1 }
+          $fail = @()
+          foreach ($m in 'lines', 'regions', 'functions') {
+            $covered = (@($files | ForEach-Object { $_.summary.$m.covered }) | Measure-Object -Sum).Sum
+            $count = (@($files | ForEach-Object { $_.summary.$m.count }) | Measure-Object -Sum).Sum
+            $pct = if ($count) { 100.0 * $covered / $count } else { 100.0 }
+            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, $pct, $covered, $count)
+            if ($covered -lt $count) { $fail += "$m $covered/$count" }
+          }
+          if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
+
+  # The declared MSRV is enforced, not decorative: build with exactly the
+  # rust-version toolchain from Cargo.toml, read from the manifest at run time
+  # so an MSRV bump touches Cargo.toml ONLY (no version literals here to drift;
+  # the version also stays out of the job `name:` — static YAML can't
+  # interpolate step outputs there). Build-only by design: rust-version is a
+  # claim about building the package, not about the dev-dependency tree
+  # (iced_test may float its own MSRV).
+  msrv:
+    name: gui msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Read the MSRV floor from Cargo.toml
+        id: msrv
+        # jq -e fails loudly if rust-version ever disappears from the manifest.
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-gui/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-gui") | .rust_version')"
+          echo "MSRV floor: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install the MSRV toolchain
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install "$MSRV" --profile minimal
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Build with the declared rust-version
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" build --locked
+
+  # The real-window launch smoke: the app opens, renders, and exits 0, driven
+  # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
+  # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software
+  # Vulkan on Linux, the in-box DX12 WARP software rasterizer on Windows
+  # (Bevy's CI runs real winit+wgpu windows with both). Legs the recipes are
+  # proven on block; the rest run SOFT (continue-on-error) — a required check
+  # that flakes blocks every PR:
+  #   ubuntu-24.04-arm  mesa lavapipe is apt-installable on arm64, but the
+  #                     recipe is unproven for a GUI on hosted arm runners;
+  #                     promote to blocking after a green streak.
+  #   windows-11-arm    WARP is arm64-native and in-box, same unproven caveat;
+  #                     promote to blocking after a green streak.
+  #   macos-15          the runner's paravirtual Metal is the one render path
+  #                     with no software fallback.
+  # macos-15-intel is deliberately ABSENT: its hosted VMs expose no Metal at
+  # all, so there is no real window stack to smoke — that arch's compile/logic
+  # coverage lives in `gui build + test (macos-15-intel)`. The per-OS
+  # install/launch steps below key on runner.os, so the arm legs reuse them
+  # unchanged.
+  smoke:
+    name: gui smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: true}
+          - {os: windows-11-arm, soft: true}
+          - {os: macos-15, soft: true}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the virtual display + software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+
+      - name: Build (debug — the env hooks are debug-only)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      - name: Launch smoke (xvfb + lavapipe)
+        if: runner.os == 'Linux'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: xvfb-run -a cargo run --locked
+
+      - name: Launch smoke (DX12 WARP)
+        if: runner.os == 'Windows'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+          WGPU_BACKEND: dx12
+        run: cargo run --locked
+
+      - name: Launch smoke (paravirtual Metal — SOFT)
+        if: runner.os == 'macOS'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: cargo run --locked

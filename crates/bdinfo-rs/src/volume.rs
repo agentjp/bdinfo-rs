@@ -18,6 +18,10 @@
 //!   drive letter when that read is unavailable.
 //! - [`safe_report_stem`] reduces any label to a safe single filename component, a defensive net
 //!   that also covers a hostile `.iso` volume identifier.
+//!
+//! The label recovery is replicated by the GUI's `volume` module
+//! (`crates/bdinfo-rs-gui/src/volume.rs`), which must resolve the same label
+//! for the same disc — the crates share no code; keep the two in lock-step.
 
 // In a binary, `pub` items are unexported (`unreachable_pub`), so the reachable
 // visibility for these crate-root helpers is `pub(crate)` — which the nursery
@@ -41,6 +45,10 @@ const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 /// `label` reduced to a filesystem-safe report-file stem: each illegal or
 /// control character becomes `_`. A clean label — a folder name, a `.iso` volume
 /// identifier, a resolved drive label — passes through unchanged.
+///
+/// Replicated by the GUI's `paths::report_file_name`
+/// (`crates/bdinfo-rs-gui/src/paths.rs`), which must produce the same
+/// filename for the same disc — keep the two in lock-step.
 pub(crate) fn safe_report_stem(label: &str) -> String {
     label.chars().map(|c| if c.is_control() || ILLEGAL.contains(&c) { '_' } else { c }).collect()
 }

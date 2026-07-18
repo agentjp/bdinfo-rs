@@ -1166,7 +1166,7 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
     }
     if ext.light_level_available && ext.maximum_content_light_level > 0 {
         info.push(format!(
-            "Maximum Content Light Level: {} cd / m2",
+            "Maximum Content Light Level: {} cd/m2",
             ext.maximum_content_light_level
         ));
         info.push(format!(
@@ -1880,7 +1880,7 @@ mod tests {
             "2160p / 23.976 fps / 16:9 / Main 10 @ Level 5.1 @ High / 4:2:0 / 10 bits / HDR10 / \
              Limited Range / BT.2020 / PQ / BT.2020 non-constant / Mastering display color \
              primaries: Display P3 / Mastering display luminance: min: 0.0001 cd/m2, max: 1000 \
-             cd/m2 / Maximum Content Light Level: 1033 cd / m2 / Maximum Frame-Average Light \
+             cd/m2 / Maximum Content Light Level: 1033 cd/m2 / Maximum Frame-Average Light \
              Level: 311 cd/m2"
         );
     }
@@ -1918,7 +1918,7 @@ mod tests {
             "2160p / 23.976 fps / 16:9 / Main 10 @ Level 5.1 @ High / 4:2:0 / 10 bits / HDR10+ / \
              Limited Range / BT.2020 / PQ / BT.2020 non-constant / Mastering display color \
              primaries: Display P3 / Mastering display luminance: min: 0.0010 cd/m2, max: 1000 \
-             cd/m2 / Maximum Content Light Level: 969 cd / m2 / Maximum Frame-Average Light \
+             cd/m2 / Maximum Content Light Level: 969 cd/m2 / Maximum Frame-Average Light \
              Level: 230 cd/m2"
         );
     }
@@ -2554,7 +2554,7 @@ mod tests {
         let desc = s.description();
         assert!(desc.contains("HDR10+"), "{desc}");
         assert!(desc.contains("Mastering display color primaries: Display P3"), "{desc}");
-        assert!(desc.contains("Maximum Content Light Level: 969 cd / m2"), "{desc}");
+        assert!(desc.contains("Maximum Content Light Level: 969 cd/m2"), "{desc}");
     }
 
     #[test]

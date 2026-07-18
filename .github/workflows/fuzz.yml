@@ -1,24 +1,21 @@
 name: fuzz
 
-# Adversarial coverage over the untrusted-input parsers (Blu-ray bytes are
-# attacker-controlled). cargo-fuzz / libFuzzer need a nightly toolchain and have
-# no Windows MSVC support, so this runs on Linux only. The local mirror is
-# scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the guards here match it.
+# The TAG leg of the adversarial tier: a longer fresh-fuzz pass per libFuzzer
+# target on every v* release tag. cargo-fuzz / libFuzzer need a nightly
+# toolchain and have no Windows MSVC support, so this runs on Linux only; the
+# local mirror is scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the
+# guards here match it. The fast per-PR/push leg — replaying the committed
+# seed corpus with -runs=0 (the required `corpus replay (regression gate)`
+# check) — moved to ci.yml as a plan-gated job on the `fuzz` area; the daily
+# sweep re-runs it ungated.
 #
-#   pull_request / push to master -> replay the committed seed corpus (-runs=0),
-#                                     a fast deterministic regression gate (the
-#                                     required `corpus replay` check).
-#   push of a v* tag              -> a longer fresh-fuzz pass per target. This runs
-#                                     ALONGSIDE the publish workflows the same tag
-#                                     triggers (release/publish-crates/publish-npm)
-#                                     and does NOT block them — a crash surfaces a
-#                                     regression to fix in a follow-up patch, it is
-#                                     a post-tag adversarial sweep, not a gate.
+# This pass runs ALONGSIDE the publish workflows the same tag triggers
+# (v-release/publish-crates/publish-npm) and does NOT block them — a crash
+# surfaces a regression to fix in a follow-up patch; it is a post-tag
+# adversarial sweep, not a gate.
 
 on:
-  pull_request:
   push:
-    branches: [master]
     tags: ['v*']
 
 permissions:
@@ -33,7 +30,7 @@ env:
   # $script:Nightly in scripts/_common.ps1.
   NIGHTLY: nightly-2026-07-06
   # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
-  # with scripts/fuzz-docker.sh.
+  # with scripts/fuzz-docker.sh + ci.yml's replay job.
   TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report
   # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
   # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
@@ -43,56 +40,10 @@ env:
   FUZZ_TARGET: x86_64-unknown-linux-gnu
   # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
   # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
-  # (allocation-amplification guard). Applied to replay and fresh fuzz alike.
+  # (allocation-amplification guard).
   GUARDS: -timeout=25 -rss_limit_mb=2048
 
 jobs:
-  # PR / branch push: replay the committed seed corpus with zero fresh
-  # iterations — a deterministic regression check that the parsers still handle
-  # every recorded boundary/garbage input without panicking, hanging, or
-  # blowing up memory.
-  replay:
-    name: corpus replay (regression gate)
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install pinned nightly
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: fuzz
-          # Restore/save the cache only outside release runs: the replay job runs on
-          # PRs/pushes (cache speeds it up), while the tag-triggered extended job
-          # becomes lookup-only so a cache poisoned elsewhere can't taint a release
-          # run (zizmor cache-poisoning).
-          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
-
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
-        with:
-          tool: cargo-fuzz
-
-      - name: Verify the committed fuzz lockfile is in sync
-        # cargo-fuzz's `run` has no --locked flag (it forwards everything after
-        # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
-        # cargo command up front; this also pre-fetches the deps for the build.
-        run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
-
-      - name: Replay the committed corpus through every target
-        run: |
-          fail=0
-          for t in $TARGETS; do
-            echo "::group::replay $t"
-            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
-
   # Release tag: a longer fresh-fuzz budget per target. New corpus growth and any
   # crash artifacts are uploaded for inspection. A crash fails THIS fuzz run and
   # surfaces the regression; the publish workflows triggered by the same tag run
@@ -100,7 +51,6 @@ jobs:
   # fast-follow patch trigger, not a release blocker.
   extended:
     name: extended fuzz (release tag)
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -113,11 +63,11 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
-          # Restore/save the cache only outside release runs: the replay job runs on
-          # PRs/pushes (cache speeds it up), while the tag-triggered extended job
-          # becomes lookup-only so a cache poisoned elsewhere can't taint a release
-          # run (zizmor cache-poisoning).
-          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          # Lookup-only: this workflow now runs exclusively on release tags, and
+          # a cache poisoned elsewhere must not taint a release-adjacent run
+          # (zizmor cache-poisoning); the per-PR replay leg in ci.yml is where
+          # the fuzz build cache is used and (on master) saved.
+          lookup-only: true
 
       - name: Install cargo-fuzz
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3

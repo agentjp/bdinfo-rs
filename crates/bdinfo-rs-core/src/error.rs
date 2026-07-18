@@ -48,6 +48,14 @@ pub enum BdError {
     /// them.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// The packet scan was cancelled through the caller's cooperative cancel
+    /// flag (the `cancel` parameter of `BdRom::open_with` /
+    /// `BdRom::open_resilient_with`) — the caller's abort, not a disc failure.
+    /// The whole open aborts with this error in strict **and** resilient modes
+    /// alike: a cancelled scan yields no partial result and is never recorded
+    /// as a per-file [`ScanError`].
+    #[error("scan cancelled")]
+    ScanCancelled,
 }
 
 /// Where in a resilient disc scan a per-file failure occurred — the discriminant
@@ -131,6 +139,7 @@ mod tests {
         );
         let io = BdError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
         assert_eq!(io.to_string(), "io error: denied");
+        assert_eq!(BdError::ScanCancelled.to_string(), "scan cancelled");
     }
 
     #[test]
@@ -154,6 +163,7 @@ mod tests {
             BdError::UnexpectedEof,
             BdError::StructureNotFound,
             BdError::MissingClipFile("00000.CLPI".to_owned()),
+            BdError::ScanCancelled,
         ] {
             assert!(sourceless.source().is_none());
         }

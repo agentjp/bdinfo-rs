@@ -10,7 +10,8 @@
 //!   arrives as a flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes
 //!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
 //!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
-//!   Worker (the only scope where `FileReaderSync` exists).
+//!   Worker (the only scope where `FileReaderSync` exists). [`list_playlists`] is its structural
+//!   twin: the fast selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
 //! - [`scan_iso`] / [`list_iso_playlists`] — the streaming `.iso` exports: a single OS-picked
 //!   `.iso` `File` is opened through the core read-only UDF 2.50 reader ([`UdfSource`]) over the
 //!   same windowed [`web_sys::FileReaderSync`] cursor ([`WebIso`] is the [`IsoReader`] factory), so
@@ -50,19 +51,20 @@ use std::io::{self, BufRead, BufReader, Cursor};
 #[cfg(target_arch = "wasm32")]
 use std::io::{Read, Seek};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
-use bdinfo_rs_core::bdrom::disc::{BdRom, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanProgress};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::order::presentation_groups;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
-use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -921,7 +923,7 @@ fn render_selection(
     selection: &[String],
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, SelectionError> {
-    let structural = BdRom::open_resilient(root, false)?;
+    let structural = BdRom::open_resilient(root, ScanMode::Metadata)?;
     let names = named_selection(&structural.bdrom.playlists, selection);
     if names.is_empty() {
         return Err(SelectionError::NoMatch);
@@ -932,13 +934,27 @@ fn render_selection(
     // found, so it cannot hit the only hard error (`StructureNotFound`); on that
     // unreachable failure it degrades to the structural disc (zero measured
     // tallies) rather than erroring.
-    let measured =
-        BdRom::open_resilient_with(root, true, Some(&files), progress).unwrap_or(structural);
+    // The browser exports carry no cancel affordance: the flag is never set.
+    let measured = BdRom::open_resilient_with(
+        root,
+        ScanMode::Full,
+        Some(&files),
+        progress,
+        &never_cancelled(),
+    )
+    .unwrap_or(structural);
     let order = selection_order(&measured.bdrom.playlists, &names);
-    Ok(text::render_with(&measured.bdrom, &order, &measured.errors))
+    Ok(text::render_with(&measured.bdrom, &order, &measured.errors, RenderOptions::default()))
 }
 
 // ── shared render path ──────────────────────────────────────────────────────
+
+/// A cancel flag that never trips — the browser exports have no cancel
+/// affordance (a worker-side scan ends with the page), so every open passes
+/// this never-set flag.
+const fn never_cancelled() -> AtomicBool {
+    AtomicBool::new(false)
+}
 
 /// Runs the full **measured** scan over `root` and renders the classic disc
 /// report.
@@ -957,9 +973,11 @@ fn render_disc(
     root: &dyn BdDir,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, BdError> {
-    let report = BdRom::open_resilient_with(root, true, None, progress)?;
+    let report =
+        BdRom::open_resilient_with(root, ScanMode::Full, None, progress, &never_cancelled())?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
-    Ok(text::render_with(&report.bdrom, &order, &report.errors))
+    // The browser exports carry no report options: always the default report.
+    Ok(text::render_with(&report.bdrom, &order, &report.errors, RenderOptions::default()))
 }
 
 /// Renders a measured scan of `root`, mapping any failure to a `JsValue`.
@@ -1125,7 +1143,7 @@ pub fn scan_iso(
 #[wasm_bindgen]
 pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String, JsValue> {
     let root = build_web_tree(&paths, &files)?;
-    let report = BdRom::open_resilient(&root, false)
+    let report = BdRom::open_resilient(&root, ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }
@@ -1147,7 +1165,7 @@ pub fn list_iso_playlists(file: web_sys::File) -> Result<String, JsValue> {
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    let report = BdRom::open_resilient(&source.root(), false)
+    let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
 }
@@ -1613,6 +1631,8 @@ mod tests {
             ClipSummary {
                 name: name.to_owned(),
                 display_name: name.to_owned(),
+                file_size: 0,
+                interleaved_file_size: 0,
                 angle_index: 0,
                 relative_time_in: 0.0,
                 length,

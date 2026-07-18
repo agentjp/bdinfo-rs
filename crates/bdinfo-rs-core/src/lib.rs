@@ -9,7 +9,8 @@
 //! - `#![forbid(unsafe_code)]` — memory safety is the point.
 //! - Every read is bounds-checked and fallible; we never index raw or panic on input-derived bytes
 //!   (the `indexing_slicing` / `unwrap_used` gate enforces this).
-//! - All multi-byte integers are big-endian and host-independent.
+//! - All multi-byte integers are big-endian and host-independent — with one exception: the UDF
+//!   descriptors in `vfs::udf` are little-endian, per ECMA-167.
 #![forbid(unsafe_code)]
 // The library never writes to stdout/stderr — emitting output is the caller's
 // job. Workspace lints can't target a single crate, so this is crate-scoped on

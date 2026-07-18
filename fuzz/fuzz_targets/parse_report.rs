@@ -16,7 +16,7 @@
 use std::io::{self, BufRead, BufReader, Cursor};
 use std::sync::Arc;
 
-use bdinfo_rs_core::bdrom::disc::BdRom;
+use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode};
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use libfuzzer_sys::fuzz_target;
@@ -215,7 +215,7 @@ fn build_tree(data: &[u8]) -> MemDir {
 
 fuzz_target!(|data: &[u8]| {
     let root = build_tree(data);
-    if let Ok(report) = BdRom::open_resilient(&root, true) {
+    if let Ok(report) = BdRom::open_resilient(&root, ScanMode::Full) {
         let _ = text::render(&report.bdrom, &report.errors);
     }
 });

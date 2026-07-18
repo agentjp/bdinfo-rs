@@ -1,0 +1,116 @@
+# cargo-deny policy for the INDEPENDENT native GUI crate. This crate is its own
+# workspace, `exclude`d from the root audit graph, so the root deny.toml never sees
+# iced / wgpu / winit / cosmic-text — yet those Rust deps ARE compiled into the
+# shipped binary. This file audits them with the SAME posture as the root deny.toml
+# (advisories / permissive-license allowlist / crates.io-only / no-C static-binary
+# guard); the deltas from root are spelled out and justified below. Run:
+#   cargo deny --manifest-path crates/bdinfo-rs-gui/Cargo.toml check
+#
+# DELIBERATELY deny-only, NOT cargo-vet'd (same rationale as the wasm crate): this
+# excluded GUI tree never ships in the CLI/library distribution; deny (here) +
+# Dependabot freshness cover it, and cargo-vet's audit trail is reserved for the
+# shipped root workspace.
+
+[graph]
+all-features = true
+# The no-C guarantee lives on the targets the GUI actually ships to. Resolve the
+# graph for all of them so the Linux-only GTK trap (gtk-sys/glib-sys via the rfd
+# `gtk3` backend) is visible from any host, not just a Linux checkout.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "aarch64-pc-windows-msvc" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+version = 2
+# Add advisory IDs here ONLY with a comment explaining why the risk is accepted.
+ignore = [
+    # `paste` (unmaintained, archived) — a proc-macro used at BUILD time by
+    # `metal`, the macOS wgpu backend. Compile-time only: it ships no code and
+    # never sees untrusted input. Clears when wgpu's metal stack drops it.
+    "RUSTSEC-2024-0436",
+    # `ttf-parser` (unmaintained, not vulnerable) — via ab_glyph -> sctk-adwaita,
+    # winit's Wayland client-side-decoration fallback, which rasterizes the
+    # WINDOW TITLE from system fonts. It never touches disc data. Clears when
+    # winit moves sctk-adwaita to a maintained glyph stack.
+    "RUSTSEC-2026-0192",
+    # quick-xml DoS advisories — via wayland-scanner, a BUILD-dependency that
+    # code-generates Wayland protocol bindings from the XML specs COMMITTED
+    # inside the wayland-* crates themselves. Build-time, trusted input,
+    # unreachable from any runtime path. wayland-scanner caps quick-xml below
+    # the fixed 0.41, so no lockfile bump resolves it yet.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
+
+[licenses]
+version = 2
+unused-allowed-license = "allow"
+# Permissive-only allowlist — identical to the root deny.toml. A dependency whose
+# SPDX expression isn't satisfied here is a hard error.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OFL-1.1",
+]
+confidence-threshold = 0.8
+
+# Our own crates are LGPL-2.1-or-later (the GUI shell + the core lib it links in).
+# These scoped exceptions permit LGPL ONLY for our crates; an LGPL *dependency*
+# still fails. (The root deny.toml carries the same shape for the published crates.)
+[[licenses.exceptions]]
+name = "bdinfo-rs-gui"
+allow = ["LGPL-2.1-or-later"]
+
+[[licenses.exceptions]]
+name = "bdinfo-rs-core"
+allow = ["LGPL-2.1-or-later"]
+
+[bans]
+# The iced / wgpu / winit / cosmic-text tree legitimately carries duplicate
+# versions of low-level crates no leaf can dedupe (the same reason the crate's
+# clippy config allows `multiple_crate_versions`), so dup-detection is advisory
+# here rather than a hard error — design-review §2.2.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Single-static-tier / no-C guard — same intent as the root deny.toml: a crate
+# pulling external C breaks the "pure-Rust, no C toolchain" guarantee.
+#
+# `cmake`/`bindgen`/`vcpkg` never appear and are banned outright. `cc` and
+# `pkg-config` DO appear, but ONLY on the Linux target and ONLY as INERT
+# build-deps of the wayland/x11/EGL dlopen stack — verified not invoked:
+#   * `wayland-backend` build-deps `cc` but compiles `log_shim.c` only under its
+#     `log` feature, which is OFF here (its enabled set is `client_system,dlopen`).
+#   * `wayland-sys` / `khronos-egl` build-dep `pkg-config` but short-circuit it
+#     under `dlopen`/`dynamic` (neither enables `static`), so it is never probed.
+#   * `tiny-xlib` / `x11-dl`'s `pkg-config` libdir probe is non-fatal (they dlopen
+#     at runtime; x11-dl only links `libdl`, the glibc dynamic loader — the OS ABI).
+# So they compile no C and need no C toolchain. The `wrappers` allow them ONLY via
+# those exact crates — a NEW path to `cc`/`pkg-config` (a real C dep) still fails,
+# as does rfd's `gtk3` backend (gtk-sys/glib-sys/gdk-sys), which never appears.
+deny = [
+    { crate = "cc", wrappers = ["wayland-backend"] },
+    { crate = "pkg-config", wrappers = ["wayland-sys", "khronos-egl", "tiny-xlib", "x11-dl"] },
+    { crate = "cmake" },
+    { crate = "bindgen" },
+    { crate = "vcpkg" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

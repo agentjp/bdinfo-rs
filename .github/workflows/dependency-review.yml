@@ -32,4 +32,9 @@ jobs:
             GPL-2.0-only, GPL-2.0-or-later,
             GPL-3.0-only, GPL-3.0-or-later,
             AGPL-3.0-only, AGPL-3.0-or-later
+          # self_cell is dual-licensed `Apache-2.0 OR GPL-2.0-only`; the action
+          # rejects any expression containing a denied license, so exempt it here.
+          # We distribute under the Apache-2.0 branch — deny.toml's allow list
+          # resolves the OR expression correctly and remains authoritative.
+          allow-dependencies-licenses: pkg:cargo/self_cell
           comment-summary-in-pr: on-failure

@@ -1,0 +1,19 @@
+# The "Projection Booth" `Palette` is a ~280-byte `Copy` bundle of colour tokens,
+# deliberately threaded BY VALUE through the immediate-mode `view` tree and the
+# widget-style builders (cheap stack copies; passing `&Palette` would force a
+# borrow that cannot outlive the per-frame temporary the closures capture). Raise
+# `large_types_passed_by_value`'s limit just past it so that idiomatic by-value
+# threading is not flagged; every other size stays at the default.
+pass-by-value-size-limit = 320
+
+# The panic-seam tests (`scan::PanicAlarm` / `scan::catch_scan_panic`) must
+# genuinely unwind to prove the seam; the restriction `panic` lint stays fully
+# enforced in production code (the root workspace relaxes tests the same way).
+allow-panic-in-tests = true
+
+# `App::update` is one big message-dispatch `match` and `data_table` genuinely
+# needs its column + row-state parameters — both are inherent to an iced view/
+# update, so nudge these two pedantic thresholds just past what they need rather
+# than fragmenting the code to satisfy a line/arg count.
+too-many-lines-threshold = 130
+too-many-arguments-threshold = 8

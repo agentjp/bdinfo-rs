@@ -1,17 +1,16 @@
 name: link-check
 
-# Stale-link guard: lychee verifies every URL and relative/file link across the
-# repo (README, CHANGELOG, DIFFERENCES, CONTRIBUTING, the issue templates, the
-# Cargo/audit metadata, and the doc-comment URLs in src). Runs on every push/PR
-# like the other quality gates, plus daily to catch links that rot after merge
-# (external pages move without touching our code). Cheap: lychee caches its
-# results and only re-checks day-old links; a residual rate-limit (429) is
-# accepted rather than failed, so an external host can't red-X an unrelated push.
+# The CRON leg of the stale-link guard: lychee verifies every URL and
+# relative/file link across the repo (README, CHANGELOG, DIFFERENCES,
+# CONTRIBUTING, the issue templates, the Cargo/audit metadata, and the
+# doc-comment URLs in src), daily — external pages move without touching our
+# code, so links rot after merge. The PR/push leg is the identically-named job
+# in ci.yml, plan-gated on the `docs` area (any .md or .rs). Cheap: lychee
+# caches its results and only re-checks day-old links; a residual rate-limit
+# (429) is accepted rather than failed, so an external host can't red-X an
+# unrelated run.
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   schedule:
     - cron: "0 7 * * *"   # daily 07:00 UTC — catch post-merge rot
   workflow_dispatch:

@@ -21,6 +21,11 @@
 //! `VIDEO`/`AUDIO`/`SUBTITLES`/`TEXT` tables, `FILES`, `CHAPTERS`,
 //! `STREAM DIAGNOSTICS`, and the `QUICK SUMMARY`. The library composes the
 //! report as a `String`; printing is the caller's job.
+//!
+//! [`RenderOptions`] carries the reference GUI's two report-content switches
+//! (`STREAM DIAGNOSTICS` / `QUICK SUMMARY`). The byte contract above pins the
+//! **default** (everything on) render; an off switch is a pure omission of
+//! exactly that section — never a changed or added string.
 
 use std::fmt::Write as _;
 
@@ -51,19 +56,51 @@ const NOTES: &str = "\r\n\
     \x20   http://www.avsforum.com/avs-vb/showthread.php?t=1155731\r\n\
     \r\n";
 
+/// Which optional report sections to render — the reference GUI's two
+/// report-content switches (`GenerateStreamDiagnostics` /
+/// `GenerateTextSummary`), both on by default.
+///
+/// The default reproduces the locked report byte-for-byte; an off switch
+/// omits exactly its section and changes nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// Render each playlist's `STREAM DIAGNOSTICS` section.
+    pub stream_diagnostics: bool,
+    /// Render each playlist's `QUICK SUMMARY` block.
+    pub quick_summary: bool,
+}
+
+impl Default for RenderOptions {
+    /// Every section on — the locked default report.
+    fn default() -> Self {
+        Self { stream_diagnostics: true, quick_summary: true }
+    }
+}
+
 /// Renders the full disc report for `bdrom`.
 ///
 /// The default playlist filtering drops short and looping playlists, and any
 /// resilient-scan `errors` fold into the `WARNING:` block after the Notes.
 #[must_use]
 pub fn render(bdrom: &BdRom, errors: &[ScanError]) -> String {
-    render_with(bdrom, &bdrom.presentation_order(&PlaylistFilter::default()), errors)
+    render_with(
+        bdrom,
+        &bdrom.presentation_order(&PlaylistFilter::default()),
+        errors,
+        RenderOptions::default(),
+    )
 }
 
 /// [`render`] over an explicit playlist `order` (indices into
-/// `bdrom.playlists`; an out-of-range index renders nothing).
+/// `bdrom.playlists`; an out-of-range index renders nothing) and explicit
+/// section [`RenderOptions`].
 #[must_use]
-pub fn render_with(bdrom: &BdRom, order: &[usize], errors: &[ScanError]) -> String {
+pub fn render_with(
+    bdrom: &BdRom,
+    order: &[usize],
+    errors: &[ScanError],
+    options: RenderOptions,
+) -> String {
     let protection = protection_label(bdrom);
     let extras = bdrom.extra_features();
     let mut out = String::new();
@@ -73,7 +110,7 @@ pub fn render_with(bdrom: &BdRom, order: &[usize], errors: &[ScanError]) -> Stri
     out.push_str(&warnings(errors));
     for index in order {
         if let Some(playlist) = bdrom.playlists.get(*index) {
-            out.push_str(&playlist_block(bdrom, playlist, protection, &extras));
+            out.push_str(&playlist_block(bdrom, playlist, protection, &extras, options));
         }
     }
     out
@@ -135,12 +172,14 @@ fn warnings(errors: &[ScanError]) -> String {
     out
 }
 
-/// One playlist's full report block, banner through quick summary.
+/// One playlist's full report block, banner through quick summary —
+/// `options` gates the two optional trailing sections.
 fn playlist_block(
     bdrom: &BdRom,
     playlist: &PlaylistSummary,
     protection: &str,
     extras: &[&str],
+    options: RenderOptions,
 ) -> String {
     // The stream rows in render order — the order the playlist presents them.
     let rows: Vec<&StreamSummary> = playlist.streams.iter().collect();
@@ -167,11 +206,15 @@ fn playlist_block(
     out.push_str(&tables);
     out.push_str(&files_section(playlist));
     out.push_str(&chapters_section(playlist));
-    out.push_str(&diagnostics_section(playlist));
+    if options.stream_diagnostics {
+        out.push_str(&diagnostics_section(playlist));
+    }
     out.push_str("\r\n[/code]\r\n<---- END FORUMS PASTE ---->\r\n\r\n");
-    out.push_str("QUICK SUMMARY:\r\n\r\n");
-    out.push_str(&quick_summary(bdrom, playlist, protection, &stream_summary_lines));
-    out.push_str("\r\n");
+    if options.quick_summary {
+        out.push_str("QUICK SUMMARY:\r\n\r\n");
+        out.push_str(&quick_summary(bdrom, playlist, protection, &stream_summary_lines));
+        out.push_str("\r\n");
+    }
     out
 }
 
@@ -806,8 +849,8 @@ fn time_hh_short(ticks: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bytes_cell, cents, fixed_even, group, group_signed, kbps, render, render_with,
-        secondary_audio, time_h, time_hh, time_hh_short, time_parts,
+        RenderOptions, bytes_cell, cents, fixed_even, group, group_signed, kbps, render,
+        render_with, secondary_audio, time_h, time_hh, time_hh_short, time_parts,
     };
     use crate::bdrom::chapters::ChapterSummary;
     use crate::bdrom::disc::{BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary};
@@ -861,6 +904,8 @@ mod tests {
         ClipSummary {
             name: name.to_owned(),
             display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
             angle_index: 0,
             relative_time_in: 0.0,
             length,
@@ -1129,10 +1174,78 @@ Subtitle:       English / 19.12 kbps
         assert_eq!(render(&full_disc(), &[]), FULL_REPORT.replace('\n', "\r\n"));
     }
 
+    /// The exact `STREAM DIAGNOSTICS` bytes of [`FULL_REPORT`] (spelled with
+    /// `\n` endings like it) — what [`RenderOptions::stream_diagnostics`]
+    /// gates, leading blank line through the last tally row.
+    const DIAGNOSTICS_SECTION: &str = r"
+STREAM DIAGNOSTICS:
+
+File            PID             Type            Codec           Language                Seconds                     Bitrate                  Bytes        Packets       
+----------      -------------   -----           ----------      -------------           --------------          ---------------         --------------  -----------     
+00001.M2TS      4113 (0x1011)   0x24            HEVC                                    120.500                   5,975 kbps                90,000,000      480,000     
+00001.M2TS      4352 (0x1100)   0x86            DTS-HD MA       jpn (Japanese)          120.500                     332 kbps                 5,000,000       30,000     
+";
+
+    /// The exact `QUICK SUMMARY` bytes of [`FULL_REPORT`] — what
+    /// [`RenderOptions::quick_summary`] gates, heading through the block's
+    /// trailing blank line.
+    const QUICK_SUMMARY_SECTION: &str = r"QUICK SUMMARY:
+
+Disc Title:     FIXTURE: THE MOVIE
+Disc Label:     FIXTURE
+Disc Size:      1,000,000,000 bytes
+Protection:     AACS2
+Playlist:       00001.MPLS
+Size:           96,000,000 bytes
+Length:         00:02:00.500
+Total Bitrate:  6.37 Mbps
+Video:          MPEG-H HEVC Video / 5,975 kbps / 2160p / 23.976 fps / HDR10
+* Audio:        Japanese / DTS-HD Master Audio / 5.1 / 48 kHz /  2046 kbps / 24-bit
+Subtitle:       English / 19.12 kbps
+
+";
+
+    #[test]
+    fn the_default_options_are_the_locked_render() {
+        // Both sections on — `render` and default-options `render_with` agree
+        // on the pinned bytes.
+        let defaults = RenderOptions::default();
+        assert!(defaults.stream_diagnostics);
+        assert!(defaults.quick_summary);
+        let bdrom = full_disc();
+        assert_eq!(render_with(&bdrom, &[0], &[], defaults), render(&bdrom, &[]));
+    }
+
+    #[test]
+    fn stream_diagnostics_off_omits_exactly_that_section() {
+        assert!(FULL_REPORT.contains(DIAGNOSTICS_SECTION));
+        let expected = FULL_REPORT.replace(DIAGNOSTICS_SECTION, "").replace('\n', "\r\n");
+        let options = RenderOptions { stream_diagnostics: false, quick_summary: true };
+        assert_eq!(render_with(&full_disc(), &[0], &[], options), expected);
+    }
+
+    #[test]
+    fn quick_summary_off_omits_exactly_that_block() {
+        assert!(FULL_REPORT.contains(QUICK_SUMMARY_SECTION));
+        let expected = FULL_REPORT.replace(QUICK_SUMMARY_SECTION, "").replace('\n', "\r\n");
+        let options = RenderOptions { stream_diagnostics: true, quick_summary: false };
+        assert_eq!(render_with(&full_disc(), &[0], &[], options), expected);
+    }
+
+    #[test]
+    fn both_sections_off_omit_both_and_nothing_else() {
+        let expected = FULL_REPORT
+            .replace(DIAGNOSTICS_SECTION, "")
+            .replace(QUICK_SUMMARY_SECTION, "")
+            .replace('\n', "\r\n");
+        let options = RenderOptions { stream_diagnostics: false, quick_summary: false };
+        assert_eq!(render_with(&full_disc(), &[0], &[], options), expected);
+    }
+
     #[test]
     fn render_with_skips_an_out_of_range_index() {
         let bdrom = full_disc();
-        let header_only = render_with(&bdrom, &[7], &[]);
+        let header_only = render_with(&bdrom, &[7], &[], RenderOptions::default());
         assert!(header_only.contains("INCLUDES FORUMS REPORT FOR:"));
         assert!(!header_only.contains("PLAYLIST:"));
     }
@@ -1144,7 +1257,7 @@ Subtitle:       English / 19.12 kbps
             stage: ScanStage::StreamFile,
             reason: BdError::StructureNotFound,
         }];
-        let rendered = render_with(&disc(Vec::new()), &[], &errors);
+        let rendered = render_with(&disc(Vec::new()), &[], &errors, RenderOptions::default());
         assert!(rendered.contains("WARNING: File errors were encountered during scan:\r\n"));
         assert!(
             rendered
@@ -1291,7 +1404,7 @@ Subtitle:       English / 19.12 kbps
         for list in &mut bdrom.playlists {
             list.clips.push(broken_clip.clone());
         }
-        let rendered = render_with(&bdrom, &[0], &[]);
+        let rendered = render_with(&bdrom, &[0], &[], RenderOptions::default());
         assert!(rendered.contains("Angle 2 Total Bitrate:  0.00 Mbps"), "{rendered}");
 
         // A zero TOTAL length with real timeline bytes pins the timeline-rate
@@ -1299,7 +1412,7 @@ Subtitle:       English / 19.12 kbps
         for list in &mut bdrom.playlists {
             list.total_length = 0.0;
         }
-        let rendered = render_with(&bdrom, &[0], &[]);
+        let rendered = render_with(&bdrom, &[0], &[], RenderOptions::default());
         assert!(rendered.contains("Angle 1 Total Bitrate:  2.05 Mbps / 0.00 Mbps"), "{rendered}");
     }
 
@@ -1311,7 +1424,7 @@ Subtitle:       English / 19.12 kbps
             list.clips.clear();
             list.chapters.clear();
         }
-        let rendered = render_with(&bdrom, &[0], &[]);
+        let rendered = render_with(&bdrom, &[0], &[], RenderOptions::default());
         assert!(rendered.contains("Angle 1 Total Bitrate:  0.00 Mbps / 0.00 Mbps\r\n"));
     }
 
@@ -1346,7 +1459,7 @@ Subtitle:       English / 19.12 kbps
         let mut list = playlist("00020.MPLS", 30.0);
         list.streams = vec![video];
         list.clips = vec![first, replay, empty, unmeasured];
-        let rendered = render_with(&disc(vec![list]), &[0], &[]);
+        let rendered = render_with(&disc(vec![list]), &[0], &[], RenderOptions::default());
 
         // One row per deduplicated measured clip; the unpresented PID and the
         // empty clip render nothing; the unmeasured clip reads `0` seconds.
