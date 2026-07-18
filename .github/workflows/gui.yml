@@ -32,12 +32,13 @@ name: gui
 #   gui build + test (macos-15-intel)
 #   gui build + test (macos-15)
 #   gui checks (lint + coverage + mutants + deny)
-#   gui msrv (rust 1.96)
+#   gui msrv
 #   gui smoke (ubuntu-latest)
 #   gui smoke (windows-2025)
-# The macOS smoke stays soft (continue-on-error): the runner's paravirtual
-# Metal is the one render path with no software fallback, and a required check
-# that flakes blocks every PR.
+# The other smoke legs stay soft (continue-on-error) — the arm pair until the
+# unproven hosted-runner recipes accumulate a green streak, macOS structurally
+# (paravirtual Metal, no software fallback) — because a required check that
+# flakes blocks every PR.
 
 on:
   push:
@@ -290,22 +291,32 @@ jobs:
           key: ${{ steps.mutants-key.outputs.key }}
 
   # The declared MSRV is enforced, not decorative: build with exactly the
-  # rust-version toolchain from Cargo.toml (1.96 — also the root workspace's,
-  # which the bdinfo-rs-core path dep inherits). Build-only by design:
-  # rust-version is a claim about building the package, not about the
-  # dev-dependency tree (iced_test may float its own MSRV). Drift self-detects:
-  # a rust-version bump past this toolchain makes cargo refuse the build here
-  # until the two move in lockstep.
+  # rust-version toolchain from Cargo.toml, read from the manifest at run time
+  # so an MSRV bump touches Cargo.toml ONLY (no version literals here to drift;
+  # the version also stays out of the job `name:` — static YAML can't
+  # interpolate step outputs there). Build-only by design: rust-version is a
+  # claim about building the package, not about the dev-dependency tree
+  # (iced_test may float its own MSRV).
   msrv:
-    name: gui msrv (rust 1.96)
+    name: gui msrv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
+      - name: Read the MSRV floor from Cargo.toml
+        id: msrv
+        # jq -e fails loudly if rust-version ever disappears from the manifest.
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-gui/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-gui") | .rust_version')"
+          echo "MSRV floor: $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Install the MSRV toolchain
-        run: rustup toolchain install 1.96 --profile minimal
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install "$MSRV" --profile minimal
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -313,24 +324,43 @@ jobs:
 
       - name: Build with the declared rust-version
         working-directory: crates/bdinfo-rs-gui
-        run: cargo +1.96 build --locked
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: cargo "+$MSRV" build --locked
 
   # The real-window launch smoke: the app opens, renders, and exits 0, driven
   # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
   # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software
   # Vulkan on Linux, the in-box DX12 WARP software rasterizer on Windows
-  # (Bevy's CI runs real winit+wgpu windows with both). macOS runs the same
-  # smoke soft (continue-on-error): its paravirtual Metal has no software
-  # fallback, and a required check that flakes blocks every PR.
+  # (Bevy's CI runs real winit+wgpu windows with both). Legs the recipes are
+  # proven on block; the rest run SOFT (continue-on-error) — a required check
+  # that flakes blocks every PR:
+  #   ubuntu-24.04-arm  mesa lavapipe is apt-installable on arm64, but the
+  #                     recipe is unproven for a GUI on hosted arm runners;
+  #                     promote to blocking after a green streak.
+  #   windows-11-arm    WARP is arm64-native and in-box, same unproven caveat;
+  #                     promote to blocking after a green streak.
+  #   macos-15          the runner's paravirtual Metal is the one render path
+  #                     with no software fallback.
+  # macos-15-intel is deliberately ABSENT: its hosted VMs expose no Metal at
+  # all, so there is no real window stack to smoke — that arch's compile/logic
+  # coverage lives in `gui build + test (macos-15-intel)`. The per-OS
+  # install/launch steps below key on runner.os, so the arm legs reuse them
+  # unchanged.
   smoke:
     name: gui smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'macos-15' }}
+    continue-on-error: ${{ matrix.soft }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2025, macos-15]
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: true}
+          - {os: windows-11-arm, soft: true}
+          - {os: macos-15, soft: true}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
