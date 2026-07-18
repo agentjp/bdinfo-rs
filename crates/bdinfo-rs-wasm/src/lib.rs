@@ -10,7 +10,8 @@
 //!   arrives as a flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes
 //!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
 //!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
-//!   Worker (the only scope where `FileReaderSync` exists).
+//!   Worker (the only scope where `FileReaderSync` exists). [`list_playlists`] is its structural
+//!   twin: the fast selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
 //! - [`scan_iso`] / [`list_iso_playlists`] — the streaming `.iso` exports: a single OS-picked
 //!   `.iso` `File` is opened through the core read-only UDF 2.50 reader ([`UdfSource`]) over the
 //!   same windowed [`web_sys::FileReaderSync`] cursor ([`WebIso`] is the [`IsoReader`] factory), so
