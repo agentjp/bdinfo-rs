@@ -1124,8 +1124,8 @@ jobs:
   # check-runs render prefixed (`gui / gui build + test (…)`,
   # `wasm / wasm gate (…)`); a red anywhere inside reddens the caller job and
   # therefore ci-ok. When the area is skipped, the single caller job reports
-  # `skipped` — the inner jobs never appear, which is why the one required
-  # context among them needs the alias job below.
+  # `skipped` — the inner jobs never appear, which is fine because only the
+  # caller jobs feed ci-ok and no inner name is a required context.
   gui:
     name: gui
     needs: plan
@@ -1137,27 +1137,6 @@ jobs:
     needs: plan
     if: needs.plan.outputs.wasm == 'true'
     uses: ./.github/workflows/wasm.yml
-
-  # TRANSITIONAL alias for branch protection: `wasm gate (build + size +
-  # parity)` is a LIVE required context, but the job that used to report it
-  # now runs inside the wasm reusable, where its check-run renders as
-  # `wasm / wasm gate (build + size + parity)` — a different string that would
-  # leave the required check "Expected" forever. This thin job keeps the exact
-  # old string reporting: success when the gate passed OR the wasm area was
-  # skipped (the same semantics an `if:`-skipped required job has), failure
-  # when the gate failed. Delete it when branch protection swaps to ci-ok.
-  wasm-required:
-    name: wasm gate (build + size + parity)
-    needs: [wasm]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mirror the wasm reusable's result
-        env:
-          RESULT: ${{ needs.wasm.result }}
-        run: |
-          echo "wasm gate result: $RESULT"
-          [ "$RESULT" = "success" ] || [ "$RESULT" = "skipped" ]
 
   # The fan-in: the ONE result branch protection will require (the protection
   # cutover swaps the 28 name-matched contexts for this job + the three
@@ -1175,7 +1154,7 @@ jobs:
   # a manually-cancelled run must not end green.
   ci-ok:
     name: ci-ok
-    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, links, deny, vet, replay, pkg, gui, wasm, wasm-required]
+    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, links, deny, vet, replay, pkg, gui, wasm]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
