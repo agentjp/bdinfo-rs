@@ -41,6 +41,43 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    public delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder sb, int max);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    // The real app window: owned by the pid, visible, titled "bdinfo-rs…".
+    // Process.MainWindowHandle is NOT that — winit also creates hidden
+    // zero-sized top-level helpers and MainWindowHandle can pick one.
+    public static IntPtr FindMain(uint pid, string prefix) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) => {
+            uint wpid; GetWindowThreadProcessId(h, out wpid);
+            if (wpid != pid || !IsWindowVisible(h)) return true;
+            var sb = new System.Text.StringBuilder(256);
+            GetWindowText(h, sb, 256);
+            if (!sb.ToString().StartsWith(prefix)) return true;
+            found = h; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+    // The AttachThreadInput technique: adopt the current foreground thread's
+    // input state so the foreground lock treats this process as entitled.
+    public static bool ForceForeground(IntPtr h) {
+        uint tmp;
+        uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), out tmp);
+        uint cur = GetCurrentThreadId();
+        AttachThreadInput(cur, fgThread, true);
+        ShowWindow(h, 9); // SW_RESTORE
+        BringWindowToTop(h);
+        SetForegroundWindow(h);
+        AttachThreadInput(cur, fgThread, false);
+        return GetForegroundWindow() == h;
+    }
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
@@ -80,7 +117,8 @@ $hwnd = [IntPtr]::Zero
 for ($i = 0; $i -lt 300; $i++) {
     $proc.Refresh()
     if ($proc.HasExited) { throw "app exited before showing a window ($($proc.ExitCode))" }
-    if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = $proc.MainWindowHandle; break }
+    $hwnd = [GuiInput]::FindMain([uint32]$proc.Id, 'bdinfo-rs')
+    if ($hwnd -ne [IntPtr]::Zero) { break }
     Start-Sleep -Milliseconds 100
 }
 if ($hwnd -eq [IntPtr]::Zero) { throw 'window never appeared' }
@@ -117,13 +155,13 @@ function Save-Shot([string]$Name) {
 
 function Assert-Foreground {
     # SetForegroundWindow from an unrelated process is throttled by the
-    # foreground lock; the documented release is that the CALLER received the
-    # last input event, so tap a bare ALT first, then retry.
+    # foreground lock: tap a bare ALT (the caller-received-input release),
+    # then the AttachThreadInput takeover, and retry.
     for ($i = 0; $i -lt 10; $i++) {
         if ([GuiInput]::GetForegroundWindow() -eq $hwnd) { return }
         [void][GuiInput]::Key(0x12, $false) # VK_MENU down
         [void][GuiInput]::Key(0x12, $true)
-        [void][GuiInput]::SetForegroundWindow($hwnd)
+        if ([GuiInput]::ForceForeground($hwnd)) { return }
         Start-Sleep -Milliseconds 500
     }
     throw 'the app never became the foreground window — refusing to inject blind clicks'

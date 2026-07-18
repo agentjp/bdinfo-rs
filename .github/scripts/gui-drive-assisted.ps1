@@ -63,12 +63,38 @@ $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 
 # On Windows the capture needs the window handle; elsewhere the virtual /
 # runner display is captured whole (the app is the only window on it).
+# Found by pid + visibility + title: Process.MainWindowHandle can pick one of
+# winit's hidden zero-sized helper top-levels instead of the real window.
 $hwnd = 0
 if ($IsWindows) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class GuiFind {
+    public delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder sb, int max);
+    public static IntPtr FindMain(uint pid, string prefix) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) => {
+            uint wpid; GetWindowThreadProcessId(h, out wpid);
+            if (wpid != pid || !IsWindowVisible(h)) return true;
+            var sb = new System.Text.StringBuilder(256);
+            GetWindowText(h, sb, 256);
+            if (!sb.ToString().StartsWith(prefix)) return true;
+            found = h; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+"@
     for ($i = 0; $i -lt 300; $i++) {
         $proc.Refresh()
         if ($proc.HasExited) { break }
-        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = $proc.MainWindowHandle.ToInt64(); break }
+        $found = [GuiFind]::FindMain([uint32]$proc.Id, 'bdinfo-rs')
+        if ($found -ne [IntPtr]::Zero) { $hwnd = $found.ToInt64(); break }
         Start-Sleep -Milliseconds 100
     }
     if ($hwnd -eq 0 -and -not $proc.HasExited) { Write-Host '!! window handle never appeared' }
