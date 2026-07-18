@@ -379,7 +379,8 @@ Every push and pull request runs the full gate in CI:
   no-C-dependencies ban) and `cargo vet` (every dependency covered by a trusted audit),
   plus CodeQL SAST and dependency review.
 - **Mutation testing — zero surviving mutants.** Every pull request mutation-tests its
-  diff (`cargo mutants --in-diff`), with a full sweep before each release; a mutant must
+  diff (`cargo mutants --in-diff`), with a daily full sweep in CI (re-run on every
+  release tag) as the authoritative bar; a mutant must
   either make a test *fail* or be documented as provably equivalent. Coverage that can't
   kill a mutant doesn't count.
 - **Fuzzing — no panics, no hangs.** Every untrusted-input parser (bitstream, M2TS, every
