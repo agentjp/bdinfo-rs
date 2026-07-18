@@ -429,9 +429,15 @@ jobs:
       # displayplacer raises the mac desktop to 1920x1080 (best-effort; the
       # paravirtual display may reject a mode — the harness then works at
       # whatever it gets and crops to the window regardless).
+      # The runner image ships aws/tap pre-tapped; Homebrew's tap-trust ignores
+      # the untrusted tap and warns on every brew command. Untap it (brew's own
+      # first remedy — we never use it) instead of trusting it or disabling
+      # trust checks; both formulae come from homebrew/core.
       - name: Install displayplacer (macOS resolution control)
         if: runner.os == 'macOS'
-        run: brew install displayplacer
+        run: |
+          brew untap aws/tap
+          brew install displayplacer
 
       - name: Build (debug — the drive seam is debug-only)
         working-directory: crates/bdinfo-rs-gui
@@ -506,9 +512,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
 
+      # aws/tap untapped for the assisted step's reason: unused, untrusted,
+      # warns on every brew command.
       - name: Install cliclick + displayplacer (macOS clicks + resolution)
         if: runner.os == 'macOS'
-        run: brew install cliclick displayplacer
+        run: |
+          brew untap aws/tap
+          brew install cliclick displayplacer
 
       - name: Build (debug — the env hooks are debug-only)
         working-directory: crates/bdinfo-rs-gui
