@@ -1,0 +1,195 @@
+name: gui-drive
+
+# EXPERIMENTAL, ADVISORY ALWAYS: drive the real GUI window on a real desktop
+# session and upload a per-step screenshot gallery — the evidence base for
+# choosing the durable window-driving strategy. Two strategies run side by
+# side and are compared against the headless iced_test Simulator suite (which
+# already gates every PR through gui.yml):
+#
+#   assisted (b)  The debug-only BDINFO_GUI_DRIVE seam walks the app through a
+#                 fixed click-everything sequence (sort → splitter → rows →
+#                 Settings → scan → cancel → rescan → report → copy → save)
+#                 and the OS only screenshots each rendered state. Skips the
+#                 OS input stack, but deterministic and arch-portable — hard
+#                 asserts: walk completed, exit 0, saved report on disk.
+#   inject (a)    Real OS cursor/keyboard events (SendInput on Windows,
+#                 xdotool under xvfb on Linux, cliclick on macOS) at fixed
+#                 logical coordinates over the pinned 880x960 window — the
+#                 truest input-path test; hard assert: the Settings click
+#                 changes the rendered pixels.
+#
+# This workflow stays OUTSIDE the ci.yml orchestrator BY DESIGN: it is never
+# part of ci-ok's needs and its job names must never become required contexts
+# (a red experiment must not block a merge). It runs nightly plus on demand;
+# the pull_request trigger is paths-gated to the driving harness and the gui
+# crate so a core/docs/workflow change never launches this matrix — fine for
+# an advisory workflow (a paths-filtered job that never reports would hang a
+# PR only if it were required, which this must never be).
+#
+# Matrix notes: the ubuntu/windows x86-64 legs ride the same proven display
+# recipes as gui.yml's smoke (xvfb + lavapipe, DX12 WARP); the arm legs probe
+# the INPUT stack on top of the smoke's render-only streak and run SOFT until
+# they earn one of their own; macos-15 is SOFT because hosted-runner
+# Accessibility is expected to block synthetic input (the leg records exactly
+# where). macos-15-intel is deliberately absent everywhere: its hosted VMs
+# expose no Metal, so there is no real window stack to drive.
+
+on:
+  schedule:
+    - cron: "30 9 * * *" # nightly, after the 08:00 sweep window
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/gui-drive.yml'
+      - '.github/scripts/gui-drive-*.ps1'
+      - 'crates/bdinfo-rs-gui/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-drive-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  assisted:
+    name: gui drive assisted (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: true}
+          - {os: windows-11-arm, soft: true}
+          - {os: macos-15, soft: true}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the virtual display + software Vulkan + capture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick
+
+      - name: Build (debug — the drive seam is debug-only)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      - name: Drive the walk (xvfb + lavapipe)
+        if: runner.os == 'Linux'
+        run: >
+          xvfb-run -a pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Drive the walk (DX12 WARP)
+        if: runner.os == 'Windows'
+        env:
+          WGPU_BACKEND: dx12
+        run: >
+          pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Drive the walk (paravirtual Metal — SOFT)
+        if: runner.os == 'macOS'
+        run: >
+          pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Upload the gallery (evidence either way)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-drive-assisted-${{ matrix.os }}
+          path: gallery/
+          retention-days: 14
+          if-no-files-found: warn
+
+  inject:
+    name: gui drive inject (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: true}
+          - {os: windows-11-arm, soft: true}
+          - {os: macos-15, soft: true}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the virtual display + software Vulkan + xdotool + capture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
+
+      - name: Install cliclick (macOS synthetic clicks)
+        if: runner.os == 'macOS'
+        run: brew install cliclick
+
+      - name: Build (debug — the env hooks are debug-only)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      - name: Inject the walk (xdotool under xvfb)
+        if: runner.os == 'Linux'
+        run: >
+          xvfb-run -a pwsh .github/scripts/gui-drive-inject-linux.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Inject the walk (SendInput)
+        if: runner.os == 'Windows'
+        env:
+          WGPU_BACKEND: dx12
+        run: >
+          pwsh .github/scripts/gui-drive-inject-windows.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Inject the walk (cliclick — SOFT, records the Accessibility wall)
+        if: runner.os == 'macOS'
+        run: >
+          pwsh .github/scripts/gui-drive-inject-macos.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Upload the gallery (evidence either way)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-drive-inject-${{ matrix.os }}
+          path: gallery/
+          retention-days: 14
+          if-no-files-found: warn
