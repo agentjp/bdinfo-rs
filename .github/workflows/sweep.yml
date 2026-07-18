@@ -185,6 +185,9 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so gh has no git remote to infer the repo
+          # from — name it explicitly.
+          GH_REPO: ${{ github.repository }}
           RESULTS: ${{ toJSON(needs) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
