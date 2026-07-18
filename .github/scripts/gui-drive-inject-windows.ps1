@@ -72,6 +72,23 @@ public static class GuiInput {
         }, IntPtr.Zero);
         return found;
     }
+    // Clear the deck: hosted Windows runners keep a "Runner Provisioner"
+    // window in the foreground (actions/runner#2189) and each console spawn
+    // adds a conhost — minimize every OTHER visible titled top-level so no
+    // stranger sits over a click point. Throwaway CI desktop, so this is safe.
+    public static int MinimizeOthers(IntPtr keep) {
+        int n = 0;
+        EnumWindows((h, l) => {
+            if (h == keep || !IsWindowVisible(h)) return true;
+            var sb = new System.Text.StringBuilder(256);
+            GetWindowText(h, sb, 256);
+            if (sb.Length == 0) return true;
+            ShowWindow(h, 6); // SW_MINIMIZE
+            n++;
+            return true;
+        }, IntPtr.Zero);
+        return n;
+    }
     // The AttachThreadInput technique: adopt the current foreground thread's
     // input state so the foreground lock treats this process as entitled.
     public static bool ForceForeground(IntPtr h) {
@@ -146,6 +163,9 @@ for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Milliseconds 500
 }
 if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
+$minimized = [GuiInput]::MinimizeOthers($hwnd)
+Write-Host "==> minimized $minimized other top-level window(s) (runner provisioner etc.)"
+
 $origin = New-Object GuiInput+POINT
 [void][GuiInput]::ClientToScreen($hwnd, [ref]$origin)
 $scale = $rect.Right / 880.0
@@ -155,9 +175,14 @@ $logicalH = $rect.Bottom / $scale
 Write-Host ("==> client {0}x{1} at {2},{3} (scale {4}, logical height {5})" -f $rect.Right, $rect.Bottom, $origin.X, $origin.Y, $scale, [int]$logicalH)
 
 function Save-Shot([string]$Name) {
-    & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass `
-        -File (Join-Path $PSScriptRoot 'gui-drive-capture-win.ps1') -Hwnd $hwnd.ToInt64() -Out (Join-Path $Gallery "$Name.png")
-    if ($LASTEXITCODE -ne 0) { Write-Host "!! capture failed for $Name" }
+    # -WindowStyle Hidden: a visible conhost from each capture spawn cascades
+    # across the desktop and lands under later click points — the hit-test
+    # guard below caught exactly that in run 4.
+    $cap = Start-Process powershell.exe -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
+        '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $PSScriptRoot 'gui-drive-capture-win.ps1'),
+        '-Hwnd', $hwnd.ToInt64(), '-Out', (Join-Path $Gallery "$Name.png"))
+    if ($cap.ExitCode -ne 0) { Write-Host "!! capture failed for $Name ($($cap.ExitCode))" }
 }
 
 function Request-Foreground {
@@ -184,7 +209,13 @@ function Send-Click([double]$Lx, [double]$Ly) {
     # The precise no-blind-clicks guard: the top-level window that will
     # receive this click must be the app — stronger than a foreground check,
     # because injected mouse input routes by cursor position, not focus.
-    if ([GuiInput]::RootAt($px, $py) -ne $hwnd) {
+    # Retried briefly: transient overlays (a closing conhost, a toast) clear.
+    $clear = $false
+    for ($i = 0; $i -lt 10; $i++) {
+        if ([GuiInput]::RootAt($px, $py) -eq $hwnd) { $clear = $true; break }
+        Start-Sleep -Milliseconds 300
+    }
+    if (-not $clear) {
         throw "another window sits under the cursor at $px,$py — refusing to inject blind clicks"
     }
     [void][GuiInput]::Mouse(0x0002) # LEFTDOWN
