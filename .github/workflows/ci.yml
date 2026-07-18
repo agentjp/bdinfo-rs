@@ -12,9 +12,12 @@ name: CI
 # WHY plan + `if:`, never `on.paths:`, on anything required: a job skipped via
 # `if:` still reports a check-run with conclusion `skipped`, which satisfies a
 # required status check — but a workflow filtered out by `on.paths:` never
-# reports at all and leaves the PR's required check "Expected" forever. For
-# the same reason, never rename or delete a job whose `name:` string is a
-# live required context (contexts match on that string).
+# reports at all and leaves the PR's required check "Expected" forever. One
+# nuance (observed live): a skipped MATRIX job reports once, UNexpanded — its
+# per-leg names never appear — so per-leg contexts cannot survive gating;
+# only the job-level result feeds ci-ok, which is what branch protection
+# requires. For the same reason, never rename or delete a job whose `name:`
+# string is a live required context (contexts match on that string).
 #
 # Build and test on every supported OS. The pinned stable toolchain installs
 # itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
@@ -164,8 +167,9 @@ jobs:
           # CI plumbing changed but no code — still build + test on one leg
           # per OS/shell family, exercising the changed checkout / rust-cache /
           # install-action plumbing from both sides without the 6-arch fleet.
-          # The list stays full when the job is skipped, so every
-          # required-name leg still reports (as `skipped`).
+          # When the job is skipped it reports ONCE, unexpanded (a skipped
+          # matrix never materializes per-leg check runs — observed live), so
+          # the list's value only matters when the job actually runs.
           test=false
           test_os='["ubuntu-latest","ubuntu-24.04-arm","windows-2025","windows-11-arm","macos-15-intel","macos-15"]'
           if [ "$core" = "true" ]; then
