@@ -251,17 +251,12 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
             _ => {}
         }
     }
-    let folder = std::env::var("BDINFO_GUI_OPEN")
-        .ok()
-        .map(|path| Task::done(Message::FolderPicked(Some(PathBuf::from(path)))));
-    let iso = std::env::var("BDINFO_GUI_ISO")
-        .ok()
-        .map(|path| Task::done(Message::IsoPicked(Some(PathBuf::from(path)))));
+    // The auto-open (`BDINFO_GUI_OPEN`/`_ISO`) is NOT a boot task: messages
+    // completing during compositor bring-up get dropped by the shell, so it
+    // rides an Idle-gated subscription instead (see [`App::subscription`]).
     let settings_dialog =
         std::env::var("BDINFO_GUI_SETTINGS").ok().map(|_| Task::done(Message::OpenSettings));
     let mut tasks = vec![base];
-    tasks.extend(folder);
-    tasks.extend(iso);
     tasks.extend(settings_dialog);
     // BDINFO_GUI_SMOKE_MS=<ms>: exit cleanly after the delay — the headless
     // launch smoke's seam ("the app opens, renders, exits 0"; see gui.yml).
@@ -986,6 +981,11 @@ enum Message {
     /// loop cleanly so the launch smoke's process exits 0.
     #[cfg(debug_assertions)]
     SmokeExit,
+    /// The debug auto-open tick (`BDINFO_GUI_OPEN`/`_ISO`): an Idle-gated
+    /// subscription re-fires it until the open takes, because a message
+    /// delivered during compositor bring-up can be dropped.
+    #[cfg(debug_assertions)]
+    DebugAutoOpen,
     /// The debug drive walk (`BDINFO_GUI_DRIVE`) wants step `step` applied —
     /// polled (`polls` so far) until the step's precondition holds.
     #[cfg(debug_assertions)]
@@ -1189,6 +1189,8 @@ impl App {
             #[cfg(debug_assertions)]
             Message::SmokeExit => iced::exit(),
             #[cfg(debug_assertions)]
+            Message::DebugAutoOpen => self.debug_auto_open(),
+            #[cfg(debug_assertions)]
             Message::DriveNext { step, polls } => self.drive_next(step, polls),
             #[cfg(debug_assertions)]
             Message::DriveMark(step) => self.drive_mark(step),
@@ -1375,6 +1377,20 @@ impl App {
     /// window is not redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
+        // Debug auto-open (`BDINFO_GUI_OPEN`/`_ISO`) rides a SUBSCRIPTION,
+        // not a boot task: boot-batch messages that complete while the
+        // compositor is still initializing are dropped by the shell (proven
+        // on the CI runners and reproduced locally), and any retry chained
+        // from such a message dies with it. A subscription is always alive;
+        // this one only exists while the flow sits at Idle, so it vanishes
+        // the moment the open takes.
+        #[cfg(debug_assertions)]
+        if self.flow.stage() == Stage::Idle
+            && (std::env::var_os("BDINFO_GUI_OPEN").is_some()
+                || std::env::var_os("BDINFO_GUI_ISO").is_some())
+        {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::DebugAutoOpen));
+        }
         // The close button / Alt+F4: closing is manual (so the geometry saves
         // on the way out) — this feed is what makes the window closable at all.
         subs.push(iced::window::close_requests().map(Message::CloseRequested));
@@ -1436,6 +1452,23 @@ impl App {
         matches!(self.flow.stage(), Stage::Listing | Stage::Scanning)
     }
 
+    /// Debug auto-open: send the `BDINFO_GUI_OPEN`/`_ISO` pick. The Idle-gated
+    /// subscription that delivers this tick stops the moment the flow leaves
+    /// Idle, so a taken open is never re-sent.
+    #[cfg(debug_assertions)]
+    fn debug_auto_open(&mut self) -> Task<Message> {
+        if self.flow.stage() != Stage::Idle {
+            return Task::none();
+        }
+        if let Some(path) = std::env::var_os("BDINFO_GUI_OPEN") {
+            self.update(Message::FolderPicked(Some(PathBuf::from(path))))
+        } else if let Some(path) = std::env::var_os("BDINFO_GUI_ISO") {
+            self.update(Message::IsoPicked(Some(PathBuf::from(path))))
+        } else {
+            Task::none()
+        }
+    }
+
     /// Debug drive walk: try to apply step `step` — poll while its
     /// precondition is false, leave the FAILED marker and end the walk when
     /// the poll cap is spent, and schedule the step's marker once applied.
@@ -1482,6 +1515,11 @@ impl App {
     /// hook (`BDINFO_GUI_SCAN=all`), selecting and scanning every playlist so
     /// a screenshot can show measured data.
     fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
+        // The listing outcome, next to begin_listing's start line.
+        match &result {
+            Ok(_) => log::info!("listed {}", input.display()),
+            Err(error) => log::info!("listing failed: {error}"),
+        }
         let view = ViewSettings::from_settings(&self.persisted);
         self.flow = std::mem::take(&mut self.flow).listed(input, result, view);
         // Only when THIS input just became the listing (not a superseded or
@@ -1607,6 +1645,9 @@ impl App {
         self.hovered_header = None;
         self.pane_selection = None;
         self.pulse = 0;
+        // The one log line per open: pins down whether a scan ever started
+        // when a report or listing seems to be missing in the field.
+        log::info!("listing {}", input.display());
         self.flow = Flow::start_listing(input.clone());
         Task::perform(
             async move {
