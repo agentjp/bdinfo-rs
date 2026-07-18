@@ -43,8 +43,11 @@ deliberately strict:
 - **cargo-semver-checks** against the last release tag — the library API is
   SemVer-stable.
 - **coverage** — 100% lines / regions / functions on the library.
-- **cargo-deny** and **cargo-vet** — advisories, the license allow-list, the
-  no-C-dependency bans, and per-dependency supply-chain audits.
+- **cargo-deny** and **cargo-vet** — the license allow-list, the no-C-dependency
+  bans, crates.io-only sources, and per-dependency supply-chain audits. RustSec
+  advisories are checked in a daily audit run and, for a PR's own dependency
+  changes, by **dependency-review** — a freshly published CVE never reddens an
+  unrelated PR.
 - **conventional commits + banned words** — `convco check` verifies every commit
   on the PR is a [Conventional Commit](https://www.conventionalcommits.org/), and a
   banned-word gate rejects LLM/AI-attribution tokens in the commit messages and the
