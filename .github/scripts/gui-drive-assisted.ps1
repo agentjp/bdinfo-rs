@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# Strategy (b) of the GUI driving experiment (gui-drive.yml): APP-ASSISTED
+# Strategy (b) of the GUI drive gate (gui.yml, drive-assisted): APP-ASSISTED
 # driving. The debug-only BDINFO_GUI_DRIVE seam walks the real window through a
 # fixed click-everything sequence (sort → splitter → rows → Settings → scan →
 # cancel → rescan → report → copy → save), dropping an `NN-name.marker` file
@@ -60,13 +60,13 @@ $env:BDINFO_GUI_DRIVE_MS = "$DriveMs"
 # The SHARED window geometry across every driving leg (assisted + inject, all
 # six arches): the app's natural 880x960 design size at the desktop origin, so
 # the galleries are directly comparable. Every desktop is raised to 1920x1080
-# (xvfb in gui-drive.yml; the Windows/mac harness blocks below) so this window
+# (xvfb in gui.yml; the Windows/mac harness blocks below) so this window
 # always fits, and every shot is CROPPED to the window — no desktop margin,
 # identical framing on every OS.
 $env:BDINFO_GUI_WIN = '880x960+0+0'
 
 # Raise the desktop to 1920x1080 BEFORE launch so the window places on the full
-# canvas (Linux xvfb is already sized by gui-drive.yml). Best-effort: a display
+# canvas (Linux xvfb is already sized by gui.yml). Best-effort: a display
 # that rejects the mode just stays as-is and the window/crop still work.
 if ($IsWindows) {
     Add-Type -TypeDefinition @"

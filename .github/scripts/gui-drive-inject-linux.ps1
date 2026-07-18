@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# Strategy (a) of the GUI driving experiment (gui-drive.yml), Linux leg:
+# Strategy (a) of the GUI drive gate (gui.yml, drive-inject), Linux leg:
 # OS-LEVEL INPUT INJECTION with xdotool under xvfb (run this whole script via
 # `xvfb-run -a pwsh ...` so DISPLAY reaches the app, xdotool, and the capture
 # alike). Same walk, coordinates, and pixel-change assert as the Windows leg

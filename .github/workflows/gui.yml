@@ -3,9 +3,11 @@ name: gui
 # The PROPORTIONATE Posture-C gate for the native desktop GUI
 # (crates/bdinfo-rs-gui), mirrored 1:1 by the local scripts/gui-compliance.ps1.
 # A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the `gui`
-# area (a crate-dir change, or a core change via the encoded path-dep edge —
-# root-Cargo.lock-only bumps excluded), and the daily sweep re-runs it ungated
-# through the same orchestrator. This file carries no triggers or concurrency
+# area (a crate-dir change, a core change via the encoded path-dep edge —
+# root-Cargo.lock-only bumps excluded — or an edit to this file / the
+# .github/scripts/gui-*.ps1 helpers, since a gate's implementation files
+# re-fire the gate), and the daily sweep re-runs it ungated through the same
+# orchestrator. This file carries no triggers or concurrency
 # of its own — both are the caller's — so it can never fire on its own and
 # never needs a paths filter.
 #
@@ -15,8 +17,8 @@ name: gui
 # cargo-mutants 0 missed, proptests, byte-exact golden ties. Tier B (the iced
 # shell main.rs + the style vocabulary ui.rs) is excluded from cov/mutants by
 # the crate-local .cargo/mutants.toml (proofs there) and verified instead by
-# the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, and
-# the headless launch smoke below.
+# the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, the
+# headless launch smoke, and the real-window drive walks below.
 #
 # The Tier-A mutation bar is NOT enforced here: the full-crate sweep (~50 min)
 # was rescheduled off the PR path (D1) into sweep.yml, which runs it daily —
@@ -291,14 +293,11 @@ jobs:
   # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
   # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software
   # Vulkan on Linux, the in-box DX12 WARP software rasterizer on Windows
-  # (Bevy's CI runs real winit+wgpu windows with both). Legs the recipes are
-  # proven on block; the rest run SOFT (continue-on-error) — a required check
-  # that flakes blocks every PR:
-  #   ubuntu-24.04-arm  mesa lavapipe is apt-installable on arm64, but the
-  #                     recipe is unproven for a GUI on hosted arm runners;
-  #                     promote to blocking after a green streak.
-  #   windows-11-arm    WARP is arm64-native and in-box, same unproven caveat;
-  #                     promote to blocking after a green streak.
+  # (Bevy's CI runs real winit+wgpu windows with both). The arm legs entered
+  # SOFT ("promote to blocking after a green streak") and were promoted: the
+  # drive-experiment matrix (PR #128) ran lavapipe-arm64 and arm-native WARP
+  # windows green seven consecutive times on top of this smoke's own streak.
+  # The one remaining SOFT leg:
   #   macos-15          the runner's paravirtual Metal is the one render path
   #                     with no software fallback.
   # macos-15-intel is deliberately ABSENT: its hosted VMs expose no Metal at
@@ -317,8 +316,8 @@ jobs:
         include:
           - {os: ubuntu-latest, soft: false}
           - {os: windows-2025, soft: false}
-          - {os: ubuntu-24.04-arm, soft: true}
-          - {os: windows-11-arm, soft: true}
+          - {os: ubuntu-24.04-arm, soft: false}
+          - {os: windows-11-arm, soft: false}
           - {os: macos-15, soft: true}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -364,3 +363,189 @@ jobs:
           BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
           BDINFO_GUI_SMOKE_MS: "8000"
         run: cargo run --locked
+
+  # The real-window DRIVE gates: the app driven end to end on a real desktop
+  # session, a screenshot per step uploaded as a gallery either way. Promoted
+  # from the standalone advisory experiment (PR #128) after seven consecutive
+  # all-ten-green matrices — the deliberate owner decision superseding the
+  # experiment's stay-advisory recommendation; the future gui release lane
+  # inherits these as part of its bar. Two complementary proofs:
+  #
+  #   assisted  the debug-only BDINFO_GUI_DRIVE seam walks the app through the
+  #             full click-everything sequence (sort → splitter → rows →
+  #             Settings → scan → cancel → rescan → report → copy → save) and
+  #             the OS only screenshots each rendered state. Skips the OS
+  #             input stack, but message-driven and coordinate-free — zero
+  #             maintenance on layout changes. Hard asserts: the walk
+  #             completed, exit 0, the saved report exists on disk.
+  #   inject    real OS cursor/keyboard events (SendInput on Windows, xdotool
+  #             under xvfb on Linux, cliclick on macOS) at fixed logical
+  #             coordinates over the pinned 880x960 window — the truest
+  #             input-path proof. Hard assert: the Settings click changes the
+  #             rendered pixels. Its price is the shared coordinate table
+  #             (calibrated to the 880-wide layout): a deliberate layout
+  #             change must update it in the same PR, snapshot-test semantics.
+  #
+  # Blocking on all four Linux/Windows legs — x86 AND arm, the same promoted
+  # split as the smoke above; macos-15 stays SOFT (paravirtual Metal plus the
+  # Sequoia screen-capture re-approval residual), and macos-15-intel is absent
+  # for the smoke's no-Metal reason. The x86 legs ride the proven display
+  # recipes (xvfb + lavapipe, DX12 WARP); every leg runs at a 1920x1080
+  # desktop with shots cropped to the 880x960 window, so the galleries are
+  # comparable across OSes. The old standalone workflow's nightly schedule is
+  # superseded by the daily sweep (which re-runs this whole workflow ungated
+  # and files the rolling issue on a scheduled red); a red leg here reddens
+  # the `gui` caller job and therefore ci-ok.
+  drive-assisted:
+    name: gui drive assisted (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: false}
+          - {os: windows-11-arm, soft: false}
+          - {os: macos-15, soft: true}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the virtual display + software Vulkan + capture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
+
+      # displayplacer raises the mac desktop to 1920x1080 (best-effort; the
+      # paravirtual display may reject a mode — the harness then works at
+      # whatever it gets and crops to the window regardless).
+      - name: Install displayplacer (macOS resolution control)
+        if: runner.os == 'macOS'
+        run: brew install displayplacer
+
+      - name: Build (debug — the drive seam is debug-only)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      # A 1920x1080 virtual display everywhere (the harness raises Windows/mac
+      # to match); the app runs at its natural 880x960 window and every shot is
+      # cropped to that window (via xdotool's window id here), so the galleries
+      # are identical across OSes and carry no desktop margin.
+      - name: Drive the walk (xvfb + lavapipe)
+        if: runner.os == 'Linux'
+        run: >
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Drive the walk (DX12 WARP)
+        if: runner.os == 'Windows'
+        env:
+          WGPU_BACKEND: dx12
+        run: >
+          pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Drive the walk (paravirtual Metal — SOFT)
+        if: runner.os == 'macOS'
+        run: >
+          pwsh .github/scripts/gui-drive-assisted.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Upload the gallery (evidence either way)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-drive-assisted-${{ matrix.os }}
+          path: gallery/
+          retention-days: 7
+          if-no-files-found: warn
+
+  drive-inject:
+    name: gui drive inject (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.soft }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, soft: false}
+          - {os: windows-2025, soft: false}
+          - {os: ubuntu-24.04-arm, soft: false}
+          - {os: windows-11-arm, soft: false}
+          - {os: macos-15, soft: true}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the virtual display + software Vulkan + xdotool + capture (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
+
+      - name: Install cliclick + displayplacer (macOS clicks + resolution)
+        if: runner.os == 'macOS'
+        run: brew install cliclick displayplacer
+
+      - name: Build (debug — the env hooks are debug-only)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --locked
+
+      # 1920x1080 virtual display, window-cropped capture — see the assisted note.
+      - name: Inject the walk (xdotool under xvfb)
+        if: runner.os == 'Linux'
+        run: >
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-inject-linux.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Inject the walk (SendInput)
+        if: runner.os == 'Windows'
+        env:
+          WGPU_BACKEND: dx12
+        run: >
+          pwsh .github/scripts/gui-drive-inject-windows.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Inject the walk (cliclick — SOFT, records the Accessibility wall)
+        if: runner.os == 'macOS'
+        run: >
+          pwsh .github/scripts/gui-drive-inject-macos.ps1
+          -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
+          -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
+          -Gallery gallery
+
+      - name: Upload the gallery (evidence either way)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-drive-inject-${{ matrix.os }}
+          path: gallery/
+          retention-days: 7
+          if-no-files-found: warn

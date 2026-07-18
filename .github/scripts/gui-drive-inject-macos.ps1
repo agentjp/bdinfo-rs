@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# Strategy (a) of the GUI driving experiment (gui-drive.yml), macOS leg —
+# Strategy (a) of the GUI drive gate (gui.yml, drive-inject), macOS leg —
 # SOFT/EXPERIMENTAL by design. Synthetic input on macOS needs the
 # Accessibility permission (both the System Events geometry lookup and
 # cliclick's CGEvent posts), which hosted runners are not expected to grant to
