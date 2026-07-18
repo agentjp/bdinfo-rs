@@ -14,7 +14,8 @@
 //! source, and the theme preference persist across launches.
 //! A disc can arrive three ways — the pickers, a drag-and-drop onto the window,
 //! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
-//! open flow.
+//! open flow. The recalled last source is not a fourth: it only pre-fills the
+//! Source field with Rescan live (see `boot`); nothing scans until asked.
 #![forbid(unsafe_code)]
 // The window is a leaf binary, not a library: a Windows release build hides the
 // console so launching it does not flash a terminal. No effect on other targets.
