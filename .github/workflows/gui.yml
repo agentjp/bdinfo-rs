@@ -293,32 +293,31 @@ jobs:
   # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
   # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software
   # Vulkan on Linux, the in-box DX12 WARP software rasterizer on Windows
-  # (Bevy's CI runs real winit+wgpu windows with both). The arm legs entered
-  # SOFT ("promote to blocking after a green streak") and were promoted: the
-  # drive-experiment matrix (PR #128) ran lavapipe-arm64 and arm-native WARP
-  # windows green seven consecutive times on top of this smoke's own streak.
-  # The one remaining SOFT leg:
-  #   macos-15          the runner's paravirtual Metal is the one render path
-  #                     with no software fallback.
+  # (Bevy's CI runs real winit+wgpu windows with both). All five legs are
+  # HARD (the arm legs and finally macos-15 were each promoted after sustained
+  # green streaks, PR #128 and its follow-up): macOS is a crucial supported
+  # platform, and a gate that ignores its own signal is not a gate — a red
+  # macos-15 leg now means something actually broke. Its known failure mode:
+  # the runner's paravirtual Metal is the one render path with no software
+  # fallback. If a leg ever flakes for environment reasons, fix the harness
+  # or deliberately re-soften — never a silent retry loop.
   # macos-15-intel is deliberately ABSENT: its hosted VMs expose no Metal at
   # all, so there is no real window stack to smoke — that arch's compile/logic
   # coverage lives in `gui build + test (macos-15-intel)`. The per-OS
-  # install/launch steps below key on runner.os, so the arm legs reuse them
-  # unchanged.
+  # install/launch steps below key on runner.os.
   smoke:
     name: gui smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.soft }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, soft: false}
-          - {os: windows-2025, soft: false}
-          - {os: ubuntu-24.04-arm, soft: false}
-          - {os: windows-11-arm, soft: false}
-          - {os: macos-15, soft: true}
+        os:
+          - ubuntu-latest
+          - windows-2025
+          - ubuntu-24.04-arm
+          - windows-11-arm
+          - macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -356,7 +355,7 @@ jobs:
           WGPU_BACKEND: dx12
         run: cargo run --locked
 
-      - name: Launch smoke (paravirtual Metal — SOFT)
+      - name: Launch smoke (paravirtual Metal)
         if: runner.os == 'macOS'
         working-directory: crates/bdinfo-rs-gui
         env:
@@ -386,30 +385,36 @@ jobs:
   #             (calibrated to the 880-wide layout): a deliberate layout
   #             change must update it in the same PR, snapshot-test semantics.
   #
-  # Blocking on all four Linux/Windows legs — x86 AND arm, the same promoted
-  # split as the smoke above; macos-15 stays SOFT (paravirtual Metal plus the
-  # Sequoia screen-capture re-approval residual), and macos-15-intel is absent
-  # for the smoke's no-Metal reason. The x86 legs ride the proven display
-  # recipes (xvfb + lavapipe, DX12 WARP); every leg runs at a 1920x1080
-  # desktop with shots cropped to the 880x960 window, so the galleries are
-  # comparable across OSes. The old standalone workflow's nightly schedule is
-  # superseded by the daily sweep (which re-runs this whole workflow ungated
-  # and files the rolling issue on a scheduled red); a red leg here reddens
-  # the `gui` caller job and therefore ci-ok.
+  # Blocking on ALL FIVE legs — Linux/Windows x86 AND arm plus macos-15, hard
+  # like the smoke above: macOS is a crucial supported platform, its legs had
+  # been green throughout their soft period, and a gate that ignores its own
+  # signal is not a gate. Known macos-15 failure modes (residual risks, not
+  # reasons for softness): the paravirtual Metal path has no software
+  # fallback, and drive-inject carries the Sequoia screen-capture re-approval
+  # residual. If a leg ever flakes for environment reasons, fix the harness
+  # (the scripts already handle window polling and capture pre-authorization)
+  # or deliberately re-soften — never a silent retry loop. macos-15-intel is
+  # absent for the smoke's no-Metal reason. The x86 legs ride the proven
+  # display recipes (xvfb + lavapipe, DX12 WARP); every leg runs at a
+  # 1920x1080 desktop with shots cropped to the 880x960 window, so the
+  # galleries are comparable across OSes. The old standalone workflow's
+  # nightly schedule is superseded by the daily sweep (which re-runs this
+  # whole workflow ungated and files the rolling issue on a scheduled red —
+  # mac breakage included, previously invisible to the schedule); a red leg
+  # here reddens the `gui` caller job and therefore ci-ok.
   drive-assisted:
     name: gui drive assisted (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.soft }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, soft: false}
-          - {os: windows-2025, soft: false}
-          - {os: ubuntu-24.04-arm, soft: false}
-          - {os: windows-11-arm, soft: false}
-          - {os: macos-15, soft: true}
+        os:
+          - ubuntu-latest
+          - windows-2025
+          - ubuntu-24.04-arm
+          - windows-11-arm
+          - macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -465,7 +470,7 @@ jobs:
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
           -Gallery gallery
 
-      - name: Drive the walk (paravirtual Metal — SOFT)
+      - name: Drive the walk (paravirtual Metal)
         if: runner.os == 'macOS'
         run: >
           pwsh .github/scripts/gui-drive-assisted.ps1
@@ -485,17 +490,16 @@ jobs:
   drive-inject:
     name: gui drive inject (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.soft }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, soft: false}
-          - {os: windows-2025, soft: false}
-          - {os: ubuntu-24.04-arm, soft: false}
-          - {os: windows-11-arm, soft: false}
-          - {os: macos-15, soft: true}
+        os:
+          - ubuntu-latest
+          - windows-2025
+          - ubuntu-24.04-arm
+          - windows-11-arm
+          - macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -543,7 +547,7 @@ jobs:
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
           -Gallery gallery
 
-      - name: Inject the walk (cliclick — SOFT, records the Accessibility wall)
+      - name: Inject the walk (cliclick)
         if: runner.os == 'macOS'
         run: >
           pwsh .github/scripts/gui-drive-inject-macos.ps1
