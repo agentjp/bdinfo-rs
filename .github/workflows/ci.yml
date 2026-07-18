@@ -364,9 +364,9 @@ jobs:
   # typos.toml are tracked so clippy/typos behave identically. Format uses the
   # pinned nightly (rustfmt.toml has nightly-only options). Public repo = free
   # minutes, so the heavy quality checks run here too — incremental mutants run
-  # per-PR (the `mutants` job below) and the fuzz corpus replays per-PR (the
-  # `replay` job); only the full core mutants sweep + the Windows-via-Docker
-  # local fuzz stay local.
+  # per-PR (the `mutants` job below), the fuzz corpus replays per-PR (the
+  # `replay` job), and the full mutants sweeps for every crate live in
+  # sweep.yml; only the Windows-via-Docker fuzz runner stays local.
   lint:
     name: lint (clippy, fmt, typos, doc, deps, semver)
     needs: plan
@@ -465,8 +465,8 @@ jobs:
 
   # Incremental mutation testing on the PR diff: every line a pull request
   # changes must be killed by a test that FAILS when the line is mutated. The
-  # full-tree sweep (~hours) stays local/pre-release; this PR-scoped slice
-  # (cargo mutants --in-diff) is fast. It reads the tracked .cargo/mutants.toml
+  # full-tree sweep (~hours) lives in sweep.yml (sharded, daily + release
+  # tags); this PR-scoped slice (cargo mutants --in-diff) is fast. It reads the tracked .cargo/mutants.toml
   # policy and the `mutants` nextest profile (.config/nextest.toml) — both now
   # published, so CI mutates exactly as the local gate does.
   #
@@ -475,9 +475,10 @@ jobs:
   # can false-TIMEOUT on the 4-core hosted runners (a hang-prone loop-guard
   # mutant runs in ceil(n/cores) nextest-terminate waves), so gating merges on
   # it would let an environment artifact block an unrelated PR. The
-  # AUTHORITATIVE "0 missed mutants" gate is the local full sweep run before
-  # each release (per CLAUDE.md); this surfaces regressions early but does not
-  # block. Keep it out of the required set and out of ci-ok.
+  # AUTHORITATIVE "0 missed mutants" gate is sweep.yml's sharded full sweep
+  # (daily when the workspace changed + release tags); this surfaces
+  # regressions early but does not block. Keep it out of the required set and
+  # out of ci-ok.
   mutants:
     name: mutation testing (PR diff)
     needs: plan

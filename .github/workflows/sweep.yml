@@ -5,15 +5,17 @@ name: sweep
 # orchestrator with every area forced (a workflow_call with a non-PR/push
 # event makes the plan job fire all areas), plus the expensive tier the PR
 # path deliberately does not carry: the full-crate `cargo mutants --in-place`
-# sweeps for the gui and wasm sibling crates (D1). Untouched areas are thus
-# re-verified within 24 h, and environment drift (runner images, toolchain
-# point releases, a floating tool) cannot hide behind a skipped PR job. A
-# scheduled failure files/refreshes ONE rolling issue (closed again on the
-# next green sweep); workflow_dispatch exists so the sweep can be exercised on
-# demand.
+# sweeps for EVERY crate — the root workspace (core + CLI, sharded) and the
+# gui and wasm sibling crates (D1). These legs are the authoritative 0-missed
+# mutation bar for the whole repo; there is no local full-sweep ritual.
+# Untouched areas are thus re-verified within 24 h, and environment drift
+# (runner images, toolchain point releases, a floating tool) cannot hide
+# behind a skipped PR job. A scheduled failure files/refreshes ONE rolling
+# issue (closed again on the next green sweep); workflow_dispatch exists so
+# the sweep can be exercised on demand.
 #
 # Release tags (v*) run the full-mutants legs ONLY — the authoritative
-# 0-missed release checkpoint for the sibling crates, riding alongside the
+# 0-missed release checkpoint for every crate, riding alongside the
 # publish lanes exactly like fuzz.yml's extended pass (it surfaces a
 # regression, it does not block the release). The orchestrator call is
 # skipped on tags: every area was already green on the master commit the tag
@@ -57,6 +59,104 @@ jobs:
     name: orchestrator
     if: github.event_name != 'push'
     uses: ./.github/workflows/ci.yml
+
+  # Full mutation over the ROOT workspace (bdinfo-rs-core + the CLI), 0
+  # missed — the leg that retired the local pre-release `cargo mt` ritual;
+  # this sweep (daily + tags) is the authoritative core 0-missed bar. Policy
+  # comes from the tracked .cargo/mutants.toml: test_workspace = true (every
+  # mutant faces the whole suite, the CLI's end-to-end fixture flow included),
+  # which is what makes this expensive — ~3-4 h on a 24-core dev box, more on
+  # a 4-core hosted runner, against the 6 h job limit. So the run is SHARDED
+  # (cargo mutants --shard k/8): each shard builds its own baseline, then
+  # mutates a deterministic eighth of the mutant list, fitting comfortably
+  # (minutes are free on a public repo; concurrency is the only budget).
+  # --in-place skips the tree copy (each shard owns its runner's checkout);
+  # --no-shuffle keeps the shard partition deterministic.
+  #
+  # The marker key must capture EVERYTHING that can change a mutants verdict
+  # for the root workspace — wider than the gui/wasm single-crate keys (miss
+  # an input and a stale green marker lies): both crate trees, the workspace
+  # manifest (lints + the [profile.mutants] build profile), the lockfile, the
+  # mutants policy, the nextest profile (the `mutants` profile's timeouts),
+  # and the toolchain. Folded through sha256 to keep the key short. Every
+  # shard computes the identical key; the marker itself is saved only by
+  # core-mutants-ok below, after ALL shards ran green.
+  core-mutants:
+    name: core full mutants (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    outputs:
+      # Identical across legs (each computes it from the same HEAD), so the
+      # matrix-output last-writer-wins rule is harmless; core-mutants-ok
+      # reuses it instead of recomputing.
+      key: ${{ steps.key.outputs.key }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Compute the sweep marker key (root-workspace inputs hash)
+        id: key
+        run: |
+          inputs=$(git rev-parse HEAD:crates/bdinfo-rs-core HEAD:crates/bdinfo-rs HEAD:Cargo.toml HEAD:Cargo.lock HEAD:.cargo/mutants.toml HEAD:.config/nextest.toml HEAD:rust-toolchain.toml)
+          echo "$inputs"
+          echo "key=core-mutants-ok-$(echo "$inputs" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the last-green marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.marker.outputs.cache-hit != 'true'
+        with:
+          # Same discipline as the sibling legs: tag legs build fresh, only
+          # master runs save.
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install mutation tools
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutants (0 missed, this shard)
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: cargo mutants --in-place --no-shuffle --shard ${{ matrix.shard }}/8
+
+  # The marker fan-in: runs only when every shard succeeded (default `needs`
+  # semantics), so the one saved marker attests the WHOLE root workspace
+  # passed. Probes first: on a marker hit the shards all short-circuited and
+  # the key already exists — saving it again would only warn.
+  core-mutants-ok:
+    name: core full mutants marker
+    needs: [core-mutants]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe for an existing marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ needs.core-mutants.outputs.key }}
+          lookup-only: true
+
+      - name: Write the marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: echo ok > .mutants-ok
+
+      - name: Save the marker (all shards green)
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ needs.core-mutants.outputs.key }}
 
   # Full Tier-A mutation over the GUI crate, 0 missed. --in-place because a
   # temp copy would not carry the ../bdinfo-rs-core path dep; reads the
@@ -174,7 +274,7 @@ jobs:
   # watching them.
   report:
     name: rolling failure issue
-    needs: [orchestrator, gui-mutants, wasm-mutants]
+    needs: [orchestrator, core-mutants, core-mutants-ok, gui-mutants, wasm-mutants]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

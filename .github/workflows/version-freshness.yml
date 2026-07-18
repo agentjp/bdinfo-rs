@@ -8,6 +8,12 @@ name: version-freshness
 #     rest),
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
+#   - the four action SHAs in dist-workspace.toml `[dist.github-action-commits]`
+#     (checkout, upload-/download-artifact, attest) — the SOURCE dist generates
+#     v-release.yml from, invisible to Dependabot (it bumps the GENERATED file,
+#     which then fails `dist generate --check`) — cross-checked against the
+#     hand-maintained workflows' pins for the same actions so the drift becomes
+#     a scheduled nag instead of a red X on an unrelated Dependabot PR,
 #   - cargo-vet (the `--version` pin in ci.yml's vet job),
 #   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
 #   - taplo (the `tool: taplo-cli@X` pin in ci.yml's TOML job — a formatter, pinned like
@@ -36,9 +42,12 @@ name: version-freshness
 #   - cargo-deb + cargo-generate-rpm (the `cargo-deb@X` / `cargo-generate-rpm@X` pins
 #     in build-linux-packages.sh — the .deb/.rpm packagers are compiled from source
 #     INSIDE dist's fail-fast release, so they are version-pinned there so a broken
-#     upstream release can't abort the whole release; both checked vs crates.io), and
+#     upstream release can't abort the whole release; both checked vs crates.io, and
+#     both cross-checked against the second copy in ci.yml's pkg job, which must
+#     stay EQUAL so the PR smoke test packages with the exact release tools), and
 #     cloudsmith-cli (the `cloudsmith-cli==X` pipx pin in packages.yml — a pip pin
-#     invisible to Dependabot's cargo/npm/actions scans; checked vs PyPI),
+#     invisible to Dependabot's cargo/npm/actions scans; pinned once per push job,
+#     every occurrence checked to agree, then vs PyPI),
 # (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
 # binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
@@ -94,6 +103,32 @@ jobs:
           function Read-Pin($path, $regex) {
             foreach ($line in (Get-Content $path)) {
               if ($line -match $regex) { return $Matches[1] }
+            }
+            return $null
+          }
+
+          # EVERY pin matched by $regex (group 1, one per line) in $path, in file
+          # order — for a pin that exists more than once in one file and must
+          # agree with itself (Read-Pin sees only the first occurrence).
+          function Read-AllPins($path, $regex) {
+            $found = @()
+            foreach ($line in (Get-Content $path)) {
+              if ($line -match $regex) { $found += $Matches[1] }
+            }
+            return , $found
+          }
+
+          # A SHA-pinned action reference (`<sha> # <tag>`), normalized, from a
+          # workflow (`uses: $action@<sha> # <tag>`) or from dist-workspace.toml's
+          # [dist.github-action-commits] (`"$action" = "<sha> # <tag>"`); $null if
+          # absent. Normalizing to one string compares SHA and tag comment
+          # together — Dependabot always moves both, so both must agree.
+          function Read-ActionPin($path, $action) {
+            $esc = [regex]::Escape($action)
+            foreach ($line in (Get-Content $path)) {
+              if ($line -match "$esc(@|`"\s*=\s*`")([0-9a-f]{40})\s*#\s*([^\s`"]+)") {
+                return "$($Matches[2]) # $($Matches[3])"
+              }
             }
             return $null
           }
@@ -200,6 +235,36 @@ jobs:
             Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
           }
 
+          # --- dist [dist.github-action-commits]: TOML pins vs the workflows -----
+          # The four action SHAs in dist-workspace.toml are the SOURCE dist
+          # generates v-release.yml from, and Dependabot cannot see the TOML: its
+          # bump of the same action in the workflows (generated v-release.yml
+          # included) leaves the TOML behind, caught today only as a red
+          # `dist generate --check` on that Dependabot PR. Cross-check each TOML
+          # pin against a hand-maintained workflow using the same action (one
+          # canonical file per action — checkout is everywhere so ci.yml is
+          # canonical; upload-/download-artifact live in gui.yml, attest in
+          # docker.yml; the github-actions Dependabot group bumps all
+          # hand-maintained workflows together, so any one file represents the
+          # fleet). A drift line here turns the red-X surprise into a scheduled
+          # nag; the fix is unchanged (scripts/dist-sync.ps1 / dist generate).
+          $distActionSources = [ordered]@{
+            'actions/checkout'          = '.github/workflows/ci.yml'
+            'actions/upload-artifact'   = '.github/workflows/gui.yml'
+            'actions/download-artifact' = '.github/workflows/gui.yml'
+            'actions/attest'            = '.github/workflows/docker.yml'
+          }
+          foreach ($action in $distActionSources.Keys) {
+            $wf = $distActionSources[$action]
+            $tomlPin = Read-ActionPin 'dist-workspace.toml' $action
+            $wfPin = Read-ActionPin $wf $action
+            if (-not $tomlPin) { throw "No $action pin in dist-workspace.toml [dist.github-action-commits]" }
+            if (-not $wfPin) { throw "No $action pin in $wf" }
+            if ($tomlPin -ne $wfPin) {
+              Add-Problem "$action dist pin drifted" "- dist-workspace.toml ``[dist.github-action-commits]`` pins ``$action`` at ``$tomlPin`` but $wf uses ``$wfPin`` — set the TOML pin to the workflow's value and re-run ``dist generate`` (scripts/dist-sync.ps1)"
+            }
+          }
+
           # --- cargo-vet: ci.yml vs mozilla/cargo-vet --------------------------
           $vetPin = Read-Pin '.github/workflows/ci.yml' 'cargo-vet --version ([0-9.]+)'
           if (-not $vetPin) { throw 'No cargo-vet --version pin in ci.yml' }
@@ -267,6 +332,23 @@ jobs:
             Add-Problem 'cargo-generate-rpm (query failed)' '- could not query the latest cargo-generate-rpm release (crates.io)'
           } elseif ([version]$cargoRpmLatest -gt [version]$cargoRpmPin) {
             Add-Problem "cargo-generate-rpm $cargoRpmPin->$cargoRpmLatest" "- cargo-generate-rpm pin ``$cargoRpmPin`` (build-linux-packages.sh) is behind the latest release ``$cargoRpmLatest``"
+          }
+          # Both pins exist a SECOND time in ci.yml's pkg job (`tool:
+          # cargo-deb@…,cargo-generate-rpm@…`) — deliberately equal so the PR
+          # smoke test packages with the exact release tools (the script's
+          # already-on-PATH guard then skips its source compile). A one-sided
+          # bump silently de-syncs the smoke test from the release path, so
+          # cross-check agreement like the NIGHTLY pins; freshness of the value
+          # itself is already covered above.
+          $cargoDebCi = Read-Pin '.github/workflows/ci.yml' 'cargo-deb@([0-9.]+)'
+          $cargoRpmCi = Read-Pin '.github/workflows/ci.yml' 'cargo-generate-rpm@([0-9.]+)'
+          if (-not $cargoDebCi) { throw 'No cargo-deb@<version> pin in ci.yml (pkg job)' }
+          if (-not $cargoRpmCi) { throw 'No cargo-generate-rpm@<version> pin in ci.yml (pkg job)' }
+          if ($cargoDebCi -ne $cargoDebPin) {
+            Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but ci.yml's pkg job installs ``$cargoDebCi`` — they must be identical (the smoke test must use the exact release tools)"
+          }
+          if ($cargoRpmCi -ne $cargoRpmPin) {
+            Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but ci.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
           }
 
           # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
@@ -423,9 +505,16 @@ jobs:
           # The deb/rpm jobs push to Cloudsmith with a pinned `cloudsmith-cli==X`
           # (pipx). A pip pin invisible to Dependabot's cargo/npm/actions scans, so a
           # server-side API change could break the frozen client silently; nag here
-          # like the other hand-bumped tools when a newer client ships.
-          $cloudsmithPin = Read-Pin '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
-          if (-not $cloudsmithPin) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
+          # like the other hand-bumped tools when a newer client ships. The pin
+          # occurs once PER PUSH JOB (.deb and .rpm), so read every occurrence and
+          # assert they agree — the first-match-only read used to validate one job
+          # while the other could drift — then run freshness on the agreed value.
+          $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
+          if (-not $cloudsmithPins.Count) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
+          $cloudsmithPin = $cloudsmithPins[0]
+          if (@($cloudsmithPins | Sort-Object -Unique).Count -gt 1) {
+            Add-Problem 'cloudsmith-cli pins disagree' "- cloudsmith-cli pin mismatch inside packages.yml: ``$($cloudsmithPins -join '` / `')`` — the .deb and .rpm push jobs must pin the same version"
+          }
           $cloudsmithLatest = Latest-PyPI 'cloudsmith-cli'
           if (-not $cloudsmithLatest) {
             Add-Problem 'cloudsmith-cli (query failed)' '- could not query the latest cloudsmith-cli release (PyPI)'

@@ -3,7 +3,7 @@
 # runs them in sequence (cargo aliases can't shell-chain, so the script does).
 #
 # Core gate (fast, run every edit):  ck nt lt ft dc mc dn cov
-# Periodic (slow, pre-release):       mt (mutants), sh (shear), vt (vet) + geiger
+# Periodic (slow, on demand):         mt (mutants), sh (shear), vt (vet) + geiger
 # (geiger has no alias — it needs a per-crate absolute --manifest-path that an
 #  alias can't carry; scripts/compliance.ps1 -Full runs it as an advisory step.)
 #
@@ -45,9 +45,10 @@ dn = "deny check"
 # which can't carry `+toolchain` — can't express it).
 cov = "llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100"
 
-# --- Periodic / pre-release (installed by setup.ps1) -----------------------
+# --- Periodic / on demand (installed by setup.ps1) -------------------------
 # Mutation testing — validates the SUITE, not the code. Strict+speed policy in
-# .cargo/mutants.toml. Slow: run pre-release or with --in-diff for a PR.
+# .cargo/mutants.toml. Slow: use --in-diff for a change slice; the
+# authoritative full sweep runs in CI (sweep.yml, daily + release tags).
 mt = "mutants"
 # Unused-dependency sweep, AST-based (complementary to machete).
 sh = "shear --locked --deny-warnings --check-test-targets"
