@@ -2,6 +2,13 @@ name: gui
 
 # The PROPORTIONATE Posture-C gate for the native desktop GUI
 # (crates/bdinfo-rs-gui), mirrored 1:1 by the local scripts/gui-compliance.ps1.
+# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the `gui`
+# area (a crate-dir change, or a core change via the encoded path-dep edge —
+# root-Cargo.lock-only bumps excluded), and the daily sweep re-runs it ungated
+# through the same orchestrator. This file carries no triggers or concurrency
+# of its own — both are the caller's — so it can never fire on its own and
+# never needs a paths filter.
+#
 # Tier A — the crate's LIBRARY (flow / model / selection / panes / progress /
 # paths / clipboard / columns / settings / theme / icon / winres / scan) — is held to the
 # core bar: clippy -D warnings, llvm-cov 100% lines/regions/functions,
@@ -11,46 +18,30 @@ name: gui
 # the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, and
 # the headless launch smoke below.
 #
+# The Tier-A mutation bar is NOT enforced here: the full-crate sweep (~50 min)
+# was rescheduled off the PR path (D1) into sweep.yml, which runs it daily —
+# only when the crate tree changed since the last green sweep — and on release
+# tags, the authoritative 0-missed checkpoints. The PR path gets the advisory
+# in-diff mutants job in ci.yml (`gui mutation testing (PR diff)`) instead.
+#
 # Job shape — the repo's standing pattern (same reasoning as the core/CLI in
 # ci.yml): arch bugs live in build + test, which runs on all six shipped
-# arches; coverage/mutants measure test quality of platform-independent logic,
-# so once (ubuntu) is the signal. The snapshot-hash ties run per-arch as an
-# initially-ADVISORY step (mismatches upload the rendered PNGs as artifacts,
-# the step does not fail — yet): pure-CPU tiny-skia rendering with bundled
-# fonts is byte-identical across OSes in iced's own CI, but this repo promotes
-# the hashes to a hard per-arch gate only after its own 6-arch PR runs prove
-# that holds here too. The text-report goldens stay HARD everywhere —
-# byte-exactness lives on the report, not the pixels.
+# arches; coverage measures test quality of platform-independent logic, so
+# once (ubuntu) is the signal. The snapshot-hash ties are a hard per-arch
+# gate: the first 6-arch runs proved tiny-skia renders byte-identically per OS
+# family, pinned in snapshots/{windows,unix}/. The text-report goldens stay
+# HARD everywhere — byte-exactness lives on the report, not the pixels.
 #
-# REQUIRED-CHECK CONTEXTS (added to branch protection at merge time, NOT now —
-# the additive-POST procedure is in CLAUDE.md; contexts match the job `name:`
-# strings verbatim, so renaming a job silently un-gates it):
-#   gui build + test (ubuntu-latest)
-#   gui build + test (ubuntu-24.04-arm)
-#   gui build + test (windows-2025)
-#   gui build + test (windows-11-arm)
-#   gui build + test (macos-15-intel)
-#   gui build + test (macos-15)
-#   gui checks (lint + coverage + mutants + deny)
-#   gui msrv
-#   gui smoke (ubuntu-latest)
-#   gui smoke (windows-2025)
-# The other smoke legs stay soft (continue-on-error) — the arm pair until the
-# unproven hosted-runner recipes accumulate a green streak, macOS structurally
-# (paravirtual Metal, no software fallback) — because a required check that
-# flakes blocks every PR.
+# Check contexts: these jobs render as `gui / gui build + test (…)` etc. and
+# were never individually required; they gate merges through ci.yml's `ci-ok`
+# fan-in (a red here reddens ci-ok). The staged plan to add 10 gui contexts to
+# branch protection at merge time is superseded by the ci-ok swap.
 
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: gui-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + ci.yml (cross-checked by version-freshness.yml)
@@ -84,6 +75,10 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          # Cache write-discipline (wgpu): PR-branch saves are invisible to
+          # every other PR, so only master runs (pushes + the daily sweep)
+          # save; PRs restore the master-seeded cache.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
@@ -159,10 +154,11 @@ jobs:
           if-no-files-found: ignore
 
   # The once-is-the-signal tier: the tripwires and lints, the crate-local
-  # supply-chain audit, Tier-A coverage at the 100% floor, and Tier-A mutation
-  # at 0 missed — platform-independent measurements, run on one runner.
+  # supply-chain audit, and Tier-A coverage at the 100% floor —
+  # platform-independent measurements, run on one runner. (Tier-A mutation
+  # moved to sweep.yml + the release-tag leg; see the header.)
   checks:
-    name: gui checks (lint + coverage + mutants + deny)
+    name: gui checks (lint + coverage + deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -175,11 +171,12 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: Install the Rust gate tools (llvm-cov / nextest / mutants / machete / shear / deny / typos)
+      - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
         uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
         with:
-          tool: cargo-llvm-cov,cargo-nextest,cargo-mutants,cargo-machete,cargo-shear,cargo-deny,typos-cli
+          tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
 
       # The no-C tripwire (cargo tree over the 6 shipped targets: GTK/C bans,
       # the -sys/-dl allowlist, verified-inert cc/pkg-config wrappers, and the
@@ -250,46 +247,6 @@ jobs:
           }
           if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
 
-      # Tier-A mutation, 0 missed. --in-place because the temp copy would not
-      # carry the ../bdinfo-rs-core path dep (the same reason the wasm gate
-      # uses it); reads the crate-local .cargo/mutants.toml Tier-B exclusions.
-      # The snapshot ties participate (per-OS-family pins make them green on
-      # this runner), keeping their mutant kill power in CI as locally.
-      #
-      # The sweep verifies the SUITE against the crate SOURCE, and both are
-      # captured exactly by the crate's git tree hash (the crate dir includes
-      # its lockfile and .cargo/mutants.toml) plus the toolchain file — so a
-      # marker hit means this byte-identical gui tree already passed a full
-      # sweep on an earlier run, and re-running it (~90 min) would re-verify
-      # unchanged inputs (e.g. a workflow-only push). The marker is saved only
-      # after a green sweep (implicit success() on the save steps' `if:`).
-      - name: Compute the full-mutants marker key (gui tree hash)
-        id: mutants-key
-        run: echo "key=gui-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-gui)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the full-mutants marker
-        id: mutants-marker
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .mutants-ok
-          key: ${{ steps.mutants-key.outputs.key }}
-
-      - name: Mutants (Tier A 0 missed)
-        if: steps.mutants-marker.outputs.cache-hit != 'true'
-        working-directory: crates/bdinfo-rs-gui
-        run: cargo mutants --in-place
-
-      - name: Write the full-mutants marker
-        if: steps.mutants-marker.outputs.cache-hit != 'true'
-        run: echo ok > .mutants-ok
-
-      - name: Save the full-mutants marker
-        if: steps.mutants-marker.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .mutants-ok
-          key: ${{ steps.mutants-key.outputs.key }}
-
   # The declared MSRV is enforced, not decorative: build with exactly the
   # rust-version toolchain from Cargo.toml, read from the manifest at run time
   # so an MSRV bump touches Cargo.toml ONLY (no version literals here to drift;
@@ -321,6 +278,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Build with the declared rust-version
         working-directory: crates/bdinfo-rs-gui
@@ -369,6 +327,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the virtual display + software Vulkan (Linux)
         if: runner.os == 'Linux'

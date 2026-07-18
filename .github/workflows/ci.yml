@@ -487,6 +487,88 @@ jobs:
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           cargo mutants --no-shuffle --in-diff pr.diff
 
+  # Advisory in-diff mutation over the GUI crate on the PR path (D1): mirrors
+  # the local `gui-compliance.ps1 -InDiff` dev loop — the diff is taken
+  # --relative from inside the crate so its paths match cargo-mutants' working
+  # directory, and --in-place because a temp copy would not carry the
+  # ../bdinfo-rs-core path dep. When the `gui` area fired via the core edge
+  # only, the crate's own diff is empty and there is nothing to mutate. Same
+  # ADVISORY posture and false-TIMEOUT rationale as `mutants` above: not
+  # required, not in ci-ok's needs. The authoritative full-crate 0-missed bar
+  # lives in sweep.yml (daily when the crate changed + release tags).
+  gui-mutants:
+    name: gui mutation testing (PR diff)
+    needs: plan
+    if: github.event_name == 'pull_request' && needs.plan.outputs.gui == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # The suite the mutants face includes the iced_test snapshot ties; the
+      # deterministic software backend is what makes them run on a GPU-less
+      # runner at all (same as gui.yml).
+      ICED_TEST_BACKEND: tiny-skia
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0   # need the base branch to diff the PR against
+          persist-credentials: false
+
+      # Default save-if: PR-only job, so a master-gated save would never write;
+      # its own PR-scoped save speeds the next push to the same PR.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+
+      - name: Install mutation tools
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutate the crate's PR diff
+        working-directory: crates/bdinfo-rs-gui
+        run: |
+          git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
+          if [ ! -s "$RUNNER_TEMP/crate.diff" ]; then
+            echo "no gui-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
+            exit 0
+          fi
+          cargo mutants --in-place --no-shuffle --in-diff "$RUNNER_TEMP/crate.diff"
+
+  # The wasm twin of gui-mutants: advisory in-diff mutation over the wasm
+  # crate's own PR diff (--relative + --in-place for the same path-dep reason;
+  # the crate-local .cargo/mutants.toml carries the Tier-B cfg(wasm32)
+  # exclusions). Not required, not in ci-ok's needs; the full-crate bar lives
+  # in sweep.yml.
+  wasm-mutants:
+    name: wasm mutation testing (PR diff)
+    needs: plan
+    if: github.event_name == 'pull_request' && needs.plan.outputs.wasm == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0   # need the base branch to diff the PR against
+          persist-credentials: false
+
+      # Default save-if: PR-only job (see gui-mutants).
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-wasm
+
+      - name: Install mutation tools
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutate the crate's PR diff
+        working-directory: crates/bdinfo-rs-wasm
+        run: |
+          git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
+          if [ ! -s "$RUNNER_TEMP/crate.diff" ]; then
+            echo "no wasm-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
+            exit 0
+          fi
+          cargo mutants --in-place --no-shuffle --in-diff "$RUNNER_TEMP/crate.diff"
+
   # The ultimate real-world gate: do exactly what a user does — install bdinfo-rs
   # the traditional way (build it from source; no package managers), scan the
   # committed fixture disc, and confirm the report is byte-identical to the golden.
@@ -992,6 +1074,47 @@ jobs:
           echo "$rpmc" | grep -qE '/usr/share/man/man1/bdinfo-rs\.1' || { echo "MISSING in .rpm: man page"; exit 1; }
           echo "aarch64 .rpm OK"
 
+  # The sibling-crate gates, invoked as workflow_call reusables so their job
+  # content stays with their crates while the plan gates them here. Their
+  # check-runs render prefixed (`gui / gui build + test (…)`,
+  # `wasm / wasm gate (…)`); a red anywhere inside reddens the caller job and
+  # therefore ci-ok. When the area is skipped, the single caller job reports
+  # `skipped` — the inner jobs never appear, which is why the one required
+  # context among them needs the alias job below.
+  gui:
+    name: gui
+    needs: plan
+    if: needs.plan.outputs.gui == 'true'
+    uses: ./.github/workflows/gui.yml
+
+  wasm:
+    name: wasm
+    needs: plan
+    if: needs.plan.outputs.wasm == 'true'
+    uses: ./.github/workflows/wasm.yml
+
+  # TRANSITIONAL alias for branch protection: `wasm gate (build + size +
+  # parity)` is a LIVE required context, but the job that used to report it
+  # now runs inside the wasm reusable, where its check-run renders as
+  # `wasm / wasm gate (build + size + parity)` — a different string that would
+  # leave the required check "Expected" forever. This thin job keeps the exact
+  # old string reporting: success when the gate passed OR the wasm area was
+  # skipped (the same semantics an `if:`-skipped required job has), failure
+  # when the gate failed. Delete it in session 3, when branch protection swaps
+  # to ci-ok.
+  wasm-required:
+    name: wasm gate (build + size + parity)
+    needs: [wasm]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror the wasm reusable's result
+        env:
+          RESULT: ${{ needs.wasm.result }}
+        run: |
+          echo "wasm gate result: $RESULT"
+          [ "$RESULT" = "success" ] || [ "$RESULT" = "skipped" ]
+
   # The fan-in: the ONE result branch protection will require (session 3 of the
   # CI overhaul swaps the 28 name-matched contexts for this job + the three
   # standalone checks). Green = every gate job either succeeded or was skipped
@@ -1002,13 +1125,13 @@ jobs:
   # ALL THE PREVIOUS JOBS NEED TO BE ADDED TO THE `needs` SECTION OF THIS JOB!
   # (cargo's warning, kept verbatim: a job missing from `needs` silently stops
   # gating merges.) The deliberate exceptions are the ADVISORY mutation jobs
-  # (`mutants` — see its header: false-TIMEOUTs on 4-core runners must not
-  # block unrelated PRs), which stay visible on the PR but do not gate.
-  # `!cancelled()` rather than `always()`: a manually-cancelled run must not
-  # end green.
+  # (`mutants`, `gui-mutants`, `wasm-mutants` — see their headers:
+  # false-TIMEOUTs on 4-core runners must not block unrelated PRs), which stay
+  # visible on the PR but do not gate. `!cancelled()` rather than `always()`:
+  # a manually-cancelled run must not end green.
   ci-ok:
     name: ci-ok
-    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, links, deny, vet, replay, pkg]
+    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, links, deny, vet, replay, pkg, gui, wasm, wasm-required]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
