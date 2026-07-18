@@ -68,6 +68,22 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
+    [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint p, ref RECT r, uint ini);
+    // Move the window to the work-area top-left and clamp its height to fit,
+    // keeping the width (already 880 logical). Hosted runner displays are
+    // small (1024x768 with a 48 px taskbar): the default 960-tall window
+    // hangs off-screen there and SetCursorPos clamps, so bottom-bar clicks
+    // land on the taskbar instead of the app. The walk's y coordinates
+    // derive from the measured client height, so a shorter window is fine
+    // (the macOS leg already walks at 681).
+    public static bool FitToWork(IntPtr h) {
+        RECT wa = new RECT();
+        if (!SystemParametersInfo(0x30, 0, ref wa, 0)) return false; // SPI_GETWORKAREA
+        RECT w; GetWindowRect(h, out w);
+        int width = w.Right - w.Left;
+        int height = System.Math.Min(w.Bottom - w.Top, wa.Bottom - wa.Top);
+        return SetWindowPos(h, IntPtr.Zero, wa.Left, wa.Top, width, height, 0x0014); // SWP_NOZORDER | SWP_NOACTIVATE
+    }
     // The desktop composition — every visible top-level with its rect and
     // topmost flag, so a failing run documents exactly what shares the
     // runner desktop with the app instead of leaving it to guesswork.
@@ -196,6 +212,8 @@ for ($i = 0; $i -lt 60; $i++) {
 if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
 Write-Host '==> desktop composition before the walk:'
 [GuiInput]::DumpDesktop() | ForEach-Object { Write-Host "    $_" }
+if (-not [GuiInput]::FitToWork($hwnd)) { Write-Host '!! FitToWork failed' }
+Start-Sleep -Milliseconds 800 # let the resize lay out before measuring
 $minimized = [GuiInput]::MinimizeOthers($hwnd)
 Write-Host "==> minimized $minimized other top-level window(s) (runner provisioner etc.)"
 # Belt and braces: some overlays (UWP input hosts) refuse SW_MINIMIZE and
