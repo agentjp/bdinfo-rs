@@ -50,7 +50,7 @@ iced = { version = "0.14", features = ["tokio"] }
 # `xdg-portal` needs one async runtime to drive ashpd: `tokio` (pure Rust,
 # maintained), not the default `async-std` (deprecated upstream) — without one
 # the Linux target does not compile at all (Halloy ships this exact pair).
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.16", default-features = false, features = ["xdg-portal", "tokio"] }
 # The `log` FACADE only (pure Rust, ~no code): the iced/wgpu/rfd tree already
 # routes its diagnostics through it — iced_wgpu logs the selected adapter, rfd
 # logs the portal errors it swallows — so it was in this lockfile long before
