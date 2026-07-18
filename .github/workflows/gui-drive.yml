@@ -82,6 +82,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick
 
+      # Pre-authorize screen capture so the TCC consent dialog ("bash is
+      # requesting to bypass the system private window picker") never spawns
+      # over the window mid-gallery. Hosted macOS runners ship with SIP
+      # disabled, which is what makes the direct TCC.db grant possible; the
+      # capture itself works either way (the dialog is cosmetic pollution),
+      # so a schema mismatch on a future image just logs and moves on.
+      - name: Pre-authorize screen capture (macOS TCC)
+        if: runner.os == 'macOS'
+        run: |
+          for client in /bin/bash /bin/zsh "$(command -v pwsh || true)"; do
+            [ -n "$client" ] || continue
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$client', 1, 2, 4, 1, 'UNUSED', 0, $(date +%s));" \
+              && echo "granted: $client" || echo "TCC grant failed for $client (schema drift?) — the consent dialog may appear in shots"
+          done
+
       - name: Build (debug — the drive seam is debug-only)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --locked
@@ -154,6 +170,17 @@ jobs:
       - name: Install cliclick (macOS synthetic clicks)
         if: runner.os == 'macOS'
         run: brew install cliclick
+
+      # Same TCC pre-grant as the assisted job — see the comment there.
+      - name: Pre-authorize screen capture (macOS TCC)
+        if: runner.os == 'macOS'
+        run: |
+          for client in /bin/bash /bin/zsh "$(command -v pwsh || true)"; do
+            [ -n "$client" ] || continue
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '$client', 1, 2, 4, 1, 'UNUSED', 0, $(date +%s));" \
+              && echo "granted: $client" || echo "TCC grant failed for $client (schema drift?) — the consent dialog may appear in shots"
+          done
 
       - name: Build (debug — the env hooks are debug-only)
         working-directory: crates/bdinfo-rs-gui
