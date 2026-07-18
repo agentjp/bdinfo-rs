@@ -94,6 +94,7 @@ fn main() -> iced::Result {
         None => log::info!("config: no base directory resolved; running without persistence"),
     }
     let persisted = config.as_deref().map_or_else(settings::Settings::default, settings::load_from);
+    let persisted = debug_window_override(persisted);
     let window = window_settings(&persisted);
     let result =
         iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
@@ -290,6 +291,41 @@ fn debug_worker_panic() {
         std::env::var_os("BDINFO_GUI_PANIC").is_none(),
         "BDINFO_GUI_PANIC: forced worker panic"
     );
+}
+
+/// Release: the persisted geometry boots untouched — no environment hooks.
+#[cfg(not(debug_assertions))]
+const fn debug_window_override(persisted: settings::Settings) -> settings::Settings {
+    persisted
+}
+
+/// Debug only: `BDINFO_GUI_WIN=<W>x<H>[+<X>+<Y>]` (logical pixels) pins the
+/// boot geometry through the normal launch path — the same seam the persisted
+/// settings ride, so winit itself creates the window at that size. The CI
+/// driving harnesses need it: hosted runner displays are small (1024x768 with
+/// a taskbar), the default 960-tall window hangs off-screen there, and
+/// resizing from OUTSIDE the process proved unreliable on those desktops.
+/// Malformed specs are ignored; [`settings::launch_size`] still clamps to the
+/// window minimum. Compiled out of every release build.
+#[cfg(debug_assertions)]
+fn debug_window_override(mut persisted: settings::Settings) -> settings::Settings {
+    if let Ok(spec) = std::env::var("BDINFO_GUI_WIN") {
+        let (size, pos) = spec
+            .split_once('+')
+            .map_or((spec.as_str(), None), |(size, rest)| (size, rest.split_once('+')));
+        if let Some((w, h)) = size.split_once('x')
+            && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
+        {
+            persisted.window_size = Some((w, h));
+            persisted.window_maximized = false;
+        }
+        if let Some((x, y)) = pos
+            && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
+        {
+            persisted.window_pos = Some((x, y));
+        }
+    }
+    persisted
 }
 
 /// Debug only: the marker directory of the scripted walk (`BDINFO_GUI_DRIVE`),

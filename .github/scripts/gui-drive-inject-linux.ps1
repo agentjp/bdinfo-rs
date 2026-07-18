@@ -27,6 +27,9 @@ $env:BDINFO_GUI_OPEN = (Resolve-Path $Disc).Path
 $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
+# Boot geometry through the app's own seam (same shape as the Windows leg —
+# one coordinate table across all legs; the y coords derive from the height).
+$env:BDINFO_GUI_WIN = '880x640+0+0'
 
 Write-Host "==> launch $Exe (DISPLAY=$env:DISPLAY)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru

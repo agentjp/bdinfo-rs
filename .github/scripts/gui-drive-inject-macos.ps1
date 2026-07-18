@@ -25,6 +25,9 @@ $env:BDINFO_GUI_OPEN = (Resolve-Path $Disc).Path
 $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
+# Boot geometry through the app's own seam: 640 tall fits the paravirtual
+# display without the OS clamping (the System Events readout still rules).
+$env:BDINFO_GUI_WIN = '880x640'
 
 Write-Host "==> launch $Exe"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru

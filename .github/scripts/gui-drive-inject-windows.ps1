@@ -52,7 +52,6 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
-    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int ht, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder sb, int max);
     // The top-level window that would receive a click at (x, y).
     public static IntPtr RootAt(int x, int y) {
@@ -68,21 +67,19 @@ public static class GuiInput {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int idx);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public static uint PidOf(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
-    [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint p, ref RECT r, uint ini);
-    // Move the window to the work-area top-left and clamp its height to fit,
-    // keeping the width (already 880 logical). Hosted runner displays are
-    // small (1024x768 with a 48 px taskbar): the default 960-tall window
-    // hangs off-screen there and SetCursorPos clamps, so bottom-bar clicks
-    // land on the taskbar instead of the app. The walk's y coordinates
-    // derive from the measured client height, so a shorter window is fine
-    // (the macOS leg already walks at 681).
-    public static bool FitToWork(IntPtr h) {
-        RECT wa = new RECT();
-        if (!SystemParametersInfo(0x30, 0, ref wa, 0)) return false; // SPI_GETWORKAREA
-        RECT w; GetWindowRect(h, out w);
-        int width = w.Right - w.Left;
-        int height = System.Math.Min(w.Bottom - w.Top, wa.Bottom - wa.Top);
-        return SetWindowPos(h, IntPtr.Zero, wa.Left, wa.Top, width, height, 0x0014); // SWP_NOZORDER | SWP_NOACTIVATE
+    // Every visible top-level except `keep`, as "pid|class|title" — the
+    // up-front desktop cleanup resolves each to its process and decides.
+    public static string[] Others(IntPtr keep) {
+        var list = new System.Collections.Generic.List<string>();
+        EnumWindows((h, l) => {
+            if (h == keep || !IsWindowVisible(h)) return true;
+            var t = new System.Text.StringBuilder(256); GetWindowText(h, t, 256);
+            var c = new System.Text.StringBuilder(256); GetClassName(h, c, 256);
+            uint pid; GetWindowThreadProcessId(h, out pid);
+            list.Add(pid + "|" + c + "|" + t);
+            return true;
+        }, IntPtr.Zero);
+        return list.ToArray();
     }
     // The desktop composition — every visible top-level with its rect and
     // topmost flag, so a failing run documents exactly what shares the
@@ -99,11 +96,6 @@ public static class GuiInput {
         return list.ToArray();
     }
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-    // Pin the app above everything non-topmost, without moving or activating
-    // it (HWND_TOPMOST; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE).
-    public static bool MakeTopmost(IntPtr h) {
-        return SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0013);
-    }
     // The real app window: owned by the pid, visible, titled "bdinfo-rs…".
     // Process.MainWindowHandle is NOT that — winit also creates hidden
     // zero-sized top-level helpers and MainWindowHandle can pick one.
@@ -149,6 +141,10 @@ public static class GuiInput {
         AttachThreadInput(cur, fgThread, false);
         return GetForegroundWindow() == h;
     }
+    // (SetWindowPos-based fit/topmost helpers were tried and removed: the
+    // runner desktop ignored out-of-band resizes and UWP immersive windows
+    // outrank HWND_TOPMOST — the app now boots CI-sized via BDINFO_GUI_WIN
+    // and the cleanup above kills the immersive nags at the process level.)
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
@@ -172,6 +168,15 @@ public static class GuiInput {
 "@
 [void][GuiInput]::SetProcessDPIAware()
 
+# Hosted images default the virtual display to 1024x768. Set-DisplayResolution
+# exists on the Server images (windows-2025) only — best effort, logged; the
+# BDINFO_GUI_WIN boot geometry below fits the window at ANY resolution.
+try {
+    Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop
+    Write-Host '==> display set to 1920x1080'
+}
+catch { Write-Host "==> Set-DisplayResolution unavailable ($($_.Exception.Message.Trim())) — staying at the image default" }
+
 $tempBase = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
 $configDir = Join-Path $tempBase "gui-inject-config-$PID"
 Remove-Item -Recurse -Force $configDir -ErrorAction SilentlyContinue
@@ -181,6 +186,10 @@ $env:BDINFO_GUI_OPEN = (Resolve-Path $Disc).Path
 $env:BDINFO_GUI_THEME = 'dark'
 $env:BDINFO_GUI_SCAN_DELAY = "$ScanDelayMs"
 $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
+# Boot geometry through the app's own seam: 880x640 logical at the origin
+# fits the smallest runner work area (768 - 48 taskbar), so no bottom-bar
+# click can ever land off-screen or on the taskbar.
+$env:BDINFO_GUI_WIN = '880x640+0+0'
 
 Write-Host "==> launch $Exe"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
@@ -212,13 +221,33 @@ for ($i = 0; $i -lt 60; $i++) {
 if ($rect.Right -lt 600 -or $rect.Bottom -lt 400) { throw "client rect never settled ($($rect.Right)x$($rect.Bottom))" }
 Write-Host '==> desktop composition before the walk:'
 [GuiInput]::DumpDesktop() | ForEach-Object { Write-Host "    $_" }
-if (-not [GuiInput]::FitToWork($hwnd)) { Write-Host '!! FitToWork failed' }
-Start-Sleep -Milliseconds 800 # let the resize lay out before measuring
+
+# Up-front desktop cleanup, the surefire way: resolve every other visible
+# top-level to its owning PROCESS and kill the strangers (the image ships an
+# OOBE "Microsoft account" nag, a stray "System Properties" dialog, …). Shell
+# furniture is skipped by window class; runner-critical processes by name —
+# killing the agent's own console host would kill the job. Verified by a
+# re-dump below; the click-time hit-test stays as the last net.
+$benignClass = 'Progman', 'WorkerW', 'Shell_TrayWnd', 'DummyDWMListenerWindow',
+'EdgeUiInputTopWndClass', 'Winit Thread Event Target', 'PseudoConsoleWindow', 'Button'
+$protectedProc = 'explorer', 'conhost', 'OpenConsole', 'WindowsTerminal', 'cmd', 'dwm',
+'pwsh', 'powershell', 'Runner.Worker', 'Runner.Listener', 'hosted-compute-agent', 'node',
+'sihost', 'taskhostw'
+foreach ($entry in [GuiInput]::Others($hwnd)) {
+    $bpid, $class, $title = $entry -split '\|', 3
+    if ($benignClass -contains $class) { continue }
+    $name = (Get-Process -Id ([int]$bpid) -ErrorAction SilentlyContinue).ProcessName
+    if (-not $name -or $protectedProc -contains $name) {
+        Write-Host "    keeping $name (pid $bpid, $class '$title')"
+        continue
+    }
+    Write-Host "    killing $name (pid $bpid, $class '$title')"
+    Stop-Process -Id ([int]$bpid) -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 700
 $minimized = [GuiInput]::MinimizeOthers($hwnd)
-Write-Host "==> minimized $minimized other top-level window(s) (runner provisioner etc.)"
-# Belt and braces: some overlays (UWP input hosts) refuse SW_MINIMIZE and
-# still hit-test above a normal window — pin the app topmost instead.
-if (-not [GuiInput]::MakeTopmost($hwnd)) { Write-Host '!! SetWindowPos(HWND_TOPMOST) failed' }
+Write-Host "==> minimized $minimized surviving titled window(s); desktop after cleanup:"
+[GuiInput]::DumpDesktop() | ForEach-Object { Write-Host "    $_" }
 
 $origin = New-Object GuiInput+POINT
 [void][GuiInput]::ClientToScreen($hwnd, [ref]$origin)
