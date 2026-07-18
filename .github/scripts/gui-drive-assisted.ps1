@@ -179,16 +179,22 @@ if ($IsLinux) {
     if ($xwid) { Write-Host "==> Linux window id: $xwid" } else { Write-Host '!! xdotool never found the window' }
 }
 
-# macOS: read the window rect once so every shot crops to the app (the consent
-# dialog was already granted+dismissed pre-launch above).
+# macOS: read the window rect (for cropping every shot to the app) once the
+# window exists — poll, because the marker watch below starts before the disc
+# has listed. The consent dialog was already granted+dismissed pre-launch.
 $macRect = $null
 if ($IsMacOS) {
-    $geom = & osascript -e 'tell application "System Events" to get {position, size} of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $geom) {
-        $p = @("$geom" -split ',\s*')
-        $macRect = "$([int]$p[0]),$([int]$p[1]),$([int]$p[2]),$([int]$p[3])"
-        Write-Host "==> macOS window rect: $macRect"
+    for ($i = 0; $i -lt 40; $i++) {
+        $geom = & osascript -e 'tell application "System Events" to get {position, size} of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>$null
+        if ($LASTEXITCODE -eq 0 -and $geom) {
+            $p = @("$geom" -split ',\s*')
+            $macRect = "$([int]$p[0]),$([int]$p[1]),$([int]$p[2]),$([int]$p[3])"
+            Write-Host "==> macOS window rect: $macRect"
+            break
+        }
+        Start-Sleep -Milliseconds 500
     }
+    if (-not $macRect) { Write-Host '!! macOS window rect never read — shots will be full-screen' }
 }
 
 function Save-Shot([string]$Name) {
