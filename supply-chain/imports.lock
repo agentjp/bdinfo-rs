@@ -16,8 +16,8 @@ user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.mio]]
-version = "1.2.1"
-when = "2026-05-28"
+version = "1.2.2"
+when = "2026-07-13"
 user-id = 6025
 user-login = "Thomasdezeeuw"
 user-name = "Thomas de Zeeuw"
