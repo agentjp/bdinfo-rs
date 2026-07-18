@@ -62,6 +62,12 @@ jobs:
   # lockfiles, so the daily Dependabot root-lockfile chore cannot re-fire
   # their gates.
   #
+  # A gate's implementation files belong to its area, not just `meta`: the
+  # reusable workflow files and the .github/scripts helpers a gate executes
+  # (gui.yml + gui-*.ps1 → gui, wasm.yml → wasm, source-rules.ps1 → core)
+  # re-fire the gate they implement — editing a gate must re-run it, or the
+  # edit ships proven only by YAML lint.
+  #
   # Fail-safes: if the diff cannot be computed (missing before-SHA,
   # force-push, git error) every area fires; so does the `ci-full` PR label.
   # Labels are read from the event payload, so apply the label BEFORE a push
@@ -139,13 +145,16 @@ jobs:
             while IFS= read -r f; do
               [ -n "$f" ] || continue
               case "$f" in
-                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core=true ;;
+                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*|.github/scripts/source-rules.ps1) core=true ;;
               esac
+              # source-rules.ps1 is deliberately NOT in core_edge: it only
+              # implements the core lint step, so it re-fires the core gate
+              # without dragging the sibling crates along.
               case "$f" in
                 crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core_edge=true ;;
               esac
-              case "$f" in crates/bdinfo-rs-gui/*) gui=true ;; esac
-              case "$f" in crates/bdinfo-rs-wasm/*) wasm=true ;; esac
+              case "$f" in crates/bdinfo-rs-gui/*|.github/workflows/gui.yml|.github/scripts/gui-*.ps1) gui=true ;; esac
+              case "$f" in crates/bdinfo-rs-wasm/*|.github/workflows/wasm.yml) wasm=true ;; esac
               case "$f" in fuzz/*) fuzz=true ;; esac
               case "$f" in Cargo.lock|Cargo.toml|*/Cargo.toml|deny.toml|supply-chain/*|crates/*/deny.toml) deps=true ;; esac
               case "$f" in .github/*|.yamllint.yml) meta=true ;; esac
