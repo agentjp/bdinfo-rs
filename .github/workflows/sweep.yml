@@ -1,0 +1,222 @@
+name: sweep
+
+# The completeness backstop that makes the orchestrator's area gating provably
+# non-weakening (D2/D3): once a day, run EVERYTHING — the whole ci.yml
+# orchestrator with every area forced (a workflow_call with a non-PR/push
+# event makes the plan job fire all areas), plus the expensive tier the PR
+# path deliberately does not carry: the full-crate `cargo mutants --in-place`
+# sweeps for the gui and wasm sibling crates (D1). Untouched areas are thus
+# re-verified within 24 h, and environment drift (runner images, toolchain
+# point releases, a floating tool) cannot hide behind a skipped PR job. A
+# scheduled failure files/refreshes ONE rolling issue (closed again on the
+# next green sweep); workflow_dispatch exists so the sweep can be exercised on
+# demand.
+#
+# Release tags (v*) run the full-mutants legs ONLY — the authoritative
+# 0-missed release checkpoint for the sibling crates, riding alongside the
+# publish lanes exactly like fuzz.yml's extended pass (it surfaces a
+# regression, it does not block the release). The orchestrator call is
+# skipped on tags: every area was already green on the master commit the tag
+# must sit on (guard-ancestor), and the publish lanes must not compete with a
+# fleet re-run. A future gui release lane adds its own tag pattern here when
+# it exists (`gui-v*` currently fires nothing, by tag-namespace design).
+#
+# The full sweeps are guarded by a TREE-HASH CACHE MARKER (the mechanism the
+# gui gate used as a session-1 stopgap, now owning the schedule): the sweep
+# verifies the crate's SUITE against the crate's SOURCE, and both are captured
+# exactly by the crate dir's git tree hash (lockfile and .cargo/mutants.toml
+# included) plus rust-toolchain.toml — so a marker hit means this
+# byte-identical tree already passed a full sweep, and re-running (~50–90 min)
+# would re-verify unchanged inputs. The marker is saved only after a green
+# sweep (implicit success() on the save step's `if:`), and only sweep runs
+# save it — schedule runs execute on master, so the marker is master-scoped
+# and restorable by the tag legs; a quiet day skips in seconds. Accepted
+# cost: cache eviction (~7 days unused) causes one benign redundant sweep.
+
+on:
+  schedule:
+    - cron: "0 8 * * *"   # daily 08:00 UTC
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-${{ github.ref }}
+  # Never cancel a running sweep: a half-finished mutants pass saves no marker,
+  # so cancellation only wastes the spent minutes.
+  cancel-in-progress: false
+
+jobs:
+  # The whole PR/master gate, ungated: ci.yml's plan job sees a schedule /
+  # workflow_dispatch event and fires every area, including the gui and wasm
+  # reusables. Skipped on tag pushes (see the header).
+  orchestrator:
+    name: orchestrator
+    if: github.event_name != 'push'
+    uses: ./.github/workflows/ci.yml
+
+  # Full Tier-A mutation over the GUI crate, 0 missed. --in-place because a
+  # temp copy would not carry the ../bdinfo-rs-core path dep; reads the
+  # crate-local .cargo/mutants.toml Tier-B exclusions. The snapshot ties
+  # participate via the deterministic software renderer, keeping their mutant
+  # kill power (a palette or view-model mutation shifts the rendered hash).
+  gui-mutants:
+    name: gui full mutants (Tier A 0 missed)
+    runs-on: ubuntu-latest
+    env:
+      ICED_TEST_BACKEND: tiny-skia
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Compute the sweep marker key (crate tree hash)
+        id: key
+        run: echo "key=gui-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-gui)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the last-green marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.marker.outputs.cache-hit != 'true'
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          # Tag legs build fresh: a cache poisoned elsewhere must not taint a
+          # release-adjacent run (the fuzz.yml precedent). Schedule runs are on
+          # master, so their saves seed every PR.
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install mutation tools
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutants (Tier A 0 missed)
+        if: steps.marker.outputs.cache-hit != 'true'
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo mutants --in-place
+
+      - name: Write the marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: echo ok > .mutants-ok
+
+      - name: Save the marker (green sweep only)
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
+  # Full Tier-A mutation over the wasm crate, 0 missed — same marker pattern.
+  # --in-place for the same path-dep reason; the crate-local .cargo/mutants.toml
+  # carries the Tier-B cfg(wasm32) exclusions (browser glue is verified by the
+  # multi-runtime parity tests in the gate instead).
+  wasm-mutants:
+    name: wasm full mutants (Tier A 0 missed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Compute the sweep marker key (crate tree hash)
+        id: key
+        run: echo "key=wasm-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-wasm)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the last-green marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.marker.outputs.cache-hit != 'true'
+        with:
+          workspaces: crates/bdinfo-rs-wasm
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install mutation tools
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2.83.3
+        with:
+          tool: cargo-mutants,cargo-nextest
+
+      - name: Mutants (Tier A 0 missed)
+        if: steps.marker.outputs.cache-hit != 'true'
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo mutants --in-place
+
+      - name: Write the marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: echo ok > .mutants-ok
+
+      - name: Save the marker (green sweep only)
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ steps.key.outputs.key }}
+
+  # ONE rolling issue for scheduled failures (the ruff daily-fuzz pattern):
+  # refreshed while the sweep stays red, closed automatically on the next
+  # green sweep. Scheduled runs only — dispatch and tag runs have a human
+  # watching them.
+  report:
+    name: rolling failure issue
+    needs: [orchestrator, gui-mutants, wasm-mutants]
+    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: File or refresh the rolling issue (close on green)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $needs = $env:RESULTS | ConvertFrom-Json
+          $failed = @($needs.PSObject.Properties |
+              Where-Object { $_.Value.result -notin 'success', 'skipped' } |
+              ForEach-Object { "$($_.Name): $($_.Value.result)" })
+          gh label create ci-sweep --color ededed --description 'Daily full-sweep failures' --force | Out-Null
+          $existing = gh issue list --state open --label ci-sweep --json number --jq '.[0].number'
+          if ($failed.Count -eq 0) {
+            if ($existing) {
+              gh issue close $existing --comment "The daily sweep is green again: $env:RUN_URL" | Out-Null
+              Write-Host "Closed issue #$existing"
+            }
+            else { Write-Host 'Sweep green; nothing to file.' }
+            exit 0
+          }
+          $title = "Daily sweep failed: $($failed -join ', ')"
+          $body = @(
+            'The daily full sweep (every area ungated + the full mutants tier) failed:'
+            ''
+            @($failed | ForEach-Object { "- $_" })
+            ''
+            "Run: $env:RUN_URL"
+            ''
+            'This is one rolling issue: refreshed while the sweep stays red, closed automatically on the next green sweep.'
+          ) -join "`n"
+          if ($existing) {
+            gh issue edit $existing --title $title --body $body | Out-Null
+            Write-Host "Updated issue #$existing"
+          }
+          else {
+            gh issue create --title $title --body $body --label ci-sweep | Out-Null
+            Write-Host 'Filed the rolling issue'
+          }

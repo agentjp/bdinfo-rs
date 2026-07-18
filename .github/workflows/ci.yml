@@ -42,7 +42,11 @@ env:
   NIGHTLY: nightly-2026-07-06
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Namespaced by event so that, should a workflow_call invocation from
+  # sweep.yml ever be subject to this group (the caller's concurrency is the
+  # one that governs a called run), a sweep could still never queue against —
+  # and supersede — a master-push run on the same ref.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   # PR-only: rapid sequential squash-merges must each keep their master run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
