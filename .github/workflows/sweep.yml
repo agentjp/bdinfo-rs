@@ -22,7 +22,7 @@ name: sweep
 # it exists (`gui-v*` currently fires nothing, by tag-namespace design).
 #
 # The full sweeps are guarded by a TREE-HASH CACHE MARKER (the mechanism the
-# gui gate used as a session-1 stopgap, now owning the schedule): the sweep
+# gui gate used as a PR-era stopgap, now owning the schedule): the sweep
 # verifies the crate's SUITE against the crate's SOURCE, and both are captured
 # exactly by the crate dir's git tree hash (lockfile and .cargo/mutants.toml
 # included) plus rust-toolchain.toml — so a marker hit means this

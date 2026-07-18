@@ -1141,8 +1141,7 @@ jobs:
   # leave the required check "Expected" forever. This thin job keeps the exact
   # old string reporting: success when the gate passed OR the wasm area was
   # skipped (the same semantics an `if:`-skipped required job has), failure
-  # when the gate failed. Delete it in session 3, when branch protection swaps
-  # to ci-ok.
+  # when the gate failed. Delete it when branch protection swaps to ci-ok.
   wasm-required:
     name: wasm gate (build + size + parity)
     needs: [wasm]
@@ -1156,8 +1155,8 @@ jobs:
           echo "wasm gate result: $RESULT"
           [ "$RESULT" = "success" ] || [ "$RESULT" = "skipped" ]
 
-  # The fan-in: the ONE result branch protection will require (session 3 of the
-  # CI overhaul swaps the 28 name-matched contexts for this job + the three
+  # The fan-in: the ONE result branch protection will require (the protection
+  # cutover swaps the 28 name-matched contexts for this job + the three
   # standalone checks). Green = every gate job either succeeded or was skipped
   # by the plan; red = anything failed, was cancelled, or never ran because a
   # `needs` upstream failed.

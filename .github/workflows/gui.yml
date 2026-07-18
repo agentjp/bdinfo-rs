@@ -53,7 +53,8 @@ env:
 
 jobs:
   # Build + the full test suite on every shipped arch — where per-platform bugs
-  # actually live. The snapshot ties run as a separate advisory step (above).
+  # actually live. The snapshot ties run as their own BLOCKING per-arch step
+  # below (excluded from the plain test step so their verdict reports alone).
   test:
     name: gui build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -124,8 +125,8 @@ jobs:
       # the shipped level over the full suite (every cfg(debug_assertions)
       # site lives in the Tier-B bin, but overflow-checks and codegen differ
       # crate-wide in release). Once is the signal — per-arch bugs are the
-      # debug matrix's job. Snapshots stay excluded: the advisory/hard split
-      # is decided on the debug matrix, not here.
+      # debug matrix's job. Snapshots stay excluded: the per-OS-family ties
+      # are the debug matrix's verdict, not this leg's.
       - name: Test (release mode)
         if: matrix.os == 'ubuntu-latest'
         working-directory: crates/bdinfo-rs-gui
