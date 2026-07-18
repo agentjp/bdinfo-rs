@@ -94,6 +94,7 @@ fn main() -> iced::Result {
         None => log::info!("config: no base directory resolved; running without persistence"),
     }
     let persisted = config.as_deref().map_or_else(settings::Settings::default, settings::load_from);
+    let persisted = debug_window_override(persisted);
     let window = window_settings(&persisted);
     let result =
         iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
@@ -214,9 +215,35 @@ fn boot_with(app: App, base: Task<Message>) -> (App, Task<Message>) {
 /// (`light`/`dark`) pins the palette, `BDINFO_GUI_OPEN` / `BDINFO_GUI_ISO`
 /// auto-open a disc, and `BDINFO_GUI_SETTINGS` (any value) opens the Settings
 /// dialog, so `scripts/gui-shoot.ps1` can drive the real window to a known
-/// state and capture it. Compiled out of every release build.
+/// state and capture it. `BDINFO_GUI_DRIVE=<dir>` runs the scripted
+/// click-everything walk for the CI driving harness ([`DRIVE_STEPS`]).
+/// Compiled out of every release build.
 #[cfg(debug_assertions)]
 fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
+    // One log line naming the hooks this boot actually sees — the CI
+    // harnesses read it back from the diagnostics log when a hook seems not
+    // to have fired (an env var lost between runner shells is otherwise
+    // indistinguishable from a broken hook).
+    log::info!(
+        "debug hooks: {}",
+        [
+            "BDINFO_GUI_OPEN",
+            "BDINFO_GUI_ISO",
+            "BDINFO_GUI_THEME",
+            "BDINFO_GUI_SCAN",
+            "BDINFO_GUI_SCAN_DELAY",
+            "BDINFO_GUI_SETTINGS",
+            "BDINFO_GUI_SMOKE_MS",
+            "BDINFO_GUI_DRIVE",
+            "BDINFO_GUI_DRIVE_MS",
+            "BDINFO_GUI_WIN"
+        ]
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
+    );
     if let Ok(pref) = std::env::var("BDINFO_GUI_THEME") {
         match pref.as_str() {
             "light" => app.theme_pref = ThemePref::Light,
@@ -224,17 +251,12 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
             _ => {}
         }
     }
-    let folder = std::env::var("BDINFO_GUI_OPEN")
-        .ok()
-        .map(|path| Task::done(Message::FolderPicked(Some(PathBuf::from(path)))));
-    let iso = std::env::var("BDINFO_GUI_ISO")
-        .ok()
-        .map(|path| Task::done(Message::IsoPicked(Some(PathBuf::from(path)))));
+    // The auto-open (`BDINFO_GUI_OPEN`/`_ISO`) is NOT a boot task: messages
+    // completing during compositor bring-up get dropped by the shell, so it
+    // rides an Idle-gated subscription instead (see [`App::subscription`]).
     let settings_dialog =
         std::env::var("BDINFO_GUI_SETTINGS").ok().map(|_| Task::done(Message::OpenSettings));
     let mut tasks = vec![base];
-    tasks.extend(folder);
-    tasks.extend(iso);
     tasks.extend(settings_dialog);
     // BDINFO_GUI_SMOKE_MS=<ms>: exit cleanly after the delay — the headless
     // launch smoke's seam ("the app opens, renders, exits 0"; see gui.yml).
@@ -245,6 +267,13 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
             async move { std::thread::sleep(Duration::from_millis(ms)) },
             |()| Message::SmokeExit,
         ));
+    }
+    // BDINFO_GUI_DRIVE=<dir>: run the scripted walk, markers into <dir> (see
+    // [`DRIVE_STEPS`]). The directory is created here so the harness can start
+    // watching it before the first marker lands.
+    if let Some(dir) = drive_dir() {
+        let _ = std::fs::create_dir_all(&dir).log_err("drive dir");
+        tasks.push(drive_after(DRIVE_SETTLE_MS, Message::DriveNext { step: 0, polls: 0 }));
     }
     (app, Task::batch(tasks))
 }
@@ -258,8 +287,10 @@ fn debug_scan_all() -> bool {
 }
 
 /// Debug only: an artificial pause (milliseconds from `BDINFO_GUI_SCAN_DELAY`)
-/// inserted into the initial scan, so the transient "scanning" overlay stays up
-/// long enough for the capture harness to grab it. No effect without the var.
+/// inserted into the initial scan AND the measured-scan worker, so the
+/// transient "scanning" states stay up long enough for a capture harness to
+/// grab them — and long enough for the drive walk's Cancel step to land inside
+/// a measured scan of the small CI fixture. No effect without the var.
 #[cfg(debug_assertions)]
 fn debug_scan_delay() {
     if let Some(ms) = std::env::var("BDINFO_GUI_SCAN_DELAY").ok().and_then(|v| v.parse().ok()) {
@@ -279,6 +310,267 @@ fn debug_worker_panic() {
         std::env::var_os("BDINFO_GUI_PANIC").is_none(),
         "BDINFO_GUI_PANIC: forced worker panic"
     );
+}
+
+/// Release: the persisted geometry boots untouched — no environment hooks.
+#[cfg(not(debug_assertions))]
+const fn debug_window_override(persisted: settings::Settings) -> settings::Settings {
+    persisted
+}
+
+/// Debug only: `BDINFO_GUI_WIN=<W>x<H>[+<X>+<Y>]` (logical pixels) pins the
+/// boot geometry through the normal launch path — the same seam the persisted
+/// settings ride, so winit itself creates the window at that size. The CI
+/// driving harnesses need it: hosted runner displays are small (1024x768 with
+/// a taskbar), the default 960-tall window hangs off-screen there, and
+/// resizing from OUTSIDE the process proved unreliable on those desktops.
+/// Malformed specs are ignored; [`settings::launch_size`] still clamps to the
+/// window minimum. Compiled out of every release build.
+#[cfg(debug_assertions)]
+fn debug_window_override(mut persisted: settings::Settings) -> settings::Settings {
+    if let Ok(spec) = std::env::var("BDINFO_GUI_WIN") {
+        let (size, pos) = spec
+            .split_once('+')
+            .map_or((spec.as_str(), None), |(size, rest)| (size, rest.split_once('+')));
+        if let Some((w, h)) = size.split_once('x')
+            && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
+        {
+            persisted.window_size = Some((w, h));
+            persisted.window_maximized = false;
+        }
+        if let Some((x, y)) = pos
+            && let (Ok(x), Ok(y)) = (x.trim().parse(), y.trim().parse())
+        {
+            persisted.window_pos = Some((x, y));
+        }
+    }
+    persisted
+}
+
+/// Debug only: the marker directory of the scripted walk (`BDINFO_GUI_DRIVE`),
+/// `None` when the walk is off. See [`DRIVE_STEPS`].
+#[cfg(debug_assertions)]
+fn drive_dir() -> Option<PathBuf> {
+    std::env::var_os("BDINFO_GUI_DRIVE").map(PathBuf::from)
+}
+
+/// Debug only: the per-step capture window of the scripted walk, milliseconds
+/// (`BDINFO_GUI_DRIVE_MS`, default 1500) — how long a rendered state is
+/// guaranteed to stay on screen after its marker appears.
+#[cfg(debug_assertions)]
+fn drive_window_ms() -> u64 {
+    std::env::var("BDINFO_GUI_DRIVE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500)
+}
+
+/// How long a step's messages get to render before its marker is written.
+#[cfg(debug_assertions)]
+const DRIVE_SETTLE_MS: u64 = 500;
+/// The poll interval while a step waits for its precondition.
+#[cfg(debug_assertions)]
+const DRIVE_POLL_MS: u64 = 200;
+/// Poll attempts before the walk gives up on a step (450 × 200 ms = 90 s).
+#[cfg(debug_assertions)]
+const DRIVE_MAX_POLLS: u32 = 450;
+
+/// One step of the scripted walk: poll `ready` until the app state can take
+/// the step, apply `act`, and (a settle later) write the `NN-name.marker`
+/// file the capture harness screenshots on.
+#[cfg(debug_assertions)]
+struct DriveStep {
+    /// The marker / screenshot name.
+    name: &'static str,
+    /// Whether the app state is ready for this step (polled until true).
+    ready: fn(&App) -> bool,
+    /// The step itself — injects the same messages the widgets emit.
+    act: fn(&mut App) -> Task<Message>,
+}
+
+/// Debug only: the fixed click-everything walk behind `BDINFO_GUI_DRIVE` —
+/// open (via `BDINFO_GUI_OPEN`) → sort → splitter → rows → Settings
+/// (toggle / Cancel / OK) → scan → cancel → rescan → report → copy → save.
+/// The steps inject the exact messages the widgets emit, so the OS input
+/// stack is deliberately NOT under test (that is the injection harness's
+/// job); the one dialog road (`SaveReport`) is entered through its result
+/// message (`SaveDest`, aimed at the marker directory) so no native chooser
+/// can block a headless runner. Pair with `BDINFO_GUI_SCAN_DELAY` so the
+/// cancel step lands inside the measured scan of the small CI fixture.
+#[cfg(debug_assertions)]
+static DRIVE_STEPS: &[DriveStep] = &[
+    // The auto-open (BDINFO_GUI_OPEN) has listed the disc — the baseline shot.
+    DriveStep { name: "listed", ready: drive_listed, act: |_| Task::none() },
+    DriveStep {
+        name: "sort-length",
+        ready: drive_listed,
+        act: |app| app.update(Message::SortBy(SortColumn::Length)),
+    },
+    // The same header again — the ascending order flips.
+    DriveStep {
+        name: "sort-length-flip",
+        ready: drive_listed,
+        act: |app| app.update(Message::SortBy(SortColumn::Length)),
+    },
+    DriveStep {
+        name: "sort-file",
+        ready: drive_listed,
+        act: |app| app.update(Message::SortBy(SortColumn::File)),
+    },
+    // Drag the outer splitter: the same resize message the pane grid emits.
+    DriveStep {
+        name: "splitter",
+        ready: drive_listed,
+        act: |app| {
+            drive_first_split(app.panes.layout()).map_or_else(Task::none, |split| {
+                app.update(Message::PaneResized(pane_grid::ResizeEvent { split, ratio: 0.72 }))
+            })
+        },
+    },
+    DriveStep {
+        name: "row-activate",
+        ready: drive_listed,
+        act: |app| {
+            let row = app.flow.row_count().saturating_sub(1).min(1);
+            app.update(Message::RowActivated(row))
+        },
+    },
+    DriveStep {
+        name: "row-toggle",
+        ready: drive_listed,
+        act: |app| app.update(Message::RowToggled(0)),
+    },
+    DriveStep {
+        name: "select-none",
+        ready: drive_listed,
+        act: |app| app.update(Message::SelectNone),
+    },
+    DriveStep {
+        name: "select-all",
+        ready: drive_listed,
+        act: |app| app.update(Message::SelectAll),
+    },
+    DriveStep {
+        name: "settings-open",
+        ready: drive_idle,
+        act: |app| app.update(Message::OpenSettings),
+    },
+    // A checkbox plus a theme chip — the live preview makes the shot obvious.
+    DriveStep {
+        name: "settings-toggle",
+        ready: drive_settings_open,
+        act: |app| {
+            let toggled = app.update(Message::SettingsToggled(SettingsField::ChapterCount));
+            let themed = app.update(Message::SettingsTheme(settings::ThemeChoice::Light));
+            Task::batch([toggled, themed])
+        },
+    },
+    // Cancel drops the draft — the theme preview visibly reverts.
+    DriveStep {
+        name: "settings-cancel",
+        ready: drive_settings_open,
+        act: |app| app.update(Message::SettingsCancel),
+    },
+    DriveStep {
+        name: "settings-reopen",
+        ready: drive_idle,
+        act: |app| {
+            let opened = app.update(Message::OpenSettings);
+            let toggled = app.update(Message::SettingsToggled(SettingsField::HumanSizes));
+            Task::batch([opened, toggled])
+        },
+    },
+    // OK applies the draft — the size columns re-render human-readable.
+    DriveStep {
+        name: "settings-ok",
+        ready: drive_settings_open,
+        act: |app| app.update(Message::SettingsOk),
+    },
+    DriveStep { name: "scan", ready: drive_listed, act: |app| app.update(Message::ScanSelected) },
+    // Cancel right away, while BDINFO_GUI_SCAN_DELAY still holds the worker —
+    // the fixture disc is small, so a later cancel would miss the scan.
+    DriveStep { name: "cancel", ready: drive_scanning, act: |app| app.update(Message::Cancel) },
+    DriveStep { name: "cancelled", ready: drive_idle, act: |_| Task::none() },
+    DriveStep { name: "rescan", ready: drive_listed, act: |app| app.update(Message::ScanSelected) },
+    // No-op: captures the in-flight progress UI (the delay holds it up).
+    DriveStep { name: "scanning", ready: drive_scanning, act: |_| Task::none() },
+    // No-op: captures the measured table + the scan-complete modal.
+    DriveStep { name: "scanned", ready: drive_reported, act: |_| Task::none() },
+    DriveStep {
+        name: "dismiss",
+        ready: |app| app.notice.is_some(),
+        act: |app| app.update(Message::DismissNotice),
+    },
+    DriveStep { name: "report", ready: drive_reported, act: |app| app.update(Message::ShowReport) },
+    DriveStep { name: "copy", ready: drive_reported, act: |app| app.update(Message::CopyReport) },
+    // The dialog's result message, aimed at the marker directory: the saved
+    // BDINFO.<label>.txt landing there is the walk's hard on-disk evidence.
+    DriveStep {
+        name: "save",
+        ready: drive_reported,
+        act: |app| {
+            drive_dir().map_or_else(Task::none, |dir| app.update(Message::SaveDest(Some(dir))))
+        },
+    },
+    // The terminal sentinel: its marker means every step above completed.
+    DriveStep { name: "done", ready: |_| true, act: |_| Task::none() },
+];
+
+/// The playlist table is up with at least one row.
+#[cfg(debug_assertions)]
+fn drive_listed(app: &App) -> bool {
+    app.flow.stage() == Stage::Listed && app.flow.row_count() > 0
+}
+
+/// No scan is in flight (the state the Settings / save roads require).
+#[cfg(debug_assertions)]
+const fn drive_idle(app: &App) -> bool {
+    !app.is_busy()
+}
+
+/// The Settings dialog is open (a draft exists).
+#[cfg(debug_assertions)]
+const fn drive_settings_open(app: &App) -> bool {
+    app.settings_draft.is_some()
+}
+
+/// The measured scan is in flight.
+#[cfg(debug_assertions)]
+fn drive_scanning(app: &App) -> bool {
+    app.flow.stage() == Stage::Scanning
+}
+
+/// A measured scan has finished — the report is the measured render.
+#[cfg(debug_assertions)]
+fn drive_reported(app: &App) -> bool {
+    app.flow.stage() == Stage::Reported
+}
+
+/// The first splitter in the pane layout — the outer horizontal one, the walk's
+/// drag target.
+#[cfg(debug_assertions)]
+const fn drive_first_split(node: &pane_grid::Node) -> Option<pane_grid::Split> {
+    match node {
+        pane_grid::Node::Split { id, .. } => Some(*id),
+        pane_grid::Node::Pane(_) => None,
+    }
+}
+
+/// Delivers `message` after `ms` — the walk's scheduler. The sleep blocks one
+/// executor worker, the established debug-hook trade-off (`BDINFO_GUI_SMOKE_MS`
+/// sleeps the same way).
+#[cfg(debug_assertions)]
+fn drive_after(ms: u64, message: Message) -> Task<Message> {
+    Task::perform(async move { std::thread::sleep(Duration::from_millis(ms)) }, move |()| message)
+}
+
+/// Writes a walk marker file (`NN-name.marker`, the flow stage as content)
+/// into the marker directory — the capture harness's screenshot trigger. The
+/// index prefix keeps the gallery in walk order. Best-effort like every debug
+/// hook: a failed write only logs.
+#[cfg(debug_assertions)]
+fn drive_marker(index: usize, name: &str, stage: Stage) {
+    if let Some(dir) = drive_dir() {
+        let _ = std::fs::write(dir.join(format!("{index:02}-{name}.marker")), format!("{stage:?}"))
+            .log_err("drive marker");
+    }
 }
 
 /// The per-platform config file location, resolved from the process
@@ -689,6 +981,24 @@ enum Message {
     /// loop cleanly so the launch smoke's process exits 0.
     #[cfg(debug_assertions)]
     SmokeExit,
+    /// The debug auto-open tick (`BDINFO_GUI_OPEN`/`_ISO`): an Idle-gated
+    /// subscription re-fires it until the open takes, because a message
+    /// delivered during compositor bring-up can be dropped.
+    #[cfg(debug_assertions)]
+    DebugAutoOpen,
+    /// The debug drive walk (`BDINFO_GUI_DRIVE`) wants step `step` applied —
+    /// polled (`polls` so far) until the step's precondition holds.
+    #[cfg(debug_assertions)]
+    DriveNext {
+        /// The [`DRIVE_STEPS`] index to apply.
+        step: usize,
+        /// Precondition polls spent on it so far (gives up at the cap).
+        polls: u32,
+    },
+    /// Step `step` of the drive walk was applied and has had a settle to
+    /// render — write its marker, then schedule the next step.
+    #[cfg(debug_assertions)]
+    DriveMark(usize),
     /// The geometry readout for the closing window arrived — persist
     /// everything and actually close (`BDInfo` saves at `FormClosing` too).
     SaveAndClose {
@@ -797,16 +1107,8 @@ impl App {
                 Task::none()
             }
             Message::RowActivated(index) => self.activate_row(index),
-            Message::RowHovered(region, index) => {
-                self.hovered = Some((region, index));
-                Task::none()
-            }
-            Message::RowUnhovered(region, index) => {
-                if self.hovered == Some((region, index)) {
-                    self.hovered = None;
-                }
-                Task::none()
-            }
+            Message::RowHovered(region, index) => self.on_row_hovered(region, index),
+            Message::RowUnhovered(region, index) => self.on_row_unhovered(region, index),
             Message::PaneRowPressed(region, index) => {
                 self.pane_selection = Some((region, index));
                 Task::none()
@@ -886,6 +1188,12 @@ impl App {
             }
             #[cfg(debug_assertions)]
             Message::SmokeExit => iced::exit(),
+            #[cfg(debug_assertions)]
+            Message::DebugAutoOpen => self.debug_auto_open(),
+            #[cfg(debug_assertions)]
+            Message::DriveNext { step, polls } => self.drive_next(step, polls),
+            #[cfg(debug_assertions)]
+            Message::DriveMark(step) => self.drive_mark(step),
             Message::CloseRequested(id) => close_with_geometry(id),
             Message::SaveAndClose { id, position, size, maximized } => {
                 self.save_and_close(id, position, size, maximized)
@@ -1069,6 +1377,20 @@ impl App {
     /// window is not redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
+        // Debug auto-open (`BDINFO_GUI_OPEN`/`_ISO`) rides a SUBSCRIPTION,
+        // not a boot task: boot-batch messages that complete while the
+        // compositor is still initializing are dropped by the shell (proven
+        // on the CI runners and reproduced locally), and any retry chained
+        // from such a message dies with it. A subscription is always alive;
+        // this one only exists while the flow sits at Idle, so it vanishes
+        // the moment the open takes.
+        #[cfg(debug_assertions)]
+        if self.flow.stage() == Stage::Idle
+            && (std::env::var_os("BDINFO_GUI_OPEN").is_some()
+                || std::env::var_os("BDINFO_GUI_ISO").is_some())
+        {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::DebugAutoOpen));
+        }
         // The close button / Alt+F4: closing is manual (so the geometry saves
         // on the way out) — this feed is what makes the window closable at all.
         subs.push(iced::window::close_requests().map(Message::CloseRequested));
@@ -1130,12 +1452,74 @@ impl App {
         matches!(self.flow.stage(), Stage::Listing | Stage::Scanning)
     }
 
+    /// Debug auto-open: send the `BDINFO_GUI_OPEN`/`_ISO` pick. The Idle-gated
+    /// subscription that delivers this tick stops the moment the flow leaves
+    /// Idle, so a taken open is never re-sent.
+    #[cfg(debug_assertions)]
+    fn debug_auto_open(&mut self) -> Task<Message> {
+        if self.flow.stage() != Stage::Idle {
+            return Task::none();
+        }
+        if let Some(path) = std::env::var_os("BDINFO_GUI_OPEN") {
+            self.update(Message::FolderPicked(Some(PathBuf::from(path))))
+        } else if let Some(path) = std::env::var_os("BDINFO_GUI_ISO") {
+            self.update(Message::IsoPicked(Some(PathBuf::from(path))))
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Debug drive walk: try to apply step `step` — poll while its
+    /// precondition is false, leave the FAILED marker and end the walk when
+    /// the poll cap is spent, and schedule the step's marker once applied.
+    #[cfg(debug_assertions)]
+    fn drive_next(&mut self, step: usize, polls: u32) -> Task<Message> {
+        match DRIVE_STEPS.get(step) {
+            Some(spec) if (spec.ready)(self) => {
+                let applied = (spec.act)(self);
+                Task::batch([applied, drive_after(DRIVE_SETTLE_MS, Message::DriveMark(step))])
+            }
+            // The precondition never came true: the FAILED marker is the
+            // harness's red signal.
+            Some(spec) if polls >= DRIVE_MAX_POLLS => {
+                drive_marker(step, &format!("FAILED-{}", spec.name), self.flow.stage());
+                iced::exit()
+            }
+            Some(_) => drive_after(
+                DRIVE_POLL_MS,
+                Message::DriveNext { step, polls: polls.wrapping_add(1) },
+            ),
+            None => iced::exit(),
+        }
+    }
+
+    /// Debug drive walk: step `step` has rendered — write its marker, then
+    /// schedule the next step (or the clean exit) a capture window later.
+    #[cfg(debug_assertions)]
+    fn drive_mark(&self, step: usize) -> Task<Message> {
+        DRIVE_STEPS.get(step).map_or_else(Task::none, |spec| {
+            drive_marker(step, spec.name, self.flow.stage());
+            let next = step.wrapping_add(1);
+            let message = if next < DRIVE_STEPS.len() {
+                Message::DriveNext { step: next, polls: 0 }
+            } else {
+                Message::SmokeExit
+            };
+            drive_after(drive_window_ms(), message)
+        })
+    }
+
     /// Applies a finished structural scan. A successful listing becomes the
     /// remembered last path (saved now — `BDInfo` keeps `LastPath` the same
     /// way). In a debug build it also honours the capture harness's auto-scan
     /// hook (`BDINFO_GUI_SCAN=all`), selecting and scanning every playlist so
     /// a screenshot can show measured data.
     fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
+        // The listing outcome, next to begin_listing's start line.
+        match &result {
+            Ok(_) => log::info!("listed {}", input.display()),
+            Err(error) => log::info!("listing failed: {error}"),
+        }
         let view = ViewSettings::from_settings(&self.persisted);
         self.flow = std::mem::take(&mut self.flow).listed(input, result, view);
         // Only when THIS input just became the listing (not a superseded or
@@ -1261,6 +1645,9 @@ impl App {
         self.hovered_header = None;
         self.pane_selection = None;
         self.pulse = 0;
+        // The one log line per open: pins down whether a scan ever started
+        // when a report or listing seems to be missing in the field.
+        log::info!("listing {}", input.display());
         self.flow = Flow::start_listing(input.clone());
         Task::perform(
             async move {
@@ -1316,6 +1703,8 @@ impl App {
             });
             #[cfg(debug_assertions)]
             debug_worker_panic();
+            #[cfg(debug_assertions)]
+            debug_scan_delay();
             // The scan fires its progress callback every few MB — tens of thousands
             // of times on a feature disc. Coalesce to one message per ~100 ms (plus
             // every file boundary) so the UI re-renders a few times a second, not
@@ -1392,6 +1781,20 @@ impl App {
     fn activate_row(&mut self, index: usize) -> Task<Message> {
         self.flow.set_active(index);
         self.pane_selection = None;
+        Task::none()
+    }
+
+    /// Records the row under the cursor (its hover lift).
+    fn on_row_hovered(&mut self, region: Region, index: usize) -> Task<Message> {
+        self.hovered = Some((region, index));
+        Task::none()
+    }
+
+    /// Clears the row hover if `(region, index)` still owns it.
+    fn on_row_unhovered(&mut self, region: Region, index: usize) -> Task<Message> {
+        if self.hovered == Some((region, index)) {
+            self.hovered = None;
+        }
         Task::none()
     }
 
