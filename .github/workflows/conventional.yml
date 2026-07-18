@@ -29,6 +29,13 @@ concurrency:
 jobs:
   conventional:
     name: conventional commits + banned words
+    # Open PRs only: the `edited` trigger also fires on title/body edits to
+    # CLOSED PRs (Dependabot edits merged-PR bodies routinely), and a closed —
+    # merged or not — PR has no squash subject left to lint, so re-running the
+    # gate there can only paint a spurious red X. Skipping is safe: a skipped
+    # run still reports a check-run, and required-context semantics only
+    # matter while the PR is open.
+    if: github.event.pull_request.state == 'open'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
