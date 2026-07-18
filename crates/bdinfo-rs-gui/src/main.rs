@@ -220,6 +220,30 @@ fn boot_with(app: App, base: Task<Message>) -> (App, Task<Message>) {
 /// Compiled out of every release build.
 #[cfg(debug_assertions)]
 fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
+    // One log line naming the hooks this boot actually sees — the CI
+    // harnesses read it back from the diagnostics log when a hook seems not
+    // to have fired (an env var lost between runner shells is otherwise
+    // indistinguishable from a broken hook).
+    log::info!(
+        "debug hooks: {}",
+        [
+            "BDINFO_GUI_OPEN",
+            "BDINFO_GUI_ISO",
+            "BDINFO_GUI_THEME",
+            "BDINFO_GUI_SCAN",
+            "BDINFO_GUI_SCAN_DELAY",
+            "BDINFO_GUI_SETTINGS",
+            "BDINFO_GUI_SMOKE_MS",
+            "BDINFO_GUI_DRIVE",
+            "BDINFO_GUI_DRIVE_MS",
+            "BDINFO_GUI_WIN"
+        ]
+        .iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
+    );
     if let Ok(pref) = std::env::var("BDINFO_GUI_THEME") {
         match pref.as_str() {
             "light" => app.theme_pref = ThemePref::Light,

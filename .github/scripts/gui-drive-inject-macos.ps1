@@ -29,7 +29,7 @@ $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
 # display without the OS clamping (the System Events readout still rules).
 $env:BDINFO_GUI_WIN = '880x640'
 
-Write-Host "==> launch $Exe"
+Write-Host "==> launch $Exe (OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 Start-Sleep -Milliseconds ($ScanDelayMs + 10000)
 
@@ -84,6 +84,9 @@ $exited = $proc.WaitForExit($SmokeMs)
 if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 $code = if ($exited) { $proc.ExitCode } else { 'killed' }
 Write-Host "==> app exit code $code"
+# The app's per-launch diagnostics log rides along in the gallery.
+Get-ChildItem $configDir -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $Gallery -Force -ErrorAction SilentlyContinue
 if ($failures.Count -gt 0) {
     Write-Host '!! macOS injection blocked — recorded failures:'
     $failures | ForEach-Object { Write-Host "   $_" }

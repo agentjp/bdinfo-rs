@@ -140,8 +140,11 @@ while ($true) {
 }
 $proc.WaitForExit()
 
-# Preserve the walk's on-disk evidence alongside the shots.
+# Preserve the walk's on-disk evidence alongside the shots, plus the app's
+# per-launch diagnostics log (it names the debug hooks the boot saw).
 Get-ChildItem $driveDir -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $Gallery -Force -ErrorAction SilentlyContinue
+Get-ChildItem $configDir -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
     Copy-Item -Destination $Gallery -Force -ErrorAction SilentlyContinue
 
 # Verdict: walk complete + clean exit + the saved report actually landed.

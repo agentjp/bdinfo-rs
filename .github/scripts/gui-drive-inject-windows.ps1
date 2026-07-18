@@ -201,7 +201,7 @@ $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
 # click can ever land off-screen or on the taskbar.
 $env:BDINFO_GUI_WIN = '880x640+0+0'
 
-Write-Host "==> launch $Exe"
+Write-Host "==> launch $Exe (OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 $hwnd = [IntPtr]::Zero
 for ($i = 0; $i -lt 300; $i++) {
@@ -397,6 +397,10 @@ Write-Host '==> waiting for the smoke-deadline exit'
 $exited = $proc.WaitForExit($SmokeMs)
 if (-not $exited) { Stop-Process -Id $proc.Id -Force; throw 'the app never hit its smoke deadline' }
 Write-Host ("==> app exit code {0}" -f $proc.ExitCode)
+# The app's per-launch diagnostics log (it names the debug hooks the boot
+# saw) rides along in the gallery — the harness's flight recorder.
+Get-ChildItem $configDir -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $Gallery -Force -ErrorAction SilentlyContinue
 if ($proc.ExitCode -ne 0 -or -not $landed) {
     Write-Host '!! injection walk FAILED (the uploaded gallery holds whatever was captured)'
     exit 1

@@ -31,7 +31,7 @@ $env:BDINFO_GUI_SMOKE_MS = "$SmokeMs"
 # one coordinate table across all legs; the y coords derive from the height).
 $env:BDINFO_GUI_WIN = '880x640+0+0'
 
-Write-Host "==> launch $Exe (DISPLAY=$env:DISPLAY)"
+Write-Host "==> launch $Exe (DISPLAY=$env:DISPLAY OPEN=$env:BDINFO_GUI_OPEN WIN=$env:BDINFO_GUI_WIN)"
 $proc = Start-Process -FilePath (Resolve-Path $Exe).Path -PassThru
 
 # Find the X11 window (xdotool --sync blocks until it exists), then focus it
@@ -105,6 +105,9 @@ Write-Host '==> waiting for the smoke-deadline exit'
 $exited = $proc.WaitForExit($SmokeMs)
 if (-not $exited) { Stop-Process -Id $proc.Id -Force; throw 'the app never hit its smoke deadline' }
 Write-Host ("==> app exit code {0}" -f $proc.ExitCode)
+# The app's per-launch diagnostics log rides along in the gallery.
+Get-ChildItem $configDir -Recurse -Filter '*.log' -ErrorAction SilentlyContinue |
+    Copy-Item -Destination $Gallery -Force -ErrorAction SilentlyContinue
 if ($proc.ExitCode -ne 0 -or -not $landed) {
     Write-Host '!! injection walk FAILED (the uploaded gallery holds whatever was captured)'
     exit 1
