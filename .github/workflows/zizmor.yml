@@ -1,20 +1,19 @@
 name: zizmor
 
-# Static security analysis of the GitHub Actions workflows themselves (zizmor):
-# template injection, token over-permissioning, unpinned/impostor actions, cache
-# poisoning, dangerous triggers, credential persistence, and more. Runs the FULL
-# audit set online — the GITHUB_TOKEN enables the impostor-commit /
-# known-vulnerable-actions checks that need the GitHub API — and hard-fails on any
-# finding, like the other quality gates. Daily too, so a newly-disclosed
-# vulnerable action surfaces between pushes. The only accepted residuals live in
-# .github/zizmor.yml (the cargo-dist-generated v-release.yml, which cannot be
-# hand-edited) and inline (the two architecturally-required workflow_run triggers);
-# every hand-maintained workflow is fixed in place, not suppressed.
+# The CRON leg of the zizmor gate: static security analysis of the GitHub
+# Actions workflows (template injection, token over-permissioning,
+# unpinned/impostor actions, cache poisoning, dangerous triggers, credential
+# persistence, and more), daily — zizmor floats at latest and the audits are
+# partly ONLINE (impostor-commit / known-vulnerable-actions via the GitHub
+# API), so a newly-disclosed vulnerable action surfaces between pushes. The
+# PR/push leg is the identically-named job in ci.yml, plan-gated on the `meta`
+# area; the daily sweep re-runs that leg ungated too. The only accepted
+# residuals live in .github/zizmor.yml (the cargo-dist-generated v-release.yml,
+# which cannot be hand-edited) and inline (the two architecturally-required
+# workflow_run triggers); every hand-maintained workflow is fixed in place, not
+# suppressed.
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   schedule:
     - cron: "0 7 * * *"   # daily 07:00 UTC — catch newly-disclosed action vulns
   workflow_dispatch:

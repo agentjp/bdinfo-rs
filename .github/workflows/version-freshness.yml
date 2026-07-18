@@ -8,9 +8,9 @@ name: version-freshness
 #     rest),
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `cargo-dist@X`
 #     install in ci.yml — the two must stay equal),
-#   - cargo-vet (the `--version` pin in audit.yml),
+#   - cargo-vet (the `--version` pin in ci.yml's vet job),
 #   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
-#   - taplo (the `tool: taplo-cli@X` pin in toml.yml — a formatter, pinned like
+#   - taplo (the `tool: taplo-cli@X` pin in ci.yml's TOML job — a formatter, pinned like
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
@@ -200,14 +200,14 @@ jobs:
             Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, then re-run ``dist generate``"
           }
 
-          # --- cargo-vet: audit.yml vs mozilla/cargo-vet -----------------------
-          $vetPin = Read-Pin '.github/workflows/audit.yml' 'cargo-vet --version ([0-9.]+)'
-          if (-not $vetPin) { throw 'No cargo-vet --version pin in audit.yml' }
+          # --- cargo-vet: ci.yml vs mozilla/cargo-vet --------------------------
+          $vetPin = Read-Pin '.github/workflows/ci.yml' 'cargo-vet --version ([0-9.]+)'
+          if (-not $vetPin) { throw 'No cargo-vet --version pin in ci.yml' }
           $vetLatest = Latest-Semver 'mozilla/cargo-vet'
           if (-not $vetLatest) {
             Add-Problem 'cargo-vet (query failed)' '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
           } elseif ([version]$vetLatest -gt [version]$vetPin) {
-            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (audit.yml) is behind the latest release ``$vetLatest``"
+            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (ci.yml) is behind the latest release ``$vetLatest``"
           }
 
           # --- ryl: ci.yml YAML-lint pin vs crates.io --------------------------
@@ -222,16 +222,16 @@ jobs:
             Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
           }
 
-          # --- taplo: toml.yml `tool: taplo-cli@X` pin vs crates.io -------------
+          # --- taplo: ci.yml `tool: taplo-cli@X` pin vs crates.io ---------------
           # Pinned like ryl so the TOML format/lint stays reproducible; nothing
           # else watches it.
-          $taploPin = Read-Pin '.github/workflows/toml.yml' 'tool:\s*taplo-cli@([0-9.]+)'
-          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in toml.yml' }
+          $taploPin = Read-Pin '.github/workflows/ci.yml' 'tool:\s*taplo-cli@([0-9.]+)'
+          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in ci.yml' }
           $taploLatest = Latest-CratesIo 'taplo-cli'
           if (-not $taploLatest) {
             Add-Problem 'taplo (query failed)' '- could not query the latest taplo release (crates.io taplo-cli)'
           } elseif ([version]$taploLatest -gt [version]$taploPin) {
-            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (toml.yml) is behind the latest release ``$taploLatest``"
+            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (ci.yml) is behind the latest release ``$taploLatest``"
           }
 
           # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
