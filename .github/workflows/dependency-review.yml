@@ -22,19 +22,27 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: low
-          # License policy: block a PR introducing a strong-copyleft dependency
-          # that would force us to relicense the whole static binary (incompatible
-          # with our LGPL-2.1-or-later distribution). deny.toml's [licenses] allow
-          # list remains the AUTHORITATIVE full policy (enforced by the required
-          # `cargo deny check`); this denylist is a low-false-positive PR-time
-          # backstop targeting only the genuinely incompatible families.
-          deny-licenses: >-
-            GPL-2.0-only, GPL-2.0-or-later,
-            GPL-3.0-only, GPL-3.0-or-later,
-            AGPL-3.0-only, AGPL-3.0-or-later
-          # self_cell is dual-licensed `Apache-2.0 OR GPL-2.0-only`; the action
-          # rejects any expression containing a denied license, so exempt it here.
-          # We distribute under the Apache-2.0 branch — deny.toml's allow list
-          # resolves the OR expression correctly and remains authoritative.
-          allow-dependencies-licenses: pkg:cargo/self_cell
+          # License policy: an ALLOWLIST (deny-licenses is deprecated upstream —
+          # actions/dependency-review-action#997: a deny list can never
+          # enumerate every incompatible license, removal planned for the next
+          # major). The list is the UNION of the three authoritative deny.toml
+          # allowlists (root + gui + wasm — the dependency graph spans all
+          # three lockfiles, and a gui bump can introduce BSL-1.0/OFL-1.1);
+          # `cargo deny check` remains the authoritative gate, this the PR-time
+          # backstop. A new dependency license must be added deliberately in
+          # BOTH places, same as the deny.toml policy already requires.
+          allow-licenses: >-
+            MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
+            BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, Zlib,
+            MPL-2.0, CC0-1.0, BSL-1.0, OFL-1.1
+          # Package-scoped exemptions, mirroring deny.toml's scoped exceptions:
+          # our own workspace crates are LGPL-2.1-or-later (the allowlist above
+          # is for DEPENDENCIES, permissive only — an LGPL dependency must
+          # still fail), and self_cell is `Apache-2.0 OR GPL-2.0-only` (we
+          # distribute under the Apache-2.0 branch; deny.toml resolves the OR
+          # expression correctly and remains authoritative).
+          allow-dependencies-licenses: >-
+            pkg:cargo/bdinfo-rs-core, pkg:cargo/bdinfo-rs,
+            pkg:cargo/bdinfo-rs-gui, pkg:cargo/bdinfo-rs-wasm,
+            pkg:cargo/self_cell
           comment-summary-in-pr: on-failure
