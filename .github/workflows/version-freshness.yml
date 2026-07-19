@@ -45,7 +45,7 @@ name: version-freshness
 #     upstream release can't abort the whole release; both checked vs crates.io, and
 #     both cross-checked against every other copy — ci.yml's pkg job, the GUI
 #     packaging script (.github/scripts/gui-package-linux.ps1), and the taiki-e
-#     installs in gui.yml + gui-release.yml — which must all stay EQUAL so the PR
+#     install in gui.yml's packaging smoke — which must all stay EQUAL so the PR
 #     smoke tests package with the exact release tools),
 #   - appimagetool (the `$appimagetoolVersion` curl-download pin in
 #     .github/scripts/gui-package-linux.ps1 — the GUI lane's AppImage packer,
@@ -356,15 +356,15 @@ jobs:
           if ($cargoRpmCi -ne $cargoRpmPin) {
             Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but ci.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
           }
-          # The GUI lane carries three MORE copies of the same two pins: the
-          # packaging script's install fallback plus the taiki-e pre-installs
-          # in gui.yml's packaging smoke and gui-release.yml's Linux legs. All
+          # The GUI lane carries two MORE copies of the same two pins: the
+          # packaging script's source-compile pins (what the release legs run
+          # — their ubuntu-22.04 glibc floor rules out the prebuilt binaries)
+          # plus the taiki-e pre-install in gui.yml's packaging smoke. All
           # must equal build-linux-packages.sh's, for the same
           # smoke-packages-with-the-release-tools reason.
           $guiPackagerHomes = [ordered]@{
             '.github/scripts/gui-package-linux.ps1' = @("cargoDebVersion\s*=\s*'([0-9.]+)'", "cargoGenerateRpmVersion\s*=\s*'([0-9.]+)'")
             '.github/workflows/gui.yml'             = @('cargo-deb@([0-9.]+)', 'cargo-generate-rpm@([0-9.]+)')
-            '.github/workflows/gui-release.yml'     = @('cargo-deb@([0-9.]+)', 'cargo-generate-rpm@([0-9.]+)')
           }
           foreach ($file in $guiPackagerHomes.Keys) {
             $debHere = Read-Pin $file $guiPackagerHomes[$file][0]
