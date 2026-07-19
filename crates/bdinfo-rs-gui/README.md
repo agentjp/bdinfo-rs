@@ -1,45 +1,46 @@
 # bdinfo-rs-gui
 
-**Native desktop GUI for [bdinfo-rs](../../README.md)** — the classic BDInfo disc
-report as a cross-platform desktop app. Open a `BDMV` folder or `.iso` image, pick
-playlists from the familiar three-pane view (Playlist / Stream File / Codec), run the
-measured scan with live progress, and read, save, or copy the classic text report.
-The report is **byte-identical** to the one the `bdinfo-rs` CLI produces.
+**The native desktop app for [bdinfo-rs](../../README.md) — the classic BDInfo disc report, on
+Windows, macOS, and Linux.**
 
-Like the rest of the project it is pure Rust — no webview, no bundled runtime, no C
-libraries — and runs on Windows, macOS, and Linux, on x64 and arm64. Rendering is
-GPU-accelerated (wgpu) with an automatic software fallback (tiny-skia) when no usable
-GPU is found.
+Open a `BDMV` folder or `.iso`, pick playlists from the familiar three-pane view (Playlist / Stream
+File / Codec), run the measured scan with live progress, then read, save, or copy the report. It is
+**byte-identical** to the one the `bdinfo-rs` CLI produces.
+
+Pure Rust — no webview, no bundled runtime, no C libraries — on x64 and arm64. Rendering is
+GPU-accelerated through wgpu, falling back to software (tiny-skia) automatically when no usable GPU
+is found.
 
 ## Installing
 
 Every [`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true)
 ships, for x64 and arm64:
 
-- **Windows** — an `.msi` installer (Start-menu entry, clean uninstall) and a portable
-  `.zip`. SmartScreen may warn on the portable exe's first run: "More info" → "Run
-  anyway".
-- **macOS** — a `.dmg`; drag the app to Applications. The app is unsigned: allow the
-  first launch under System Settings → Privacy & Security → **Open Anyway**, or run
+- **Windows** — an `.msi` installer (Start-menu entry, clean uninstall) and a portable `.zip`.
+  SmartScreen may warn on the portable exe's first run: "More info" → "Run anyway".
+- **macOS** — a `.dmg`; drag the app to Applications. The app is unsigned: allow the first launch
+  under System Settings → Privacy & Security → **Open Anyway**, or run
   `xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"`.
 - **Linux** — an AppImage (download, `chmod +x`, run) plus `.deb` and `.rpm` packages.
 
 Each release carries `SHA256SUMS` and Sigstore build-provenance attestations
 (`gh attestation verify <asset> --repo agentjp/bdinfo-rs`).
 
-## Launching
+## Opening a disc
 
-- **Double-click** the binary. No installation or setup step; settings are created on
-  first use.
-- **Drag and drop** a disc folder or `.iso` file onto the window.
-- **Command line:** `bdinfo-rs-gui <path>` opens the disc at `<path>` on startup — the
-  disc root, the `BDMV` folder itself, any directory inside it, or an `.iso` image.
-  This is the whole CLI surface; for scripting and reports-without-a-window use the
-  `bdinfo-rs` CLI instead.
+- **Double-click** the app. There is no installation or setup step; settings are created on first
+  use.
+- **Drag and drop** a disc folder or `.iso` onto the window.
+- **From a terminal:** `bdinfo-rs-gui <path>` opens that disc at startup — the disc root, the `BDMV`
+  folder, any directory inside it, or an `.iso`. That is the entire command-line surface; for
+  scripting and reports without a window, use the `bdinfo-rs` CLI.
+
+Reports are saved as `BDINFO.{volume label}.txt`, either through *Save report…* or automatically
+beside the disc when *Auto-save report on scan completion* is enabled.
 
 ## Files it writes
 
-All persistent state lives in one per-user directory, created on first use:
+One per-user directory, created on first use:
 
 | Platform | Directory |
 |---|---|
@@ -47,97 +48,59 @@ All persistent state lives in one per-user directory, created on first use:
 | macOS | `~/Library/Application Support/bdinfo-rs/` |
 | Linux | `$XDG_CONFIG_HOME/bdinfo-rs/` (default `~/.config/bdinfo-rs/`) |
 
-- **`gui.conf`** — settings and window geometry, saved as they change. **Deleting it
-  is the full reset**: window size/position, theme, and every setting return to
-  defaults. This is also the fix when the window restores off-screen (e.g. a saved
-  position on a since-unplugged monitor).
-- **`gui.log`** — a plain-text diagnostic log, overwritten at each launch. It records
-  which GPU/renderer was actually selected, any panics, and dialog/portal errors.
-  **When filing a bug, attach `gui.log`** from a launch that shows the problem — it
-  answers the first questions a graphics issue needs answered.
-
-Reports are saved as `BDINFO.{volume label}.txt` — via the *Save report…* dialog, or
-automatically next to the disc when *Auto-save report on scan completion* is enabled
-in Settings.
+- **`gui.conf`** — settings and window geometry, saved as they change. **Deleting it is the full
+  reset**: window size and position, theme, and every setting return to defaults. This is also the
+  fix when the window restores off-screen, for example onto a monitor you have since unplugged.
+- **`gui.log`** — a plain-text diagnostic log, overwritten at each launch. It records which
+  renderer was selected, any panics, and dialog or portal errors. **Attach it when filing a bug** —
+  it answers the first questions a graphics issue raises.
 
 ## Troubleshooting
 
-Rendering problems are almost always the GPU driver stack, and two environment
-variables cover nearly all of them:
+Rendering problems are almost always the GPU driver stack, and two environment variables cover
+nearly all of them.
 
-- **Glitchy or wrong rendering — black icons, gradient banding, flashing, or a crash
-  right at startup on an old GPU:** set `ICED_BACKEND=tiny-skia` to force software
-  rendering. When GPU initialization fails outright the app already falls back to
-  software rendering on its own; the variable is for the cases where the GPU path
-  "works" but renders wrongly.
-- **Picking a different GPU API:** `WGPU_BACKEND=vulkan` (or `gl`, `dx12`, `metal`)
-  skips a broken backend while staying GPU-accelerated.
-- **Hybrid-GPU laptop spins up the discrete GPU:** set `WGPU_POWER_PREF=low`. The
-  renderer defaults to the high-performance adapter; a disc analyzer does not need
-  one.
-- **Wayland trouble** (blank window, no decorations, compositor quirks): unset
-  `WAYLAND_DISPLAY` for the launch to run via X11/XWayland. (The old
-  `WINIT_UNIX_BACKEND` variable no longer exists; the standard display variables are
-  the selection mechanism.)
-- **Raspberry Pi, Asahi Linux, and similar (2048-px GPU texture limit):** resizing
-  the window wider than 2048 physical pixels can crash the GPU renderer on devices
-  whose driver reports a 2048-px maximum texture size. Use
-  `ICED_BACKEND=tiny-skia` there.
-- **White or blank window after a GPU driver update, sleep/resume, or monitor
-  change:** restart the app — recovering a lost GPU device is an upstream renderer
-  limitation. Settings are saved as they change, and with
-  *Auto-save report on scan completion* enabled a finished report is already on disk.
-- **White window on Windows with the "Beta: Use Unicode UTF-8 for worldwide language
-  support" locale option enabled:** known driver-dependent incompatibility with GPU
-  apps. `ICED_BACKEND=tiny-skia` avoids it, or disable the option (Control Panel →
-  Region → Administrative → Change system locale).
-- **File-picker buttons do nothing on a minimal Linux setup** (bare window manager,
-  container): the open/save dialogs go through the XDG desktop portal, with a zenity
-  fallback — with neither installed, the dialogs cannot appear (install
-  `xdg-desktop-portal` plus a backend such as `xdg-desktop-portal-gtk`, or `zenity`).
-  Two roads always work without any portal: drag-and-drop onto the window, and the
-  command-line path argument. Portal failures are recorded in `gui.log`.
-- **Everything is too small or too large** (typically X11 fractional scaling): set
-  the UI scale in Settings (50–200%), or step it with <kbd>Ctrl</kbd>+<kbd>+</kbd> /
-  <kbd>Ctrl</kbd>+<kbd>-</kbd>.
-- **macOS:** quitting with <kbd>Cmd</kbd>+<kbd>Q</kbd> skips the window-close path,
-  so that session's window size and position are not remembered (settings are
-  unaffected). Close the window itself to keep the geometry.
-- **Non-Latin disc titles show as boxes on a minimal Linux install:** text falls back
-  to system fonts, so the system needs a font covering the script (e.g. a Noto CJK
-  package for Japanese/Chinese/Korean titles).
+| Symptom | Fix |
+|---|---|
+| Black icons, banding, flashing, or a crash at startup on an old GPU | `ICED_BACKEND=tiny-skia` — force software rendering |
+| One graphics API is broken, but the GPU is fine | `WGPU_BACKEND=vulkan` (or `gl`, `dx12`, `metal`) |
+| A hybrid-GPU laptop spins up the discrete GPU | `WGPU_POWER_PREF=low` — a disc analyzer does not need it |
+| Blank window, missing decorations, compositor quirks (Wayland) | Unset `WAYLAND_DISPLAY` for the launch to run under X11/XWayland |
+| Crash when the window goes wider than 2048 px (Raspberry Pi, Asahi) | `ICED_BACKEND=tiny-skia` — those drivers cap texture size at 2048 px |
+| White window on Windows with the "Beta: Unicode UTF-8 worldwide language support" locale option | `ICED_BACKEND=tiny-skia`, or turn the option off (Control Panel → Region → Administrative) |
+| White or blank window after a driver update, sleep/resume, or a monitor change | Restart the app — recovering a lost GPU device is an upstream renderer limitation |
+| Everything is too small or too large (typically X11 fractional scaling) | Set UI scale in Settings (50–200%), or <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> |
+| File-picker buttons do nothing on a minimal Linux setup | Install `xdg-desktop-portal` and a backend such as `xdg-desktop-portal-gtk`, or `zenity` |
+| Non-Latin disc titles render as boxes | Install a font covering the script, such as a Noto CJK package |
 
-## Differences from the BDInfo GUI
+Two notes that are behaviour, not bugs:
 
-Deliberate divergences from the original Windows-only BDInfo application:
+- **File dialogs** go through the XDG desktop portal with a zenity fallback. With neither installed
+  they cannot appear — but drag-and-drop and the command-line path argument always work. Portal
+  failures are recorded in `gui.log`.
+- **macOS:** quitting with <kbd>Cmd</kbd>+<kbd>Q</kbd> skips the window-close path, so that
+  session's window size and position are not remembered. Settings are unaffected. Close the window
+  itself to keep the geometry.
 
-- **Damaged discs scan through.** Unreadable files are collected into the report's
-  `WARNING` block and shown as a single banner; the scan continues. The original
-  stops with a message box per failed file.
-- **Saving:** a *Save report…* dialog with a destination picker, in addition to the
-  original's autosave-next-to-the-disc setting (off by default here).
-- **Not implemented:** the bitrate chart windows; the custom playlist builder; the
-  taskbar progress indicator.
-- **The report is byte-compatible** with the original tool's. The few deliberate
-  content-level divergences — places where the original is provably wrong against the
-  codec specifications — are documented in [DIFFERENCES.md](../../DIFFERENCES.md).
+## Differences from the original BDInfo GUI
 
-## Packaging notes
+| | bdinfo-rs-gui | Original |
+|---|---|---|
+| Damaged discs | Scans through; unreadable files go to the report's `WARNING` block and a single banner | Stops with a message box per failed file |
+| Saving | *Save report…* dialog with a destination picker, plus optional autosave (off by default) | Autosave beside the disc |
+| Bitrate charts | Not implemented | Present |
+| Custom playlist builder | Not implemented | Present |
+| Taskbar progress | Not implemented | Present |
 
-- The application identifies itself to the windowing system as `bdinfo-rs-gui`. On
-  Linux (Wayland especially) the desktop entry must match for the icon and window
-  grouping to work: the file must be named `bdinfo-rs-gui.desktop`, and any
-  `StartupWMClass` entry must say `bdinfo-rs-gui`.
-- Linux packages should recommend `xdg-desktop-portal` (file dialogs; see
-  troubleshooting above).
-- A macOS `.app` bundle must set `CFBundleIdentifier` in `Info.plist` — the native
-  open panel requires it in bundled apps.
-- Configuration is created at runtime in the per-user directory listed above; there
-  is nothing to install. An uninstall purge should remove that directory.
+The report itself is byte-compatible. The deliberate content-level divergences — places where the
+original is provably wrong against the codec specifications — are in
+[DIFFERENCES.md](../../DIFFERENCES.md).
 
 ## Building from source
 
-The GUI is its own workspace inside the repository:
+The app is its own workspace inside the repository. Pure Rust: no C toolchain and no system
+development libraries on any platform. The pinned toolchain installs itself via the repository's
+`rust-toolchain.toml`.
 
 ```sh
 git clone https://github.com/agentjp/bdinfo-rs
@@ -145,12 +108,18 @@ cd bdinfo-rs/crates/bdinfo-rs-gui
 cargo build --release      # binary at target/release/bdinfo-rs-gui
 ```
 
-Pure Rust: no C toolchain and no system development libraries are required on any
-platform. The pinned toolchain installs itself via the repository's
-`rust-toolchain.toml`.
+## Packaging notes
+
+- The app identifies itself to the windowing system as `bdinfo-rs-gui`. On Linux, and Wayland
+  especially, the desktop entry must match for the icon and window grouping to work: the file must
+  be named `bdinfo-rs-gui.desktop`, and any `StartupWMClass` must say `bdinfo-rs-gui`.
+- Linux packages should recommend `xdg-desktop-portal` for file dialogs.
+- A macOS `.app` bundle must set `CFBundleIdentifier` in `Info.plist` — the native open panel
+  requires it in bundled apps.
+- There is nothing to install: configuration is created at runtime in the per-user directory above.
+  An uninstall purge should remove that directory.
 
 ## License
 
-[LGPL-2.1-or-later](../../LICENSE), like the rest of bdinfo-rs — a derivative work of
-BDInfo ([UniqProject](https://github.com/UniqProject/BDInfo)); see
-[NOTICE](../../NOTICE) for upstream attribution.
+[LGPL-2.1-or-later](../../LICENSE), like the rest of bdinfo-rs — a derivative work of BDInfo
+([UniqProject](https://github.com/UniqProject/BDInfo)); see [NOTICE](../../NOTICE) for attribution.
