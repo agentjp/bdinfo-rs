@@ -364,10 +364,8 @@ fn drive_window_ms() -> u64 {
     std::env::var("BDINFO_GUI_DRIVE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500)
 }
 
-/// How long a step's messages get to render before its marker is written.
 #[cfg(debug_assertions)]
 const DRIVE_SETTLE_MS: u64 = 500;
-/// The poll interval while a step waits for its precondition.
 #[cfg(debug_assertions)]
 const DRIVE_POLL_MS: u64 = 200;
 /// Poll attempts before the walk gives up on a step (450 × 200 ms = 90 s).
@@ -405,7 +403,6 @@ static DRIVE_STEPS: &[DriveStep] = &[
         ready: drive_listed,
         act: |app| app.update(Message::SortBy(SortColumn::Length)),
     },
-    // The same header again — the ascending order flips.
     DriveStep {
         name: "sort-length-flip",
         ready: drive_listed,
@@ -621,10 +618,9 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
             .log_err("window icon")
             .ok(),
         exit_on_close_request: false,
-        // Wayland ignores the RGBA icon above by protocol — the dock icon and
-        // window grouping key off this id, matched against the `.desktop`
-        // file ([`APP_ID`]). The field only exists on Linux; every other
-        // platform (the BSDs included) keeps its own platform defaults.
+        // Wayland ignores the RGBA icon above by protocol and keys off this
+        // id instead — see `APP_ID`. The field only exists on Linux; every
+        // other platform (the BSDs included) keeps its own platform defaults.
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: APP_ID.to_owned(),
@@ -817,7 +813,6 @@ enum Command {
 }
 
 impl Command {
-    /// The label shown on this command's control.
     const fn label(self) -> &'static str {
         match self {
             Self::OpenFolder => "Open folder…",
@@ -829,7 +824,6 @@ impl Command {
         }
     }
 
-    /// The message this command dispatches.
     const fn message(self) -> Message {
         match self {
             Self::OpenFolder => Message::OpenFolder,
@@ -1039,7 +1033,6 @@ impl App {
         f32::from(percent) / 100.0
     }
 
-    /// The window title (an iced title function over the app state).
     fn title(&self) -> String {
         self.flow
             .label()
@@ -1682,9 +1675,7 @@ impl App {
         self.showing_report = false;
         self.notice = None;
         self.pane_selection = None;
-        // A fresh cancel flag per scan: the Cancel button sets it, the demux
-        // polls it per read chunk. Cancelling a superseded scan can never
-        // touch this one — it holds its own flag.
+        // A fresh flag per scan — see the `scan_cancel` field.
         let cancel = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancel));
 
@@ -2533,8 +2524,8 @@ fn header_cell<'a>(
             .wrapping(text::Wrapping::None),
     )
     .width(width)
-    // Fill the header band and centre vertically, so every column's label sits on
-    // the same baseline whether or not it carries a resize grab.
+    // So every column's label sits on the same baseline whether or not it
+    // carries a resize grab.
     .height(Length::Fill)
     .align_x(align)
     .align_y(Vertical::Center)

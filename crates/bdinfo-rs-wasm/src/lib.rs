@@ -1049,7 +1049,7 @@ pub fn scan_report(data: &[u8]) -> String {
 /// Runs the **full measured** scan — M2TS demux + per-stream/per-chapter
 /// statistics, `run_packet_scan = true` — reading every file's bytes
 /// synchronously at byte offsets through [`web_sys::FileReaderSync`]. This MUST
-/// run in a Web Worker (the only scope where `FileReaderSync` exists). When
+/// run in a Web Worker (see the module docs). When
 /// `on_progress` is supplied it is called as `(file, done, total)` after each
 /// demux read. A non-empty `selection` names the playlists to measure (CLI
 /// `--mpls` semantics — unfiltered, in order); an empty `selection` measures the
@@ -1091,8 +1091,8 @@ pub fn scan_files(
 /// [`web_sys::FileReaderSync`] ([`WebIso`] is the [`IsoReader`] factory), so a
 /// multi-GB `.iso` never has to fit in memory. It then runs the **full measured**
 /// scan and renders the same report `bdinfo-rs <disc>.iso` writes. Like
-/// [`scan_files`], this MUST run in a Web Worker (the only scope where
-/// `FileReaderSync` exists); `on_progress`, when supplied, is called as
+/// [`scan_files`], this MUST run in a Web Worker; `on_progress`, when
+/// supplied, is called as
 /// `(file, done, total)`; a non-empty `selection` measures only the named
 /// playlists (CLI `--mpls` semantics, unfiltered, in order), an empty one the
 /// standard `--whole` set.

@@ -26,37 +26,22 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// The config file's key for the short-playlist filter switch.
+// The config file's keys.
 const KEY_FILTER_SHORT: &str = "filter-short-playlists";
-/// The config file's key for the short-playlist threshold (whole seconds).
 const KEY_SHORT_SECONDS: &str = "short-playlist-seconds";
-/// The config file's key for the looping-playlist filter switch.
 const KEY_FILTER_LOOPS: &str = "filter-looping-playlists";
-/// The config file's key for the human-readable size toggle.
 const KEY_HUMAN_SIZES: &str = "human-readable-sizes";
-/// The config file's key for the chapter-count display toggle.
 const KEY_CHAPTER_COUNT: &str = "display-chapter-count";
-/// The config file's key for the autosave-report switch.
 const KEY_AUTOSAVE: &str = "autosave-report";
-/// The config file's key for the report's stream-diagnostics sections.
 const KEY_REPORT_DIAGNOSTICS: &str = "report-stream-diagnostics";
-/// The config file's key for the report's quick-summary blocks.
 const KEY_REPORT_SUMMARY: &str = "report-quick-summary";
-/// The config file's key for the last opened source path.
 const KEY_LAST_PATH: &str = "last-path";
-/// The config file's key for the theme preference.
 const KEY_THEME: &str = "theme";
-/// The config file's key for the UI scale, in percent.
 const KEY_UI_SCALE: &str = "ui-scale-percent";
-/// The config file's keys for the window's logical size.
 const KEY_WINDOW_WIDTH: &str = "window-width";
-/// See [`KEY_WINDOW_WIDTH`].
 const KEY_WINDOW_HEIGHT: &str = "window-height";
-/// The config file's keys for the window's logical position.
 const KEY_WINDOW_X: &str = "window-x";
-/// See [`KEY_WINDOW_X`].
 const KEY_WINDOW_Y: &str = "window-y";
-/// The config file's key for the window's maximized state.
 const KEY_WINDOW_MAXIMIZED: &str = "window-maximized";
 
 /// The largest believable window axis, in logical pixels — a stored size or
@@ -252,7 +237,7 @@ impl Settings {
         let (mut width, mut height, mut x, mut y) = (None, None, None, None);
         for line in text.lines() {
             let Some((raw_key, raw_value)) = line.split_once('=') else {
-                continue; // not a `key = value` line — skipped
+                continue;
             };
             let key = raw_key.trim();
             // The writer puts exactly one space after `=`; strip exactly that
@@ -522,9 +507,7 @@ pub fn sanitize_seconds(text: &str) -> String {
 
 // ── where the file lives ─────────────────────────────────────────────────────
 
-/// The directory + file name under the platform's config base.
 const APP_DIR: &str = "bdinfo-rs";
-/// See [`APP_DIR`].
 const FILE_NAME: &str = "gui.conf";
 
 /// Windows: `%APPDATA%\bdinfo-rs\gui.conf`. `None` without a usable
