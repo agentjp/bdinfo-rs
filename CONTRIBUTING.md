@@ -1,126 +1,120 @@
 # Contributing to bdinfo-rs
 
-Thanks for your interest in bdinfo-rs — a memory-safe, zero-C-dependency Rust
-Blu-ray disc analyzer. This guide covers how to build, what CI expects, and the
-handful of house rules that keep the project's guarantees intact.
+This guide covers how to build, how to run the same checks CI runs, and the house rules that keep
+the project's guarantees intact.
 
 ## Reporting issues
 
-- **Bugs and feature requests:** open an issue on the
-  [tracker](https://github.com/agentjp/bdinfo-rs/issues). A disc structure or
-  report excerpt that reproduces the problem helps a lot.
-- **Security vulnerabilities:** report privately via
-  [GitHub Security Advisories](https://github.com/agentjp/bdinfo-rs/security/advisories/new),
-  not a public issue.
+- **Output differences** — the most useful report there is. Use the
+  [output difference template](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)
+  and paste the **text report** (codecs, bitrates, stream layout). Never attach audio or video.
+- **Bugs and feature requests** — the [tracker](https://github.com/agentjp/bdinfo-rs/issues).
+- **Security vulnerabilities** — privately, via
+  [GitHub Security Advisories](https://github.com/agentjp/bdinfo-rs/security/advisories/new).
+  See [SECURITY.md](SECURITY.md); a panic or hang on malformed input is in scope.
 
 ## Building
 
-No C toolchain, no system libraries, no extra steps — the same on Windows,
-macOS, and Linux:
+No C toolchain, no system libraries, no extra steps — the same on Windows, macOS, and Linux. The
+pinned toolchain installs itself via `rust-toolchain.toml`; **MSRV is 1.96**.
 
 ```sh
 git clone https://github.com/agentjp/bdinfo-rs
 cd bdinfo-rs
-cargo build --workspace      # debug build; add --release for the optimized binary
-cargo test --workspace       # unit + integration + property tests
+cargo build --workspace      # add --release for the optimized binary
+cargo test --workspace
 ```
 
-The pinned Rust toolchain installs itself automatically via `rust-toolchain.toml`,
-and Cargo fetches the few pure-Rust dependencies. The **minimum supported Rust
-version (MSRV) is 1.96**.
+The desktop app and the WebAssembly package are **separate workspaces** — `--workspace` at the root
+does not touch them, and each has its own lockfile and its own gate:
 
-## What CI checks
+```sh
+cd crates/bdinfo-rs-gui  && cargo build --release
+cd crates/bdinfo-rs-wasm && cargo test
+```
 
-Every pull request must be green. CI mirrors the local quality gate and is
-deliberately strict:
+## Running the checks locally
 
-- **build + test** on Linux, Windows, and macOS.
-- **rustfmt** (pinned nightly — the format config uses nightly-only options).
-- **clippy** with `-D warnings` (the pedantic, nursery, cargo, and selected
-  restriction lints are all on).
-- **typos** spell-check, **machete** / **shear** unused-dependency checks, and a
-  **doc** build with warnings treated as errors.
-- **cargo-semver-checks** against the last release tag — the library API is
-  SemVer-stable.
-- **coverage** — 100% lines / regions / functions on the library.
-- **cargo-deny** and **cargo-vet** — the license allow-list, the no-C-dependency
-  bans, crates.io-only sources, and per-dependency supply-chain audits. RustSec
-  advisories are checked in a daily audit run and, for a PR's own dependency
-  changes, by **dependency-review** — a freshly published CVE never reddens an
-  unrelated PR.
-- **conventional commits + banned words** — `convco check` verifies every commit
-  on the PR is a [Conventional Commit](https://www.conventionalcommits.org/), and a
-  banned-word gate rejects LLM/AI-attribution tokens in the commit messages and the
-  PR title/body. See [Commit messages](#commit-messages--conventional-commits) below.
+The gate is a sequence of tracked Cargo aliases in [`.cargo/config.toml`](.cargo/config.toml) — CI
+runs these exact aliases, so local and CI agree. Run them cheapest first and stop at the first
+failure:
 
-Running `cargo build`, `cargo test`, `cargo clippy`, and `cargo fmt --check`
-locally before pushing catches the common failures early.
+| | | |
+|---|---|---|
+| `cargo ck` | type-check every target | `cargo dc` | docs, warnings as errors |
+| `cargo nt` | tests (nextest, strict) | `cargo mc` | unused dependencies |
+| `cargo lt` | clippy, `-D warnings` | `cargo dn` | cargo-deny: advisories, licenses, bans |
+| `cargo cov` | coverage, floors at 100% | `cargo mt` | mutation testing (slow) |
+
+Two checks have no alias:
+
+- **Formatting** needs the pinned **nightly** rustfmt (`rustfmt.toml` uses nightly-only options),
+  and an alias cannot select a toolchain: `cargo +nightly fmt --all --check`.
+- **Mutation testing on a diff** is what a pull request runs:
+  `cargo mutants --in-place --in-diff <diff>`.
 
 ## House rules
 
-These are not style preferences — each one protects a guarantee the project
-makes, and a change that breaks one will not be merged.
+Each of these protects a guarantee the project makes. A change that breaks one will not be merged.
 
-- **No `unsafe`.** It is `forbid`-den workspace-wide; memory safety is the
-  product.
-- **No C / no FFI.** Never add a dependency that compiles or links C (a `cc` /
-  `cmake` / `bindgen` build script, or a `-sys` crate wrapping a C library). The
-  single static binary is the whole point, and `cargo-deny` enforces this.
-- **Deterministic output.** Never use `HashMap` / `HashSet` on an output path —
-  their iteration order is nondeterministic. Use `BTreeMap` or a sorted `Vec`.
-- **Big-endian disc reads.** Disc structures are big-endian; always parse via
-  `from_be_bytes`, never host byte order. (UDF, in `vfs::udf`, is little-endian
-  by spec — the one exception.)
-- **Never panic on input.** Malformed data returns `Result<_, BdError>`; an
-  absent field or EOF is an `Option`. No `unwrap` / `expect` / `panic` / raw
-  indexing on disc bytes — the parser must never panic or hang on hostile input.
-- **The report is byte-locked.** The human-readable disc report is a frozen byte
-  contract pinned by a fixture test. Do not change report bytes incidentally; a
-  deliberate change (for example a spec-correctness fix) must arrive with the
-  re-pinned fixture and a clear rationale.
+- **No `unsafe`.** `forbid`-den workspace-wide, including the desktop app. Memory safety is the
+  product. (The WebAssembly crate carries a single tripwire-guarded exception for its bindings.)
+- **No C, no FFI.** Never add a dependency that compiles or links C — a `cc` / `cmake` / `bindgen`
+  build script, or a `-sys` crate wrapping a C library. `cargo-deny` enforces it.
+- **Checked arithmetic.** Bare `+ - * << >>` is rejected. Use `wrapping_*` for fixed-width codec and
+  bit math; `checked_*` with `?` for buffer offsets and lengths, where overflow means malformed
+  input.
+- **Big-endian disc reads.** Disc structures are big-endian — always `from_be_bytes`. UDF, in
+  `vfs::udf`, is little-endian by specification: the one exception.
+- **Deterministic output.** Never `HashMap` / `HashSet` on an output path. Use `BTreeMap` or a
+  sorted `Vec`.
+- **Never panic on input.** Malformed data returns `Result<_, BdError>`; an absent field or EOF is
+  an `Option`. No `unwrap` / `expect` / `panic` / raw indexing on disc bytes.
+- **The report is byte-locked.** The disc report is a frozen byte contract (CRLF, UTF-8 without BOM,
+  invariant numbers, truncated times) pinned by fixture tests. A deliberate change must arrive with
+  the re-pinned fixture and a rationale — and if it is a divergence from the original BDInfo, an
+  entry in [DIFFERENCES.md](DIFFERENCES.md).
+- **Style belongs to the tools.** rustfmt owns layout, clippy owns idioms. Never hand-tune spacing
+  or import order.
 
-## Commit messages — Conventional Commits
+A module is considered done at 100% coverage with zero surviving mutants, carrying both unit tests
+and property tests.
 
-bdinfo-rs uses [**Conventional Commits**](https://www.conventionalcommits.org/).
-master is **squash-merged**, so each PR lands as one commit whose subject is the **PR
-title** — that subject feeds the generated changelog and the computed release version.
-Write the PR title (and every commit) as release-note copy. The format is:
+## Commit messages
+
+bdinfo-rs uses [Conventional Commits](https://www.conventionalcommits.org/). master is
+**squash-merged**, so each pull request lands as one commit whose subject is the **pull request
+title** — that subject feeds the generated changelog and the computed version. Write it as
+release-note copy.
 
 ```text
 <type>(<scope>): <description>
 ```
 
-**type** (required) sets the changelog section and the SemVer impact. These are the
-only accepted types — `convco check` rejects anything else. The **bump** column is
-what `convco version --bump` derives automatically; convco only bumps for `feat`,
-`fix`, and breaking changes, so the rest read as no automatic bump (a release that
-wants one anyway overrides it — see [Cutting a release](#cutting-a-release-maintainers)):
+**type** sets the changelog section and the SemVer impact. This list is closed; `convco check`
+rejects anything else. Only `feat`, `fix`, and breaking changes bump the version automatically.
 
 | type | bump | changelog | use for |
-|------|-------|-----------|---------|
+|---|---|---|---|
 | `feat` | minor | **Features** | a new user-visible capability |
 | `fix` | patch | **Bug Fixes** | a bug fix |
-| `perf` | — | **Performance** | a measurable speed / size improvement |
+| `perf` | — | **Performance** | a measurable speed or size improvement |
 | `refactor` | — | hidden | a behaviour-preserving code change |
 | `docs` | — | hidden | documentation only |
 | `test` | — | hidden | tests only |
-| `build` | — | hidden | build system / dependencies |
-| `ci` | — | hidden | CI configuration / workflows |
-| `chore` | — | hidden | housekeeping touching no src / tests |
+| `build` | — | hidden | build system or dependencies |
+| `ci` | — | hidden | CI configuration or workflows |
+| `chore` | — | hidden | housekeeping touching no src or tests |
 | `style` | — | hidden | formatting only |
 
-A `!` after the type/scope or a `BREAKING CHANGE:` footer forces a **major** bump.
+A `!` after the type or scope, or a `BREAKING CHANGE:` footer, forces a **major** bump.
 
-**scope** (optional) names the area, from the closed vocabulary in
-[`.convco`](.convco): code — `core cli vfs udf bitstream bytes stream bdrom mpls clpi
-m2ts index discovery codec report`; infrastructure — `deps ci release docker fuzz
-packaging gate`. Adding a module means adding its scope to `.convco`.
+**scope** is optional, from the vocabulary in [`.convco`](.convco) — code: `core cli vfs udf
+bitstream bytes stream bdrom mpls clpi m2ts index discovery codec report`; front-ends: `wasm gui`;
+infrastructure: `deps ci release docker fuzz packaging gate`. Adding a module means adding its
+scope.
 
-**description** (required) — imperative, lower-case start, no trailing period; a full
-release-note sentence.
-
-**breaking changes** — append `!` after the type / scope (`feat(report)!: …`) or add
-a `BREAKING CHANGE:` footer; either bumps the **major** version.
+**description** is imperative, lower-case, with no trailing period — a full release-note sentence.
 
 ```text
 feat(udf): add case-insensitive descriptor lookup
@@ -129,65 +123,69 @@ perf(m2ts): halve the allocations in the packet scan
 feat(report)!: drop the legacy column from the locked report
 ```
 
-**No attribution, ever** — no `Co-Authored-By`, no "Generated with…", no sign-off,
-and no LLM/AI-attribution words (`Claude`, `Copilot`, `GPT`, `AI`, the 🤖 emoji, …)
-anywhere in a commit message or in the PR title / body. This is enforced mechanically
-by [`.github/scripts/check-banned-words.ps1`](.github/scripts/check-banned-words.ps1),
-which runs both in the commit-msg hook and in CI.
+**No attribution, ever.** No `Co-Authored-By`, no "Generated with…", no sign-off, and no
+LLM/AI-attribution tokens anywhere in a commit message or a pull request title or body. Enforced by
+[`.github/scripts/check-banned-words.ps1`](.github/scripts/check-banned-words.ps1), which runs in
+both the commit-msg hook and CI.
 
-### Authoring and checking locally
-
-Install [convco](https://convco.github.io/) as a prebuilt binary (`cargo binstall
-convco`, or `taiki-e/install-action`; avoid the from-source build, which compiles C —
-convco is a dev tool, never a bdinfo-rs dependency). Write the subject by hand, or let
-convco scaffold it:
+Check both before pushing — the same two things CI runs:
 
 ```sh
-convco commit --feat --scope udf -m "add case-insensitive descriptor lookup"
-```
-
-Validate before pushing — the same two checks CI runs:
-
-```sh
-convco check origin/master..HEAD          # every commit is conventional
+convco check origin/master..HEAD
 git log --format=%B origin/master..HEAD | pwsh .github/scripts/check-banned-words.ps1 -Label commits
 ```
 
-Maintainers can install git hooks (commit-msg + pre-push) that run both automatically
-via the local `scripts/install-hooks.ps1`.
+Install [convco](https://convco.github.io/) as a prebuilt binary (`cargo binstall convco`) — the
+from-source build compiles C, and it is a dev tool, never a bdinfo-rs dependency.
 
 ## Pull requests
 
-Open a PR from a branch — never push to master, which is protected. Keep the branch
-**rebased** on `origin/master` (master keeps a **linear history**).
+Open a pull request from a branch; master is protected. Keep the branch **rebased** on
+`origin/master`, which branch protection requires to be up to date before merging.
 
-- master is **squash-merged**: the whole PR lands as ONE commit whose subject is the **PR
-  title**, so the **PR title must be a Conventional Commit** — it is the changelog line and
-  the version driver, and CI enforces it (a required check). Every commit in the PR must
-  still be conventional (hygiene, and a single-commit PR's message is the squash fallback),
-  but the individual commits do not appear on master.
-- **Why squash, not rebase:** master requires **signed commits** AND **linear history**.
-  GitHub cannot sign rebased commits, and merge commits are non-linear — so squash, which
-  GitHub signs (Verified) and keeps linear, is the only method compatible with both.
-- All required checks must be green, including **conventional commits + banned words**.
+- The **pull request title must be a Conventional Commit** — it becomes the squashed commit subject,
+  the changelog line, and the version driver. It is a required check.
+- Every commit in the branch must also be conventional. They do not appear on master, but a
+  single-commit pull request's message is the squash fallback.
+- **Why squash rather than rebase:** master requires both signed commits and linear history. GitHub
+  cannot sign rebased commits, and merge commits are not linear. Squash is the only method
+  satisfying both, and GitHub signs it.
+- All required checks must be green.
 
 Fill out the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
 
 By contributing you agree that your contributions are licensed under the project's
-[LGPL-2.1-or-later](LICENSE) license.
+[LGPL-2.1-or-later](LICENSE).
+
+## What CI checks
+
+Every pull request runs a plan-gated orchestrator: a classifier job maps the diff to areas, and only
+the affected gate jobs run. The full set:
+
+- **Build and test** on Linux, Windows, and macOS.
+- **rustfmt** (pinned nightly) and **clippy** with `-D warnings` — pedantic, nursery, cargo, and a
+  selected restriction set.
+- **Coverage** — 100% lines, regions, and functions on the library, plus branch-coverage floors.
+- **Mutation testing** on the diff, and a full sweep daily and on every release tag.
+- **Fuzzing** — the committed seed corpus is replayed on every pull request; release tags fresh-fuzz.
+- **typos**, **machete** and **shear** (unused dependencies), and a **doc** build with warnings as
+  errors.
+- **cargo-semver-checks** against the last release tag — the library API is SemVer-stable.
+- **cargo-deny** and **cargo-vet** — license allow-list, the no-C-dependency ban, crates.io-only
+  sources, and per-dependency audits. RustSec advisories run in a daily audit, and a pull request's
+  own dependency changes go through dependency-review, so a freshly published CVE never reddens an
+  unrelated pull request.
+- **Conventional commits and banned words**, and CodeQL.
 
 ## Cutting a release (maintainers)
 
-convco computes the version and changelog, but it never commits, tags, or pushes — its
-output is advisory and the pushed `vX.Y.Z` tag is the source of truth. Merging a PR never
-triggers a release; only the tag does (it runs cargo-dist). Before tagging:
+Releases are tag-driven. convco computes the version and changelog but never commits, tags, or
+pushes — its output is advisory and the pushed `vX.Y.Z` tag is the source of truth. Merging never
+releases; only the tag does.
 
-1. **Compute the next version (advisory):**
-
-   ```sh
-   convco version --bump          # e.g. 1.1.0; override with --patch / --minor / --major
-   ```
-
+1. **Compute the next version** — `convco version --bump`, overriding with `--patch` / `--minor` /
+   `--major` where convco's rules do not apply (it bumps only on `feat`, `fix`, and breaking
+   changes).
 2. **Set it across the workspace** and bump the internal pin, then refresh the lockfile:
 
    ```sh
@@ -196,39 +194,30 @@ triggers a release; only the tag does (it runs cargo-dist). Before tagging:
    cargo build
    ```
 
-3. **Generate the new CHANGELOG section** from the commits since the last tag and insert
-   it above the existing history — the curated pre-adoption entries are preserved, only
-   the new version's section is generated:
+3. **Generate the changelog section** — `convco changelog v<previous>..HEAD` — and insert it above
+   the preserved history. convco emits the bracketed Keep-a-Changelog shape that cargo-dist parses
+   for the release notes. convco derives link hosts from the git remote, so check the generated
+   links point at `github.com`.
+4. Run the gate, open a pull request whose title is the release commit, squash-merge, then push the
+   `vX.Y.Z` tag on master. The tag must equal the workspace version and sit on master.
 
-   ```sh
-   convco changelog v<previous>..HEAD
-   ```
-
-   convco emits the bracketed Keep-a-Changelog format (`## [X.Y.Z](…) (date)` with
-   `### Features` / `### Bug Fixes` sections) that cargo-dist parses for the release
-   notes — the same heading shape as the existing `## [1.0.0]` entry. convco 0.6.4 derives
-   the link host from the git remote (the `ai.github.com` SSH alias), so rewrite
-   `ai.github.com` → `github.com` in the generated links; the cockpit
-   `scripts/release-prep.ps1` does steps 1–3, the rewrite included, in one pass.
-
-4. Run the gate, open a PR (its title is the conventional release commit), **Squash and
-   merge**, then push the `vX.Y.Z` tag on master.
+The tag fans out to every channel automatically. Releases are **immutable** — never re-push a tag;
+recover a partial release per channel.
 
 ### The GUI release lane (`gui-v*`)
 
-The desktop GUI releases through its own hand-rolled lane (`gui-release.yml`), not
-cargo-dist: a `gui-vX.Y.Z` tag builds the six native targets, packages them (Windows
-`.msi` + portable `.zip`, macOS `.dmg`, Linux AppImage + `.deb` + `.rpm`), and publishes
-a GitHub Release marked not-latest. cargo-dist's `v` tag-namespace keeps the two lanes
-from ever firing each other.
+The desktop app releases through its own hand-rolled lane (`gui-release.yml`), not cargo-dist: a
+`gui-vX.Y.Z` tag builds the six native targets, packages them (Windows `.msi` + portable `.zip`,
+macOS `.dmg`, Linux AppImage + `.deb` + `.rpm`), and publishes a GitHub Release marked not-latest.
+cargo-dist's `v` tag-namespace keeps the two lanes from ever firing each other.
 
-**Versioning: coupled start, independent cadence.** The first GUI tag is `gui-v2.0.0`,
-alongside the workspace's `v2.0.0`; from then on the lanes move independently — the gui
-crate's version bumps only when shipped GUI changes warrant it, and workspace releases
-never drag a GUI bump along. The mechanical invariant the lane enforces: `gui-vX.Y.Z`
-must equal `crates/bdinfo-rs-gui/Cargo.toml`'s version and sit on master.
+**Versioning: coupled start, independent cadence.** The first GUI tag is `gui-v2.0.0`, alongside
+the workspace's `v2.0.0`; from then on the lanes move independently — the gui crate's version bumps
+only when shipped GUI changes warrant it, and workspace releases never drag a GUI bump along. The
+invariant the lane enforces: `gui-vX.Y.Z` must equal `crates/bdinfo-rs-gui/Cargo.toml`'s version
+and sit on master.
 
-Before tagging, run the lane's dry run: Actions → gui-release → Run workflow (on
-master). It builds and packages all six targets and uploads the results as workflow
-artifacts for hand-testing; only release creation and attestation are tag-only. The tag
-run always rebuilds from the tagged commit — it never reuses dry-run artifacts.
+Before tagging, run the lane's dry run: Actions → gui-release → Run workflow (on master). It builds
+and packages all six targets and uploads the results as workflow artifacts for hand-testing; only
+release creation and attestation are tag-only. A tag run always rebuilds from the tagged commit —
+it never reuses dry-run artifacts.
