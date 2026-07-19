@@ -69,8 +69,7 @@ impl ViewSettings {
     }
 
     /// The core playlist filter these settings build — what the row
-    /// construction applies in place of the old hard-coded
-    /// `PlaylistFilter::default()`.
+    /// construction applies instead of `PlaylistFilter::default()`.
     #[must_use]
     pub fn filter(&self) -> PlaylistFilter {
         PlaylistFilter {
@@ -671,7 +670,7 @@ mod tests {
         assert_eq!(first.file, "00000.MPLS");
         assert_eq!(first.estimated_bytes, "1,000.00 B");
         assert_eq!(first.measured_bytes, "0");
-        // The defaults render exactly as before the settings existed.
+        // The defaults render the chapter suffix and grouped-byte sizes.
         let default_cells = display_rows(&rows, ViewSettings::default());
         let first = default_cells.first().expect("the feature row");
         assert_eq!(first.file, "00000.MPLS [12 Chapters]");

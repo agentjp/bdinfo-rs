@@ -1,7 +1,10 @@
 //! The persistent GUI configuration.
 //!
 //! The app's small memory between launches: the window geometry, the last
-//! opened source path, and the theme preference, stored as a flat
+//! opened source path, and every Settings-dialog preference — theme, UI
+//! scale, the table filters and their threshold, the size and chapter-count
+//! formatting, autosave, and the two optional report sections (see
+//! [`Settings`] for the full set) — stored as a flat
 //! `key = value` text file (hand-rolled parser + writer, pure std — this
 //! project hand-rolled a UDF reader; a key-value file is squarely in its
 //! idiom). The store is a **convenience, never a dependency**: unknown keys
@@ -200,16 +203,16 @@ impl Default for Settings {
             window_maximized: false,
             last_path: None,
             theme: ThemeChoice::default(),
-            // Native scale — a fresh install renders exactly as before the
-            // setting existed.
+            // Native scale — a fresh install adds no scaling of its own on
+            // top of the OS DPI.
             ui_scale_percent: 100,
             // The filter defaults are core's (on at 20 s) — today's table.
             filter_short_playlists: true,
             short_playlist_seconds: 20,
             filter_looping_playlists: true,
             // Two deliberate divergences from BDInfo's own defaults, chosen so
-            // a fresh config renders this GUI's table exactly as before the
-            // Settings dialog existed: BDInfo defaults SizeFormatHR ON (we
+            // a fresh config renders this GUI's table the way its golden ties
+            // pin it: BDInfo defaults SizeFormatHR ON (we
             // ship grouped bytes) and DisplayChapterCount OFF (we show the
             // chapter suffix).
             human_readable_sizes: false,
@@ -225,8 +228,13 @@ impl Default for Settings {
 
 impl Settings {
     /// Parses the config file's text. Tolerant by design: unknown keys are
-    /// ignored (forward compatibility), malformed lines are skipped, and an
-    /// out-of-range or non-finite number is dropped — whatever the bytes,
+    /// ignored (forward compatibility) and malformed lines are skipped. A
+    /// non-numeric value is always dropped, leaving the default; an
+    /// out-of-range one depends on the key — a non-finite or implausibly
+    /// large geometry number is dropped (`parse_axis`), while the
+    /// short-playlist threshold and the UI-scale percent are clamped into
+    /// their bounds (`parse_seconds`, `parse_ui_scale`), so
+    /// `ui-scale-percent = 999` loads as 200, not 100. Whatever the bytes,
     /// this returns a usable value and never panics.
     #[must_use]
     pub fn parse(text: &str) -> Self {
@@ -235,8 +243,8 @@ impl Settings {
 
     /// [`parse`](Self::parse), also returning the unknown keys it ignored
     /// (first-seen order, deduplicated) — the loader warns about them so a
-    /// `theem = dark` typo is diagnosable, while the parse itself stays
-    /// exactly as tolerant as before: reporting, not validation.
+    /// `theem = dark` typo is diagnosable. The parse itself is unchanged by
+    /// the reporting: an unknown key is still ignored, not rejected.
     #[must_use]
     pub fn parse_reporting(text: &str) -> (Self, Vec<String>) {
         let mut settings = Self::default();
@@ -309,7 +317,8 @@ impl Settings {
     /// Renders the config file's text: one `key = value` line per stored
     /// fact, sorted by key (deterministic output), `\n` endings. Absent
     /// fields write no line, and a value that cannot live on one line (a
-    /// non-UTF-8 or control-character path) is simply not persisted.
+    /// non-UTF-8 path, or one containing a line break) is simply not
+    /// persisted.
     #[must_use]
     pub fn render(&self) -> String {
         let mut entries: Vec<(&str, String)> = vec![

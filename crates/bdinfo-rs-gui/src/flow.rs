@@ -1097,7 +1097,7 @@ mod tests {
         assert!(flow.all_selected());
         flow.select_none();
         assert_eq!(flow.selected_count(), 0);
-        // Nothing checked no longer blocks scanning — it becomes a whole-disc scan.
+        // Nothing checked does not block scanning — it is a whole-disc scan.
         assert!(flow.can_scan());
     }
 

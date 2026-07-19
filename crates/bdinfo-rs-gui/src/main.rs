@@ -10,8 +10,8 @@
 //! "Projection Booth" identity ([`theme`] + [`ui`]). The only impure thing the
 //! shell owns is the measured-scan worker thread and the channel that streams its
 //! progress back as messages, plus the OS-theme and file-drop subscriptions and
-//! the best-effort config store ([`settings`]): window geometry, the last opened
-//! source, and the theme preference persist across launches.
+//! the best-effort config store ([`settings`]): the window geometry, the last
+//! opened source, and every Settings-dialog preference persist across launches.
 //! A disc can arrive three ways — the pickers, a drag-and-drop onto the window,
 //! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
 //! open flow. The recalled last source is not a fourth: it only pre-fills the
@@ -50,7 +50,9 @@ use iced::{Element, Length, Task};
 /// The window's initial logical size — a **portrait-leaning** footprint (taller
 /// than wide), because the three master-detail panes are stacked vertically, so
 /// the vertical axis is where the value is. Roughly `BDInfo`'s width but much
-/// taller, sized to nearly fill a standard ~900-tall work area. The layout is
+/// taller — it fills the work area of a 1080-tall display and overflows a
+/// smaller one (see `debug_window_override`, which exists because the
+/// 960-tall default hangs off-screen on a 1024x768 CI runner). The layout is
 /// fully responsive (`Fill`/`FillPortion` + scrollable panes), so any size works;
 /// long codec descriptions clip at the pane edge exactly as they do in `BDInfo`.
 const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);

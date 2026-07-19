@@ -4,8 +4,8 @@
 //! browser. Several entry points feed the very same render path:
 //!
 //! - [`scan_report`] — the in-memory export: BDMV bytes are framed into a synthetic disc tree (six
-//!   `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and rendered
-//!   to the classic report. Used by the native ⇄ in-browser byte-parity test.
+//!   `u32`-BE sections), opened with [`BdRom::open_resilient_with`] (packet scan **on**), and
+//!   rendered to the classic report. Used by the native ⇄ in-browser byte-parity test.
 //! - [`scan_files`] — the streaming export: a `webkitdirectory`-selected BDMV folder arrives as a
 //!   flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes are read
 //!   **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no Asyncify),
@@ -97,9 +97,10 @@ impl<F> Node<F> {
     }
 }
 
-/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte. Mirrors the
-/// core's [`fs::glob_ci`](bdinfo_rs_core) so file-backed input matches patterns
-/// exactly like folder input does.
+/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte. Mirrors
+/// `glob_ci` in the core's `vfs::fs` (crate-private there, so it cannot be
+/// reused or linked) so file-backed input matches patterns exactly like
+/// folder input does — the two implementations must agree.
 fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     match pattern.split_first() {
         None => name.is_empty(),
