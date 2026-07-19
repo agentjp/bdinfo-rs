@@ -103,11 +103,33 @@ jobs:
       # The SHIPPED configuration — opt-level="s" + fat LTO + codegen-units=1 +
       # strip + (Windows) windows_subsystem — compiles on every shipped arch.
       # wgpu has LTO-breakage history; without this a green merge can hide a
-      # red first release. Build-only: the smoke env hooks are debug-only, so a
-      # release binary cannot auto-exit — launching it stays a human step.
+      # red first release.
       - name: Build (release profile — the shipped configuration)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --release --locked
+
+      # The one thing a release binary can do unattended: `--version` prints
+      # and exits 0 before any window machinery loads (src/args.rs) — the
+      # probe packaging validators run, and the GUI analogue of the
+      # `bdinfo-rs --version` assertion in install-smoke-test.yml. A window
+      # launch still needs the debug-only smoke env hooks below: a bare
+      # release launch opens a real window and stays up until a human closes
+      # it. Start-Process + WaitForExit because a windows_subsystem=windows
+      # binary detaches from the console — a plain invocation on the Windows
+      # legs would neither wait nor see the exit code; the 30 s cap turns a
+      # regression back into a window launch into a fast red instead of a
+      # job-timeout hang.
+      - name: Version probe (the release binary exits 0)
+        working-directory: crates/bdinfo-rs-gui
+        shell: pwsh
+        run: |
+          $exe = './target/release/bdinfo-rs-gui' + ($IsWindows ? '.exe' : '')
+          $p = Start-Process -FilePath $exe -ArgumentList '--version' -PassThru
+          if (-not $p.WaitForExit(30000)) {
+            $p.Kill()
+            throw '--version did not exit within 30 s'
+          }
+          if ($p.ExitCode -ne 0) { throw "--version exited $($p.ExitCode)" }
 
       # Every PR run yields downloadable per-arch release binaries — including
       # the arches this project has no hardware for — so any increment can be
