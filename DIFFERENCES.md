@@ -162,6 +162,31 @@ value is never rendered.
 
 ---
 
+## Desktop app vs. the BDInfo GUI
+
+The report is byte-identical; the window around it is not a pixel-for-pixel port. The three-pane
+Playlist / Stream File / Codec view, the playlist table, sorting, drag-and-drop, the settings
+dialog, and the report toggles all behave as in the original.
+
+Not carried over:
+
+- **Bitrate charts.** The original plots six chart types (`FormChart`) from per-second and
+  per-frame measurements; bdinfo-rs keeps only the aggregate statistics the report prints, so
+  there is nothing to plot. The chart-tied image-prefix setting is absent with them.
+- **Custom playlist builder.** Playlists are selected from the disc's own table, not assembled.
+- **Taskbar progress and live in-grid numbers.** Progress is shown in the window, not painted into
+  the taskbar button or streamed into the playlist grid mid-scan.
+- **The `KeepStreamOrder`, `EnableSSIF`, and `ExtendedStreamDiagnostics` toggles.**
+- **Selectable report text.** The text widgets in use cannot span-select; *Copy report* and
+  *Save report…* cover the same need.
+
+Deliberately different:
+
+- **Unreadable files do not prompt.** The original asks Yes/No per failing file; bdinfo-rs collects
+  them, scans the rest, and shows one warning banner — the same `WARNING` block the report carries.
+- **Saving is both manual and automatic.** A *Save report…* dialog exists alongside the
+  save-on-completion setting.
+
 ## See also
 
 - [`CHANGELOG.md`](CHANGELOG.md#differences-from-bdinfo) — the per-release record of these
