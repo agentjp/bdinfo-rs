@@ -95,9 +95,9 @@ switch ($Kind) {
         $deb = Join-Path $dir "bdinfo-rs-gui-$Triple.deb"
         Assert (Test-Path $deb) 'deb exists'
         $info = & dpkg-deb --info $deb
-        Assert (($info | Select-String 'Recommends:.*xdg-desktop-portal').Count -gt 0) 'deb recommends the portal'
-        Assert (($info | Select-String 'Recommends:.*libvulkan1').Count -gt 0) 'deb recommends libvulkan1'
-        Assert (($info | Select-String 'Depends:.*libc6').Count -gt 0) 'deb depends on glibc ($auto resolved)'
+        Assert (@($info | Select-String 'Recommends:.*xdg-desktop-portal').Count -gt 0) 'deb recommends the portal'
+        Assert (@($info | Select-String 'Recommends:.*libvulkan1').Count -gt 0) 'deb recommends libvulkan1'
+        Assert (@($info | Select-String 'Depends:.*libc6').Count -gt 0) 'deb depends on glibc ($auto resolved)'
         $contents = & dpkg-deb --contents $deb
         foreach ($path in
             './usr/bin/bdinfo-rs-gui',
@@ -105,22 +105,22 @@ switch ($Kind) {
             './usr/share/metainfo/io.github.agentjp.bdinfo_rs_gui.metainfo.xml',
             './usr/share/icons/hicolor/512x512/apps/bdinfo-rs-gui.png',
             './usr/share/doc/bdinfo-rs-gui/copyright') {
-            Assert (($contents | Select-String ([regex]::Escape($path))).Count -gt 0) "deb carries $path"
+            Assert (@($contents | Select-String ([regex]::Escape($path))).Count -gt 0) "deb carries $path"
         }
 
         # ── .rpm: weak deps + payload paths ──────────────────────────────────
         $rpm = Join-Path $dir "bdinfo-rs-gui-$Triple.rpm"
         Assert (Test-Path $rpm) 'rpm exists'
         $recommends = & rpm -qp --recommends $rpm 2>$null
-        Assert (($recommends | Select-String 'xdg-desktop-portal').Count -gt 0) 'rpm recommends the portal'
-        Assert (($recommends | Select-String 'vulkan-loader').Count -gt 0) 'rpm recommends vulkan-loader'
+        Assert (@($recommends | Select-String 'xdg-desktop-portal').Count -gt 0) 'rpm recommends the portal'
+        Assert (@($recommends | Select-String 'vulkan-loader').Count -gt 0) 'rpm recommends vulkan-loader'
         $files = & rpm -qpl $rpm 2>$null
         foreach ($path in
             '/usr/bin/bdinfo-rs-gui',
             '/usr/share/applications/bdinfo-rs-gui.desktop',
             '/usr/share/metainfo/io.github.agentjp.bdinfo_rs_gui.metainfo.xml',
             '/usr/share/icons/hicolor/512x512/apps/bdinfo-rs-gui.png') {
-            Assert (($files | Select-String ([regex]::Escape($path))).Count -gt 0) "rpm carries $path"
+            Assert (@($files | Select-String ([regex]::Escape($path))).Count -gt 0) "rpm carries $path"
         }
 
         # ── AppImage: the four spec-mandated root entries ────────────────────
