@@ -65,8 +65,8 @@ mod tests {
     #[test]
     fn helpers_read_in_bounds_values() {
         let buf = [0x12_u8, 0x34, 0x56, 0x78, b'e', b'n', b'g'];
-        // `BdError` is no longer `PartialEq` (its `Io` variant wraps `io::Error`),
-        // so the result tests compare the `Ok`/`Err` shape via `.ok()`/`matches!`.
+        // `BdError` is not `PartialEq` (its `Io` wraps `io::Error`), so the result tests
+        // compare the `Ok`/`Err` shape via `.ok()`/`matches!`.
         assert_eq!(byte(&buf, 0).ok(), Some(0x12));
         assert_eq!(u16_be(&buf, 0).ok(), Some(0x1234));
         assert_eq!(u32_be(&buf, 0).ok(), Some(0x1234_5678));

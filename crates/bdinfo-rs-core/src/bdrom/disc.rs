@@ -3695,7 +3695,7 @@ mod tests {
     #[test]
     fn open_rejects_a_folder_without_bdmv() {
         let disc = TempDisc::build(&["random"], &[]);
-        // `BdError` no longer derives `PartialEq` (its `Io` wraps `io::Error`); the
+        // `BdError` is not `PartialEq` (its `Io` wraps `io::Error`); the
         // error paths assert on the failure's `Display` instead.
         assert_eq!(disc.open().unwrap_err().to_string(), "unable to locate BD structure");
     }

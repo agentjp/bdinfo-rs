@@ -4071,7 +4071,7 @@ mod tests {
     fn open_with_oversized_block_size_is_structure_not_found() {
         // The same volume one doubling past the cap is rejected by the cap
         // alone (the 32 KiB twin above proves it would otherwise open fine) —
-        // a hostile block size can no longer size every sector read.
+        // the cap is what stops a hostile block size from sizing every sector read.
         let err = UdfSource::open(MemIso::boxed(minimal_iso_with_block_size(64 << 10)))
             .expect_err("oversized block size");
         assert_eq!(err.to_string(), "unable to locate BD structure");
