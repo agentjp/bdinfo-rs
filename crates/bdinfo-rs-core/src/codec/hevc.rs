@@ -15,9 +15,7 @@
 //! 4:2:0 + signalled colour description with BT.2020 primaries (9) + PQ transfer
 //! (16) + BT.2020 matrix (9/10) + a present mastering display ⇒ the label is
 //! `Dolby Vision` when the stream `PID >= 4117`, else `HDR10+` when an ST 2094-40
-//! ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`. The
-//! mastering-display colour reading carries a known caveat — TODO: the colour
-//! reading is sometimes off.
+//! ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`.
 //!
 //! The HDR SEI messages (mastering display, content light level, ST 2094-40
 //! T.35) are *sparse* on some streams — they can recur only every few seconds
