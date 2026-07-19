@@ -2,9 +2,9 @@
 # .cargo/mutants.toml is NOT inherited). Posture C, tiered like the wasm crate's
 # Posture B:
 #
-# Tier A — the LIBRARY (flow / model / selection / panes / progress / paths /
-# clipboard / columns / settings / theme / icon / winres / scan) — is held to
-# 0 missed.
+# Tier A — the LIBRARY (args / flow / model / selection / panes / progress /
+# paths / clipboard / columns / settings / theme / icon / winres / scan) — is
+# held to 0 missed.
 # Every mutant faces the whole suite: the unit + property tests, the golden-tie
 # parity tests (byte-exact reports over the committed fixture), and the
 # iced_test interaction + snapshot-hash tests in the binary (run the gate with
