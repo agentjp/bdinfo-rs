@@ -43,8 +43,14 @@ name: version-freshness
 #     in build-linux-packages.sh — the .deb/.rpm packagers are compiled from source
 #     INSIDE dist's fail-fast release, so they are version-pinned there so a broken
 #     upstream release can't abort the whole release; both checked vs crates.io, and
-#     both cross-checked against the second copy in ci.yml's pkg job, which must
-#     stay EQUAL so the PR smoke test packages with the exact release tools), and
+#     both cross-checked against every other copy — ci.yml's pkg job, the GUI
+#     packaging script (.github/scripts/gui-package-linux.ps1), and the taiki-e
+#     installs in gui.yml + gui-release.yml — which must all stay EQUAL so the PR
+#     smoke tests package with the exact release tools),
+#   - appimagetool (the `$appimagetoolVersion` curl-download pin in
+#     .github/scripts/gui-package-linux.ps1 — the GUI lane's AppImage packer,
+#     fetched at a static version invisible to Dependabot; checked vs
+#     AppImage/appimagetool's latest release), and
 #     cloudsmith-cli (the `cloudsmith-cli==X` pipx pin in packages.yml — a pip pin
 #     invisible to Dependabot's cargo/npm/actions scans; pinned once per push job,
 #     every occurrence checked to agree, then vs PyPI),
@@ -350,6 +356,40 @@ jobs:
           if ($cargoRpmCi -ne $cargoRpmPin) {
             Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but ci.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
           }
+          # The GUI lane carries three MORE copies of the same two pins: the
+          # packaging script's install fallback plus the taiki-e pre-installs
+          # in gui.yml's packaging smoke and gui-release.yml's Linux legs. All
+          # must equal build-linux-packages.sh's, for the same
+          # smoke-packages-with-the-release-tools reason.
+          $guiPackagerHomes = [ordered]@{
+            '.github/scripts/gui-package-linux.ps1' = @("cargoDebVersion\s*=\s*'([0-9.]+)'", "cargoGenerateRpmVersion\s*=\s*'([0-9.]+)'")
+            '.github/workflows/gui.yml'             = @('cargo-deb@([0-9.]+)', 'cargo-generate-rpm@([0-9.]+)')
+            '.github/workflows/gui-release.yml'     = @('cargo-deb@([0-9.]+)', 'cargo-generate-rpm@([0-9.]+)')
+          }
+          foreach ($file in $guiPackagerHomes.Keys) {
+            $debHere = Read-Pin $file $guiPackagerHomes[$file][0]
+            $rpmHere = Read-Pin $file $guiPackagerHomes[$file][1]
+            if (-not $debHere) { throw "No cargo-deb pin in $file" }
+            if (-not $rpmHere) { throw "No cargo-generate-rpm pin in $file" }
+            if ($debHere -ne $cargoDebPin) {
+              Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but $file pins ``$debHere`` — every copy must be identical"
+            }
+            if ($rpmHere -ne $cargoRpmPin) {
+              Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but $file pins ``$rpmHere`` — every copy must be identical"
+            }
+          }
+
+          # --- appimagetool: gui-package-linux.ps1 pin vs AppImage/appimagetool ---
+          # The GUI lane's AppImage packer, fetched over curl at a static
+          # version — invisible to Dependabot, watched here like komac.
+          $appimagetoolPin = Read-Pin '.github/scripts/gui-package-linux.ps1' "appimagetoolVersion\s*=\s*'([0-9.]+)'"
+          if (-not $appimagetoolPin) { throw 'No appimagetoolVersion pin in gui-package-linux.ps1' }
+          $appimagetoolLatest = Latest-Semver 'AppImage/appimagetool'
+          if (-not $appimagetoolLatest) {
+            Add-Problem 'appimagetool (query failed)' '- could not query the latest appimagetool release (AppImage/appimagetool)'
+          } elseif ([version]$appimagetoolLatest -gt [version]$appimagetoolPin) {
+            Add-Problem "appimagetool $appimagetoolPin->$appimagetoolLatest" "- appimagetool pin ``$appimagetoolPin`` (gui-package-linux.ps1) is behind the latest release ``$appimagetoolLatest``"
+          }
 
           # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
           # The browser package builds with `wasm-bindgen-cli@X` (taiki-e); X MUST
@@ -522,7 +562,7 @@ jobs:
             Add-Problem "cloudsmith-cli $cloudsmithPin->$cloudsmithLatest" "- cloudsmith-cli pin ``$cloudsmithPin`` (packages.yml) is behind the latest release ``$cloudsmithLatest``"
           }
 
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  komac: $komacPin (latest $komacLatest)  cargo-deb: $cargoDebPin (latest $cargoDebLatest)  cargo-generate-rpm: $cargoRpmPin (latest $cargoRpmLatest)  cloudsmith-cli: $cloudsmithPin (latest $cloudsmithLatest)"
+          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  komac: $komacPin (latest $komacLatest)  cargo-deb: $cargoDebPin (latest $cargoDebLatest)  cargo-generate-rpm: $cargoRpmPin (latest $cargoRpmLatest)  appimagetool: $appimagetoolPin (latest $appimagetoolLatest)  cloudsmith-cli: $cloudsmithPin (latest $cloudsmithLatest)"
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $bodyLines = @($problems | ForEach-Object { $_.line })

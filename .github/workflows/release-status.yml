@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Version tag to check, e.g. v1.2.0
+        description: Version tag to check, e.g. v1.2.0 (or gui-v2.0.0 for the GUI lane)
         required: true
         type: string
 
@@ -55,8 +55,16 @@ jobs:
             echo "$code"
           }
 
-          # GitHub Release (archive)
-          if try3 gh release view "$tag" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release" "PRESENT"; else add "GitHub Release" "ABSENT"; fi
+          # GitHub Release (archive). Accepts a CLI tag (vX.Y.Z) or a GUI tag
+          # (gui-vX.Y.Z): the version base is stripped of either prefix, and
+          # both lanes' releases are reported — the GUI's only channel is its
+          # GitHub Release (gui-release.yml), and the two lanes version
+          # independently, so its row simply reads ABSENT when no GUI release
+          # carries this number.
+          ver="${ver#gui-}"
+          ver="${ver#v}"
+          if try3 gh release view "v$ver" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release (CLI)" "PRESENT"; else add "GitHub Release (CLI)" "ABSENT"; fi
+          if try3 gh release view "gui-v$ver" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release (GUI)" "PRESENT"; else add "GitHub Release (GUI)" "ABSENT"; fi
 
           # crates.io — both crates: 200 present, 404 absent, anything else = couldn't check
           for crate in bdinfo-rs-core bdinfo-rs; do

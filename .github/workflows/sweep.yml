@@ -14,14 +14,15 @@ name: sweep
 # issue (closed again on the next green sweep); workflow_dispatch exists so
 # the sweep can be exercised on demand.
 #
-# Release tags (v*) run the full-mutants legs ONLY — the authoritative
-# 0-missed release checkpoint for every crate, riding alongside the
-# publish lanes exactly like fuzz.yml's extended pass (it surfaces a
-# regression, it does not block the release). The orchestrator call is
-# skipped on tags: every area was already green on the master commit the tag
-# must sit on (guard-ancestor), and the publish lanes must not compete with a
-# fleet re-run. A future gui release lane adds its own tag pattern here when
-# it exists (`gui-v*` currently fires nothing, by tag-namespace design).
+# Release tags (v* for the CLI/library lane, gui-v* for the GUI lane) run
+# the full-mutants legs ONLY — the authoritative 0-missed release checkpoint
+# for every crate, riding alongside the publish lanes exactly like fuzz.yml's
+# extended pass (it surfaces a regression, it does not block the release).
+# Either tag fires all three legs: the tree-hash markers make the unchanged
+# crates skip in seconds, so the extra coverage is free. The orchestrator
+# call is skipped on tags: every area was already green on the master commit
+# the tag must sit on (guard-ancestor), and the publish lanes must not
+# compete with a fleet re-run.
 #
 # The full sweeps are guarded by a TREE-HASH CACHE MARKER (the mechanism the
 # gui gate used as a PR-era stopgap, now owning the schedule): the sweep
@@ -39,7 +40,7 @@ on:
   schedule:
     - cron: "0 8 * * *"   # daily 08:00 UTC
   push:
-    tags: ['v*']
+    tags: ['v*', 'gui-v*']
   workflow_dispatch:
 
 permissions:
