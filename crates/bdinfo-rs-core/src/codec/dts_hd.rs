@@ -14,8 +14,7 @@
 //! `bitrate` is the demux-measured stream rate; Master Audio is always flagged VBR,
 //! while High-Res / Express initialize from that measured rate (plus the core's).
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow. The asset section is a single pass: only the first asset's
+//! The asset section is a single pass: only the first asset's
 //! descriptor feeds the stream fields, and any further assets go unparsed.
 //! Several descriptor arrays (the active-extension masks, mix-output masks, asset
 //! sizes, and info text) are read purely for framing — their values feed nothing.
@@ -39,6 +38,10 @@ const DTS_X_PATTERN: u32 = 0x0200_0850;
 /// and `0xF14000D1` count as DTS:X IMAX — the two values that `>> 1` collapses to (per
 /// `libavcodec/dca_xll.c`). A DTS:X IMAX stream carries this word and not the legacy
 /// one, so without it the track loses its DTS:X label.
+///
+/// Deliberate divergence from classic `BDInfo` — see `DIFFERENCES.md`, "DTS:X IMAX
+/// detection". `BDInfo` knows only the legacy [`DTS_X_PATTERN`] and so renders these
+/// tracks as plain `DTS-HD Master Audio`; bdinfo-rs renders `DTS:X Master Audio`.
 const DTS_X_IMAX_PATTERN: u32 = 0xF140_00D0;
 
 /// The DTS:X IMAX pattern with its low bit set — the second value the LSB-ignored

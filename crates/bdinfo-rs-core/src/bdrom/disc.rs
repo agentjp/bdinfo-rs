@@ -60,7 +60,7 @@ pub struct PlaylistSummary {
     /// Number of chapter marks.
     pub chapter_count: usize,
     /// Number of presented streams, excluding SSIF-only rows
-    /// ([]) — the count the report presents.
+    /// ([`StreamSummary::ssif_only`]) — the count the report presents.
     pub stream_count: usize,
     /// The number of extra camera angles (0 for a single-angle playlist).
     pub angle_count: usize,
@@ -298,7 +298,9 @@ impl AngleTotals {
 pub struct StreamSummary {
     /// The packet identifier (PID), emitted zero-padded to five digits.
     pub pid: Pid,
-    /// The elementary-stream type (its  is the report's  type cell).
+    /// The elementary-stream type — the code that selects which report table
+    /// (`VIDEO`/`AUDIO`/`SUBTITLES`/`TEXT`) the row lands in. The type itself is
+    /// never printed.
     pub stream_type: TsStreamType,
     /// The short codec name, e.g. `AVC`, `DTS-HD MA`.
     pub codec_short_name: String,
@@ -348,7 +350,7 @@ pub struct StreamSummary {
     pub is_hidden: bool,
     /// Whether the stream is presented only through the interleaved (`*.ssif`)
     /// dependent-view scan — the 3D MVC video the clip information omits
-    /// ([] does not count these rows).
+    /// ([`PlaylistSummary::stream_count`] does not count these rows).
     pub ssif_only: bool,
 }
 
@@ -362,8 +364,9 @@ pub struct StreamSummary {
     reason = "the seven flags are independent disc properties (3D/50Hz/UHD/BD+/BD-Java/D-BOX/PSP), not a state machine"
 )]
 pub struct BdRom {
-    /// Disc volume label — here the disc-root directory name (see the
-    /// module-level note on folder input).
+    /// Disc volume label — the genuine UDF `LogicalVolumeIdentifier` for
+    /// `.iso` input, the disc-root directory name for folder input (see the
+    /// module-level input conventions).
     pub volume_label: String,
     /// Disc title from `META/bdmt_eng.xml`; `None` when absent or the
     /// placeholder `"blu-ray"`.
@@ -538,10 +541,9 @@ impl Sink<'_> {
     /// Like [`absorb`](Self::absorb), with a `BDMV/BACKUP` recovery attempt
     /// between a primary failure and recording it.
     ///
-    /// **Resilient mode only.** Strict `open` never reads BACKUP — it is the
-    /// honest fail-fast path, so a recovery facility belongs to the resilient
-    /// scan that `open_resilient` (the CLI default) runs. On a primary `Err` in
-    /// resilient mode `backup` is invoked; `Some(Ok(value))` is returned with
+    /// Recovery is resilient-mode only; `discover_backups` documents why, and
+    /// leaves the pools empty in strict mode so `backup` can only miss there. On
+    /// a primary `Err` `backup` is invoked; `Some(Ok(value))` is returned with
     /// the *primary* failure still recorded against `file`/`stage`, so the
     /// report's `WARNING` block surfaces the bad primary even though the
     /// recovered data is present. A missing or also-failing backup falls
@@ -741,7 +743,6 @@ impl BdRom {
         cancel: &AtomicBool,
         sink: &mut Sink<'_>,
     ) -> Result<Self, BdError> {
-        // --- locate directories ---------------------------------------------
         // Walk self+ancestors for a `BDMV` before trying the child lookup,
         // tolerating input that points at the BDMV directory itself or inside
         // it. When the walk finds a scannable BDMV ancestor, its parent becomes
@@ -1886,16 +1887,19 @@ fn clip_stem(name: &str) -> &str {
 
 /// The file handles of one `BDMV/BACKUP` metadata directory, keyed by
 /// upper-cased name — the recovery pool a damaged primary's replacement is
-/// drawn from. Empty when the disc has no such backup directory (or the scan is
-/// strict, which never recovers).
+/// drawn from. Empty when there is no such pool to draw from (see
+/// `discover_backups`).
 type BackupFiles = BTreeMap<String, Box<dyn BdFile>>;
 
 /// The `BDMV/BACKUP` recovery pools — `(index.bdmv, PLAYLIST, CLIPINF)` — built
 /// once per open and drawn from only when a primary read fails.
 ///
-/// **Resilient mode only.** Strict `open` never recovers from BACKUP, so it
-/// skips the probe entirely (three empty pools, no extra IO, no new failure
-/// points). A directory-listing failure anywhere in the probe is recorded once
+/// **Resilient mode only, and this is where that is decided.** Strict `open` is
+/// the honest fail-fast path, so a recovery facility belongs to the resilient
+/// scan that `open_resilient` (the CLI default) runs: a strict scan skips the
+/// probe entirely (three empty pools, no extra IO, no new failure points) and
+/// every downstream backup lookup therefore misses. A directory-listing failure
+/// anywhere in the probe is recorded once
 /// under `BACKUP` — surfaced, not silently swallowed — and leaves the pools
 /// empty; a disc with no `BDMV/BACKUP` yields empty pools with nothing
 /// recorded.
@@ -3692,7 +3696,7 @@ mod tests {
     #[test]
     fn open_rejects_a_folder_without_bdmv() {
         let disc = TempDisc::build(&["random"], &[]);
-        // `BdError` no longer derives `PartialEq` (its `Io` wraps `io::Error`); the
+        // `BdError` is not `PartialEq` (its `Io` wraps `io::Error`); the
         // error paths assert on the failure's `Display` instead.
         assert_eq!(disc.open().unwrap_err().to_string(), "unable to locate BD structure");
     }

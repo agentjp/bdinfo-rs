@@ -1,17 +1,17 @@
 //! `bdinfo-rs-gui` — the native desktop window for the bdinfo-rs Blu-ray
 //! analyzer.
 //!
-//! The thin iced (Tier-B) shell over the [`bdinfo_rs_gui`] library: it drives the
+//! The thin iced shell over the [`bdinfo_rs_gui`] library: it drives the
 //! full two-phase flow — pick a disc FOLDER or `.iso`, fast structural scan →
 //! selectable playlist table → measured scan on a worker thread with a live
 //! progress bar → the rendered report, with Save / Copy. Every `update` arm calls
-//! a Tier-A transition ([`Flow`]) or seam ([`scan`]) and applies the result; the
+//! a library transition ([`Flow`]) or seam ([`scan`]) and applies the result; the
 //! `view` is a thin projection of [`Flow`] onto widgets dressed in the
 //! "Projection Booth" identity ([`theme`] + [`ui`]). The only impure thing the
 //! shell owns is the measured-scan worker thread and the channel that streams its
 //! progress back as messages, plus the OS-theme and file-drop subscriptions and
-//! the best-effort config store ([`settings`]): window geometry, the last opened
-//! source, and the theme preference persist across launches.
+//! the best-effort config store ([`settings`]): the window geometry, the last
+//! opened source, and every Settings-dialog preference persist across launches.
 //! A disc can arrive three ways — the pickers, a drag-and-drop onto the window,
 //! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
 //! open flow. The recalled last source is not a fourth: it only pre-fills the
@@ -50,7 +50,9 @@ use iced::{Element, Length, Task};
 /// The window's initial logical size — a **portrait-leaning** footprint (taller
 /// than wide), because the three master-detail panes are stacked vertically, so
 /// the vertical axis is where the value is. Roughly `BDInfo`'s width but much
-/// taller, sized to nearly fill a standard ~900-tall work area. The layout is
+/// taller — it fills the work area of a 1080-tall display and overflows a
+/// smaller one (see `debug_window_override`, which exists because the
+/// 960-tall default hangs off-screen on a 1024x768 CI runner). The layout is
 /// fully responsive (`Fill`/`FillPortion` + scrollable panes), so any size works;
 /// long codec descriptions clip at the pane edge exactly as they do in `BDInfo`.
 const WINDOW_SIZE: (f32, f32) = (880.0, 960.0);
@@ -362,10 +364,8 @@ fn drive_window_ms() -> u64 {
     std::env::var("BDINFO_GUI_DRIVE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500)
 }
 
-/// How long a step's messages get to render before its marker is written.
 #[cfg(debug_assertions)]
 const DRIVE_SETTLE_MS: u64 = 500;
-/// The poll interval while a step waits for its precondition.
 #[cfg(debug_assertions)]
 const DRIVE_POLL_MS: u64 = 200;
 /// Poll attempts before the walk gives up on a step (450 × 200 ms = 90 s).
@@ -403,7 +403,6 @@ static DRIVE_STEPS: &[DriveStep] = &[
         ready: drive_listed,
         act: |app| app.update(Message::SortBy(SortColumn::Length)),
     },
-    // The same header again — the ascending order flips.
     DriveStep {
         name: "sort-length-flip",
         ready: drive_listed,
@@ -576,7 +575,7 @@ fn drive_marker(index: usize, name: &str, stage: Stage) {
 /// The per-platform config file location, resolved from the process
 /// environment — `None` when no base directory can be resolved (the app then
 /// runs without persistence). The one env-bound read in the config story; the
-/// per-platform path math it dispatches to is Tier A ([`settings`]).
+/// per-platform path math it dispatches to is pure ([`settings`]).
 fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -619,10 +618,9 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
             .log_err("window icon")
             .ok(),
         exit_on_close_request: false,
-        // Wayland ignores the RGBA icon above by protocol — the dock icon and
-        // window grouping key off this id, matched against the `.desktop`
-        // file ([`APP_ID`]). The field only exists on Linux; every other
-        // platform (the BSDs included) keeps its own platform defaults.
+        // Wayland ignores the RGBA icon above by protocol and keys off this
+        // id instead — see `APP_ID`. The field only exists on Linux; every
+        // other platform (the BSDs included) keeps its own platform defaults.
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: APP_ID.to_owned(),
@@ -632,7 +630,7 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
     }
 }
 
-/// The app state — the Tier-A [`Flow`] the shell drives, plus the runtime-side
+/// The app state — the pure [`Flow`] the shell drives, plus the runtime-side
 /// bits: the visual preference + last-known OS mode, the scan generation counter
 /// (stamped on the worker's messages so a stale event is ignored), the scan start
 /// time (for the elapsed / remaining estimate), and a transient status line.
@@ -758,7 +756,7 @@ fn default_panes() -> pane_grid::State<Region> {
     })
 }
 
-/// A column weight as an `iced` `FillPortion` — the Tier-A scaling
+/// A column weight as an `iced` `FillPortion` — the pure scaling
 /// ([`columns::portion`]) wrapped in the layout type.
 fn fill(weight: f32) -> Length {
     Length::FillPortion(columns::portion(weight))
@@ -815,7 +813,6 @@ enum Command {
 }
 
 impl Command {
-    /// The label shown on this command's control.
     const fn label(self) -> &'static str {
         match self {
             Self::OpenFolder => "Open folder…",
@@ -827,7 +824,6 @@ impl Command {
         }
     }
 
-    /// The message this command dispatches.
     const fn message(self) -> Message {
         match self {
             Self::OpenFolder => Message::OpenFolder,
@@ -1037,7 +1033,6 @@ impl App {
         f32::from(percent) / 100.0
     }
 
-    /// The window title (an iced title function over the app state).
     fn title(&self) -> String {
         self.flow
             .label()
@@ -1065,7 +1060,7 @@ impl App {
         }
     }
 
-    /// The pure-ish message dispatch: each arm applies a Tier-A transition and
+    /// The pure-ish message dispatch: each arm applies a library transition and
     /// returns the side effect to run (a dialog, the scan worker, a clipboard
     /// write, an exit, or nothing).
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1609,7 +1604,7 @@ impl App {
 
     /// Opens `path` — a dropped item or the boot argument — through the same
     /// classify-and-list road the pickers take ([`Input::classify`], the one
-    /// Tier-A classifier both roads share). Ignored while a scan is in flight,
+    /// classifier both roads share). Ignored while a scan is in flight,
     /// the same rule that disables the Source buttons; a path that is neither a
     /// directory nor a `.iso` file lands in the same friendly failure state as
     /// a bad pick, with the loaded-disc chrome cleared like any new open.
@@ -1680,9 +1675,7 @@ impl App {
         self.showing_report = false;
         self.notice = None;
         self.pane_selection = None;
-        // A fresh cancel flag per scan: the Cancel button sets it, the demux
-        // polls it per read chunk. Cancelling a superseded scan can never
-        // touch this one — it holds its own flag.
+        // A fresh flag per scan — see the `scan_cancel` field.
         let cancel = Arc::new(AtomicBool::new(false));
         self.scan_cancel = Some(Arc::clone(&cancel));
 
@@ -1757,7 +1750,7 @@ impl App {
 
     /// Writes the rendered report into `dir` as `BDINFO.{label}.txt`, bytes
     /// verbatim (the locked CRLF / UTF-8 no-BOM contract — never re-encode).
-    /// The label is disc-controlled, so the filename goes through the Tier-A
+    /// The label is disc-controlled, so the filename goes through the
     /// sanitizer ([`paths::report_file_name`]) — the same name the CLI writes.
     fn save_report(&mut self, dir: &std::path::Path) {
         let (Some(report), Some(label)) = (self.flow.report(), self.flow.label()) else {
@@ -2531,8 +2524,8 @@ fn header_cell<'a>(
             .wrapping(text::Wrapping::None),
     )
     .width(width)
-    // Fill the header band and centre vertically, so every column's label sits on
-    // the same baseline whether or not it carries a resize grab.
+    // So every column's label sits on the same baseline whether or not it
+    // carries a resize grab.
     .height(Length::Fill)
     .align_x(align)
     .align_y(Vertical::Center)
@@ -3387,10 +3380,10 @@ mod harness {
     }
 }
 
-/// Tier-B interaction tests: `iced_test`'s Simulator renders the real
+/// Interaction tests: `iced_test`'s Simulator renders the real
 /// `view()` offscreen, clicks it by visible text, and the produced messages
 /// run through the real `update` — so the widget wiring (what a click
-/// dispatches, what a state renders) is verified against the Tier-A state it
+/// dispatches, what a state renders) is verified against the library state it
 /// must land in. No window, no Tasks, no subscriptions: worker completions
 /// are injected as the messages they would arrive as.
 #[cfg(test)]
@@ -3766,7 +3759,7 @@ mod interaction {
     }
 }
 
-/// Tier-B pixel ties: key states rendered offscreen on the deterministic
+/// Pixel ties: key states rendered offscreen on the deterministic
 /// tiny-skia backend with the bundled fonts, pinned as committed SHA-256
 /// hashes per OS family (`snapshots/{windows,unix}/*.sha256` — see
 /// [`harness::assert_snapshot`] for the family evidence). Run them via the

@@ -1,11 +1,10 @@
-//! Tier A — the pure playlist view-model.
+//! The pure playlist view-model.
 //!
 //! These constructors mirror the CLI's playlist table (and the wasm crate's
 //! `table_rows` / `table_length` / `estimated_bytes` / `playlist_rows`) over the
 //! public [`PlaylistSummary`] type — the GUI cannot import the CLI binary's
 //! private helpers, so it reimplements them the same way. No widgets, no IO:
-//! plain data in, plain data out, so `view()` is a thin projection and Phase 4
-//! can hold this layer to the core bar (100% coverage + 0 missed mutants).
+//! plain data in, plain data out, so `view()` is a thin projection.
 
 use std::cmp::Ordering;
 
@@ -70,8 +69,7 @@ impl ViewSettings {
     }
 
     /// The core playlist filter these settings build — what the row
-    /// construction applies in place of the old hard-coded
-    /// `PlaylistFilter::default()`.
+    /// construction applies instead of `PlaylistFilter::default()`.
     #[must_use]
     pub fn filter(&self) -> PlaylistFilter {
         PlaylistFilter {
@@ -672,7 +670,7 @@ mod tests {
         assert_eq!(first.file, "00000.MPLS");
         assert_eq!(first.estimated_bytes, "1,000.00 B");
         assert_eq!(first.measured_bytes, "0");
-        // The defaults render exactly as before the settings existed.
+        // The defaults render the chapter suffix and grouped-byte sizes.
         let default_cells = display_rows(&rows, ViewSettings::default());
         let first = default_cells.first().expect("the feature row");
         assert_eq!(first.file, "00000.MPLS [12 Chapters]");

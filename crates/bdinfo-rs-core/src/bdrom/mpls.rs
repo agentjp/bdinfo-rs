@@ -884,7 +884,7 @@ mod tests {
         }
         let mut bad = comprehensive_mpls();
         bad.splice(0..8, *b"MPLSXXXX");
-        // `BdError` no longer derives `PartialEq` (its `Io` wraps `io::Error`); assert
+        // `BdError` is not `PartialEq` (its `Io` wraps `io::Error`); assert
         // on the failure's `Display` instead.
         assert_eq!(
             TsPlaylistFile::scan("p.mpls", &bad).unwrap_err().to_string(),

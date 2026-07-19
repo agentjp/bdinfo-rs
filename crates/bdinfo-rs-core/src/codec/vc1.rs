@@ -51,7 +51,12 @@ pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut O
                     // fixed 3-bit FPTYPE at bits 29..=27 (SMPTE 421M §9.1.1.5), not a
                     // unary code. Collapse the pair to its representative type exactly
                     // as FFmpeg does (`fptype & 4` picks the B/BI half, `fptype & 2` the
-                    // pair's second member).
+                    // pair's second member). Classic BDInfo decodes the field header as
+                    // if it carried the unary code; correcting it is a deliberate
+                    // divergence with no visible effect, because the tag is only ever
+                    // counted as a frame-present marker and its string is never
+                    // rendered. See DIFFERENCES.md "Correctness fixes with no effect on
+                    // a normal disc".
                     let fptype = (p & 0x3800_0000).wrapping_shr(27);
                     *tag = Some(
                         match ((fptype & 0x4) == 0, (fptype & 0x2) == 0) {

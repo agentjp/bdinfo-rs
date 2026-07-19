@@ -15,9 +15,7 @@
 //! 4:2:0 + signalled colour description with BT.2020 primaries (9) + PQ transfer
 //! (16) + BT.2020 matrix (9/10) + a present mastering display ⇒ the label is
 //! `Dolby Vision` when the stream `PID >= 4117`, else `HDR10+` when an ST 2094-40
-//! ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`. The
-//! mastering-display colour reading carries a known caveat — TODO: the colour
-//! reading is sometimes off.
+//! ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`.
 //!
 //! The HDR SEI messages (mastering display, content light level, ST 2094-40
 //! T.35) are *sparse* on some streams — they can recur only every few seconds
@@ -81,11 +79,8 @@ const MASTERING_DISPLAY_COLOR_VOLUME_VALUES: [MasteringDisplayColorVolumeValue; 
 /// output-dead; see the module notes).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct VuiColour {
-    /// `video_signal_type_present_flag`.
     video_signal_type_present_flag: bool,
-    /// `colour_description_present_flag`.
     colour_description_present_flag: bool,
-    /// `video_full_range_flag`.
     video_full_range_flag: u8,
     /// `colour_primaries` (2 = unspecified, the default).
     colour_primaries: u8,
@@ -115,19 +110,13 @@ impl VuiColour {
 /// that feeds observable output.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct SeqParameterSet {
-    /// `general_profile_space`.
     profile_space: u32,
-    /// `general_tier_flag`.
     tier_flag: bool,
-    /// `general_profile_idc`.
     profile_idc: u16,
-    /// `general_level_idc`.
     level_idc: u16,
     /// `chroma_format_idc` (1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4).
     chroma_format_idc: u32,
-    /// `bit_depth_luma_minus8`.
     bit_depth_luma_minus8: u8,
-    /// `bit_depth_chroma_minus8`.
     bit_depth_chroma_minus8: u8,
     /// The VUI colour description.
     vui: VuiColour,
@@ -137,9 +126,7 @@ struct SeqParameterSet {
 /// the slice-segment header reads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PicParameterSet {
-    /// `num_extra_slice_header_bits`.
     num_extra_slice_header_bits: u8,
-    /// `dependent_slice_segments_enabled_flag`.
     dependent_slice_segments_enabled_flag: bool,
 }
 
@@ -147,13 +134,9 @@ struct PicParameterSet {
 /// `general_level_idc` — the profile-tier-level outputs the SPS records.
 #[derive(Debug, Clone, Copy, Default)]
 struct ProfileTierLevel {
-    /// `general_profile_space`.
     profile_space: u32,
-    /// `general_tier_flag`.
     tier_flag: bool,
-    /// `general_profile_idc`.
     profile_idc: u16,
-    /// `general_level_idc`.
     level_idc: u16,
 }
 
@@ -386,7 +369,7 @@ impl Hevc<'_, '_> {
     }
 
     /// The shared outer/inner loop guard — keep scanning while there are at least
-    /// three bytes left and the stream is not yet a finished, frame-typed unit.
+    /// four bytes left and the stream is not yet a finished, frame-typed unit.
     fn scan_should_continue(&self, frame_type_read: bool) -> bool {
         self.buffer.position() < self.buffer.length().saturating_sub(3)
             && (!self.is_initialized || !frame_type_read)
@@ -543,8 +526,8 @@ impl Hevc<'_, '_> {
         self.short_term_ref_pic_sets(num_short_term_ref_pic_sets);
         if self.buffer.read_bool(true) {
             // long_term_ref_pics_present_flag
-            // `num_long_term_ref_pics_sps` is an unbounded `ue(v)`; clamp a
-            // malformed huge count to the spec ceiling.
+            // `num_long_term_ref_pics_sps` is an unbounded `ue(v)`; clamp it to
+            // `MAX_LONG_TERM_REF_PICS`.
             let num_long_term_ref_pics_sps = self.buffer.read_exp(true).min(MAX_LONG_TERM_REF_PICS);
             let mut i = 0;
             while i < num_long_term_ref_pics_sps {
@@ -619,6 +602,9 @@ impl Hevc<'_, '_> {
         // the CVS also conforms to profile i, so the first set flag names the
         // profile. Index 0 maps to profile 0 (a no-op recovery), so the scan can
         // start there without a guard — the first *meaningful* set flag still wins.
+        // Classic BDInfo keeps the coded 0 and prints an unknown profile; recovering
+        // it is a deliberate divergence confined to malformed headers. See
+        // DIFFERENCES.md "Correctness fixes with no effect on a normal disc".
         let compatibility_flags = self.buffer.read_bits4(32, true);
         let mut compat_idx: u16 = 0;
         while compat_idx < 32 {
@@ -669,13 +655,9 @@ impl Hevc<'_, '_> {
     ///
     /// `num_short_term_ref_pic_sets` arrives already clamped to
     /// [`MAX_SHORT_TERM_REF_PIC_SETS`]; the per-set `num_negative_pics` /
-    /// `num_positive_pics` are clamped to [`MAX_DELTA_POCS_PER_SET`] here. Those
-    /// are unbounded `ue(v)` codes a malformed SPS can decode astronomically large
-    /// — looping on the raw values would never terminate on hostile bytes (a hang
-    /// the fuzz tier caught); the clamps bound every loop by construction.
-    /// Output-neutral: a spec-conformant SPS never exceeds the ceilings, so the
-    /// clamps are no-ops and `num_pics` (at most twice [`MAX_DELTA_POCS_PER_SET`])
-    /// keeps the inter-pred loop bounded too.
+    /// `num_positive_pics` are clamped to [`MAX_DELTA_POCS_PER_SET`] here, for the
+    /// reason documented on [`MAX_SHORT_TERM_REF_PIC_SETS`]. `num_pics` is then at
+    /// most twice [`MAX_DELTA_POCS_PER_SET`], which bounds the inter-pred loop too.
     fn short_term_ref_pic_sets(&mut self, num_short_term_ref_pic_sets: u32) {
         let mut num_pics: u32 = 0;
         let mut st_rps_idx: u32 = 0;
@@ -974,7 +956,7 @@ fn match_color_volume(primaries: &[u16; 8], green: usize, blue: usize, red: usiz
     None
 }
 
-/// Whether `primaries[channel*2 + j]` is within ±25 (≈±0.0005) of
+/// Whether `primaries[channel*2 + j]` is within `-25..=+24` (≈±0.0005) of
 /// `reference[ref_channel*2 + j]` — the primary-coordinate tolerance test.
 fn within(
     primaries: &[u16; 8],
@@ -990,7 +972,7 @@ fn within(
     actual >= expected.wrapping_sub(25) && actual < expected.wrapping_add(25)
 }
 
-/// Whether the white point `primaries[6 + j]` is within `-2..=+2` (≈±0.00005) of
+/// Whether the white point `primaries[6 + j]` is within `-2..=+2` (±0.00004) of
 /// the reference white point — the tighter white-point tolerance.
 fn within_white(primaries: &[u16; 8], j: usize, reference: &[u16; 8]) -> bool {
     let actual = i32::from(primaries.get(6_usize.wrapping_add(j)).copied().unwrap_or(0));
@@ -1124,6 +1106,8 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
     // the mastering SEI alone (as the BDInfo lineage does) drops the label on a
     // valid HDR10+ stream that carries dynamic metadata but no static mastering
     // display — so `is_hdr10_plus` alone is enough to claim the (HDR10+) label.
+    // Deliberate divergence from classic BDInfo — see DIFFERENCES.md "HDR10+
+    // without a mastering display".
     if u16::from(sps.bit_depth_luma_minus8).wrapping_add(8) == 10
         && sps.chroma_format_idc == 1
         && sps.vui.video_signal_type_present_flag
@@ -1165,6 +1149,10 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
         info.push(format!("Mastering display luminance: {}", ext.mastering_display_luminance));
     }
     if ext.light_level_available && ext.maximum_content_light_level > 0 {
+        // `cd/m2`, not the lineage's `cd / m2`: classic BDInfo spaces the slash on
+        // this one line while every neighbouring luminance / light-level line uses
+        // `cd/m2` — one string literal out of step with the rest. Deliberate
+        // divergence from classic BDInfo — see DIFFERENCES.md "MaxCLL unit label".
         info.push(format!(
             "Maximum Content Light Level: {} cd/m2",
             ext.maximum_content_light_level
@@ -1939,7 +1927,7 @@ mod tests {
         assert!(s.encoding_profile.is_none());
         assert!(!s.base.is_initialized);
         assert_eq!(tag, None);
-        // is_vbr is set unconditionally at the end of the scan.
+        // Every scan sets `is_vbr` at the end, start codes or not.
         assert!(s.base.is_vbr);
     }
 

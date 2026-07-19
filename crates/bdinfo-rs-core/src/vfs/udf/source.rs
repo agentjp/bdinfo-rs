@@ -31,11 +31,9 @@
 //! to absolute byte runs), so the [`BdDir`]/[`BdFile`] accessors are infallible
 //! arena lookups — directory data is read at open, file data is read lazily through
 //! [`UdfFileReader`]. The walk is bounded ([`Limits::max_nodes`], a visited-ICB set,
-//! and [`Limits::max_depth`]) so malformed or cyclic input can never hang — and,
-//! because the depth cap bounds how deep the arena's directory chain can run, the
-//! recursive arena consumers (glob recursion here, `directory_size` in the BDROM
-//! scan) cannot overflow the thread stack either (the crate-wide contract: never
-//! panic/hang on disc bytes). `u64` byte offsets throughout (a Blu-ray `.iso` is
+//! and [`Limits::max_depth`]) so malformed or cyclic input can neither hang nor
+//! overflow the thread stack of the recursive arena consumers — `build_tree`
+//! documents that argument. `u64` byte offsets throughout (a Blu-ray `.iso` is
 //! tens of GB, its `.m2ts`/`.ssif` streams routinely >4 GB).
 //!
 //! All numeric *parsing* stays in the little-endian [`super`] core; this module
@@ -97,10 +95,8 @@ struct Limits {
     /// shattered metadata mapping can't amass an unbounded list.
     max_extents: usize,
     /// Upper bound on the arena's directory nesting depth (root = depth 0): a
-    /// subdirectory deeper than this is dropped, so the recursive arena consumers
-    /// ([`UdfDir::collect_from`] here, `directory_size` in the BDROM scan) recurse a
-    /// bounded number of frames and a hostile chain of ~1M nested directories cannot
-    /// overflow the thread stack.
+    /// subdirectory deeper than this is dropped. `build_tree` documents why that
+    /// bound is what keeps the recursive arena consumers off the thread stack.
     max_depth: usize,
     /// Upper bound on the File Set Descriptor extent blocks scanned for the FSD
     /// (a hostile `LongAd` length can't drive an unbounded search; an authored
@@ -1187,10 +1183,6 @@ fn load_metadata_extents(
     Some(extents)
 }
 
-// ---------------------------------------------------------------------------
-// Extent resolution → byte runs
-// ---------------------------------------------------------------------------
-
 /// The byte offset of `LengthOfAllocationDescriptors` in an Allocation Extent
 /// Descriptor (ECMA-167 §4/14.5): the 16-byte tag, then
 /// `PreviousAllocationExtentLocation` (4 bytes).
@@ -1434,10 +1426,6 @@ fn read_runs(reader: &mut dyn ReadSeek, runs: &[Run], cap: u64) -> Result<Vec<u8
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
-// Directory-tree walk → arena
-// ---------------------------------------------------------------------------
-
 /// Walks the whole directory tree from the root ICB into a flat [`Node`] arena
 /// (node 0 = root). Bounded by [`Limits::max_nodes`], a visited-ICB set, and
 /// [`Limits::max_depth`], so malformed or cyclic input cannot hang.
@@ -1477,11 +1465,8 @@ fn build_tree(
                 break;
             }
             let is_dir = matches!(child.kind, ChildKind::Dir);
-            // Drop a subdirectory past the depth cap: its node is the start of a
-            // chain the recursive consumers would descend, so truncating it here
-            // (the parent at `depth` is the deepest expanded level once
-            // `depth == max_depth`) keeps their recursion bounded. Files are leaves
-            // — always kept.
+            // Drop a subdirectory past the depth cap (see this function's doc);
+            // files are leaves and are always kept.
             if is_dir && depth >= limits.max_depth {
                 continue;
             }
@@ -4071,7 +4056,7 @@ mod tests {
     fn open_with_oversized_block_size_is_structure_not_found() {
         // The same volume one doubling past the cap is rejected by the cap
         // alone (the 32 KiB twin above proves it would otherwise open fine) —
-        // a hostile block size can no longer size every sector read.
+        // the cap is what stops a hostile block size from sizing every sector read.
         let err = UdfSource::open(MemIso::boxed(minimal_iso_with_block_size(64 << 10)))
             .expect_err("oversized block size");
         assert_eq!(err.to_string(), "unable to locate BD structure");

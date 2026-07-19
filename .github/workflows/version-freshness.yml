@@ -507,8 +507,8 @@ jobs:
           # server-side API change could break the frozen client silently; nag here
           # like the other hand-bumped tools when a newer client ships. The pin
           # occurs once PER PUSH JOB (.deb and .rpm), so read every occurrence and
-          # assert they agree — the first-match-only read used to validate one job
-          # while the other could drift — then run freshness on the agreed value.
+          # assert they agree — a first-match-only read validates one job while the
+          # other drifts unseen — then run freshness on the agreed value.
           $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
           if (-not $cloudsmithPins.Count) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
           $cloudsmithPin = $cloudsmithPins[0]
@@ -548,9 +548,9 @@ jobs:
             'Bump deliberately: update the pin(s) in the file(s) named above, keep the five NIGHTLY pins (ci.yml / fuzz.yml / wasm.yml / gui.yml / publish-npm.yml) identical, and re-run `dist generate` after any cargo-dist bump. CI re-validates on the next push.'
           ) -join "`n"
 
-          # One rolling issue, tracked by a stable label (the title now varies, so it
-          # can no longer be matched on the title). Adopt a pre-existing issue from the
-          # old fixed-title scheme on the first run after this change.
+          # One rolling issue, tracked by a stable label — the title varies with the
+          # stale pins, so it is not matchable. The title search below adopts an issue
+          # left open by the earlier fixed-title scheme instead of opening a second one.
           gh label create version-freshness --color ededed --description 'Stale or inconsistent pinned tool/toolchain versions' --force | Out-Null
           $existing = gh issue list --state open --label version-freshness --json number --jq '.[0].number'
           if (-not $existing) {

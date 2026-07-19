@@ -8,16 +8,15 @@ name: packages
 # expose a manual `workflow_dispatch` for re-runs / backfills. Every job runs on a
 # Linux runner; every action is SHA-pinned.
 #
-# The .deb/.rpm packages are now BUILT INSIDE the release (dist `extra-artifacts`
+# The .deb/.rpm packages are BUILT INSIDE the release (dist `extra-artifacts`
 # -> .github/build-linux-packages.sh), so they are attached to the Release at
 # creation, before it is published. This workflow therefore only DOWNLOADS those
 # already-attached packages to install-verify them on a native-arch runner and push
-# them to Cloudsmith — it no longer builds them, and (crucially) no longer uploads
-# anything back to the Release. That post-publication `gh release upload` was the
-# one thing incompatible with GitHub "immutable releases" (a release's assets freeze
-# at publication); with it gone, immutability can be enabled. As a bonus the deb/rpm
-# jobs now need only `contents: read`, resolving the two job-level `contents: write`
-# Token-Permissions residuals (alerts #78/#79).
+# them to Cloudsmith. It builds nothing and (crucially) uploads nothing back to the
+# Release: a post-publication `gh release upload` is incompatible with GitHub
+# "immutable releases", where a release's assets freeze at publication. Keeping the
+# upload out is what lets immutability stay enabled, and it holds the deb/rpm jobs
+# to `contents: read`.
 #
 # Stable-only: the `gate` job skips prerelease tags (anything but a bare vX.Y.Z),
 # matching the old `released`-event semantics and Homebrew's default.

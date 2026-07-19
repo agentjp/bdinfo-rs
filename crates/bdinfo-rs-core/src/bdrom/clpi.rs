@@ -371,8 +371,9 @@ mod tests {
     #[test]
     fn a_clip_with_zero_program_sequences_has_no_streams() {
         // num_prog == 0: nothing past the count is read — in particular the
-        // byte at the old fixed stream-count offset (8) is junk here, not a
-        // count, and the entry-shaped bytes after it must not parse.
+        // byte at offset 8, where a single-program clip carries its stream
+        // count, is junk here, and the entry-shaped bytes after it must not
+        // parse.
         let mut clip_data = vec![0_u8, 0]; // reserved + num_prog = 0
         clip_data.extend_from_slice(&[0_u8; 6]);
         clip_data.push(1); // junk where the single-program layout put the count
@@ -385,7 +386,7 @@ mod tests {
     #[test]
     fn scan_rejects_unknown_file_type() {
         let buf = build_clpi(*b"XXXX0100", &[]);
-        // `BdError` no longer derives `PartialEq` (its `Io` wraps `io::Error`), so the
+        // `BdError` is not `PartialEq` (its `Io` wraps `io::Error`), so the
         // error assertions check the failure's `Display` — region-clean and pinning
         // the message text the codec/report layers surface to the CLI.
         assert_eq!(

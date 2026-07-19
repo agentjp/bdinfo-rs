@@ -3,15 +3,15 @@
 //! This crate exposes the library's whole **measured** scan pipeline to the
 //! browser. Several entry points feed the very same render path:
 //!
-//! - [`scan_report`] — the Phase 1 in-memory export: BDMV bytes are framed into a synthetic disc
-//!   tree (six `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and
+//! - [`scan_report`] — the in-memory export: BDMV bytes are framed into a synthetic disc tree (six
+//!   `u32`-BE sections), opened with [`BdRom::open_resilient_with`] (packet scan **on**), and
 //!   rendered to the classic report. Used by the native ⇄ in-browser byte-parity test.
-//! - [`scan_files`] — the Phase 2 streaming export: a `webkitdirectory`-selected BDMV folder
-//!   arrives as a flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes
-//!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
-//!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
-//!   Worker (the only scope where `FileReaderSync` exists). [`list_playlists`] is its structural
-//!   twin: the fast selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
+//! - [`scan_files`] — the streaming export: a `webkitdirectory`-selected BDMV folder arrives as a
+//!   flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes are read
+//!   **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no Asyncify),
+//!   so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web Worker (the
+//!   only scope where `FileReaderSync` exists). [`list_playlists`] is its structural twin: the fast
+//!   selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
 //! - [`scan_iso`] / [`list_iso_playlists`] — the streaming `.iso` exports: a single OS-picked
 //!   `.iso` `File` is opened through the core read-only UDF 2.50 reader ([`UdfSource`]) over the
 //!   same windowed [`web_sys::FileReaderSync`] cursor ([`WebIso`] is the [`IsoReader`] factory), so
@@ -97,9 +97,10 @@ impl<F> Node<F> {
     }
 }
 
-/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte. Mirrors the
-/// core's [`fs::glob_ci`](bdinfo_rs_core) so file-backed input matches patterns
-/// exactly like folder input does.
+/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte. Mirrors
+/// `glob_ci` in the core's `vfs::fs` (crate-private there, so it cannot be
+/// reused or linked) so file-backed input matches patterns exactly like
+/// folder input does — the two implementations must agree.
 fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     match pattern.split_first() {
         None => name.is_empty(),
@@ -316,9 +317,8 @@ fn js_message(value: &JsValue) -> String {
 /// read (an empty caller buffer, or a cursor at/after EOF).
 ///
 /// The panic-safety-critical arithmetic split out of the `FileReaderSync` I/O so
-/// the off-by-one and EOF-clamp edges are exercised on the native (Tier-A)
-/// build. `end` is clamped to `len`, so a window that would cross EOF is
-/// shortened rather than over-reading the caller's `buf`.
+/// the off-by-one and EOF-clamp edges are exercised on the native build. `end` is clamped to `len`,
+/// so a window that would cross EOF is shortened rather than over-reading the caller's `buf`.
 #[cfg(any(target_arch = "wasm32", test))]
 fn read_window(pos: u64, buf_len: usize, len: u64) -> Option<(u64, u64)> {
     if buf_len == 0 || pos >= len {
@@ -1031,7 +1031,7 @@ pub fn run_iso_report(reader: Box<dyn IsoReader>) -> String {
     render_disc(&source.root(), &mut |_| {}).unwrap_or_default()
 }
 
-/// The Phase 1 in-memory entry point: feed it BDMV bytes (the six `u32`-BE
+/// The in-memory entry point: feed it BDMV bytes (the six `u32`-BE
 /// framed sections — see the module-level docs), get back the classic report.
 ///
 /// Runs the **measured** scan (M2TS demux + per-stream/per-chapter statistics),
@@ -1042,14 +1042,14 @@ pub fn scan_report(data: &[u8]) -> String {
     run_report(data)
 }
 
-/// The Phase 2 streaming entry point: hand it a `webkitdirectory`-selected BDMV
+/// The streaming entry point: hand it a `webkitdirectory`-selected BDMV
 /// folder as parallel `(relativePath, File)` lists and get back the classic
 /// disc report.
 ///
 /// Runs the **full measured** scan — M2TS demux + per-stream/per-chapter
 /// statistics, `run_packet_scan = true` — reading every file's bytes
 /// synchronously at byte offsets through [`web_sys::FileReaderSync`]. This MUST
-/// run in a Web Worker (the only scope where `FileReaderSync` exists). When
+/// run in a Web Worker (see the module docs). When
 /// `on_progress` is supplied it is called as `(file, done, total)` after each
 /// demux read. A non-empty `selection` names the playlists to measure (CLI
 /// `--mpls` semantics — unfiltered, in order); an empty `selection` measures the
@@ -1091,8 +1091,8 @@ pub fn scan_files(
 /// [`web_sys::FileReaderSync`] ([`WebIso`] is the [`IsoReader`] factory), so a
 /// multi-GB `.iso` never has to fit in memory. It then runs the **full measured**
 /// scan and renders the same report `bdinfo-rs <disc>.iso` writes. Like
-/// [`scan_files`], this MUST run in a Web Worker (the only scope where
-/// `FileReaderSync` exists); `on_progress`, when supplied, is called as
+/// [`scan_files`], this MUST run in a Web Worker; `on_progress`, when
+/// supplied, is called as
 /// `(file, done, total)`; a non-empty `selection` measures only the named
 /// playlists (CLI `--mpls` semantics, unfiltered, in order), an empty one the
 /// standard `--whole` set.
@@ -1287,7 +1287,7 @@ mod tests {
     fn tree_error_messages_describe_each_variant() {
         // `message` is consumed natively only here: its `From<TreeError> for
         // JsValue` caller is wasm32-only, so this is the test that keeps it both
-        // live and covered on the native (Tier-A) build.
+        // live and covered on the native build.
         assert!(TreeError::BareFile("loose.mpls".to_owned()).message().contains("loose.mpls"));
         assert!(
             TreeError::MixedRoots("A".to_owned(), "B".to_owned())
@@ -1614,8 +1614,8 @@ mod tests {
         assert_eq!(seek_target(SeekFrom::Current(i64::MAX), u64::MAX, 0).expect("sat"), u64::MAX);
     }
 
-    /// CLI-parity selection helpers (Tier A): the structural playlist listing
-    /// and the by-name measured scan, native-tested to the core bar.
+    /// CLI-parity selection helpers: the structural playlist listing and the
+    /// by-name measured scan, native-tested.
     mod selection {
         use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
 
@@ -1915,7 +1915,7 @@ mod tests {
 
     // The reader math is panic-safety-critical, so amplify the unit cases with
     // property tests. proptest's backend does not build for wasm32, so these run
-    // only on the native (Tier-A) build.
+    // only on the native build.
     #[cfg(not(target_arch = "wasm32"))]
     mod prop {
         use std::io::{self, SeekFrom};

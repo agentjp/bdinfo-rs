@@ -1,4 +1,4 @@
-//! Tier A — the pure live-progress model.
+//! The pure live-progress model.
 //!
 //! Ports the CLI's (`main.rs`) `progress_stats` + `hms` math: from a scan's
 //! `done` / `total` byte counts and the elapsed wall time it derives the

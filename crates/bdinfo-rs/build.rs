@@ -1,8 +1,10 @@
 //! Build script: generate the shell completions + man page for the `bdinfo-rs`
 //! CLI, derived from the same `clap::Command` the binary parses.
 //!
-//! WHERE THE ARTIFACTS LAND (the contract the release packaging — prompt 04 —
-//! relies on; do not change without updating it):
+//! WHERE THE ARTIFACTS LAND (the contract `.github/build-setup.yml` — the
+//! cargo-dist build-setup step wired in by `dist-workspace.toml`'s
+//! `github-build-setup` — and `.github/workflows/ci.yml`'s packaging step both
+//! rely on; do not change without updating them):
 //!
 //! Every generated file is written into a single `assets/` directory rooted at
 //! this build script's `OUT_DIR`:

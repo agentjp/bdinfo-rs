@@ -1,5 +1,5 @@
-//! Tier A — best-effort diagnostics: the per-launch log file, the panic
-//! hook, and the tolerated-error helper.
+//! Best-effort diagnostics: the per-launch log file, the panic hook, and
+//! the tolerated-error helper.
 //!
 //! The release binary hides the console on Windows (`windows_subsystem`), so
 //! stderr does not exist — without a file, a failed boot, a panic, or a

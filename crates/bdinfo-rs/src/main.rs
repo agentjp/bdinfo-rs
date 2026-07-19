@@ -1,4 +1,5 @@
-//! `bdinfo-rs` CLI — drives the `bdinfo-rs-core` library. No GUI, ever.
+//! `bdinfo-rs` CLI — drives the `bdinfo-rs-core` library. Terminal only: the
+//! desktop window is a separate binary (`bdinfo-rs-gui`).
 //!
 //! Usage: `bdinfo-rs <BD_PATH> [REPORT_DEST]`.
 //!

@@ -1,4 +1,4 @@
-//! Tier A — clipboard text sanitizing.
+//! Clipboard text sanitizing.
 //!
 //! The rendered report can carry literal NUL bytes: a degenerate disc with a
 //! zeroed 3-letter language code renders those bytes verbatim (the report is

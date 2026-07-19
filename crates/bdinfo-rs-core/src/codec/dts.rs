@@ -11,8 +11,7 @@
 //! is used only for the "open" bit-rate marker. The DTS core never sets `tag`;
 //! the wrapping [`crate::codec::dts_hd`] scanner sets it.
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow. The 4-bit sample-rate and 5-bit bit-rate codes can never reach their
+//! The 4-bit sample-rate and 5-bit bit-rate codes can never reach their
 //! 16- and 32-entry table bounds, so those lookups carry no range guard; the
 //! 3-bit source-PCM-resolution code *can* reach the 7-entry bit-depth table's
 //! length (code 7), so that lookup is a bounds-checked `.get()` whose miss is an

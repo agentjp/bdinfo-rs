@@ -1,4 +1,4 @@
-//! Tier A — the resizable-column weight math.
+//! The resizable-column weight math.
 //!
 //! The three data panes render their columns as proportional weights (the
 //! `BDInfo` ratios), and the user re-weights them by dragging a header

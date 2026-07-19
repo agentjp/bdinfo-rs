@@ -1,7 +1,10 @@
-//! Tier A — the persistent GUI configuration.
+//! The persistent GUI configuration.
 //!
 //! The app's small memory between launches: the window geometry, the last
-//! opened source path, and the theme preference, stored as a flat
+//! opened source path, and every Settings-dialog preference — theme, UI
+//! scale, the table filters and their threshold, the size and chapter-count
+//! formatting, autosave, and the two optional report sections (see
+//! [`Settings`] for the full set) — stored as a flat
 //! `key = value` text file (hand-rolled parser + writer, pure std — this
 //! project hand-rolled a UDF reader; a key-value file is squarely in its
 //! idiom). The store is a **convenience, never a dependency**: unknown keys
@@ -23,37 +26,22 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-/// The config file's key for the short-playlist filter switch.
+// The config file's keys.
 const KEY_FILTER_SHORT: &str = "filter-short-playlists";
-/// The config file's key for the short-playlist threshold (whole seconds).
 const KEY_SHORT_SECONDS: &str = "short-playlist-seconds";
-/// The config file's key for the looping-playlist filter switch.
 const KEY_FILTER_LOOPS: &str = "filter-looping-playlists";
-/// The config file's key for the human-readable size toggle.
 const KEY_HUMAN_SIZES: &str = "human-readable-sizes";
-/// The config file's key for the chapter-count display toggle.
 const KEY_CHAPTER_COUNT: &str = "display-chapter-count";
-/// The config file's key for the autosave-report switch.
 const KEY_AUTOSAVE: &str = "autosave-report";
-/// The config file's key for the report's stream-diagnostics sections.
 const KEY_REPORT_DIAGNOSTICS: &str = "report-stream-diagnostics";
-/// The config file's key for the report's quick-summary blocks.
 const KEY_REPORT_SUMMARY: &str = "report-quick-summary";
-/// The config file's key for the last opened source path.
 const KEY_LAST_PATH: &str = "last-path";
-/// The config file's key for the theme preference.
 const KEY_THEME: &str = "theme";
-/// The config file's key for the UI scale, in percent.
 const KEY_UI_SCALE: &str = "ui-scale-percent";
-/// The config file's keys for the window's logical size.
 const KEY_WINDOW_WIDTH: &str = "window-width";
-/// See [`KEY_WINDOW_WIDTH`].
 const KEY_WINDOW_HEIGHT: &str = "window-height";
-/// The config file's keys for the window's logical position.
 const KEY_WINDOW_X: &str = "window-x";
-/// See [`KEY_WINDOW_X`].
 const KEY_WINDOW_Y: &str = "window-y";
-/// The config file's key for the window's maximized state.
 const KEY_WINDOW_MAXIMIZED: &str = "window-maximized";
 
 /// The largest believable window axis, in logical pixels — a stored size or
@@ -200,16 +188,16 @@ impl Default for Settings {
             window_maximized: false,
             last_path: None,
             theme: ThemeChoice::default(),
-            // Native scale — a fresh install renders exactly as before the
-            // setting existed.
+            // Native scale — a fresh install adds no scaling of its own on
+            // top of the OS DPI.
             ui_scale_percent: 100,
             // The filter defaults are core's (on at 20 s) — today's table.
             filter_short_playlists: true,
             short_playlist_seconds: 20,
             filter_looping_playlists: true,
             // Two deliberate divergences from BDInfo's own defaults, chosen so
-            // a fresh config renders this GUI's table exactly as before the
-            // Settings dialog existed: BDInfo defaults SizeFormatHR ON (we
+            // a fresh config renders this GUI's table the way its golden ties
+            // pin it: BDInfo defaults SizeFormatHR ON (we
             // ship grouped bytes) and DisplayChapterCount OFF (we show the
             // chapter suffix).
             human_readable_sizes: false,
@@ -225,8 +213,13 @@ impl Default for Settings {
 
 impl Settings {
     /// Parses the config file's text. Tolerant by design: unknown keys are
-    /// ignored (forward compatibility), malformed lines are skipped, and an
-    /// out-of-range or non-finite number is dropped — whatever the bytes,
+    /// ignored (forward compatibility) and malformed lines are skipped. A
+    /// non-numeric value is always dropped, leaving the default; an
+    /// out-of-range one depends on the key — a non-finite or implausibly
+    /// large geometry number is dropped (`parse_axis`), while the
+    /// short-playlist threshold and the UI-scale percent are clamped into
+    /// their bounds (`parse_seconds`, `parse_ui_scale`), so
+    /// `ui-scale-percent = 999` loads as 200, not 100. Whatever the bytes,
     /// this returns a usable value and never panics.
     #[must_use]
     pub fn parse(text: &str) -> Self {
@@ -235,8 +228,8 @@ impl Settings {
 
     /// [`parse`](Self::parse), also returning the unknown keys it ignored
     /// (first-seen order, deduplicated) — the loader warns about them so a
-    /// `theem = dark` typo is diagnosable, while the parse itself stays
-    /// exactly as tolerant as before: reporting, not validation.
+    /// `theem = dark` typo is diagnosable. The parse itself is unchanged by
+    /// the reporting: an unknown key is still ignored, not rejected.
     #[must_use]
     pub fn parse_reporting(text: &str) -> (Self, Vec<String>) {
         let mut settings = Self::default();
@@ -244,7 +237,7 @@ impl Settings {
         let (mut width, mut height, mut x, mut y) = (None, None, None, None);
         for line in text.lines() {
             let Some((raw_key, raw_value)) = line.split_once('=') else {
-                continue; // not a `key = value` line — skipped
+                continue;
             };
             let key = raw_key.trim();
             // The writer puts exactly one space after `=`; strip exactly that
@@ -309,7 +302,8 @@ impl Settings {
     /// Renders the config file's text: one `key = value` line per stored
     /// fact, sorted by key (deterministic output), `\n` endings. Absent
     /// fields write no line, and a value that cannot live on one line (a
-    /// non-UTF-8 or control-character path) is simply not persisted.
+    /// non-UTF-8 path, or one containing a line break) is simply not
+    /// persisted.
     #[must_use]
     pub fn render(&self) -> String {
         let mut entries: Vec<(&str, String)> = vec![
@@ -513,9 +507,7 @@ pub fn sanitize_seconds(text: &str) -> String {
 
 // ── where the file lives ─────────────────────────────────────────────────────
 
-/// The directory + file name under the platform's config base.
 const APP_DIR: &str = "bdinfo-rs";
-/// See [`APP_DIR`].
 const FILE_NAME: &str = "gui.conf";
 
 /// Windows: `%APPDATA%\bdinfo-rs\gui.conf`. `None` without a usable

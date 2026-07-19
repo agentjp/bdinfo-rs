@@ -1,4 +1,4 @@
-//! Tier A — the app's flow state machine.
+//! The app's flow state machine.
 //!
 //! The window moves through real states: nothing picked ([`Stage::Idle`]) → a
 //! fast structural scan in flight ([`Stage::Listing`]) → the playlist table with
@@ -1097,7 +1097,7 @@ mod tests {
         assert!(flow.all_selected());
         flow.select_none();
         assert_eq!(flow.selected_count(), 0);
-        // Nothing checked no longer blocks scanning — it becomes a whole-disc scan.
+        // Nothing checked does not block scanning — it is a whole-disc scan.
         assert!(flow.can_scan());
     }
 

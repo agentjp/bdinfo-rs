@@ -3366,7 +3366,7 @@ mod tests {
         let mut payload = vec![4_u8, 0x00, 0x00, 0x01, 0xE0]; // AF length 4 + fake start
         payload.extend(pes_pts(0xE0, 90_000, &[0xAB; 10]));
         let mut bytes = pat_pmt_video();
-        bytes.extend(packet_raw(0x1011, true, 0x3, &payload)); // AFC = 11
+        bytes.extend(packet_raw(0x1011, true, 0x3, &payload));
         let mut file = TsStreamFile::new("00000.m2ts");
         let mut pls = [empty_playlist()];
         let mut cur = Cursor::new(bytes);

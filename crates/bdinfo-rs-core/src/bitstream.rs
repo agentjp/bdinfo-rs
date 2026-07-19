@@ -61,8 +61,8 @@ pub struct TsStreamBuffer {
     /// Emulation-prevention bytes (`0x03`) skipped during the current read.
     /// Reset to zero at the start of each bit read.
     skipped_bytes: usize,
-    /// Total bytes ever passed to [`add`](Self::add) (pre-clamp).
-    /// Diagnostic only; reset by [`reset`](Self::reset).
+    /// The diagnostic counter behind [`transfer_length`](Self::transfer_length);
+    /// reset by [`reset`](Self::reset).
     transfer_length: usize,
 }
 
@@ -298,9 +298,11 @@ impl TsStreamBuffer {
     /// position, so the readable span is fixed at 16 bits regardless of the
     /// current bit offset. A read whose `skip_bits + bits` exceeds 16 returns the
     /// `16 - skip_bits` real bits then **zero**-filled tail bits — it never reads
-    /// further into the stream. Every in-tree call site is byte-aligned, so a
-    /// full-width `read_bits2(16, …)` always starts at offset 0 and this never
-    /// bites; a new codec scanner requesting full width at a non-zero bit offset
+    /// further into the stream. Every *full-width* in-tree call site is
+    /// byte-aligned, so a `read_bits2(16, …)` always starts at offset 0 and this
+    /// never bites; the unaligned callers that do exist are all sub-width and stay
+    /// inside the window (`hevc` reads a 6-bit `nal_unit_type` one bit into the NAL
+    /// header). A new codec scanner requesting full width at a non-zero bit offset
     /// would silently corrupt the tail. Pinned by
     /// `read_bits2_past_window_zero_extends`.
     #[must_use]
@@ -339,10 +341,13 @@ impl TsStreamBuffer {
     /// stream — and, unlike [`read_bits2`](Self::read_bits2) /
     /// [`read_bits8`](Self::read_bits8) (whose tails zero-fill), the past-window
     /// mask here wraps back into the window's high bits, so the tail repeats the
-    /// window top (effectively `window << skip_bits`). Latent: every in-tree call
-    /// site is byte-aligned (`read_bits4(32, …)` at offset 0); a new unaligned
-    /// full-width caller would get corrupt tail bits, not the true stream bits.
-    /// Pinned by `read_bits4_unaligned_full_width_wraps_not_zero_fills`.
+    /// window top (effectively `window << skip_bits`). Latent: every *full-width*
+    /// in-tree call site is byte-aligned (`read_bits4(32, …)` at offset 0), and the
+    /// unaligned callers are all sub-width — `ac3`'s EMDF sync search reads 16 bits
+    /// per iteration while advancing one bit at a time — so they stay inside the
+    /// window. A new unaligned full-width caller would get corrupt tail bits, not
+    /// the true stream bits. Pinned by
+    /// `read_bits4_unaligned_full_width_wraps_not_zero_fills`.
     #[must_use]
     pub fn read_bits4(&mut self, bits: usize, skip_h26x_emulation_byte: bool) -> u32 {
         let pos = self.position;
@@ -369,7 +374,7 @@ impl TsStreamBuffer {
     /// **byte** position; the readable span is fixed at 64 bits. A read whose
     /// `skip_bits + bits` exceeds 64 returns the real bits then **zero**-filled
     /// tail bits (the explicit `(0..64)` index guard below), never reading past
-    /// the window into the stream. Latent — every in-tree call site is
+    /// the window into the stream. Latent — every full-width in-tree call site is
     /// byte-aligned. Pinned by `read_bits8_past_window_contributes_zero`.
     #[must_use]
     pub fn read_bits8(&mut self, bits: usize, skip_h26x_emulation_byte: bool) -> u64 {
@@ -590,7 +595,6 @@ mod tests {
         b.add(&[0x00, 0x01, 0x02, 0x03, 0x04], 2, 2);
         assert_eq!(b.length(), 2);
         b.begin_read();
-        // The stored bytes are [0x02, 0x03]: their top bits are 0,0.
         assert!(!b.read_bool(false));
         assert!(!b.read_bool(false));
     }
@@ -639,7 +643,6 @@ mod tests {
         b.reset();
         assert_eq!(b.length(), 0);
         assert_eq!(b.transfer_length(), 0);
-        // The buffer is reusable after a reset.
         b.add(&[0x04], 0, 1);
         assert_eq!(b.length(), 1);
     }
@@ -902,8 +905,9 @@ mod tests {
         // read_bits2 / read_bits8 — whose tails zero-fill — read_bits4's
         // negative-shift mask wraps back into the 32-bit window's high bits, so the
         // tail repeats the window top (effectively `window << skip_bits`). Every
-        // in-tree call site is byte-aligned, so this never bites; this pins the
-        // behavior so an unaligned full-width caller is a noticed change.
+        // full-width in-tree call site is byte-aligned, so this never bites (the
+        // unaligned callers are sub-width and stay inside the window); this pins
+        // the behavior so an unaligned full-width caller is a noticed change.
         let mut b = buf(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         assert_eq!(b.read_bits4(3, false), 0b111);
         assert_eq!(b.read_bits4(32, false), 0xFFFF_FFFF); // wraps to all-ones, not 0xFFFF_FFF8

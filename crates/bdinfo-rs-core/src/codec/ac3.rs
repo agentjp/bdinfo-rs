@@ -9,12 +9,8 @@
 //! optional dependent-substream core via [`TsAudioStream::ts_clone`], and the EMD
 //! framework scan that detects Atmos).
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow; the `f64`→`i64` bit-rate conversion truncates toward zero. A buffer
-//! too short for a header read returns early and leaves the stream untouched.
-//! The two `dheadphonmod` bits are read purely for framing (nothing acts on
-//! them), and inside the first-payload block the EMDF payload id is always
-//! `1..=15`, so the `0x1F` escape handling lives only in the payload loop.
+//! The `f64`→`i64` bit-rate conversion truncates toward zero. A buffer too short
+//! for a header read returns early and leaves the stream untouched.
 
 use crate::bitstream::{SeekOrigin, TsStreamBuffer};
 use crate::stream::{TsAudioMode, TsAudioStream, TsStreamType};
@@ -34,7 +30,6 @@ const AC3_CHANNELS: [u8; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 #[must_use]
 pub fn ac3_chan_map(chan_map: u32) -> u8 {
     let mut channels: u8 = 0;
-    // Walk the 16-bit channel map MSB-first.
     for i in 0..16_u8 {
         let bit = 1_u32.wrapping_shl(15_u32.wrapping_sub(u32::from(i)));
         if (chan_map & bit) != 0 && matches!(i, 5 | 6 | 9 | 10 | 11) {
@@ -67,8 +62,8 @@ const fn to_i64_trunc(x: f64) -> i64 {
     reason = "one linear bit-stream-information parse; splitting it would obscure the header layout"
 )]
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; AC-3 never sets it (and a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter; a `pub fn` is exempt from
+    // `needless_pass_by_ref_mut`, so the `&mut` stays.
     let _ = tag;
     if stream.base.is_initialized {
         return;
@@ -298,6 +293,9 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
     if half_rate {
         // Reduced-rate E-AC-3 (`fscod2`): the decoded rate is half the table value
         // (24 / 22.05 / 16 kHz), which also feeds the derived bit-rate below.
+        // Classic BDInfo does not halve it — a deliberate divergence that cannot
+        // change a disc report, since Blu-ray E-AC-3 is always 48 kHz. See
+        // DIFFERENCES.md "Correctness fixes with no effect on a normal disc".
         stream.sample_rate = stream.sample_rate.wrapping_div(2);
     }
 
@@ -305,7 +303,10 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
         // Legacy AC-3 `bsid` 9 / 10 are the half / quarter "low-sample-rate"
         // variants: `sr_shift = max(bsid, 8) - 8` right-shifts both the sample rate
         // and the table bit rate (ATSC A/52 / ETSI TS 102 366 §5.4.1; FFmpeg
-        // `ac3_parser.c`). Conforming Blu-ray AC-3 is always `bsid 8` (shift 0).
+        // `ac3_parser.c`). Conforming Blu-ray AC-3 is always `bsid 8` (shift 0), so
+        // this deliberate divergence from classic BDInfo — which applies no shift —
+        // cannot change a disc report. See DIFFERENCES.md "Correctness fixes with no
+        // effect on a normal disc".
         let sr_shift = bsid.max(8).wrapping_sub(8);
         stream.sample_rate = stream.sample_rate.wrapping_shr(sr_shift);
         // `frmsizecod >> 1` indexes the 19-entry bit-rate table; `.get()` is the
