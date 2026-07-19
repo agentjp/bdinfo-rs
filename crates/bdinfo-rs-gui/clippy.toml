@@ -11,6 +11,10 @@ pass-by-value-size-limit = 320
 # enforced in production code (the root workspace relaxes tests the same way).
 allow-panic-in-tests = true
 
+# Packaging proper nouns the docs use as plain words (`doc_markdown` would
+# demand backticks, but they are names, not code).
+doc-valid-idents = ["WiX", "AppImage", "AppStream", ".."]
+
 # `App::update` is one big message-dispatch `match` and `data_table` genuinely
 # needs its column + row-state parameters — both are inherent to an iced view/
 # update, so nudge these two pedantic thresholds just past what they need rather
