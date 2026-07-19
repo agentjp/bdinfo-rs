@@ -60,7 +60,7 @@ pub struct PlaylistSummary {
     /// Number of chapter marks.
     pub chapter_count: usize,
     /// Number of presented streams, excluding SSIF-only rows
-    /// ([]) — the count the report presents.
+    /// ([`StreamSummary::ssif_only`]) — the count the report presents.
     pub stream_count: usize,
     /// The number of extra camera angles (0 for a single-angle playlist).
     pub angle_count: usize,
@@ -298,7 +298,9 @@ impl AngleTotals {
 pub struct StreamSummary {
     /// The packet identifier (PID), emitted zero-padded to five digits.
     pub pid: Pid,
-    /// The elementary-stream type (its  is the report's  type cell).
+    /// The elementary-stream type — the code that selects which report table
+    /// (`VIDEO`/`AUDIO`/`SUBTITLES`/`TEXT`) the row lands in. The type itself is
+    /// never printed.
     pub stream_type: TsStreamType,
     /// The short codec name, e.g. `AVC`, `DTS-HD MA`.
     pub codec_short_name: String,
@@ -348,7 +350,7 @@ pub struct StreamSummary {
     pub is_hidden: bool,
     /// Whether the stream is presented only through the interleaved (`*.ssif`)
     /// dependent-view scan — the 3D MVC video the clip information omits
-    /// ([] does not count these rows).
+    /// ([`PlaylistSummary::stream_count`] does not count these rows).
     pub ssif_only: bool,
 }
 
@@ -362,8 +364,9 @@ pub struct StreamSummary {
     reason = "the seven flags are independent disc properties (3D/50Hz/UHD/BD+/BD-Java/D-BOX/PSP), not a state machine"
 )]
 pub struct BdRom {
-    /// Disc volume label — here the disc-root directory name (see the
-    /// module-level note on folder input).
+    /// Disc volume label — the genuine UDF `LogicalVolumeIdentifier` for
+    /// `.iso` input, the disc-root directory name for folder input (see the
+    /// module-level input conventions).
     pub volume_label: String,
     /// Disc title from `META/bdmt_eng.xml`; `None` when absent or the
     /// placeholder `"blu-ray"`.

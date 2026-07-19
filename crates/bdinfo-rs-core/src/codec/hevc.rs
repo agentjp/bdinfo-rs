@@ -386,7 +386,7 @@ impl Hevc<'_, '_> {
     }
 
     /// The shared outer/inner loop guard — keep scanning while there are at least
-    /// three bytes left and the stream is not yet a finished, frame-typed unit.
+    /// four bytes left and the stream is not yet a finished, frame-typed unit.
     fn scan_should_continue(&self, frame_type_read: bool) -> bool {
         self.buffer.position() < self.buffer.length().saturating_sub(3)
             && (!self.is_initialized || !frame_type_read)
@@ -974,7 +974,7 @@ fn match_color_volume(primaries: &[u16; 8], green: usize, blue: usize, red: usiz
     None
 }
 
-/// Whether `primaries[channel*2 + j]` is within ±25 (≈±0.0005) of
+/// Whether `primaries[channel*2 + j]` is within `-25..=+24` (≈±0.0005) of
 /// `reference[ref_channel*2 + j]` — the primary-coordinate tolerance test.
 fn within(
     primaries: &[u16; 8],
@@ -990,7 +990,7 @@ fn within(
     actual >= expected.wrapping_sub(25) && actual < expected.wrapping_add(25)
 }
 
-/// Whether the white point `primaries[6 + j]` is within `-2..=+2` (≈±0.00005) of
+/// Whether the white point `primaries[6 + j]` is within `-2..=+2` (±0.00004) of
 /// the reference white point — the tighter white-point tolerance.
 fn within_white(primaries: &[u16; 8], j: usize, reference: &[u16; 8]) -> bool {
     let actual = i32::from(primaries.get(6_usize.wrapping_add(j)).copied().unwrap_or(0));
