@@ -9,12 +9,8 @@
 //! optional dependent-substream core via [`TsAudioStream::ts_clone`], and the EMD
 //! framework scan that detects Atmos).
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow; the `f64`→`i64` bit-rate conversion truncates toward zero. A buffer
-//! too short for a header read returns early and leaves the stream untouched.
-//! The two `dheadphonmod` bits are read purely for framing (nothing acts on
-//! them), and inside the first-payload block the EMDF payload id is always
-//! `1..=15`, so the `0x1F` escape handling lives only in the payload loop.
+//! The `f64`→`i64` bit-rate conversion truncates toward zero. A buffer too short
+//! for a header read returns early and leaves the stream untouched.
 
 use crate::bitstream::{SeekOrigin, TsStreamBuffer};
 use crate::stream::{TsAudioMode, TsAudioStream, TsStreamType};

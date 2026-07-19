@@ -14,8 +14,7 @@
 //! `bitrate` is the demux-measured stream rate; Master Audio is always flagged VBR,
 //! while High-Res / Express initialize from that measured rate (plus the core's).
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow. The asset section is a single pass: only the first asset's
+//! The asset section is a single pass: only the first asset's
 //! descriptor feeds the stream fields, and any further assets go unparsed.
 //! Several descriptor arrays (the active-extension masks, mix-output masks, asset
 //! sizes, and info text) are read purely for framing — their values feed nothing.

@@ -10,8 +10,7 @@
 //! and the Atmos substream-extension (`has_extensions`) flag. The whole stream is
 //! initialized only once both the `TrueHD` header and its AC-3 core are.
 //!
-//! All fixed-width codec math uses `wrapping_*` so hostile field values cannot
-//! overflow; the peak bit rate `(peak_bitrate * sample_rate) >> 4` is
+//! The peak bit rate `(peak_bitrate * sample_rate) >> 4` is
 //! computed in `i64` then deliberately truncated to its low 32 bits, and the
 //! peak-bit-depth division is `f64` (a zero channel/sample-rate divisor yields a
 //! non-finite value that simply fails the `> 14` test).

@@ -541,10 +541,9 @@ impl Sink<'_> {
     /// Like [`absorb`](Self::absorb), with a `BDMV/BACKUP` recovery attempt
     /// between a primary failure and recording it.
     ///
-    /// **Resilient mode only.** Strict `open` never reads BACKUP — it is the
-    /// honest fail-fast path, so a recovery facility belongs to the resilient
-    /// scan that `open_resilient` (the CLI default) runs. On a primary `Err` in
-    /// resilient mode `backup` is invoked; `Some(Ok(value))` is returned with
+    /// Recovery is resilient-mode only; `discover_backups` documents why, and
+    /// leaves the pools empty in strict mode so `backup` can only miss there. On
+    /// a primary `Err` `backup` is invoked; `Some(Ok(value))` is returned with
     /// the *primary* failure still recorded against `file`/`stage`, so the
     /// report's `WARNING` block surfaces the bad primary even though the
     /// recovered data is present. A missing or also-failing backup falls
@@ -744,7 +743,6 @@ impl BdRom {
         cancel: &AtomicBool,
         sink: &mut Sink<'_>,
     ) -> Result<Self, BdError> {
-        // --- locate directories ---------------------------------------------
         // Walk self+ancestors for a `BDMV` before trying the child lookup,
         // tolerating input that points at the BDMV directory itself or inside
         // it. When the walk finds a scannable BDMV ancestor, its parent becomes
@@ -1889,16 +1887,19 @@ fn clip_stem(name: &str) -> &str {
 
 /// The file handles of one `BDMV/BACKUP` metadata directory, keyed by
 /// upper-cased name — the recovery pool a damaged primary's replacement is
-/// drawn from. Empty when the disc has no such backup directory (or the scan is
-/// strict, which never recovers).
+/// drawn from. Empty when there is no such pool to draw from (see
+/// `discover_backups`).
 type BackupFiles = BTreeMap<String, Box<dyn BdFile>>;
 
 /// The `BDMV/BACKUP` recovery pools — `(index.bdmv, PLAYLIST, CLIPINF)` — built
 /// once per open and drawn from only when a primary read fails.
 ///
-/// **Resilient mode only.** Strict `open` never recovers from BACKUP, so it
-/// skips the probe entirely (three empty pools, no extra IO, no new failure
-/// points). A directory-listing failure anywhere in the probe is recorded once
+/// **Resilient mode only, and this is where that is decided.** Strict `open` is
+/// the honest fail-fast path, so a recovery facility belongs to the resilient
+/// scan that `open_resilient` (the CLI default) runs: a strict scan skips the
+/// probe entirely (three empty pools, no extra IO, no new failure points) and
+/// every downstream backup lookup therefore misses. A directory-listing failure
+/// anywhere in the probe is recorded once
 /// under `BACKUP` — surfaced, not silently swallowed — and leaves the pools
 /// empty; a disc with no `BDMV/BACKUP` yields empty pools with nothing
 /// recorded.

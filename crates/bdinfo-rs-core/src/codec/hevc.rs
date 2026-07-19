@@ -541,8 +541,8 @@ impl Hevc<'_, '_> {
         self.short_term_ref_pic_sets(num_short_term_ref_pic_sets);
         if self.buffer.read_bool(true) {
             // long_term_ref_pics_present_flag
-            // `num_long_term_ref_pics_sps` is an unbounded `ue(v)`; clamp a
-            // malformed huge count to the spec ceiling.
+            // `num_long_term_ref_pics_sps` is an unbounded `ue(v)`; clamp it to
+            // `MAX_LONG_TERM_REF_PICS`.
             let num_long_term_ref_pics_sps = self.buffer.read_exp(true).min(MAX_LONG_TERM_REF_PICS);
             let mut i = 0;
             while i < num_long_term_ref_pics_sps {
@@ -670,13 +670,9 @@ impl Hevc<'_, '_> {
     ///
     /// `num_short_term_ref_pic_sets` arrives already clamped to
     /// [`MAX_SHORT_TERM_REF_PIC_SETS`]; the per-set `num_negative_pics` /
-    /// `num_positive_pics` are clamped to [`MAX_DELTA_POCS_PER_SET`] here. Those
-    /// are unbounded `ue(v)` codes a malformed SPS can decode astronomically large
-    /// — looping on the raw values would never terminate on hostile bytes (a hang
-    /// the fuzz tier caught); the clamps bound every loop by construction.
-    /// Output-neutral: a spec-conformant SPS never exceeds the ceilings, so the
-    /// clamps are no-ops and `num_pics` (at most twice [`MAX_DELTA_POCS_PER_SET`])
-    /// keeps the inter-pred loop bounded too.
+    /// `num_positive_pics` are clamped to [`MAX_DELTA_POCS_PER_SET`] here, for the
+    /// reason documented on [`MAX_SHORT_TERM_REF_PIC_SETS`]. `num_pics` is then at
+    /// most twice [`MAX_DELTA_POCS_PER_SET`], which bounds the inter-pred loop too.
     fn short_term_ref_pic_sets(&mut self, num_short_term_ref_pic_sets: u32) {
         let mut num_pics: u32 = 0;
         let mut st_rps_idx: u32 = 0;
