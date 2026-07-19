@@ -617,6 +617,9 @@ impl Hevc<'_, '_> {
         // the CVS also conforms to profile i, so the first set flag names the
         // profile. Index 0 maps to profile 0 (a no-op recovery), so the scan can
         // start there without a guard — the first *meaningful* set flag still wins.
+        // Classic BDInfo keeps the coded 0 and prints an unknown profile; recovering
+        // it is a deliberate divergence confined to malformed headers. See
+        // DIFFERENCES.md "Correctness fixes with no effect on a normal disc".
         let compatibility_flags = self.buffer.read_bits4(32, true);
         let mut compat_idx: u16 = 0;
         while compat_idx < 32 {
@@ -1122,6 +1125,8 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
     // the mastering SEI alone (as the BDInfo lineage does) drops the label on a
     // valid HDR10+ stream that carries dynamic metadata but no static mastering
     // display — so `is_hdr10_plus` alone is enough to claim the (HDR10+) label.
+    // Deliberate divergence from classic BDInfo — see DIFFERENCES.md "HDR10+
+    // without a mastering display".
     if u16::from(sps.bit_depth_luma_minus8).wrapping_add(8) == 10
         && sps.chroma_format_idc == 1
         && sps.vui.video_signal_type_present_flag
@@ -1163,6 +1168,10 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
         info.push(format!("Mastering display luminance: {}", ext.mastering_display_luminance));
     }
     if ext.light_level_available && ext.maximum_content_light_level > 0 {
+        // `cd/m2`, not the lineage's `cd / m2`: classic BDInfo spaces the slash on
+        // this one line while every neighbouring luminance / light-level line uses
+        // `cd/m2` — one string literal out of step with the rest. Deliberate
+        // divergence from classic BDInfo — see DIFFERENCES.md "MaxCLL unit label".
         info.push(format!(
             "Maximum Content Light Level: {} cd/m2",
             ext.maximum_content_light_level

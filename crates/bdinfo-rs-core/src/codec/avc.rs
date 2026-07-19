@@ -71,6 +71,9 @@ pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut O
                         // 244 (High 4:4:4 Predictive, the live H.264 code) shares the
                         // legacy 144 (old High 4:4:4) spelling so it is caught with an
                         // existing report line instead of falling to "Unknown Profile".
+                        // Deliberate divergence from classic BDInfo, which maps only
+                        // 144 and drops 244 to "Unknown Profile" — see DIFFERENCES.md
+                        // "AVC High 4:4:4 (profile 244)".
                         // Codes BDInfo has no string for (44 CAVLC 4:4:4, and the
                         // Constrained-Baseline / High-Intra constraint-flag refinements)
                         // are deliberately left as their lineage outcome — emitting a

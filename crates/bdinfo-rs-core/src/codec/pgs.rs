@@ -24,7 +24,7 @@
 //! forced flag (and its caption / forced-caption tally). bdinfo-rs chooses spec
 //! correctness here: a multi-object uncropped PG stream is counted correctly,
 //! while single-object and fully-cropped compositions stay byte-identical to
-//! `BDInfo`.
+//! `BDInfo`. See `DIFFERENCES.md`, "PGS forced-caption counts".
 //!
 //! Like every codec scanner this is panic-free over arbitrary bytes (the bit reader
 //! bounds-checks; the caption counters use `wrapping_add` so a hostile caption flood

@@ -39,6 +39,10 @@ const DTS_X_PATTERN: u32 = 0x0200_0850;
 /// and `0xF14000D1` count as DTS:X IMAX — the two values that `>> 1` collapses to (per
 /// `libavcodec/dca_xll.c`). A DTS:X IMAX stream carries this word and not the legacy
 /// one, so without it the track loses its DTS:X label.
+///
+/// Deliberate divergence from classic `BDInfo` — see `DIFFERENCES.md`, "DTS:X IMAX
+/// detection". `BDInfo` knows only the legacy [`DTS_X_PATTERN`] and so renders these
+/// tracks as plain `DTS-HD Master Audio`; bdinfo-rs renders `DTS:X Master Audio`.
 const DTS_X_IMAX_PATTERN: u32 = 0xF140_00D0;
 
 /// The DTS:X IMAX pattern with its low bit set — the second value the LSB-ignored

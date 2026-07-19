@@ -298,6 +298,9 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
     if half_rate {
         // Reduced-rate E-AC-3 (`fscod2`): the decoded rate is half the table value
         // (24 / 22.05 / 16 kHz), which also feeds the derived bit-rate below.
+        // Classic BDInfo does not halve it — a deliberate divergence that cannot
+        // change a disc report, since Blu-ray E-AC-3 is always 48 kHz. See
+        // DIFFERENCES.md "Correctness fixes with no effect on a normal disc".
         stream.sample_rate = stream.sample_rate.wrapping_div(2);
     }
 
@@ -305,7 +308,10 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
         // Legacy AC-3 `bsid` 9 / 10 are the half / quarter "low-sample-rate"
         // variants: `sr_shift = max(bsid, 8) - 8` right-shifts both the sample rate
         // and the table bit rate (ATSC A/52 / ETSI TS 102 366 §5.4.1; FFmpeg
-        // `ac3_parser.c`). Conforming Blu-ray AC-3 is always `bsid 8` (shift 0).
+        // `ac3_parser.c`). Conforming Blu-ray AC-3 is always `bsid 8` (shift 0), so
+        // this deliberate divergence from classic BDInfo — which applies no shift —
+        // cannot change a disc report. See DIFFERENCES.md "Correctness fixes with no
+        // effect on a normal disc".
         let sr_shift = bsid.max(8).wrapping_sub(8);
         stream.sample_rate = stream.sample_rate.wrapping_shr(sr_shift);
         // `frmsizecod >> 1` indexes the 19-entry bit-rate table; `.get()` is the
