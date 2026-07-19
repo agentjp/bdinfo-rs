@@ -132,6 +132,14 @@ jobs:
       # same posture as .github/build-linux-packages.sh inside the dist
       # release. The PR smoke keeps the fast pre-install (ubuntu-latest).
 
+      # The check script's validators (desktop-file-validate, appstream-util,
+      # rpm -qp) — none preinstalled on the runner image.
+      - name: Install the Linux packaging validators
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream-util rpm
+
       - name: Build (release profile, locked)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --release --locked -p bdinfo-rs-gui
