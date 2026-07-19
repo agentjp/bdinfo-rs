@@ -1,0 +1,360 @@
+name: gui-release
+
+# The hand-rolled release lane for the desktop GUI — the `gui-v*` twin of the
+# cargo-dist `v*` lane, which stays CLI-only (dist has no GUI packaging; its
+# `tag-namespace = "v"` keeps `gui-v*` from ever firing v-release.yml, and
+# nothing here touches the dist pipeline). One workflow, two modes:
+#
+#   push gui-vX.Y.Z   The real release: guards (tag == gui crate version, tag
+#                     on master), six native release builds, per-OS packaging,
+#                     SHA256SUMS, build-provenance attestation over every
+#                     asset, `gh release create --latest=false` (the CLI
+#                     release keeps the repo's "latest"). GitHub immutable
+#                     releases freeze assets at publication, so the publish is
+#                     all-or-nothing: the fail-fast completeness check runs
+#                     before anything is created.
+#
+#   workflow_dispatch The DRY RUN: everything except the publish-only steps
+#                     (release creation + attestation). The packages land as
+#                     workflow artifacts on the run summary page (7-day
+#                     retention) — the pre-tag test bench. A tag run always
+#                     rebuilds from the tagged commit and never reuses dry-run
+#                     artifacts: attestation and checksums must cover bytes
+#                     the tag run built itself, or `gh attestation verify`
+#                     breaks.
+#
+# Packaging is delegated to the .github/scripts/gui-package-*.ps1 trio, the
+# exact scripts gui.yml's packaging smoke exercises on every gui-area PR — the
+# tag-only surface here is wiring, not logic. Linux builds on ubuntu-22.04
+# (glibc 2.35): dynamically-linked binaries inherit the build image's glibc
+# floor, so the oldest supported runner image is the compatibility choice.
+# windows-11-arm carries no WiX, so the arm64 MSI is authored on the x64
+# runner from the arm leg's uploaded exe (MSI authoring is not arch-bound;
+# the check script asserts the Arm64 platform tag).
+
+on:
+  push:
+    tags: ['gui-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gui-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Tag/crate version agreement (the same invariant the CLI lane's tag parse
+  # enforces): gui-vX.Y.Z must equal crates/bdinfo-rs-gui/Cargo.toml's
+  # version. Dispatch runs just read the crate version for the legs.
+  guard-version:
+    name: tag matches the gui crate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Read the crate version and check the tag against it
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          crate="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-gui/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-gui") | .version')"
+          echo "crate version: $crate"
+          if [ "$IS_TAG" = "true" ]; then
+            tag="${REF_NAME#gui-v}"
+            if [ "$tag" != "$crate" ]; then
+              echo "::error::tag $REF_NAME does not match the gui crate version $crate; refusing to release."
+              exit 1
+            fi
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
+  # The tagged commit must sit on master (already CI-green there) — the same
+  # reusable v-release.yml wires in. Runs in dispatch mode too: the dry run
+  # models the tag path, and a dispatch from master passes trivially.
+  guard-ancestor:
+    uses: ./.github/workflows/guard-ancestor.yml
+    permissions:
+      contents: read
+
+  build:
+    name: build + package (${{ matrix.triple }})
+    needs: [guard-version, guard-ancestor]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+            kind: linux
+          - os: ubuntu-22.04-arm
+            triple: aarch64-unknown-linux-gnu
+            kind: linux
+          - os: windows-2025
+            triple: x86_64-pc-windows-msvc
+            kind: windows
+          - os: windows-11-arm
+            triple: aarch64-pc-windows-msvc
+            kind: windows-zip
+          - os: macos-15-intel
+            triple: x86_64-apple-darwin
+            kind: macos
+          - os: macos-15
+            triple: aarch64-apple-darwin
+            kind: macos
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          shared-key: gui-release
+          # Tag runs build fresh (a cache poisoned elsewhere must not taint a
+          # release build — the fuzz.yml/sweep.yml discipline); dispatch runs
+          # on master seed the cache for later dry runs.
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Release-pinned; the packaging script compiles the same versions from
+      # source if this pre-install were ever absent.
+      - name: Install the Linux packagers
+        if: matrix.kind == 'linux'
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+
+      - name: Build (release profile, locked)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --release --locked -p bdinfo-rs-gui
+
+      - name: Package (Linux — AppImage + deb + rpm)
+        if: matrix.kind == 'linux'
+        env:
+          VERSION: ${{ needs.guard-version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: pwsh .github/scripts/gui-package-linux.ps1 -Version "$VERSION" -Triple "$TRIPLE" -OutDir dist-gui
+
+      - name: Package (Windows — zip + MSI)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.guard-version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: >
+          .github/scripts/gui-package-windows.ps1
+          -Exe crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui
+
+      # windows-11-arm has no WiX: zip here, MSI in msi-arm64 below.
+      - name: Package (Windows arm64 — zip; MSI authored on the x64 runner)
+        if: matrix.kind == 'windows-zip'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.guard-version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: >
+          .github/scripts/gui-package-windows.ps1
+          -Exe crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui -Artifacts zip
+
+      - name: Package (macOS — .app in a dmg)
+        if: matrix.kind == 'macos'
+        env:
+          VERSION: ${{ needs.guard-version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: >
+          pwsh .github/scripts/gui-package-macos.ps1
+          -Binary crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui
+          -Version "$VERSION" -Triple "$TRIPLE" -OutDir dist-gui
+
+      # The same content assertions the PR smoke runs. Skipped only on the
+      # arm64 windows leg (its zip + the x64-authored MSI are asserted as a
+      # pair in msi-arm64).
+      - name: Assert the artifact contents
+        if: matrix.kind != 'windows-zip'
+        shell: pwsh
+        env:
+          KIND: ${{ matrix.kind }}
+          TRIPLE: ${{ matrix.triple }}
+        run: .github/scripts/gui-package-check.ps1 -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE
+
+      - name: Upload the packaged artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-release-${{ matrix.triple }}
+          path: dist-gui/
+          retention-days: 7
+          if-no-files-found: error
+
+      # Transport for the arm64 MSI authoring below — never a release asset
+      # itself (the name stays outside the publish job's gui-release-* glob).
+      - name: Upload the arm64 exe for MSI authoring
+        if: matrix.kind == 'windows-zip'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-buildexe-aarch64-pc-windows-msvc
+          path: crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          retention-days: 7
+          if-no-files-found: error
+
+  # The arm64 MSI, authored where WiX lives (windows-2025 preinstalls WiX
+  # 3.14, the version that added arm64 MSI support; the windows-11-arm image
+  # carries none). Checks the full windows pair — the downloaded native zip +
+  # this MSI, whose platform summary must read Arm64.
+  msi-arm64:
+    name: author the arm64 MSI (x64 runner)
+    needs: [guard-version, build]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download the arm64 exe
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gui-buildexe-aarch64-pc-windows-msvc
+          path: arm-exe
+
+      - name: Download the arm64 zip (the pair's other half)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gui-release-aarch64-pc-windows-msvc
+          path: dist-gui
+
+      - name: Author the MSI
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.guard-version.outputs.version }}
+        run: >
+          .github/scripts/gui-package-windows.ps1
+          -Exe arm-exe/bdinfo-rs-gui.exe
+          -Version $env:VERSION -Triple aarch64-pc-windows-msvc -OutDir dist-gui -Artifacts msi
+
+      - name: Assert the artifact contents (zip + Arm64-tagged MSI)
+        shell: pwsh
+        run: .github/scripts/gui-package-check.ps1 -Kind windows -Dir dist-gui -Triple aarch64-pc-windows-msvc
+
+      - name: Upload the MSI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-release-aarch64-pc-windows-msvc-msi
+          path: dist-gui/bdinfo-rs-gui-aarch64-pc-windows-msvc.msi
+          retention-days: 7
+          if-no-files-found: error
+
+  # One fail-fast gate + publish job. Both modes run the completeness check
+  # and SHA256SUMS; only a tag run attests and creates the release (immutable
+  # releases allow no second chance to attach assets, so everything must be
+  # present and verified before `gh release create`).
+  publish:
+    name: ${{ startsWith(github.ref, 'refs/tags/') && 'publish the release' || 'dry-run assembly (no publish)' }}
+    needs: [guard-version, build, msi-arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download every packaged artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: gui-release-*
+          path: assets
+          merge-multiple: true
+
+      - name: Hard-fail on any missing artifact, then write SHA256SUMS
+        working-directory: assets
+        run: |
+          expected="
+          bdinfo-rs-gui-x86_64-unknown-linux-gnu.AppImage
+          bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb
+          bdinfo-rs-gui-x86_64-unknown-linux-gnu.rpm
+          bdinfo-rs-gui-aarch64-unknown-linux-gnu.AppImage
+          bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb
+          bdinfo-rs-gui-aarch64-unknown-linux-gnu.rpm
+          bdinfo-rs-gui-x86_64-pc-windows-msvc.zip
+          bdinfo-rs-gui-x86_64-pc-windows-msvc.msi
+          bdinfo-rs-gui-aarch64-pc-windows-msvc.zip
+          bdinfo-rs-gui-aarch64-pc-windows-msvc.msi
+          bdinfo-rs-gui-x86_64-apple-darwin.dmg
+          bdinfo-rs-gui-aarch64-apple-darwin.dmg
+          "
+          missing=0
+          for f in $expected; do
+            if [ ! -f "$f" ]; then echo "::error::missing release artifact $f"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          count="$(ls -1 | wc -l)"
+          if [ "$count" -ne 12 ]; then
+            echo "::error::expected exactly 12 artifacts, found $count:"; ls -1
+            exit 1
+          fi
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance (every asset)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: assets/*
+
+      - name: Create the GitHub release (immutable; never "latest")
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.guard-version.outputs.version }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
+          Native desktop GUI for bdinfo-rs: open a BDMV folder or .iso image,
+          run the measured scan, and read, save, or copy the classic BDInfo
+          report — byte-identical to the `bdinfo-rs` CLI's.
+
+          | Platform | Artifacts |
+          |---|---|
+          | Windows (x64, arm64) | `.msi` installer (Start-menu entry, clean uninstall), portable `.zip` |
+          | macOS (Intel, Apple Silicon) | `.dmg` with a drag-to-Applications `.app` |
+          | Linux (x64, arm64) | `.AppImage`, `.deb`, `.rpm` |
+
+          **macOS (unsigned):** Gatekeeper blocks the first launch — allow it
+          under System Settings → Privacy & Security → "Open Anyway", or run
+          `xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"`.
+
+          **Windows:** SmartScreen may warn on the first run of the portable
+          exe — "More info" → "Run anyway". The `.msi` installs per-machine.
+
+          Every asset is covered by `SHA256SUMS` and a Sigstore
+          build-provenance attestation:
+          `gh attestation verify <asset> --repo agentjp/bdinfo-rs`.
+          EOF
+          gh release create "$TAG" \
+            --verify-tag \
+            --latest=false \
+            --title "bdinfo-rs GUI v$VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            assets/*
+
+      - name: Upload the dry-run bundle (dispatch only)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-release-dry-run
+          path: assets/
+          retention-days: 7
+          if-no-files-found: error
