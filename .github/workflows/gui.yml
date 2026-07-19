@@ -20,11 +20,12 @@ name: gui
 # the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, the
 # headless launch smoke, and the real-window drive walks below.
 #
-# The Tier-A mutation bar is NOT enforced here: the full-crate sweep (~50 min)
-# was rescheduled off the PR path (D1) into sweep.yml, which runs it daily —
-# only when the crate tree changed since the last green sweep — and on release
-# tags, the authoritative 0-missed checkpoints. The PR path gets the advisory
-# in-diff mutants job in ci.yml (`gui mutation testing (PR diff)`) instead.
+# The Tier-A mutation bar is NOT enforced here: the full-crate sweep was
+# rescheduled off the PR path (D1) into sweep.yml (now sharded), which runs it
+# daily — only when the crate tree changed since the last green sweep — and on
+# release tags, the authoritative 0-missed checkpoints. The PR path gets the
+# advisory in-diff mutants job in ci.yml (`gui mutation testing (PR diff)`)
+# instead.
 #
 # Job shape — the repo's standing pattern (same reasoning as the core/CLI in
 # ci.yml): arch bugs live in build + test, which runs on all six shipped
@@ -326,6 +327,12 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          # smoke + drive-assisted + drive-inject run the IDENTICAL plain
+          # debug build per OS, so the three share ONE cache lineage instead
+          # of rust-cache's default per-job keys — three byte-duplicate
+          # multi-hundred-MB caches per OS family otherwise crowd the repo's
+          # 10 GB Actions-cache budget and LRU-evict the sweep markers.
+          shared-key: gui-drive
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the virtual display + software Vulkan (Linux)
@@ -423,6 +430,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          # One lineage with smoke/drive-inject — see the smoke job's note.
+          shared-key: gui-drive
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the virtual display + software Vulkan + capture (Linux)
@@ -508,6 +517,8 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          # One lineage with smoke/drive-assisted — see the smoke job's note.
+          shared-key: gui-drive
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the virtual display + software Vulkan + xdotool + capture (Linux)
