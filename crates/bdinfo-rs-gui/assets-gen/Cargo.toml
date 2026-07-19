@@ -1,0 +1,28 @@
+# Dev-side generator for the committed packaging icon assets — see src/lib.rs.
+# A workspace member (never a dependency of the app), so the encoder crates
+# below ride the gui Cargo.lock's Dependabot + cargo-deny coverage without ever
+# entering the shipped binary's dependency tree.
+[package]
+name = "bdinfo-rs-gui-assets-gen"
+# Internal tool: never published, never released, so the version is inert.
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.96"
+license = "LGPL-2.1-or-later"
+authors = ["bdinfo-rs contributors"]
+repository = "https://github.com/agentjp/bdinfo-rs"
+description = "Generates bdinfo-rs-gui's committed packaging icon assets from the in-crate procedural mark."
+
+[dependencies]
+# The mark renderer (icon) + the .ico container (winres) — the single source
+# every derived asset comes from.
+bdinfo-rs-gui = { path = ".." }
+# Pure-Rust encoders for the two container formats the OSes want: .icns for
+# the macOS bundle, PNG for the hicolor set (and inside the .icns). Default
+# features off: they add a JPEG2000 decoder this generator never reads.
+icns = { version = "0.4", default-features = false, features = ["pngio"] }
+png = "0.18"
+
+[lints]
+workspace = true

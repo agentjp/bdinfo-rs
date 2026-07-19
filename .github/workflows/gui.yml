@@ -289,6 +289,115 @@ jobs:
           MSRV: ${{ steps.msrv.outputs.version }}
         run: cargo "+$MSRV" build --locked
 
+  # The packaging smoke: assemble every distribution artifact shape on its
+  # native runner with the SAME .github/scripts/gui-package-*.ps1 the
+  # gui-release.yml lane runs, then assert contents (zip/MSI layout + platform
+  # tag, .app/dmg structure + ad-hoc signature, AppImage root entries, deb/rpm
+  # payloads + weak deps, desktop-file/AppStream validation) — the PR-time
+  # proof that keeps the release lane's tag-only surface thin, the same
+  # pattern ci.yml's pkg job uses for the CLI's .deb/.rpm. One leg per OS
+  # family: the packaging logic is arch-independent (the release lane's
+  # native arm legs run the identical scripts; its check script asserts the
+  # arm64 MSI's platform tag there). The cargo-deb/cargo-generate-rpm pins
+  # must equal .github/build-linux-packages.sh's (version-freshness.yml
+  # cross-checks all three homes).
+  package:
+    name: gui packaging smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            kind: linux
+            triple: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            kind: windows
+            triple: x86_64-pc-windows-msvc
+          - os: macos-15
+            kind: macos
+            triple: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: crates/bdinfo-rs-gui
+          # Release-profile artifacts, distinct from the debug legs' lineages.
+          shared-key: gui-package
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install the Linux packagers + validators
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream-util rpm
+
+      # Pinned to the exact versions the packaging script would compile from
+      # source if missing — this pre-install just makes the smoke fast.
+      - name: Install cargo-deb + cargo-generate-rpm (release-pinned)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+
+      - name: Build (release profile)
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo build --release --locked -p bdinfo-rs-gui
+
+      - name: Read the crate version
+        id: version
+        shell: bash
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-gui/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-gui") | .version')"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Package (Linux — AppImage + deb + rpm)
+        if: matrix.kind == 'linux'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: pwsh .github/scripts/gui-package-linux.ps1 -Version "$VERSION" -Triple "$TRIPLE" -OutDir dist-gui
+
+      - name: Package (Windows — zip + MSI)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: >
+          .github/scripts/gui-package-windows.ps1
+          -Exe crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+          -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui
+
+      - name: Package (macOS — .app in a dmg)
+        if: matrix.kind == 'macos'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: >
+          pwsh .github/scripts/gui-package-macos.ps1
+          -Binary crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui
+          -Version "$VERSION" -Triple "$TRIPLE" -OutDir dist-gui
+
+      - name: Assert the artifact contents
+        shell: pwsh
+        env:
+          KIND: ${{ matrix.kind }}
+          TRIPLE: ${{ matrix.triple }}
+        run: .github/scripts/gui-package-check.ps1 -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE
+
+      - name: Upload the packaged artifacts (hand-testing)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gui-packages-${{ matrix.os }}
+          path: dist-gui/
+          retention-days: 7
+          if-no-files-found: error
+
   # The real-window launch smoke: the app opens, renders, and exits 0, driven
   # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
   # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software

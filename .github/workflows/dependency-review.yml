@@ -38,11 +38,16 @@ jobs:
           # Package-scoped exemptions, mirroring deny.toml's scoped exceptions:
           # our own workspace crates are LGPL-2.1-or-later (the allowlist above
           # is for DEPENDENCIES, permissive only — an LGPL dependency must
-          # still fail), and self_cell is `Apache-2.0 OR GPL-2.0-only` (we
+          # still fail), self_cell is `Apache-2.0 OR GPL-2.0-only` (we
           # distribute under the Apache-2.0 branch; deny.toml resolves the OR
-          # expression correctly and remains authoritative).
+          # expression correctly and remains authoritative), and
+          # Swatinem/rust-cache is LGPL-3.0 but a CI-SIDE action — it runs on
+          # the runner and ships nothing into any artifact, so the
+          # distribution-license policy does not apply (it already runs in
+          # every gate workflow; only a NEW workflow file re-surfaces it here).
           allow-dependencies-licenses: >-
             pkg:cargo/bdinfo-rs-core, pkg:cargo/bdinfo-rs,
             pkg:cargo/bdinfo-rs-gui, pkg:cargo/bdinfo-rs-wasm,
-            pkg:cargo/self_cell
+            pkg:cargo/self_cell,
+            pkg:githubactions/Swatinem/rust-cache
           comment-summary-in-pr: on-failure

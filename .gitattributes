@@ -11,6 +11,8 @@ fuzz/corpus/** binary
 *.exe binary
 *.pdb binary
 *.png binary
+*.ico binary
+*.icns binary
 
 # Real-disc CI fixtures (crates/bdinfo-rs/tests/fixtures). The BDMV folder bytes
 # and the .iso are opaque binary — a CRLF/LF rewrite would corrupt the M2TS / CLPI /

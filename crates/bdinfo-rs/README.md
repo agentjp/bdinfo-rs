@@ -1,34 +1,57 @@
-# bdinfo-rs (CLI)
+# bdinfo-rs
 
-`bdinfo-rs` is a memory-safe, cross-platform command-line analyzer for Blu-ray disc
-structures (`BDMV` folders and `.iso` images). It reports playlists and per-stream
-video/audio specs (codecs, bitrates, resolution, HDR / Dolby Vision / HDR10+). No GUI.
+**The classic BDInfo disc report from the command line — one static binary, no runtime.**
 
-It is a drop-in replacement for the classic BDInfo tool: the same console flow and the
-same `BDINFO.{volume label}.txt` disc report, reimplemented in Rust. It ships as a
-single statically-linked binary — no runtime, no DLLs, no install.
+[![crates.io](https://img.shields.io/crates/v/bdinfo-rs)](https://crates.io/crates/bdinfo-rs)
+[![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](https://github.com/agentjp/bdinfo-rs/blob/master/LICENSE)
+
+Analyzes `BDMV` folders and `.iso` images and writes the classic
+`BDINFO.{volume label}.txt` report: playlists and per-stream video and audio specs — codecs,
+measured bitrates, resolution, and HDR / Dolby Vision / HDR10+. A drop-in replacement for the
+original tool, with the same console flow. No GUI; for one, see the desktop app in the
+[main project](https://github.com/agentjp/bdinfo-rs).
 
 ## Install
 
 ```sh
-cargo install bdinfo-rs
+cargo install bdinfo-rs      # or, without compiling: cargo binstall bdinfo-rs
 ```
 
-Also available via WinGet (`winget install agentjp.bdinfo-rs`), Homebrew, Scoop, the AUR
-(`bdinfo-rs-bin`), `cargo binstall`, and `.deb`/`.rpm` repositories — see the
-[project README](https://github.com/agentjp/bdinfo-rs) for every install route.
+Also on Homebrew, WinGet, Scoop, the AUR, apt/dnf, and Docker — every route is in the
+[main project's install guide](https://github.com/agentjp/bdinfo-rs#command-line).
 
 ## Usage
 
 ```sh
-bdinfo-rs /path/to/bluray-folder            # playlist table + interactive selection,
-                                          # then BDINFO.{label}.txt beside the disc
-bdinfo-rs /path/to/disc.iso /path/to/out    # an .iso needs an explicit report folder
-bdinfo-rs /path/to/bluray-folder --list     # print the playlist table, scan nothing
-bdinfo-rs /path/to/bluray-folder --mpls 00800,00801
-bdinfo-rs /path/to/bluray-folder --whole    # scan everything the table lists
+bdinfo-rs <BD_PATH> [REPORT_DEST]
 ```
+
+`BD_PATH` takes the disc root, the `BDMV` folder, any directory inside it, or an `.iso`. The report
+goes to `REPORT_DEST`, defaulting to the disc folder and required for an `.iso`.
+
+```sh
+bdinfo-rs /path/to/disc                       # playlist table, then pick interactively
+bdinfo-rs /path/to/movie.iso /path/to/out     # an .iso needs an explicit report folder
+bdinfo-rs /path/to/disc --list                # print the playlist table, scan nothing
+bdinfo-rs /path/to/disc --mpls 00800,00801    # scan exactly these playlists
+bdinfo-rs /path/to/disc --whole               # scan everything the table lists
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Scan completed |
+| 3 | Scan completed with unreadable files, collected into the report's `WARNING` block |
+| 130 | Cancelled with <kbd>Ctrl</kbd>+<kbd>C</kbd> |
+
+Release archives ship bash, zsh, fish, and PowerShell completions plus a `bdinfo-rs.1` man page,
+generated from the CLI itself so they always match the binary.
+
+## Library
+
+The analyzer is [`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core); this crate is a thin
+front-end over it.
 
 ## License
 
-LGPL-2.1-or-later.
+[LGPL-2.1-or-later](https://github.com/agentjp/bdinfo-rs/blob/master/LICENSE). Derived from BDInfo
+(© 2010 Cinema Squid).

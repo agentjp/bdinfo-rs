@@ -153,7 +153,7 @@ jobs:
               case "$f" in
                 crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core_edge=true ;;
               esac
-              case "$f" in crates/bdinfo-rs-gui/*|.github/workflows/gui.yml|.github/scripts/gui-*.ps1) gui=true ;; esac
+              case "$f" in crates/bdinfo-rs-gui/*|.github/workflows/gui.yml|.github/workflows/gui-release.yml|.github/scripts/gui-*.ps1) gui=true ;; esac
               case "$f" in crates/bdinfo-rs-wasm/*|.github/workflows/wasm.yml) wasm=true ;; esac
               case "$f" in fuzz/*) fuzz=true ;; esac
               case "$f" in Cargo.lock|Cargo.toml|*/Cargo.toml|deny.toml|supply-chain/*|crates/*/deny.toml) deps=true ;; esac
@@ -572,7 +572,9 @@ jobs:
             echo "no gui-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
             exit 0
           fi
-          cargo mutants --in-place --no-shuffle --in-diff "$RUNNER_TEMP/crate.diff"
+          # --workspace so a diff touching the assets-gen member is mutated
+          # too (cargo-mutants otherwise scopes to the root package).
+          cargo mutants --in-place --no-shuffle --workspace --in-diff "$RUNNER_TEMP/crate.diff"
 
   # The wasm twin of gui-mutants: advisory in-diff mutation over the wasm
   # crate's own PR diff (--relative + --in-place for the same path-dep reason;

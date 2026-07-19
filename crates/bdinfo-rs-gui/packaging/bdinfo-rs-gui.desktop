@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=bdinfo-rs GUI
+GenericName=Blu-ray Disc Analyzer
+Comment=Scan Blu-ray discs and produce the classic BDInfo report
+Exec=bdinfo-rs-gui %f
+Icon=bdinfo-rs-gui
+Terminal=false
+Categories=AudioVideo;
+Keywords=Blu-ray;BDInfo;BDMV;ISO;
+MimeType=application/x-cd-image;
+StartupWMClass=bdinfo-rs-gui

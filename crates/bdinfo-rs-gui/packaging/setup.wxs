@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v3 source for the bdinfo-rs GUI installer. Compiled per arch by
+     .github/scripts/gui-package-windows.ps1 (candle -arch x64|arm64, which
+     also sets the components' Win64 default) with -dVersion, -dExePath and
+     -dIconPath, so nothing here couples to a checkout layout or version.
+
+     winget-clean authoring, deliberately: a stable UpgradeCode forever with
+     Product Id="*" (fresh ProductCode per version) + MajorUpgrade scheduled
+     afterInstallInitialize; perMachine scope; NO custom UI, license dialog, or
+     launch-after-install action, so msiexec's silent (/qn) and passive
+     (/passive) sequences are never blocked and a future winget manifest needs
+     zero InstallerSwitches. The per-user config (%APPDATA%\bdinfo-rs) is
+     runtime data the app creates; the MSI must never own it, so uninstall
+     leaves it in place. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="bdinfo-rs GUI"
+           Manufacturer="bdinfo-rs contributors"
+           Version="$(var.Version)"
+           UpgradeCode="EBF0C1DC-6418-4BBA-A01E-B0382088969A"
+           Language="1033">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="bdinfo-rs GUI installer"
+             Comments="Blu-ray disc analyzer" />
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of bdinfo-rs GUI is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/agentjp/bdinfo-rs" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="bdinfo-rs GUI">
+          <Component Id="MainExecutable" Guid="*">
+            <File Id="MainExe"
+                  Source="$(var.ExePath)"
+                  Name="bdinfo-rs-gui.exe"
+                  KeyPath="yes">
+              <!-- Advertised, so it rides the executable's component — no
+                   second component with a registry key-path needed. -->
+              <Shortcut Id="StartMenuShortcut"
+                        Advertise="yes"
+                        Directory="ProgramMenuFolder"
+                        Name="bdinfo-rs GUI"
+                        WorkingDirectory="INSTALLDIR"
+                        Icon="AppIcon.ico"
+                        IconIndex="0"
+                        Description="Blu-ray disc analyzer" />
+            </File>
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <Feature Id="Main" Level="1" Title="bdinfo-rs GUI" Absent="disallow">
+      <ComponentRef Id="MainExecutable" />
+    </Feature>
+  </Product>
+</Wix>

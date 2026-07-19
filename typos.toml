@@ -8,6 +8,7 @@
 # Exact tokens (incl. digit-bearing) that are domain vocabulary, never typos.
 M2TS = "M2TS"
 HDR10 = "HDR10"
+dwStrucVersion = "dwStrucVersion" # the VS_FIXEDFILEINFO field's real Win32 name
 
 [default.extend-words]
 # Word-level allow (case-insensitive): BD structure names / extensions.

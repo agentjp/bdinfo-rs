@@ -1,19 +1,24 @@
-//! The Windows icon resource, built byte-by-byte in pure Rust.
+//! Windows resources — icon, version info, `.ico` — built byte-by-byte in
+//! pure Rust.
 //!
 //! `build.rs` renders the aperture mark ([`crate::icon`]) at every size in
 //! [`SIZES`], packs each into an icon DIB ([`dib`]), assembles the classic
 //! `.res` container ([`res`]) — `RT_ICON` entries plus one `RT_GROUP_ICON`
-//! directory — and hands the file straight to the MSVC linker, which places it
-//! in the executable's `.rsrc` section. That embedded group is what Explorer,
-//! the taskbar (pinned shortcuts), and Alt-Tab read; the running window's icon
-//! is set separately at runtime from the same renderer. Hand-rolled for the
-//! same reason the renderer is: no image encoder, no resource compiler, no new
+//! directory — appends a `VS_VERSIONINFO` resource ([`version_info`] via
+//! [`entry`]) carrying the crate version, and hands the file straight to the
+//! MSVC linker, which places it in the executable's `.rsrc` section. The icon
+//! group is what Explorer, the taskbar (pinned shortcuts), and Alt-Tab read;
+//! the version block is what the file-Properties Details tab and Task Manager
+//! read; the running window's icon is set separately at runtime from the same
+//! renderer. [`ico`] packs the same DIBs into a standalone `.ico` file for the
+//! packaging assets (the MSI's Apps-list icon). Hand-rolled for the same
+//! reason the renderer is: no image encoder, no resource compiler, no new
 //! dependency, no C.
 //!
-//! Layout references: `RESOURCEHEADER` (the `.res` format) and the icon
-//! resource shapes `BITMAPINFOHEADER` and `GRPICONDIRENTRY` — all
-//! little-endian by spec, unlike the big-endian disc structures the analyzer
-//! parses.
+//! Layout references: `RESOURCEHEADER` (the `.res` format), the icon resource
+//! shapes `BITMAPINFOHEADER` / `GRPICONDIRENTRY` / `ICONDIR`, and the
+//! `VS_VERSIONINFO` block tree — all little-endian by spec, unlike the
+//! big-endian disc structures the analyzer parses.
 
 /// The icon sizes embedded in the executable.
 ///
@@ -45,6 +50,8 @@ const EMPTY_RESOURCE: [u8; 32] = [
 const RT_ICON: u16 = 3;
 /// `RT_GROUP_ICON` — the directory tying the images into one logical icon.
 const RT_GROUP_ICON: u16 = 14;
+/// `RT_VERSION` — the `VS_VERSIONINFO` block ([`version_info`]).
+pub const RT_VERSION: u16 = 16;
 
 /// Packs one `size`×`size` RGBA8 buffer into an icon DIB.
 ///
@@ -116,12 +123,35 @@ fn header(out: &mut Vec<u8>, data_size: u32, type_id: u16, name_id: u16) {
 }
 
 /// Pads `out` with zeros to the next 32-bit boundary — every resource's data
-/// in a `.res` file is DWORD-aligned.
+/// in a `.res` file is DWORD-aligned, as is every block in a `VS_VERSIONINFO`
+/// tree.
 fn align(out: &mut Vec<u8>) {
     let rem = out.len().wrapping_rem(4);
     if rem != 0 {
         out.resize(out.len().wrapping_add(4_usize.wrapping_sub(rem)), 0);
     }
+}
+
+/// One complete `.res` entry: the all-ordinal header, `data`, and the
+/// trailing DWORD padding.
+///
+/// Entries concatenate into a valid `.res` file (after the 32-byte empty
+/// marker resource), which is how `build.rs` appends the [`RT_VERSION`]
+/// resource after the icon container [`res`] builds.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "every payload is a resource this module built — a DIB under \
+              dib()'s 256 px ceiling (< 2^19 bytes), an icon directory, or a \
+              version_info() tree (< 2^16 bytes) — so the u32 data-size cast \
+              is lossless"
+)]
+pub fn entry(type_id: u16, name_id: u16, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    header(&mut out, data.len() as u32, type_id, name_id);
+    out.extend_from_slice(data);
+    align(&mut out);
+    out
 }
 
 /// Assembles the full `.res` file from `(size, dib)` pairs.
@@ -149,9 +179,7 @@ pub fn res(icons: &[(u32, Vec<u8>)]) -> Option<Vec<u8>> {
     // The images, ordinal ids 1..=count.
     for (index, (_, data)) in icons.iter().enumerate() {
         let id = (index as u16).wrapping_add(1);
-        header(&mut out, data.len() as u32, RT_ICON, id);
-        out.extend_from_slice(data);
-        align(&mut out);
+        out.extend_from_slice(&entry(RT_ICON, id, data));
     }
 
     // The GRPICONDIR + one GRPICONDIRENTRY per image.
@@ -170,17 +198,191 @@ pub fn res(icons: &[(u32, Vec<u8>)]) -> Option<Vec<u8>> {
         group.extend_from_slice(&(data.len() as u32).to_le_bytes()); // dwBytesInRes
         group.extend_from_slice(&(index as u16).wrapping_add(1).to_le_bytes()); // nID
     }
-    header(&mut out, group.len() as u32, RT_GROUP_ICON, 1);
-    out.extend_from_slice(&group);
-    align(&mut out);
+    out.extend_from_slice(&entry(RT_GROUP_ICON, 1, &group));
     Some(out)
+}
+
+/// Assembles a standalone `.ico` file from `(size, dib)` pairs — the `ICONDIR`
+/// directory followed by the images, which are byte-identical to the `RT_ICON`
+/// DIBs ([`dib`]), the two formats' shared shape.
+///
+/// Not embedded in the binary (the `.res` route above owns that): this is the
+/// packaging-asset form — the WiX installer's Apps-list icon
+/// (`ARPPRODUCTICON`) and any future manifest that wants a plain `.ico`.
+///
+/// Returns `None` when `icons` is empty or holds more images than the 16-bit
+/// count field.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "each DIB is bounded by dib()'s 256 px ceiling (< 2^19 bytes) and \
+              the directory by the u16 count checked first, so the u32 \
+              size/offset casts are lossless and the u8 extent cast wraps 256 \
+              to the format's own 0 marker exactly"
+)]
+pub fn ico(icons: &[(u32, Vec<u8>)]) -> Option<Vec<u8>> {
+    if icons.is_empty() || u16::try_from(icons.len()).is_err() {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&0_u16.to_le_bytes()); // idReserved
+    out.extend_from_slice(&1_u16.to_le_bytes()); // idType: icon
+    out.extend_from_slice(&(icons.len() as u16).to_le_bytes()); // idCount
+
+    // The images follow the directory back-to-back; each entry records its
+    // absolute file offset.
+    let mut offset = 6_usize.wrapping_add(icons.len().wrapping_mul(16));
+    for (size, data) in icons {
+        // A 256 px extent is stored as 0, as in the RT_GROUP_ICON directory.
+        out.push(*size as u8); // bWidth
+        out.push(*size as u8); // bHeight
+        out.push(0); // bColorCount: not palettized
+        out.push(0); // bReserved
+        out.extend_from_slice(&1_u16.to_le_bytes()); // wPlanes
+        out.extend_from_slice(&32_u16.to_le_bytes()); // wBitCount
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // dwBytesInRes
+        out.extend_from_slice(&(offset as u32).to_le_bytes()); // dwImageOffset
+        offset = offset.wrapping_add(data.len());
+    }
+    for (_, data) in icons {
+        out.extend_from_slice(data);
+    }
+    Some(out)
+}
+
+/// Encodes `text` as NUL-terminated UTF-16LE into `out`, counting the code
+/// units written (terminator included).
+///
+/// Returns `None` on an interior NUL — it would truncate the string for every
+/// Win32 reader.
+fn utf16z(text: &str, out: &mut Vec<u8>) -> Option<u16> {
+    let mut units: u16 = 0;
+    for unit in text.encode_utf16() {
+        if unit == 0 {
+            return None;
+        }
+        out.extend_from_slice(&unit.to_le_bytes());
+        units = units.checked_add(1)?;
+    }
+    out.extend_from_slice(&0_u16.to_le_bytes());
+    units.checked_add(1)
+}
+
+/// Pads `body` with zeros so the next byte lands on a 32-bit boundary of the
+/// final block, whose 6-byte header `body` does not yet include.
+fn align_body(body: &mut Vec<u8>) {
+    let rem = body.len().wrapping_add(6).wrapping_rem(4);
+    if rem != 0 {
+        body.resize(body.len().wrapping_add(4_usize.wrapping_sub(rem)), 0);
+    }
+}
+
+/// One block of the `VS_VERSIONINFO` tree: the `wLength` / `wValueLength` /
+/// `wType` header, the NUL-terminated UTF-16 `key`, DWORD padding, `value`,
+/// DWORD padding, then `children` (pre-joined via [`join`]). `wLength` spans
+/// the whole block; the caller supplies `w_value_length` because its unit
+/// depends on `w_type` (bytes when binary, UTF-16 units when text).
+///
+/// Returns `None` on an interior NUL in `key` or a block outgrowing the
+/// 16-bit length field.
+fn block(
+    key: &str,
+    w_type: u16,
+    w_value_length: u16,
+    value: &[u8],
+    children: &[u8],
+) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    utf16z(key, &mut body)?;
+    align_body(&mut body);
+    body.extend_from_slice(value);
+    if !children.is_empty() {
+        align_body(&mut body);
+        body.extend_from_slice(children);
+    }
+    // The header is 6 bytes; a body big enough to wrap usize cannot exist in
+    // memory, so the only real failure is the u16 field itself.
+    let length = u16::try_from(body.len().wrapping_add(6)).ok()?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&length.to_le_bytes());
+    out.extend_from_slice(&w_value_length.to_le_bytes());
+    out.extend_from_slice(&w_type.to_le_bytes());
+    out.append(&mut body);
+    Some(out)
+}
+
+/// Concatenates sibling blocks, DWORD-aligning the start of each — the
+/// inter-sibling padding the parent's `wLength` includes but each sibling's
+/// own `wLength` excludes.
+fn join(blocks: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for b in blocks {
+        align(&mut out);
+        out.extend_from_slice(b);
+    }
+    out
+}
+
+/// Builds the `VS_VERSIONINFO` block — the data of an [`RT_VERSION`] resource.
+///
+/// `version` is the four-part `FILEVERSION`/`PRODUCTVERSION` quad (the crate's
+/// `major.minor.patch` plus a zero fourth part, in `build.rs`); `strings` are
+/// the `StringFileInfo` name/value pairs (`FileDescription`, `ProductName`,
+/// …), emitted under the conventional `040904b0` table (en-US, Unicode) with
+/// the matching `VarFileInfo` translation entry. The fixed block declares
+/// `VOS_NT_WINDOWS32` / `VFT_APP`, no flags, no date.
+///
+/// Returns `None` on an interior NUL in any string or a tree outgrowing a
+/// block's 16-bit length field.
+#[must_use]
+// allow, not expect: build.rs shares this file, and there the module is
+// private, so the pub-only panics-doc lint never fires and an expectation
+// would be unfulfilled.
+#[allow(
+    clippy::missing_panics_doc,
+    reason = "the only expect() sites take constant inputs whose success the \
+              byte-tie tests pin; no caller input can reach them"
+)]
+pub fn version_info(version: [u16; 4], strings: &[(&str, &str)]) -> Option<Vec<u8>> {
+    let [major, minor, patch, build] = version;
+    // The two-dword version encoding packs disjoint 16-bit halves;
+    // wrapping_add (not `|`) so the composition stays mutation-distinguishable.
+    let ms = u32::from(major).wrapping_shl(16).wrapping_add(u32::from(minor));
+    let ls = u32::from(patch).wrapping_shl(16).wrapping_add(u32::from(build));
+
+    // VS_FIXEDFILEINFO: signature, structure version 1.0, file + product
+    // version, a full flags mask with no flags set, VOS_NT_WINDOWS32, VFT_APP,
+    // no subtype, no date — 13 dwords, 52 bytes.
+    let mut fixed = Vec::new();
+    for dword in [0xFEEF_04BD_u32, 0x0001_0000, ms, ls, ms, ls, 0x3F, 0, 0x0004_0004, 1, 0, 0, 0] {
+        fixed.extend_from_slice(&dword.to_le_bytes());
+    }
+
+    let mut table_children = Vec::new();
+    for (name, value) in strings {
+        let mut encoded = Vec::new();
+        let units = utf16z(value, &mut encoded)?;
+        table_children.push(block(name, 1, units, &encoded, &[])?);
+    }
+    let table = block("040904b0", 1, 0, &[], &join(&table_children))?;
+    let string_file_info = block("StringFileInfo", 1, 0, &[], &table)?;
+
+    // The translation pair mirroring the table key: language 0x0409 (en-US),
+    // charset 0x04B0 (Unicode) — binary value, so wValueLength is in bytes.
+    // Constant inputs, so the length checks cannot fail here.
+    let translation =
+        block("Translation", 0, 4, &[0x09, 0x04, 0xB0, 0x04], &[]).expect("a constant block");
+    let var_file_info = block("VarFileInfo", 1, 0, &[], &translation).expect("a constant block");
+
+    // wValueLength 52: the fixed block's size, a format constant (13 dwords).
+    block("VS_VERSION_INFO", 0, 52, &fixed, &join(&[string_file_info, var_file_info]))
 }
 
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
-    use super::{EMPTY_RESOURCE, SIZES, dib, res};
+    use super::{EMPTY_RESOURCE, RT_VERSION, SIZES, dib, entry, ico, res, version_info};
     use crate::icon;
 
     /// The little-endian u32 at `offset` — checked access, like the icon
@@ -346,6 +548,199 @@ mod tests {
         assert_eq!(sum, 62_004_853, "update the pinned checksum deliberately");
     }
 
+    #[test]
+    fn a_bare_entry_matches_the_header_data_pad_layout() {
+        // RT_VERSION id 1 with 3 data bytes: the 32-byte all-ordinal header,
+        // the data, and 1 pad byte to the DWORD boundary — 36 bytes.
+        let expected = [
+            3, 0, 0, 0, // DataSize
+            32, 0, 0, 0, // HeaderSize
+            0xFF, 0xFF, 16, 0, // TYPE: RT_VERSION
+            0xFF, 0xFF, 1, 0, // NAME: ordinal 1
+            0, 0, 0, 0, // DataVersion
+            0x10, 0x10, // MemoryFlags
+            0, 0, // LanguageId
+            0, 0, 0, 0, // Version
+            0, 0, 0, 0, // Characteristics
+            0xAA, 0xBB, 0xCC, // the data
+            0,    // DWORD pad
+        ];
+        assert_eq!(entry(RT_VERSION, 1, &[0xAA, 0xBB, 0xCC]), expected.as_slice());
+    }
+
+    #[test]
+    fn an_empty_and_an_overlong_ico_list_are_rejected() {
+        assert_eq!(ico(&[]), None, "no images");
+        let too_many: Vec<(u32, Vec<u8>)> =
+            (0..=u32::from(u16::MAX)).map(|_| (1, Vec::new())).collect();
+        assert_eq!(ico(&too_many), None, "past the u16 count field");
+    }
+
+    #[test]
+    fn a_single_icon_ico_matches_the_container_byte_for_byte() {
+        // One 16 px image with a 4-byte stand-in DIB: ICONDIR, one 16-byte
+        // entry whose offset is 6 + 16 = 22, then the data — 26 bytes.
+        let expected = [
+            0, 0, // idReserved
+            1, 0, // idType: icon
+            1, 0, // idCount
+            16, 16, // bWidth, bHeight
+            0, 0, // bColorCount, bReserved
+            1, 0, // wPlanes
+            32, 0, // wBitCount
+            4, 0, 0, 0, // dwBytesInRes
+            22, 0, 0, 0, // dwImageOffset
+            1, 2, 3, 4, // the DIB stand-in
+        ];
+        assert_eq!(ico(&[(16, vec![1, 2, 3, 4])]).as_deref(), Some(expected.as_slice()));
+    }
+
+    #[test]
+    fn ico_offsets_accumulate_and_the_256_px_extent_stores_as_zero() {
+        // Two images, 5 and 8 bytes: entries at 6 and 22, images at
+        // 6 + 32 = 38 and 38 + 5 = 43; the 256 px extent wraps to 0.
+        let out = ico(&[(3, vec![0xAA; 5]), (256, vec![0xBB; 8])]).expect("valid list");
+        assert_eq!(out.len(), 51);
+        assert_eq!(u16_at(&out, 4), Some(2), "idCount");
+        assert_eq!(out.get(6).copied(), Some(3), "first entry's width byte");
+        assert_eq!(u32_at(&out, 14), Some(5), "first dwBytesInRes");
+        assert_eq!(u32_at(&out, 18), Some(38), "first dwImageOffset");
+        assert_eq!(out.get(22).copied(), Some(0), "256 stores as 0");
+        assert_eq!(u32_at(&out, 30), Some(8), "second dwBytesInRes");
+        assert_eq!(u32_at(&out, 34), Some(43), "second dwImageOffset");
+        assert_eq!(out.get(38..43), Some([0xAA_u8; 5].as_slice()), "first image");
+        assert_eq!(out.get(43..51), Some([0xBB_u8; 8].as_slice()), "second image");
+    }
+
+    #[test]
+    fn the_shipped_ico_matches_the_pinned_checksum() {
+        // The exact bytes the packaging .ico carries: every size in SIZES
+        // through the exact-arithmetic renderer and this container (the same
+        // cross-arch byte-identity argument as the .res pin above).
+        let icons: Vec<(u32, Vec<u8>)> =
+            SIZES.iter().map(|&s| (s, dib(s, &icon::rgba(s)).expect("shipped size"))).collect();
+        let out = ico(&icons).expect("the shipped set is valid");
+        assert_eq!(out.len(), 422_414, "update the pinned length deliberately");
+        let sum: u64 = out.iter().map(|&byte| u64::from(byte)).sum();
+        assert_eq!(sum, 61_990_912, "update the pinned checksum deliberately");
+    }
+
+    #[test]
+    fn a_minimal_version_info_matches_the_block_tree_byte_for_byte() {
+        // version 1.2.3.4 with one string pair ("A" -> "B"): the root block,
+        // its 52-byte VS_FIXEDFILEINFO, one StringFileInfo/StringTable/String
+        // chain, and the VarFileInfo/Translation chain — 236 bytes,
+        // hand-assembled.
+        let expected: Vec<u8> = [
+            // ── root: VS_VERSION_INFO ──────────────────────────────────────
+            &[0xEC, 0, 0x34, 0, 0, 0][..], // wLength 236, wValueLength 52, binary
+            &[
+                0x56, 0, 0x53, 0, 0x5F, 0, 0x56, 0, 0x45, 0, 0x52, 0, 0x53, 0, 0x49, 0, 0x4F, 0,
+                0x4E, 0, 0x5F, 0, 0x49, 0, 0x4E, 0, 0x46, 0, 0x4F, 0, 0, 0, // "VS_VERSION_INFO"
+            ],
+            &[0, 0], // padding to the 32-bit boundary
+            // VS_FIXEDFILEINFO
+            &[0xBD, 0x04, 0xEF, 0xFE], // dwSignature
+            &[0, 0, 0x01, 0], // dwStrucVersion 1.0
+            &[0x02, 0, 0x01, 0], // dwFileVersionMS: 1.2
+            &[0x04, 0, 0x03, 0], // dwFileVersionLS: 3.4
+            &[0x02, 0, 0x01, 0], // dwProductVersionMS
+            &[0x04, 0, 0x03, 0], // dwProductVersionLS
+            &[0x3F, 0, 0, 0], // dwFileFlagsMask
+            &[0, 0, 0, 0], // dwFileFlags
+            &[0x04, 0, 0x04, 0], // dwFileOS: VOS_NT_WINDOWS32
+            &[0x01, 0, 0, 0], // dwFileType: VFT_APP
+            &[0, 0, 0, 0], // dwFileSubtype
+            &[0, 0, 0, 0, 0, 0, 0, 0], // dwFileDateMS/LS
+            // ── StringFileInfo (at 92, length 76) ──────────────────────────
+            &[0x4C, 0, 0, 0, 0x01, 0],
+            &[
+                0x53, 0, 0x74, 0, 0x72, 0, 0x69, 0, 0x6E, 0, 0x67, 0, 0x46, 0, 0x69, 0, 0x6C, 0,
+                0x65, 0, 0x49, 0, 0x6E, 0, 0x66, 0, 0x6F, 0, 0, 0, // "StringFileInfo"
+            ],
+            // StringTable "040904b0" (length 40)
+            &[0x28, 0, 0, 0, 0x01, 0],
+            &[
+                0x30, 0, 0x34, 0, 0x30, 0, 0x39, 0, 0x30, 0, 0x34, 0, 0x62, 0, 0x30, 0, 0, 0,
+            ], // "040904b0"
+            // String "A" -> "B" (length 16; wValueLength 2 UTF-16 units)
+            &[0x10, 0, 0x02, 0, 0x01, 0],
+            &[0x41, 0, 0, 0], // "A"
+            &[0, 0], // padding
+            &[0x42, 0, 0, 0], // "B"
+            // ── VarFileInfo (at 168, length 68) ────────────────────────────
+            &[0x44, 0, 0, 0, 0x01, 0],
+            &[
+                0x56, 0, 0x61, 0, 0x72, 0, 0x46, 0, 0x69, 0, 0x6C, 0, 0x65, 0, 0x49, 0, 0x6E, 0,
+                0x66, 0, 0x6F, 0, 0, 0, // "VarFileInfo"
+            ],
+            &[0, 0], // padding
+            // Translation (length 36; a 4-byte binary value)
+            &[0x24, 0, 0x04, 0, 0, 0],
+            &[
+                0x54, 0, 0x72, 0, 0x61, 0, 0x6E, 0, 0x73, 0, 0x6C, 0, 0x61, 0, 0x74, 0, 0x69, 0,
+                0x6F, 0, 0x6E, 0, 0, 0, // "Translation"
+            ],
+            &[0, 0], // padding
+            &[0x09, 0x04, 0xB0, 0x04], // en-US, Unicode
+        ]
+        .concat();
+        assert_eq!(version_info([1, 2, 3, 4], &[("A", "B")]).as_deref(), Some(&expected[..]));
+    }
+
+    #[test]
+    fn the_version_quad_packs_into_the_fixed_dwords() {
+        // Distinct halves so a shl/add slip in the MS/LS packing shows up in
+        // the dwords at their documented offsets (40 + 8 / + 12).
+        let out = version_info([0x1234, 0x5678, 0x9ABC, 0xDEF0], &[]).expect("valid");
+        assert_eq!(u32_at(&out, 40), Some(0xFEEF_04BD), "signature");
+        assert_eq!(u32_at(&out, 48), Some(0x1234_5678), "dwFileVersionMS");
+        assert_eq!(u32_at(&out, 52), Some(0x9ABC_DEF0), "dwFileVersionLS");
+        assert_eq!(u32_at(&out, 56), Some(0x1234_5678), "dwProductVersionMS");
+        assert_eq!(u32_at(&out, 60), Some(0x9ABC_DEF0), "dwProductVersionLS");
+    }
+
+    #[test]
+    fn sibling_string_blocks_start_on_32_bit_boundaries() {
+        // ("A" -> "AB") is an 18-byte block, so the next sibling needs 2 pad
+        // bytes: it must start at table-children offset 20 — absolute 172
+        // (root header+fixed 92, StringFileInfo header 36, StringTable header
+        // 24, first String 18, pad 2).
+        let out = version_info([1, 1, 1, 1], &[("A", "AB"), ("A", "B")]).expect("valid");
+        assert_eq!(u16_at(&out, 152), Some(18), "first String block length");
+        assert_eq!(out.get(170..172), Some([0, 0].as_slice()), "sibling padding");
+        assert_eq!(u16_at(&out, 172), Some(16), "second String starts aligned");
+    }
+
+    #[test]
+    fn an_interior_nul_in_a_name_or_value_is_rejected() {
+        assert_eq!(version_info([1, 1, 1, 1], &[("a\0b", "x")]), None, "name");
+        assert_eq!(version_info([1, 1, 1, 1], &[("a", "x\0y")]), None, "value");
+    }
+
+    #[test]
+    fn a_string_outgrowing_the_16_bit_fields_is_rejected() {
+        // 40 000 UTF-16 units fit the unit counter but push the String block
+        // past the u16 wLength; 65 535 units overflow the counter at the NUL
+        // terminator; 65 536 overflow it mid-string.
+        for len in [40_000, 65_535, 65_536] {
+            let value = "a".repeat(len);
+            assert_eq!(version_info([1, 1, 1, 1], &[("k", &value)]), None, "len {len}");
+        }
+    }
+
+    #[test]
+    fn a_tree_outgrowing_a_parent_block_is_rejected() {
+        // Each ancestor's u16 wLength can be the first to overflow. A 32 760
+        // char value keeps its String block at 65 534 but pushes the table to
+        // 65 558; 32 740 keeps the table at 65 518 but pushes StringFileInfo
+        // to 65 554.
+        for len in [32_760, 32_740] {
+            let value = "a".repeat(len);
+            assert_eq!(version_info([1, 1, 1, 1], &[("k", &value)]), None, "len {len}");
+        }
+    }
+
     proptest! {
         /// Any valid size/buffer pair packs to the documented DIB length, and
         /// the header always leads with biSize 40 and the true width.
@@ -387,6 +782,23 @@ mod tests {
                 .and_then(|n| n.checked_sub(2))
                 .expect("fits");
             prop_assert_eq!(u16_at(&out, count_at), u16::try_from(lens.len()).ok());
+        }
+
+        /// Any well-formed string set builds a version block whose root
+        /// wLength spans the whole buffer and whose fixed block sits at the
+        /// documented offset.
+        #[test]
+        fn any_version_info_root_length_spans_the_buffer(
+            pairs in prop::collection::vec(("[a-zA-Z]{1,12}", "[ -~&&[^\0]]{0,24}"), 0..4),
+            quad in any::<[u16; 4]>(),
+        ) {
+            let strings: Vec<(&str, &str)> =
+                pairs.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+            let out = version_info(quad, &strings).expect("well-formed by construction");
+            prop_assert_eq!(u16_at(&out, 0).map(usize::from), Some(out.len()));
+            prop_assert_eq!(u16_at(&out, 2), Some(52), "wValueLength");
+            prop_assert_eq!(u32_at(&out, 40), Some(0xFEEF_04BD), "signature at 40");
+            prop_assert_eq!(u32_at(&out, 64), Some(0x3F), "flags mask at 64");
         }
     }
 }
