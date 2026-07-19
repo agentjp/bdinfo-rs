@@ -544,6 +544,30 @@ pub fn unix_config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -
     Some(Path::new(base).join(".config").join(APP_DIR).join(FILE_NAME))
 }
 
+/// The marker file whose presence beside the executable switches the app to
+/// portable mode.
+///
+/// App-qualified (the ludusavi convention) so one removable drive can hold
+/// several portable apps in a single directory without ambiguity. Nothing
+/// creates it — not the app, not any packaging artifact — so it exists only
+/// where a user deliberately put it.
+const PORTABLE_MARKER: &str = "bdinfo-rs-gui.portable";
+
+/// Portable: `<exe dir>/gui.conf`, when a file named `bdinfo-rs-gui.portable`
+/// sits beside `exe` — the running executable's own path.
+///
+/// `None` without a marker, without a resolvable directory, or without an
+/// executable path at all; each means "not portable", so the caller falls
+/// through to the per-user location. Existence is the whole test — the
+/// marker's contents are never read, so a marker written by someone else
+/// carries no data into the process. [`Path::is_file`] rather than
+/// [`Path::exists`]: a *directory* of that name is not a marker.
+#[must_use]
+pub fn portable_config_path(exe: Option<&Path>) -> Option<PathBuf> {
+    let dir = exe?.parent()?;
+    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join(FILE_NAME))
+}
+
 // ── best-effort IO ───────────────────────────────────────────────────────────
 
 /// Loads the settings from `path`.
@@ -926,6 +950,34 @@ mod tests {
             Some(Path::new("/home/a").join(".config/bdinfo-rs/gui.conf"))
         );
         assert_eq!(super::unix_config_path(os(""), None), None);
+    }
+
+    #[test]
+    fn portable_needs_the_marker_file_beside_the_executable() {
+        let dir = scratch("portable");
+        let exe = dir.join("bdinfo-rs-gui.exe");
+        let marker = dir.join("bdinfo-rs-gui.portable");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        assert_eq!(super::portable_config_path(Some(&exe)), None);
+        // A directory of the marker's name is not a marker.
+        std::fs::create_dir(&marker).expect("scratch dir");
+        assert_eq!(super::portable_config_path(Some(&exe)), None);
+        std::fs::remove_dir(&marker).expect("scratch cleanup");
+        // Neither is a file of another name in the same directory.
+        std::fs::write(dir.join("portable.txt"), "").expect("scratch write");
+        assert_eq!(super::portable_config_path(Some(&exe)), None);
+        // The marker itself, empty: the config lands beside the executable.
+        std::fs::write(&marker, "").expect("scratch write");
+        assert_eq!(super::portable_config_path(Some(&exe)), Some(dir.join("gui.conf")));
+    }
+
+    #[test]
+    fn portable_is_off_without_a_resolvable_executable_directory() {
+        // An unresolvable `current_exe()` (`None`) and a path with no parent
+        // both mean "not portable" rather than an error.
+        assert_eq!(super::portable_config_path(None), None);
+        assert_eq!(super::portable_config_path(Some(Path::new(""))), None);
     }
 
     // ── the best-effort IO wrappers ──────────────────────────────────────────

@@ -661,11 +661,21 @@ fn drive_marker(index: usize, name: &str, stage: Stage) {
     }
 }
 
-/// The per-platform config file location, resolved from the process
-/// environment — `None` when no base directory can be resolved (the app then
-/// runs without persistence). The one env-bound read in the config story; the
-/// per-platform path math it dispatches to is pure ([`settings`]).
+/// The config file location, resolved from the process environment: the
+/// portable path beside the executable when its marker file is there,
+/// otherwise the per-platform user directory. `None` when no base directory
+/// can be resolved (the app then runs without persistence). The one env-bound
+/// read in the config story; the path math it dispatches to is pure
+/// ([`settings`]).
 fn config_path() -> Option<PathBuf> {
+    // Portable mode wins where it applies, so a copy carried between machines
+    // keeps its settings instead of writing into each host's user profile.
+    // `current_exe()` can fail; a launch that cannot locate itself is simply
+    // not portable and still boots.
+    if let Some(portable) = settings::portable_config_path(std::env::current_exe().ok().as_deref())
+    {
+        return Some(portable);
+    }
     #[cfg(target_os = "windows")]
     {
         settings::windows_config_path(std::env::var_os("APPDATA").as_deref())
