@@ -25,16 +25,21 @@
 bdinfo-rs scans `BDMV` folders and `.iso` images — playlists, clips, M2TS demux — and produces the
 classic BDInfo disc report: per-stream video and audio specs, codecs, measured bitrates, resolution,
 and HDR / Dolby Vision / HDR10+. One parser engine,
-[`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core), drives all three front-ends, so the
-report is byte-identical whichever you use.
+[`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core)
+([docs](https://docs.rs/bdinfo-rs-core)), is the whole analyzer behind a documented API — disc
+discovery, MPLS/CLPI/index parsing, M2TS demux, the codec scanners, the UDF 2.50 reader, the report
+renderer — and all three front-ends are thin shells over it, so the report is byte-identical
+whichever you use.
 
 - **The BDInfo report, byte-for-byte** — deterministic across every platform and front-end.
+- **Structure and metadata only** — no decryption, no circumvention, and feature content is never
+  copied. It works on already-decrypted discs; analyze the ones you own.
 - **Memory-safe** — `unsafe` is `forbid`-den; malformed input returns an error, never a crash.
 - **Zero C** — in-house M2TS demuxer, 13 codec scanners, and UDF 2.50 `.iso` reader. No libbluray, no FFI.
 - **Fast and small** — a pipelined demuxer that stays near NVMe read speed; the CLI is a ~1 MB binary with no runtime.
 - **Everywhere** — Windows, macOS, and Linux on x64 and arm64, plus WebAssembly.
 
-| | | |
+| Front-end | Best for | Get it |
 |---|---|---|
 | **Desktop app** | point and click | [Download ↓](#desktop-app) |
 | **Command line** | scriptable static binary | [Install ↓](#command-line) |
@@ -104,32 +109,17 @@ const report = await analyze(picked); // the classic disc report, as a string
 `listPlaylists` returns the selection table; `listPlaylistsIso` / `analyzeIso` do the same for a
 single `.iso`. Bundler, CSP, and browser-support notes: [`crates/bdinfo-rs-wasm`](crates/bdinfo-rs-wasm).
 
-## What it does not do
-
-- **No decryption, no circumvention.** It reads structure and metadata only, and never copies feature
-  content. It therefore works on already-decrypted discs — analyze the ones you own.
-- **No bitrate charts and no custom playlist builder** in the desktop app.
-- **A browser cannot write to a picked folder**, so the web version returns the report as text
-  instead of saving it next to the disc.
-
-Filing an [output difference](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)?
-Paste the **text report** — codecs, bitrates, stream layout — never audio or video. A
-[blu-ray.com](https://www.blu-ray.com) link to the release helps identify the disc.
-
 ## Differences from BDInfo
 
 The report follows the classic format byte-for-byte, except where the original is provably wrong
 against the codec specification or FFmpeg — there, bdinfo-rs emits the correct value.
 
-**[DIFFERENCES.md](DIFFERENCES.md)** has the exact before/after for every divergence and flags which
-ones appear on a normal disc.
+**[DIFFERENCES.md](DIFFERENCES.md)** has the exact before/after for every divergence, flags which
+ones appear on a normal disc, and lists how the desktop app differs from the BDInfo GUI.
 
-## Library
-
-[`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core) is the whole analyzer behind a documented
-API: disc discovery, MPLS/CLPI/index parsing, M2TS demux, the codec scanners, the UDF 2.50 reader,
-and the report renderer. All three front-ends are thin shells over it.
-[Docs](https://docs.rs/bdinfo-rs-core).
+Filing an [output difference](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)?
+Paste the **text report** — codecs, bitrates, stream layout — never audio or video. A
+[blu-ray.com](https://www.blu-ray.com) link to the release helps identify the disc.
 
 ## Quality & security
 
