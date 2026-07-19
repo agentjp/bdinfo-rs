@@ -3,15 +3,15 @@
 //! This crate exposes the library's whole **measured** scan pipeline to the
 //! browser. Several entry points feed the very same render path:
 //!
-//! - [`scan_report`] — the Phase 1 in-memory export: BDMV bytes are framed into a synthetic disc
-//!   tree (six `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and
-//!   rendered to the classic report. Used by the native ⇄ in-browser byte-parity test.
-//! - [`scan_files`] — the Phase 2 streaming export: a `webkitdirectory`-selected BDMV folder
-//!   arrives as a flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes
-//!   are read **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no
-//!   Asyncify), so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web
-//!   Worker (the only scope where `FileReaderSync` exists). [`list_playlists`] is its structural
-//!   twin: the fast selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
+//! - [`scan_report`] — the in-memory export: BDMV bytes are framed into a synthetic disc tree (six
+//!   `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and rendered
+//!   to the classic report. Used by the native ⇄ in-browser byte-parity test.
+//! - [`scan_files`] — the streaming export: a `webkitdirectory`-selected BDMV folder arrives as a
+//!   flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes are read
+//!   **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no Asyncify),
+//!   so a multi-GB `*.m2ts` never has to fit in memory. The export runs inside a Web Worker (the
+//!   only scope where `FileReaderSync` exists). [`list_playlists`] is its structural twin: the fast
+//!   selection-table scan (`bdinfo-rs <disc> --list`) over the same pairs.
 //! - [`scan_iso`] / [`list_iso_playlists`] — the streaming `.iso` exports: a single OS-picked
 //!   `.iso` `File` is opened through the core read-only UDF 2.50 reader ([`UdfSource`]) over the
 //!   same windowed [`web_sys::FileReaderSync`] cursor ([`WebIso`] is the [`IsoReader`] factory), so
@@ -1030,7 +1030,7 @@ pub fn run_iso_report(reader: Box<dyn IsoReader>) -> String {
     render_disc(&source.root(), &mut |_| {}).unwrap_or_default()
 }
 
-/// The Phase 1 in-memory entry point: feed it BDMV bytes (the six `u32`-BE
+/// The in-memory entry point: feed it BDMV bytes (the six `u32`-BE
 /// framed sections — see the module-level docs), get back the classic report.
 ///
 /// Runs the **measured** scan (M2TS demux + per-stream/per-chapter statistics),
@@ -1041,7 +1041,7 @@ pub fn scan_report(data: &[u8]) -> String {
     run_report(data)
 }
 
-/// The Phase 2 streaming entry point: hand it a `webkitdirectory`-selected BDMV
+/// The streaming entry point: hand it a `webkitdirectory`-selected BDMV
 /// folder as parallel `(relativePath, File)` lists and get back the classic
 /// disc report.
 ///
