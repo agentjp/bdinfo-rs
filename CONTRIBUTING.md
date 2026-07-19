@@ -213,3 +213,22 @@ triggers a release; only the tag does (it runs cargo-dist). Before tagging:
 
 4. Run the gate, open a PR (its title is the conventional release commit), **Squash and
    merge**, then push the `vX.Y.Z` tag on master.
+
+### The GUI release lane (`gui-v*`)
+
+The desktop GUI releases through its own hand-rolled lane (`gui-release.yml`), not
+cargo-dist: a `gui-vX.Y.Z` tag builds the six native targets, packages them (Windows
+`.msi` + portable `.zip`, macOS `.dmg`, Linux AppImage + `.deb` + `.rpm`), and publishes
+a GitHub Release marked not-latest. cargo-dist's `v` tag-namespace keeps the two lanes
+from ever firing each other.
+
+**Versioning: coupled start, independent cadence.** The first GUI tag is `gui-v2.0.0`,
+alongside the workspace's `v2.0.0`; from then on the lanes move independently — the gui
+crate's version bumps only when shipped GUI changes warrant it, and workspace releases
+never drag a GUI bump along. The mechanical invariant the lane enforces: `gui-vX.Y.Z`
+must equal `crates/bdinfo-rs-gui/Cargo.toml`'s version and sit on master.
+
+Before tagging, run the lane's dry run: Actions → gui-release → Run workflow (on
+master). It builds and packages all six targets and uploads the results as workflow
+artifacts for hand-testing; only release creation and attestation are tag-only. The tag
+run always rebuilds from the tagged commit — it never reuses dry-run artifacts.

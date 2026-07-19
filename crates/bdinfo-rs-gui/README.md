@@ -11,6 +11,22 @@ libraries — and runs on Windows, macOS, and Linux, on x64 and arm64. Rendering
 GPU-accelerated (wgpu) with an automatic software fallback (tiny-skia) when no usable
 GPU is found.
 
+## Installing
+
+Every [`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true)
+ships, for x64 and arm64:
+
+- **Windows** — an `.msi` installer (Start-menu entry, clean uninstall) and a portable
+  `.zip`. SmartScreen may warn on the portable exe's first run: "More info" → "Run
+  anyway".
+- **macOS** — a `.dmg`; drag the app to Applications. The app is unsigned: allow the
+  first launch under System Settings → Privacy & Security → **Open Anyway**, or run
+  `xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"`.
+- **Linux** — an AppImage (download, `chmod +x`, run) plus `.deb` and `.rpm` packages.
+
+Each release carries `SHA256SUMS` and Sigstore build-provenance attestations
+(`gh attestation verify <asset> --repo agentjp/bdinfo-rs`).
+
 ## Launching
 
 - **Double-click** the binary. No installation or setup step; settings are created on
