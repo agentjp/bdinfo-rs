@@ -163,6 +163,19 @@ exclude_re = [
     # terminal (piped stderr never styles).
     "main\\.rs:\\d+:\\d+: replace write_stderr with \\(\\)",
 
+    # CLI `terminal_columns` (every replacement value): samples the live console
+    # via `terminal::size()` — its ONLY caller is ProgressDisplay::observe's
+    # `styled` branch, gated on `stderr_styles()` (always false in a captured-
+    # stdio test process, excluded above), and the value flows only into
+    # `write_stderr` (also excluded — a test cannot read its own live stderr),
+    # so no test can observe the return. Asserting on a direct call instead
+    # would pin the live probe against unknown consoles (TIOCGWINSZ can
+    # genuinely report 0 columns). The width-driven rendering it feeds
+    # (compose_styled_progress / redraw_sequence) is tested with explicit
+    # columns; only the live sample is opaque. Surfaced by the first sharded CI
+    # sweep, 2026-07-18.
+    "main\\.rs:\\d+:\\d+: replace terminal_columns -> usize with \\d+",
+
     # CLI `ctrl_c_pressed` (the `-> false` replacement and every internal mutant):
     # the poll drains a live console's pending key events — in a test process there
     # is no console delivering a Ctrl+C press, so the real function and the `-> false`
