@@ -125,13 +125,12 @@ jobs:
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      # Release-pinned; the packaging script compiles the same versions from
-      # source if this pre-install were ever absent.
-      - name: Install the Linux packagers
-        if: matrix.kind == 'linux'
-        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
-        with:
-          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+      # No packager pre-install here, deliberately: install-action's prebuilt
+      # cargo-deb links glibc 2.39 and dies on these ubuntu-22.04 legs (glibc
+      # 2.35, the compatibility floor the app builds against). The packaging
+      # script compiles the release-pinned versions from source instead — the
+      # same posture as .github/build-linux-packages.sh inside the dist
+      # release. The PR smoke keeps the fast pre-install (ubuntu-latest).
 
       - name: Build (release profile, locked)
         working-directory: crates/bdinfo-rs-gui
