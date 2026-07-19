@@ -172,7 +172,7 @@ jobs:
             if [ "$core" = "true" ]; then fuzz=true; fi
           fi
 
-          # The canary (D3, "most complete cheap option"): meta-only events —
+          # The canary: meta-only events —
           # CI plumbing changed but no code — still build + test on one leg
           # per OS/shell family, exercising the changed checkout / rust-cache /
           # install-action plumbing from both sides without the 6-arch fleet.
@@ -231,9 +231,9 @@ jobs:
           # save; PRs restore the master-seeded cache.
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      # Clippy on EVERY build+test leg (D6, "standardize up"): the ubuntu-only
-      # lint job never clips the #[cfg(windows)] arms (e.g. the vfs/fs.rs
-      # raw-volume reader), so per-arch lint bugs used to sail through CI.
+      # Clippy on EVERY build+test leg: the ubuntu-only lint job never clips
+      # the #[cfg(windows)] arms (e.g. the vfs/fs.rs raw-volume reader), so a
+      # per-arch lint bug reaches master unless every leg lints.
       # Cheap: shares this leg's dep build. The alias is the tracked `lt`
       # (clippy --workspace --all-targets --locked -- -D warnings).
       - name: Clippy (-D warnings, pedantic/nursery/restriction)
@@ -505,7 +505,7 @@ jobs:
           git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
           cargo mutants --no-shuffle --in-diff pr.diff
 
-  # Advisory in-diff mutation over the GUI crate on the PR path (D1): mirrors
+  # Advisory in-diff mutation over the GUI crate on the PR path: mirrors
   # the local `gui-compliance.ps1 -InDiff` dev loop — the diff is taken
   # --relative from inside the crate so its paths match cargo-mutants' working
   # directory, and --in-place because a temp copy would not carry the
@@ -630,9 +630,9 @@ jobs:
   # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
   # so this exercises the actual RELEASE/static artifact (not the debug test binary)
   # on hardware we don't own — Linux builds the static musl target it ships.
-  # Deliberately NOT `needs:`-chained behind test/lint/coverage (D5): that chain
-  # was pure scheduling — ci-ok still requires e2e green, so running it in
-  # parallel changes nothing but the wall-clock. (Running the binary in TOTAL
+  # Deliberately NOT `needs:`-chained behind test/lint/coverage: such a chain is
+  # pure scheduling — ci-ok requires e2e green either way, so running it in
+  # parallel costs nothing but wall-clock. (Running the binary in TOTAL
   # isolation — FROM scratch, zero runtime deps — is the separate `isolation`
   # job below; docker.yml ships that same scratch image on release.)
   e2e:

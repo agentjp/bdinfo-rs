@@ -63,7 +63,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
-          # Lookup-only: this workflow now runs exclusively on release tags, and
+          # Lookup-only: this workflow runs exclusively on release tags, and
           # a cache poisoned elsewhere must not taint a release-adjacent run
           # (zizmor cache-poisoning); the per-PR replay leg in ci.yml is where
           # the fuzz build cache is used and (on master) saved.

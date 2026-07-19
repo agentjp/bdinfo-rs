@@ -17,10 +17,10 @@ name: wasm
 # caller's; the gate still deliberately NEVER runs on tags, so its build
 # caches are never a publishing-time cache-poisoning vector (the tag-driven
 # npm publish lives beside publish-crates.yml in publish-npm.yml). The
-# full-crate mutants sweep moved to sweep.yml (daily when the crate tree
+# full-crate mutants sweep lives in sweep.yml (daily when the crate tree
 # changed since the last green sweep, plus release tags — the authoritative
 # 0-missed checkpoints); the PR path gets the advisory in-diff mutants job in
-# ci.yml (`wasm mutation testing (PR diff)`) instead (D1). Inside the
+# ci.yml (`wasm mutation testing (PR diff)`) instead. Inside the
 # reusable this gate renders as `wasm / wasm gate (build + size + parity)`;
 # it gates merges through the caller job and ci-ok, not by its own name —
 # branch protection requires `ci-ok` alone among the CI jobs.

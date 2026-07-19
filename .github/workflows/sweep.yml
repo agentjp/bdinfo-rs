@@ -1,12 +1,12 @@
 name: sweep
 
 # The completeness backstop that makes the orchestrator's area gating provably
-# non-weakening (D2/D3): once a day, run EVERYTHING — the whole ci.yml
+# non-weakening: once a day, run EVERYTHING — the whole ci.yml
 # orchestrator with every area forced (a workflow_call with a non-PR/push
 # event makes the plan job fire all areas), plus the expensive tier the PR
 # path deliberately does not carry: the full-crate `cargo mutants --in-place`
 # sweeps for EVERY crate — the root workspace (core + CLI, sharded) and the
-# gui and wasm sibling crates (D1). These legs are the authoritative 0-missed
+# gui and wasm sibling crates. These legs are the authoritative 0-missed
 # mutation bar for the whole repo; there is no local full-sweep ritual.
 # Untouched areas are thus re-verified within 24 h, and environment drift
 # (runner images, toolchain point releases, a floating tool) cannot hide

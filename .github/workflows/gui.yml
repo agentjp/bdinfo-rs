@@ -20,10 +20,9 @@ name: gui
 # the iced_test Simulator interaction suite, the tiny-skia snapshot hashes, the
 # headless launch smoke, and the real-window drive walks below.
 #
-# The Tier-A mutation bar is NOT enforced here: the full-crate sweep was
-# rescheduled off the PR path (D1) into sweep.yml (now sharded), which runs it
-# daily — only when the crate tree changed since the last green sweep — and on
-# release tags, the authoritative 0-missed checkpoints. The PR path gets the
+# The full-crate mutation bar is NOT enforced here: it lives in sweep.yml,
+# sharded, running daily — only when the crate tree changed since the last
+# green sweep — and on release tags, the authoritative 0-missed checkpoints. The PR path gets the
 # advisory in-diff mutants job in ci.yml (`gui mutation testing (PR diff)`)
 # instead.
 #
@@ -371,11 +370,8 @@ jobs:
         run: cargo run --locked
 
   # The real-window DRIVE gates: the app driven end to end on a real desktop
-  # session, a screenshot per step uploaded as a gallery either way. Promoted
-  # from the standalone advisory experiment (PR #128) after seven consecutive
-  # all-ten-green matrices — the deliberate owner decision superseding the
-  # experiment's stay-advisory recommendation; the future gui release lane
-  # inherits these as part of its bar. Two complementary proofs:
+  # session, a screenshot per step uploaded as a gallery either way. The gui
+  # release lane inherits these as part of its bar. Two complementary proofs:
   #
   #   assisted  the debug-only BDINFO_GUI_DRIVE seam walks the app through the
   #             full click-everything sequence (sort → splitter → rows →
@@ -393,10 +389,9 @@ jobs:
   #             change must update it in the same PR, snapshot-test semantics.
   #
   # Blocking on ALL FIVE legs — Linux/Windows x86 AND arm plus macos-15, hard
-  # like the smoke above: macOS is a crucial supported platform, its legs had
-  # been green throughout their soft period, and a gate that ignores its own
-  # signal is not a gate. Known macos-15 failure modes (residual risks, not
-  # reasons for softness): the paravirtual Metal path has no software
+  # like the smoke above: macOS is a crucial supported platform, and a gate
+  # that ignores its own signal is not a gate. Known macos-15 failure modes
+  # (residual risks, not reasons to soften): the paravirtual Metal path has no software
   # fallback, and drive-inject carries the Sequoia screen-capture re-approval
   # residual. If a leg ever flakes for environment reasons, fix the harness
   # (the scripts already handle window polling and capture pre-authorization)
@@ -404,11 +399,10 @@ jobs:
   # absent for the smoke's no-Metal reason. The x86 legs ride the proven
   # display recipes (xvfb + lavapipe, DX12 WARP); every leg runs at a
   # 1920x1080 desktop with shots cropped to the 880x960 window, so the
-  # galleries are comparable across OSes. The old standalone workflow's
-  # nightly schedule is superseded by the daily sweep (which re-runs this
-  # whole workflow ungated and files the rolling issue on a scheduled red —
-  # mac breakage included, previously invisible to the schedule); a red leg
-  # here reddens the `gui` caller job and therefore ci-ok.
+  # galleries are comparable across OSes. Scheduled coverage comes from the
+  # daily sweep, which re-runs this whole workflow ungated and files the
+  # rolling issue on a scheduled red; a red leg here reddens the `gui` caller
+  # job and therefore ci-ok.
   drive-assisted:
     name: gui drive assisted (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
