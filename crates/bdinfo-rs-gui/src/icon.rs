@@ -5,7 +5,9 @@
 //! dark taskbar and matches the in-app brand mark. Drawn procedurally (no image
 //! decoder, no new dependency, no C) with 4×4 supersampled anti-aliasing, so the
 //! binary stays self-contained. The vector source of the same mark is kept in
-//! `assets/icon.svg` for the Phase-5 installer/bundling work.
+//! `assets/icon.svg`; the committed packaging icons (`packaging/` — `.ico`,
+//! `.icns`, the hicolor PNG set) derive from this renderer via the assets-gen
+//! workspace member.
 
 /// The mark's amber, matching `Palette::DARK.accent` — vivid enough to carry on
 /// either a light or dark window chrome.

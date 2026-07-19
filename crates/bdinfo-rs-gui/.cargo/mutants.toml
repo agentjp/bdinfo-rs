@@ -38,7 +38,14 @@
 #                mutation-covered, incl. a pinned checksum of the exact .res
 #                it writes); the handoff itself is verified by the Windows CI
 #                builds linking the resource.
-exclude_globs = ["src/main.rs", "src/ui.rs", "build.rs"]
+#
+#   assets-gen/src/main.rs
+#                The packaging-asset regeneration entry point: filesystem glue
+#                (create_dir_all + write into packaging/) over the pure
+#                assets() the tie test byte-compares against the committed
+#                files — a mutant here could only mis-write files the tie
+#                test does not re-read.
+exclude_globs = ["src/main.rs", "src/ui.rs", "build.rs", "assets-gen/src/main.rs"]
 
 # Tier-A mutants that are provably untestable, each with its proof — the same
 # three adjudications as the root workspace's CLI `volume` module, whose code

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metainfo, shared verbatim by the deb, the rpm, and the AppImage.
+     The component id uses underscores (AppStream reverse-DNS ids take letters,
+     digits and underscores per segment); the desktop file keeps its hyphenated
+     name because it must match the app's window class — the launchable entry
+     ties the two together. -->
+<component type="desktop-application">
+  <id>io.github.agentjp.bdinfo_rs_gui</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LGPL-2.1-or-later</project_license>
+  <name>bdinfo-rs GUI</name>
+  <summary>Blu-ray disc analyzer producing the classic BDInfo report</summary>
+  <description>
+    <p>
+      Scans BDMV folders and .iso images, measures every stream, and renders
+      the classic per-stream video/audio technical report, byte-identical to
+      the bdinfo-rs command-line tool. Damaged discs scan through, with
+      unreadable files collected into the report's warning block.
+    </p>
+  </description>
+  <launchable type="desktop-id">bdinfo-rs-gui.desktop</launchable>
+  <provides>
+    <binary>bdinfo-rs-gui</binary>
+  </provides>
+  <url type="homepage">https://github.com/agentjp/bdinfo-rs</url>
+  <url type="bugtracker">https://github.com/agentjp/bdinfo-rs/issues</url>
+  <developer_name>bdinfo-rs contributors</developer_name>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Utility</category>
+  </categories>
+</component>
