@@ -28,8 +28,8 @@ name: sweep
 # verifies the crate's SUITE against the crate's SOURCE, and both are captured
 # exactly by the crate dir's git tree hash (lockfile and .cargo/mutants.toml
 # included) plus rust-toolchain.toml — so a marker hit means this
-# byte-identical tree already passed a full sweep, and re-running (~50–90 min)
-# would re-verify unchanged inputs. The marker is saved only after a green
+# byte-identical tree already passed a full sweep, and re-running (tens of
+# minutes of sharded fleet time) would re-verify unchanged inputs. The marker is saved only after a green
 # sweep (implicit success() on the save step's `if:`), and only sweep runs
 # save it — schedule runs execute on master, so the marker is master-scoped
 # and restorable by the tag legs; a quiet day skips in seconds. Accepted
@@ -115,6 +115,13 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.marker.outputs.cache-hit != 'true'
         with:
+          # shared-key: every shard builds the IDENTICAL baseline, so all
+          # shards share ONE cache lineage instead of rust-cache's default
+          # per-matrix-leg keys — without it each shard saves its own
+          # multi-GB target cache and the repo's 10 GB Actions-cache budget
+          # churns, evicting the sweep markers and the master-seeded PR
+          # caches. First finisher saves; the rest skip gracefully.
+          shared-key: core-mutants
           # Same discipline as the sibling legs: tag legs build fresh, only
           # master runs save.
           lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -158,14 +165,31 @@ jobs:
           path: .mutants-ok
           key: ${{ needs.core-mutants.outputs.key }}
 
-  # Full Tier-A mutation over the GUI crate, 0 missed. --in-place because a
-  # temp copy would not carry the ../bdinfo-rs-core path dep; reads the
-  # crate-local .cargo/mutants.toml Tier-B exclusions. The snapshot ties
-  # participate via the deterministic software renderer, keeping their mutant
-  # kill power (a palette or view-model mutation shifts the rendered hash).
+  # Full Tier-A mutation over the GUI crate, 0 missed — SHARDED like the core
+  # leg (the one-job run took ~1.7 h for 608 mutants; the shards divide that
+  # mutation phase, each still paying the setup + iced/wgpu baseline, so the
+  # floor is the baseline, not zero). Shard count is deliberately modest: the sweep's tail
+  # is 8 core shards + these, and the account-wide concurrent-job budget
+  # (~20) is the scarce resource, not minutes. --in-place because a temp copy
+  # would not carry the ../bdinfo-rs-core path dep; --no-shuffle keeps the
+  # shard partition deterministic; reads the crate-local .cargo/mutants.toml
+  # Tier-B exclusions. The snapshot ties participate via the deterministic
+  # software renderer, keeping their mutant kill power (a palette or
+  # view-model mutation shifts the rendered hash). The marker key is
+  # byte-identical to the pre-shard one — ci.yml's advisory PR-diff job
+  # computes the same string for its short-circuit. (wasm below stays
+  # unsharded on purpose: a ~3-minute job would only get SLOWER paying N
+  # baselines.)
   gui-mutants:
-    name: gui full mutants (Tier A 0 missed)
+    name: gui full mutants (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
+    outputs:
+      # Identical across legs; gui-mutants-ok reuses it (see core-mutants).
+      key: ${{ steps.key.outputs.key }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     env:
       ICED_TEST_BACKEND: tiny-skia
     steps:
@@ -188,6 +212,9 @@ jobs:
         if: steps.marker.outputs.cache-hit != 'true'
         with:
           workspaces: crates/bdinfo-rs-gui
+          # One shared lineage for all shards (identical baselines) — see the
+          # core shards' shared-key note.
+          shared-key: gui-mutants
           # Tag legs build fresh: a cache poisoned elsewhere must not taint a
           # release-adjacent run (the fuzz.yml precedent). Schedule runs are on
           # master, so their saves seed every PR.
@@ -200,21 +227,35 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
 
-      - name: Mutants (Tier A 0 missed)
+      - name: Mutants (Tier A 0 missed, this shard)
         if: steps.marker.outputs.cache-hit != 'true'
         working-directory: crates/bdinfo-rs-gui
-        run: cargo mutants --in-place
+        run: cargo mutants --in-place --no-shuffle --shard ${{ matrix.shard }}/6
+
+  # The gui marker fan-in — same shape and reasoning as core-mutants-ok.
+  gui-mutants-ok:
+    name: gui full mutants marker
+    needs: [gui-mutants]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe for an existing marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ needs.gui-mutants.outputs.key }}
+          lookup-only: true
 
       - name: Write the marker
         if: steps.marker.outputs.cache-hit != 'true'
         run: echo ok > .mutants-ok
 
-      - name: Save the marker (green sweep only)
+      - name: Save the marker (all shards green)
         if: steps.marker.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .mutants-ok
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ needs.gui-mutants.outputs.key }}
 
   # Full Tier-A mutation over the wasm crate, 0 missed — same marker pattern.
   # --in-place for the same path-dep reason; the crate-local .cargo/mutants.toml
@@ -274,7 +315,7 @@ jobs:
   # watching them.
   report:
     name: rolling failure issue
-    needs: [orchestrator, core-mutants, core-mutants-ok, gui-mutants, wasm-mutants]
+    needs: [orchestrator, core-mutants, core-mutants-ok, gui-mutants, gui-mutants-ok, wasm-mutants]
     if: ${{ !cancelled() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
