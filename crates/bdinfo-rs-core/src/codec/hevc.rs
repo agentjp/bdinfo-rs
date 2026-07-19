@@ -79,11 +79,8 @@ const MASTERING_DISPLAY_COLOR_VOLUME_VALUES: [MasteringDisplayColorVolumeValue; 
 /// output-dead; see the module notes).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct VuiColour {
-    /// `video_signal_type_present_flag`.
     video_signal_type_present_flag: bool,
-    /// `colour_description_present_flag`.
     colour_description_present_flag: bool,
-    /// `video_full_range_flag`.
     video_full_range_flag: u8,
     /// `colour_primaries` (2 = unspecified, the default).
     colour_primaries: u8,
@@ -113,19 +110,13 @@ impl VuiColour {
 /// that feeds observable output.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct SeqParameterSet {
-    /// `general_profile_space`.
     profile_space: u32,
-    /// `general_tier_flag`.
     tier_flag: bool,
-    /// `general_profile_idc`.
     profile_idc: u16,
-    /// `general_level_idc`.
     level_idc: u16,
     /// `chroma_format_idc` (1 = 4:2:0, 2 = 4:2:2, 3 = 4:4:4).
     chroma_format_idc: u32,
-    /// `bit_depth_luma_minus8`.
     bit_depth_luma_minus8: u8,
-    /// `bit_depth_chroma_minus8`.
     bit_depth_chroma_minus8: u8,
     /// The VUI colour description.
     vui: VuiColour,
@@ -135,9 +126,7 @@ struct SeqParameterSet {
 /// the slice-segment header reads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PicParameterSet {
-    /// `num_extra_slice_header_bits`.
     num_extra_slice_header_bits: u8,
-    /// `dependent_slice_segments_enabled_flag`.
     dependent_slice_segments_enabled_flag: bool,
 }
 
@@ -145,13 +134,9 @@ struct PicParameterSet {
 /// `general_level_idc` — the profile-tier-level outputs the SPS records.
 #[derive(Debug, Clone, Copy, Default)]
 struct ProfileTierLevel {
-    /// `general_profile_space`.
     profile_space: u32,
-    /// `general_tier_flag`.
     tier_flag: bool,
-    /// `general_profile_idc`.
     profile_idc: u16,
-    /// `general_level_idc`.
     level_idc: u16,
 }
 
@@ -1942,7 +1927,7 @@ mod tests {
         assert!(s.encoding_profile.is_none());
         assert!(!s.base.is_initialized);
         assert_eq!(tag, None);
-        // is_vbr is set unconditionally at the end of the scan.
+        // Every scan sets `is_vbr` at the end, start codes or not.
         assert!(s.base.is_vbr);
     }
 

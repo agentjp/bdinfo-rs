@@ -30,7 +30,6 @@ const AC3_CHANNELS: [u8; 8] = [2, 1, 2, 3, 3, 4, 4, 5];
 #[must_use]
 pub fn ac3_chan_map(chan_map: u32) -> u8 {
     let mut channels: u8 = 0;
-    // Walk the 16-bit channel map MSB-first.
     for i in 0..16_u8 {
         let bit = 1_u32.wrapping_shl(15_u32.wrapping_sub(u32::from(i)));
         if (chan_map & bit) != 0 && matches!(i, 5 | 6 | 9 | 10 | 11) {
@@ -63,8 +62,8 @@ const fn to_i64_trunc(x: f64) -> i64 {
     reason = "one linear bit-stream-information parse; splitting it would obscure the header layout"
 )]
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; AC-3 never sets it (and a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter; a `pub fn` is exempt from
+    // `needless_pass_by_ref_mut`, so the `&mut` stays.
     let _ = tag;
     if stream.base.is_initialized {
         return;

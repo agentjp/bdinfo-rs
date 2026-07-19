@@ -61,8 +61,8 @@ pub struct TsStreamBuffer {
     /// Emulation-prevention bytes (`0x03`) skipped during the current read.
     /// Reset to zero at the start of each bit read.
     skipped_bytes: usize,
-    /// Total bytes ever passed to [`add`](Self::add) (pre-clamp).
-    /// Diagnostic only; reset by [`reset`](Self::reset).
+    /// The diagnostic counter behind [`transfer_length`](Self::transfer_length);
+    /// reset by [`reset`](Self::reset).
     transfer_length: usize,
 }
 
@@ -595,7 +595,6 @@ mod tests {
         b.add(&[0x00, 0x01, 0x02, 0x03, 0x04], 2, 2);
         assert_eq!(b.length(), 2);
         b.begin_read();
-        // The stored bytes are [0x02, 0x03]: their top bits are 0,0.
         assert!(!b.read_bool(false));
         assert!(!b.read_bool(false));
     }
@@ -644,7 +643,6 @@ mod tests {
         b.reset();
         assert_eq!(b.length(), 0);
         assert_eq!(b.transfer_length(), 0);
-        // The buffer is reusable after a reset.
         b.add(&[0x04], 0, 1);
         assert_eq!(b.length(), 1);
     }
