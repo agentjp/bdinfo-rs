@@ -572,7 +572,9 @@ jobs:
             echo "no gui-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
             exit 0
           fi
-          cargo mutants --in-place --no-shuffle --in-diff "$RUNNER_TEMP/crate.diff"
+          # --workspace so a diff touching the assets-gen member is mutated
+          # too (cargo-mutants otherwise scopes to the root package).
+          cargo mutants --in-place --no-shuffle --workspace --in-diff "$RUNNER_TEMP/crate.diff"
 
   # The wasm twin of gui-mutants: advisory in-diff mutation over the wasm
   # crate's own PR diff (--relative + --in-place for the same path-dep reason;

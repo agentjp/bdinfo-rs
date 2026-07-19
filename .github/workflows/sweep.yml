@@ -228,10 +228,13 @@ jobs:
         with:
           tool: cargo-mutants,cargo-nextest
 
+      # --workspace: without it cargo-mutants scopes to the root package and
+      # silently skips the assets-gen member (whose byte-tie tests are its
+      # mutant killers).
       - name: Mutants (Tier A 0 missed, this shard)
         if: steps.marker.outputs.cache-hit != 'true'
         working-directory: crates/bdinfo-rs-gui
-        run: cargo mutants --in-place --no-shuffle --shard ${{ matrix.shard }}/5
+        run: cargo mutants --in-place --no-shuffle --workspace --shard ${{ matrix.shard }}/5
 
   # The gui marker fan-in — same shape and reasoning as core-mutants-ok.
   gui-mutants-ok:
