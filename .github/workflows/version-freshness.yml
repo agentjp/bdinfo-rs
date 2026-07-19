@@ -49,8 +49,9 @@ name: version-freshness
 #     smoke tests package with the exact release tools),
 #   - appimagetool (the `$appimagetoolVersion` curl-download pin in
 #     .github/scripts/gui-package-linux.ps1 — the GUI lane's AppImage packer,
-#     fetched at a static version invisible to Dependabot; checked vs
-#     AppImage/appimagetool's latest release), and
+#     fetched at a static version invisible to Dependabot; checked vs the highest
+#     SEMVER tag AppImage/appimagetool has released, since its `releases/latest`
+#     is the rolling `continuous` nightly), and
 #     cloudsmith-cli (the `cloudsmith-cli==X` pipx pin in packages.yml — a pip pin
 #     invisible to Dependabot's cargo/npm/actions scans; pinned once per push job,
 #     every occurrence checked to agree, then vs PyPI),
@@ -146,6 +147,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { return $null }
             if ($tag -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
             return $null
+          }
+
+          # The highest X.Y.Z among $repo's non-draft, non-prerelease release tags,
+          # or $null if the API call fails. For repos whose `releases/latest` points
+          # at a rolling non-semver tag — AppImage/appimagetool marks its nightly
+          # `continuous` release latest — where Latest-Semver finds no digits and
+          # returns $null, which reads here as a failed query.
+          function Latest-Semver-Listed($repo) {
+            $tags = gh api "repos/$repo/releases" --paginate `
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' 2>$null
+            if ($LASTEXITCODE -ne 0) { return $null }
+            $versions = @()
+            foreach ($tag in $tags) {
+              if ($tag -match '(\d+\.\d+\.\d+)') { $versions += [version]$Matches[1] }
+            }
+            if ($versions.Count -eq 0) { return $null }
+            return ($versions | Sort-Object -Descending | Select-Object -First 1).ToString()
           }
 
           # The latest stable version of a crates.io crate (the source `cargo
@@ -384,7 +402,7 @@ jobs:
           # version — invisible to Dependabot, watched here like komac.
           $appimagetoolPin = Read-Pin '.github/scripts/gui-package-linux.ps1' "appimagetoolVersion\s*=\s*'([0-9.]+)'"
           if (-not $appimagetoolPin) { throw 'No appimagetoolVersion pin in gui-package-linux.ps1' }
-          $appimagetoolLatest = Latest-Semver 'AppImage/appimagetool'
+          $appimagetoolLatest = Latest-Semver-Listed 'AppImage/appimagetool'
           if (-not $appimagetoolLatest) {
             Add-Problem 'appimagetool (query failed)' '- could not query the latest appimagetool release (AppImage/appimagetool)'
           } elseif ([version]$appimagetoolLatest -gt [version]$appimagetoolPin) {
