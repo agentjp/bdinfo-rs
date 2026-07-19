@@ -1,4 +1,4 @@
-//! Tier A — the copy-path helpers behind the Ctrl+C shortcut.
+//! The copy-path helpers behind the Ctrl+C shortcut.
 //!
 //! `BDInfo`'s `ProcessCmdKey` copies the highlighted playlist's or stream
 //! file's real OS path. For **folder** input the disc's `BDMV` directory is

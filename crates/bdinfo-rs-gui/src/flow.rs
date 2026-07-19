@@ -1,4 +1,4 @@
-//! Tier A — the app's flow state machine.
+//! The app's flow state machine.
 //!
 //! The window moves through real states: nothing picked ([`Stage::Idle`]) → a
 //! fast structural scan in flight ([`Stage::Listing`]) → the playlist table with

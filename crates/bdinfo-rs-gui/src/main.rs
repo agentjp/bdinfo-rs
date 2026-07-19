@@ -1,11 +1,11 @@
 //! `bdinfo-rs-gui` — the native desktop window for the bdinfo-rs Blu-ray
 //! analyzer.
 //!
-//! The thin iced (Tier-B) shell over the [`bdinfo_rs_gui`] library: it drives the
+//! The thin iced shell over the [`bdinfo_rs_gui`] library: it drives the
 //! full two-phase flow — pick a disc FOLDER or `.iso`, fast structural scan →
 //! selectable playlist table → measured scan on a worker thread with a live
 //! progress bar → the rendered report, with Save / Copy. Every `update` arm calls
-//! a Tier-A transition ([`Flow`]) or seam ([`scan`]) and applies the result; the
+//! a library transition ([`Flow`]) or seam ([`scan`]) and applies the result; the
 //! `view` is a thin projection of [`Flow`] onto widgets dressed in the
 //! "Projection Booth" identity ([`theme`] + [`ui`]). The only impure thing the
 //! shell owns is the measured-scan worker thread and the channel that streams its
@@ -576,7 +576,7 @@ fn drive_marker(index: usize, name: &str, stage: Stage) {
 /// The per-platform config file location, resolved from the process
 /// environment — `None` when no base directory can be resolved (the app then
 /// runs without persistence). The one env-bound read in the config story; the
-/// per-platform path math it dispatches to is Tier A ([`settings`]).
+/// per-platform path math it dispatches to is pure ([`settings`]).
 fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -632,7 +632,7 @@ fn window_settings(persisted: &settings::Settings) -> iced::window::Settings {
     }
 }
 
-/// The app state — the Tier-A [`Flow`] the shell drives, plus the runtime-side
+/// The app state — the pure [`Flow`] the shell drives, plus the runtime-side
 /// bits: the visual preference + last-known OS mode, the scan generation counter
 /// (stamped on the worker's messages so a stale event is ignored), the scan start
 /// time (for the elapsed / remaining estimate), and a transient status line.
@@ -758,7 +758,7 @@ fn default_panes() -> pane_grid::State<Region> {
     })
 }
 
-/// A column weight as an `iced` `FillPortion` — the Tier-A scaling
+/// A column weight as an `iced` `FillPortion` — the pure scaling
 /// ([`columns::portion`]) wrapped in the layout type.
 fn fill(weight: f32) -> Length {
     Length::FillPortion(columns::portion(weight))
@@ -1065,7 +1065,7 @@ impl App {
         }
     }
 
-    /// The pure-ish message dispatch: each arm applies a Tier-A transition and
+    /// The pure-ish message dispatch: each arm applies a library transition and
     /// returns the side effect to run (a dialog, the scan worker, a clipboard
     /// write, an exit, or nothing).
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1609,7 +1609,7 @@ impl App {
 
     /// Opens `path` — a dropped item or the boot argument — through the same
     /// classify-and-list road the pickers take ([`Input::classify`], the one
-    /// Tier-A classifier both roads share). Ignored while a scan is in flight,
+    /// classifier both roads share). Ignored while a scan is in flight,
     /// the same rule that disables the Source buttons; a path that is neither a
     /// directory nor a `.iso` file lands in the same friendly failure state as
     /// a bad pick, with the loaded-disc chrome cleared like any new open.
@@ -1757,7 +1757,7 @@ impl App {
 
     /// Writes the rendered report into `dir` as `BDINFO.{label}.txt`, bytes
     /// verbatim (the locked CRLF / UTF-8 no-BOM contract — never re-encode).
-    /// The label is disc-controlled, so the filename goes through the Tier-A
+    /// The label is disc-controlled, so the filename goes through the
     /// sanitizer ([`paths::report_file_name`]) — the same name the CLI writes.
     fn save_report(&mut self, dir: &std::path::Path) {
         let (Some(report), Some(label)) = (self.flow.report(), self.flow.label()) else {
@@ -3387,10 +3387,10 @@ mod harness {
     }
 }
 
-/// Tier-B interaction tests: `iced_test`'s Simulator renders the real
+/// Interaction tests: `iced_test`'s Simulator renders the real
 /// `view()` offscreen, clicks it by visible text, and the produced messages
 /// run through the real `update` — so the widget wiring (what a click
-/// dispatches, what a state renders) is verified against the Tier-A state it
+/// dispatches, what a state renders) is verified against the library state it
 /// must land in. No window, no Tasks, no subscriptions: worker completions
 /// are injected as the messages they would arrive as.
 #[cfg(test)]
@@ -3766,7 +3766,7 @@ mod interaction {
     }
 }
 
-/// Tier-B pixel ties: key states rendered offscreen on the deterministic
+/// Pixel ties: key states rendered offscreen on the deterministic
 /// tiny-skia backend with the bundled fonts, pinned as committed SHA-256
 /// hashes per OS family (`snapshots/{windows,unix}/*.sha256` — see
 /// [`harness::assert_snapshot`] for the family evidence). Run them via the

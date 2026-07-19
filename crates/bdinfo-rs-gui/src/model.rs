@@ -1,11 +1,10 @@
-//! Tier A — the pure playlist view-model.
+//! The pure playlist view-model.
 //!
 //! These constructors mirror the CLI's playlist table (and the wasm crate's
 //! `table_rows` / `table_length` / `estimated_bytes` / `playlist_rows`) over the
 //! public [`PlaylistSummary`] type — the GUI cannot import the CLI binary's
 //! private helpers, so it reimplements them the same way. No widgets, no IO:
-//! plain data in, plain data out, so `view()` is a thin projection and Phase 4
-//! can hold this layer to the core bar (100% coverage + 0 missed mutants).
+//! plain data in, plain data out, so `view()` is a thin projection.
 
 use std::cmp::Ordering;
 

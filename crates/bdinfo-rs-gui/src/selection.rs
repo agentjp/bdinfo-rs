@@ -1,4 +1,4 @@
-//! Tier A — the pure playlist selection model.
+//! The pure playlist selection model.
 //!
 //! The window lists the standard filtered playlist rows ([`crate::model`]); the
 //! user checks the ones to measure, and the measured scan is narrowed to exactly
@@ -10,8 +10,7 @@
 //! the wasm crate do (the GUI cannot import the CLI binary's private helpers).
 //!
 //! No widgets, no IO: plain data in, plain data out, so the iced shell is a thin
-//! projection and Phase 4 can hold this layer to the core bar (100% coverage + 0
-//! missed mutants).
+//! projection.
 
 use std::collections::BTreeSet;
 

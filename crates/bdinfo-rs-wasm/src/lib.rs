@@ -316,9 +316,8 @@ fn js_message(value: &JsValue) -> String {
 /// read (an empty caller buffer, or a cursor at/after EOF).
 ///
 /// The panic-safety-critical arithmetic split out of the `FileReaderSync` I/O so
-/// the off-by-one and EOF-clamp edges are exercised on the native (Tier-A)
-/// build. `end` is clamped to `len`, so a window that would cross EOF is
-/// shortened rather than over-reading the caller's `buf`.
+/// the off-by-one and EOF-clamp edges are exercised on the native build. `end` is clamped to `len`,
+/// so a window that would cross EOF is shortened rather than over-reading the caller's `buf`.
 #[cfg(any(target_arch = "wasm32", test))]
 fn read_window(pos: u64, buf_len: usize, len: u64) -> Option<(u64, u64)> {
     if buf_len == 0 || pos >= len {
@@ -1287,7 +1286,7 @@ mod tests {
     fn tree_error_messages_describe_each_variant() {
         // `message` is consumed natively only here: its `From<TreeError> for
         // JsValue` caller is wasm32-only, so this is the test that keeps it both
-        // live and covered on the native (Tier-A) build.
+        // live and covered on the native build.
         assert!(TreeError::BareFile("loose.mpls".to_owned()).message().contains("loose.mpls"));
         assert!(
             TreeError::MixedRoots("A".to_owned(), "B".to_owned())
@@ -1614,8 +1613,8 @@ mod tests {
         assert_eq!(seek_target(SeekFrom::Current(i64::MAX), u64::MAX, 0).expect("sat"), u64::MAX);
     }
 
-    /// CLI-parity selection helpers (Tier A): the structural playlist listing
-    /// and the by-name measured scan, native-tested to the core bar.
+    /// CLI-parity selection helpers: the structural playlist listing and the
+    /// by-name measured scan, native-tested.
     mod selection {
         use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
 
@@ -1915,7 +1914,7 @@ mod tests {
 
     // The reader math is panic-safety-critical, so amplify the unit cases with
     // property tests. proptest's backend does not build for wasm32, so these run
-    // only on the native (Tier-A) build.
+    // only on the native build.
     #[cfg(not(target_arch = "wasm32"))]
     mod prop {
         use std::io::{self, SeekFrom};

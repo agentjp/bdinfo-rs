@@ -1,4 +1,4 @@
-//! Tier A — the master-detail pane view-models.
+//! The master-detail pane view-models.
 //!
 //! When a playlist row is the active (highlighted) one, the lower two panes show
 //! its **stream files** and its **streams / codecs** — exactly the classic

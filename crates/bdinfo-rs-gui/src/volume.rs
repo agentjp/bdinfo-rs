@@ -1,5 +1,5 @@
-//! Tier A — recovering the real disc label when a folder scan lands on a
-//! nameless Windows drive root.
+//! Recovering the real disc label when a folder scan lands on a nameless
+//! Windows drive root.
 //!
 //! A folder scan labels the disc after its root directory's name. That works
 //! everywhere a disc is mounted at a *named* path — an extracted folder, or the

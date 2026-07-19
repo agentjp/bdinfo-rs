@@ -1,4 +1,4 @@
-//! Tier A — the persistent GUI configuration.
+//! The persistent GUI configuration.
 //!
 //! The app's small memory between launches: the window geometry, the last
 //! opened source path, and the theme preference, stored as a flat
