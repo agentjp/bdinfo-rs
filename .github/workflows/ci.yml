@@ -153,13 +153,17 @@ jobs:
               case "$f" in
                 crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core_edge=true ;;
               esac
-              # gui-release.yml is deliberately NOT here: the orchestrator
-              # never runs it (tag/dispatch-only), so a lane-only edit gets
-              # the meta checks (YAML schema/style/security) and its real
-              # verification from the next dispatch dry run — not a ~40-minute
+              # gui-release.yml is deliberately NOT here, and gui-publish.yml
+              # plus its .github/scripts/publish-gui-*.ps1 helpers follow the
+              # same rule: the orchestrator never runs either lane
+              # (tag/dispatch-only), so a lane-only edit gets the meta checks
+              # (YAML schema/style/security) and its real verification from
+              # the next dispatch (dry run / prepare-only) — not a ~40-minute
               # gui fleet re-run that exercises none of the changed lines.
-              # The gui-package-*.ps1 scripts DO re-fire the area: the
-              # packaging smoke runs them.
+              # The helpers are named publish-gui-*.ps1 precisely so the
+              # gui-*.ps1 pattern below cannot catch them. The
+              # gui-package-*.ps1 scripts DO re-fire the area: the packaging
+              # smoke runs them.
               case "$f" in crates/bdinfo-rs-gui/*|.github/workflows/gui.yml|.github/scripts/gui-*.ps1) gui=true ;; esac
               case "$f" in crates/bdinfo-rs-wasm/*|.github/workflows/wasm.yml) wasm=true ;; esac
               case "$f" in fuzz/*) fuzz=true ;; esac
