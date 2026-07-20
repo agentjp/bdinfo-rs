@@ -94,7 +94,7 @@ version = "0.9.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
-version = "2.4.1"
+version = "2.5.0"
 criteria = "safe-to-run"
 
 [[exemptions.getrandom]]
@@ -146,7 +146,7 @@ version = "1.11.0"
 criteria = "safe-to-run"
 
 [[exemptions.quote]]
-version = "1.0.46"
+version = "1.0.47"
 criteria = "safe-to-deploy"
 
 [[exemptions.r-efi]]
@@ -209,8 +209,12 @@ criteria = "safe-to-deploy"
 version = "2.0.119"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "3.0.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.thiserror-impl]]
-version = "2.0.18"
+version = "2.0.19"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]

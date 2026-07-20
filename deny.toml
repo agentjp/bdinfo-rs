@@ -64,6 +64,14 @@ multiple-versions-include-dev = true
 # (e.g. bdinfo-rs → bdinfo-rs-core) are necessarily "wildcard" and are allowed.
 wildcards = "deny"
 allow-wildcard-paths = true
+# Known proc-macro-only duplicate: thiserror-impl 2.0.19 moved to syn 3 while
+# clap_derive and zerocopy-derive still parse with syn 2. Both copies run only at
+# compile time inside proc macros and never link into the shipped binary. Pinned
+# to the syn 2 version so a bump unmatches the skip and forces a recheck; remove
+# once the remaining derive crates move to syn 3.
+skip = [
+    { crate = "syn@2.0.119", reason = "compile-time-only dup vs syn 3 (thiserror-impl); clap_derive/zerocopy-derive still on syn 2" },
+]
 # Known dev-only duplicate: tempfile pulls getrandom 0.4 while proptest's
 # rand_core 0.9 still depends on getrandom 0.3, so the tree carries both. getrandom
 # 0.4 also drags in second copies of its target-gated wasm/UEFI backends (r-efi,
