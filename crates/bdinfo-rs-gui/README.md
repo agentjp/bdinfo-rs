@@ -111,8 +111,9 @@ cargo build --release      # binary at target/release/bdinfo-rs-gui
 ## Packaging notes
 
 - The app identifies itself to the windowing system as `bdinfo-rs-gui`. On Linux, and Wayland
-  especially, the desktop entry must match for the icon and window grouping to work: the file must
-  be named `bdinfo-rs-gui.desktop`, and any `StartupWMClass` must say `bdinfo-rs-gui`.
+  especially, the desktop entry must match for the icon and window grouping to work. The shipped
+  entry is named `io.github.agentjp.bdinfo-rs.desktop`, after the AppStream component id, so the
+  match runs through its `StartupWMClass=bdinfo-rs-gui` line — the two strings move together.
 - Linux packages should recommend `xdg-desktop-portal` for file dialogs.
 - A macOS `.app` bundle must set `CFBundleIdentifier` in `Info.plist` — the native open panel
   requires it in bundled apps.

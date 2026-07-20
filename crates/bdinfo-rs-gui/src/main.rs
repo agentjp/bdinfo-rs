@@ -71,9 +71,11 @@ const ICON_SIZE: u32 = 128;
 /// every platform, and (via [`window_settings`]) the Wayland/X11
 /// `application_id` on Linux. On Wayland the runtime RGBA icon is ignored by
 /// protocol: the dock icon, window grouping, and pinning come solely from a
-/// `.desktop` file matched against this id, so it must equal the shipped
-/// `.desktop` file's basename / `StartupWMClass` — an empty id (iced's Linux
-/// default) means a generic gear icon and broken grouping.
+/// `.desktop` file matched against this id — first by basename, then by
+/// `StartupWMClass`. The shipped entry is named for the AppStream component id
+/// instead, so it is the `StartupWMClass` line that must equal this string. An
+/// empty id (iced's Linux default) means a generic gear icon and broken
+/// grouping.
 const APP_ID: &str = "bdinfo-rs-gui";
 
 fn main() -> ExitCode {

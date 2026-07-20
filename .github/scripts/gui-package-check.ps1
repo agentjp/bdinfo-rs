@@ -160,9 +160,16 @@ switch ($Kind) {
     'linux' {
         # ── the shared text assets validate against their specs ──────────────
         $packaging = Join-Path $repo 'crates/bdinfo-rs-gui/packaging'
-        & desktop-file-validate (Join-Path $packaging 'bdinfo-rs-gui.desktop')
+        # The AppStream component id names the desktop file, the metainfo file
+        # and the icons as installed.
+        $appId = 'io.github.agentjp.bdinfo-rs'
+        & desktop-file-validate (Join-Path $packaging "$appId.desktop")
         Assert ($LASTEXITCODE -eq 0) 'desktop file validates'
-        & appstream-util validate-relax (Join-Path $packaging 'io.github.agentjp.bdinfo_rs_gui.metainfo.xml')
+        # --nonet: without it the validator fetches every <screenshot> URL. Those
+        # point at raw.githubusercontent.com on master, so a screenshot added in
+        # a pull request would 404 until the very merge the check is gating —
+        # and a green gate must not depend on a live third-party fetch anyway.
+        & appstream-util validate-relax --nonet (Join-Path $packaging "$appId.metainfo.xml")
         Assert ($LASTEXITCODE -eq 0) 'AppStream metainfo validates (relax — the Fedora gate)'
 
         # ── .deb: recommends + payload paths ─────────────────────────────────
@@ -175,9 +182,9 @@ switch ($Kind) {
         $contents = & dpkg-deb --contents $deb
         foreach ($path in
             './usr/bin/bdinfo-rs-gui',
-            './usr/share/applications/bdinfo-rs-gui.desktop',
-            './usr/share/metainfo/io.github.agentjp.bdinfo_rs_gui.metainfo.xml',
-            './usr/share/icons/hicolor/512x512/apps/bdinfo-rs-gui.png',
+            "./usr/share/applications/$appId.desktop",
+            "./usr/share/metainfo/$appId.metainfo.xml",
+            "./usr/share/icons/hicolor/512x512/apps/$appId.png",
             './usr/share/doc/bdinfo-rs-gui/copyright') {
             Assert (@($contents | Select-String ([regex]::Escape($path))).Count -gt 0) "deb carries $path"
         }
@@ -191,9 +198,9 @@ switch ($Kind) {
         $files = & rpm -qpl $rpm 2>$null
         foreach ($path in
             '/usr/bin/bdinfo-rs-gui',
-            '/usr/share/applications/bdinfo-rs-gui.desktop',
-            '/usr/share/metainfo/io.github.agentjp.bdinfo_rs_gui.metainfo.xml',
-            '/usr/share/icons/hicolor/512x512/apps/bdinfo-rs-gui.png') {
+            "/usr/share/applications/$appId.desktop",
+            "/usr/share/metainfo/$appId.metainfo.xml",
+            "/usr/share/icons/hicolor/512x512/apps/$appId.png") {
             Assert (@($files | Select-String ([regex]::Escape($path))).Count -gt 0) "rpm carries $path"
         }
 
@@ -208,7 +215,7 @@ switch ($Kind) {
             & $appImage --appimage-extract | Out-Null
             Assert ($LASTEXITCODE -eq 0) 'AppImage self-extracts (static runtime, no FUSE)'
             $root = Join-Path $work 'squashfs-root'
-            foreach ($entry in 'AppRun', 'bdinfo-rs-gui.desktop', 'bdinfo-rs-gui.png', '.DirIcon') {
+            foreach ($entry in 'AppRun', "$appId.desktop", "$appId.png", '.DirIcon') {
                 Assert (Test-Path (Join-Path $root $entry)) "AppImage root carries $entry"
             }
             Assert (Test-Path (Join-Path $root 'usr/bin/bdinfo-rs-gui')) 'AppImage carries the binary'
