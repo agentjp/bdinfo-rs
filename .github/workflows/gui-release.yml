@@ -345,6 +345,8 @@ jobs:
           **macOS (unsigned):** Gatekeeper blocks the first launch — allow it
           under System Settings → Privacy & Security → "Open Anyway", or run
           `xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"`.
+          macOS 26 (Tahoe) reports the same block as "is damaged and can't be
+          opened"; the app is not damaged and the steps above still apply.
 
           **Windows:** SmartScreen may warn on the first run of the portable
           exe — "More info" → "Run anyway". The `.msi` installs for the
