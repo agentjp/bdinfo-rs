@@ -412,6 +412,20 @@ jobs:
           TRIPLE: ${{ matrix.triple }}
         run: .github/scripts/gui-package-check.ps1 -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE
 
+      # Real install + launch of what was just packaged (MSI /qn install +
+      # probe + uninstall, dpkg -i + probe + remove, AppImage
+      # extract-and-run, dmg mount + probe) — the same script the
+      # gui-release.yml legs run at tag time.
+      - name: Install-and-launch smoke
+        shell: pwsh
+        env:
+          KIND: ${{ matrix.kind }}
+          TRIPLE: ${{ matrix.triple }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >
+          .github/scripts/gui-install-smoke.ps1
+          -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE -Version $env:VERSION
+
       - name: Upload the packaged artifacts (hand-testing)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
