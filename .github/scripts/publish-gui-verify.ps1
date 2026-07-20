@@ -120,5 +120,10 @@ if ($env:AUR_ENABLED -ne 'true' -and $selected -contains 'aur') {
 }
 
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
-Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "channels=$(ConvertTo-Json $selected -Compress -AsArray)"
+# Pipeline, not -InputObject: ConvertTo-Json treats a positional array as one
+# object and -AsArray then wraps it AGAIN ([["a","b"]]), which fromJson turns
+# into a single matrix job whose channel is the whole list. The pipeline
+# enumerates the elements, and -AsArray re-wraps a lone survivor so a
+# single-channel dispatch still yields a JSON array.
+Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "channels=$($selected | ConvertTo-Json -Compress -AsArray)"
 Write-Host "verified release $Tag (version $version): 12 packages + SHA256SUMS, checksums + attestations ok; channels: $($selected -join ', ')"
