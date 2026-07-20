@@ -347,7 +347,8 @@ jobs:
           `xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"`.
 
           **Windows:** SmartScreen may warn on the first run of the portable
-          exe — "More info" → "Run anyway". The `.msi` installs per-machine.
+          exe — "More info" → "Run anyway". The `.msi` installs for the
+          current user only and never asks for administrator rights.
 
           Every asset is covered by `SHA256SUMS` and a Sigstore
           build-provenance attestation:

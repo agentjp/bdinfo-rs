@@ -73,16 +73,29 @@ New-Item -ItemType Directory $work | Out-Null
 
 $icon = Join-Path $packaging 'bdinfo-rs-gui.ico'
 $wixobj = Join-Path $work 'setup.wixobj'
-& $candle -nologo -arch $arch "-dVersion=$Version" "-dExePath=$exe" "-dIconPath=$icon" `
+# -ext WixUIExtension: setup.wxs references the WixUI_FeatureTree dialog set,
+# which lives in that extension's wixlib. WiX documents it on light alone;
+# passing it to candle too is harmless and keeps the two lines symmetric.
+& $candle -nologo -arch $arch -ext WixUIExtension `
+    "-dVersion=$Version" "-dExePath=$exe" "-dIconPath=$icon" `
     -out $wixobj (Join-Path $packaging 'setup.wxs')
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: candle exit $LASTEXITCODE"; exit 1 }
 
 $msi = Join-Path $out "bdinfo-rs-gui-$Triple.msi"
-# -spdb: no .wixpdb sidecar (nothing consumes it). -sval: skip ICE
-# validation — it runs through the machine's VBScript engine, an
-# environment coupling that fails on hardened hosts (LGHT0217/2738); the
-# packaging checks + real install verification cover what ICE would.
-& $light -nologo -spdb -sval -out $msi $wixobj
+# -spdb: no .wixpdb sidecar (nothing consumes it).
+#
+# -sval: skip ICE validation entirely. The ICE suite executes as VBScript, and
+# the engine's CLSID {B54F3741-5B07-11cf-A4B0-00AA004A55E8} is unregistered on
+# stock Windows 11 — VBScript is a deprecated on-demand feature — so every ICE
+# action aborts with LGHT0217/2738 and the link fails. This is a blanket
+# suppression, not a targeted one: it also silences ICE38 and ICE43, which post
+# errors rather than warnings and are precisely the rules governing the
+# per-user components setup.wxs authors (an HKCU key path on every component
+# installed under the profile; the same on the component carrying the
+# non-advertised shortcut). That file is written so neither can fire; the
+# standing check on the claim is gui-package-check.ps1 plus a real unelevated
+# install, not the validator.
+& $light -nologo -spdb -sval -ext WixUIExtension -out $msi $wixobj
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: light exit $LASTEXITCODE"; exit 1 }
 Remove-Item -Recurse -Force $work
 Write-Host "packaged $msi"
