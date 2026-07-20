@@ -46,6 +46,11 @@ Copy-Item $binary (Join-Path $app 'Contents/MacOS/bdinfo-rs-gui')
 & chmod +x (Join-Path $app 'Contents/MacOS/bdinfo-rs-gui')
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: chmod'; exit 1 }
 Copy-Item (Join-Path $packaging 'bdinfo-rs-gui.icns') (Join-Path $app 'Contents/Resources')
+# The LGPL-2.1 text and the attribution notice live in the bundle's Resources
+# rather than loose in the dmg: dmg-root files vanish at drag-install, and the
+# installed .app must retain the license texts it was distributed under.
+Copy-Item (Join-Path $repo 'LICENSE') (Join-Path $app 'Contents/Resources')
+Copy-Item (Join-Path $repo 'NOTICE') (Join-Path $app 'Contents/Resources')
 (Get-Content -Raw (Join-Path $packaging 'Info.plist.in')).Replace('@VERSION@', $Version) |
     Set-Content -NoNewline (Join-Path $app 'Contents/Info.plist')
 

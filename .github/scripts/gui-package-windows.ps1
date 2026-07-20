@@ -78,6 +78,7 @@ $wixobj = Join-Path $work 'setup.wixobj'
 # passing it to candle too is harmless and keeps the two lines symmetric.
 & $candle -nologo -arch $arch -ext WixUIExtension `
     "-dVersion=$Version" "-dExePath=$exe" "-dIconPath=$icon" `
+    "-dLicensePath=$(Join-Path $repo 'LICENSE')" "-dNoticePath=$(Join-Path $repo 'NOTICE')" `
     -out $wixobj (Join-Path $packaging 'setup.wxs')
 if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: candle exit $LASTEXITCODE"; exit 1 }
 

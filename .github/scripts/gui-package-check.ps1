@@ -49,6 +49,10 @@ switch ($Kind) {
         Assert ($proc.ExitCode -eq 0) 'msiexec /a (administrative extract) succeeds'
         $extracted = @(Get-ChildItem $extract -Recurse -Filter 'bdinfo-rs-gui.exe' -ErrorAction SilentlyContinue)
         Assert ($extracted.Count -eq 1) 'extracted layout carries the exe once'
+        foreach ($name in 'LICENSE', 'NOTICE') {
+            $found = @(Get-ChildItem $extract -Recurse -Filter $name -ErrorAction SilentlyContinue)
+            Assert ($found.Count -eq 1) "extracted layout carries $name once"
+        }
         # Template summary property: "<platform>;<language>". arm64 MSIs are
         # authored on the x64 runner, so the tag must be checked, not assumed.
         # Plain dynamic COM calls — pwsh 7's binder resolves them; the
@@ -147,6 +151,9 @@ switch ($Kind) {
             Assert (Test-Path (Join-Path $mount 'Applications')) 'dmg carries the /Applications symlink'
             Assert (Test-Path (Join-Path $app 'Contents/MacOS/bdinfo-rs-gui')) 'bundle carries the binary'
             Assert (Test-Path (Join-Path $app 'Contents/Resources/bdinfo-rs-gui.icns')) 'bundle carries the icns'
+            foreach ($name in 'LICENSE', 'NOTICE') {
+                Assert (Test-Path (Join-Path $app "Contents/Resources/$name")) "bundle carries $name"
+            }
             & plutil -lint (Join-Path $app 'Contents/Info.plist')
             Assert ($LASTEXITCODE -eq 0) 'Info.plist lints'
             $bundleVersion = & plutil -extract CFBundleShortVersionString raw (Join-Path $app 'Contents/Info.plist')
@@ -219,6 +226,9 @@ switch ($Kind) {
                 Assert (Test-Path (Join-Path $root $entry)) "AppImage root carries $entry"
             }
             Assert (Test-Path (Join-Path $root 'usr/bin/bdinfo-rs-gui')) 'AppImage carries the binary'
+            foreach ($name in 'LICENSE', 'NOTICE') {
+                Assert (Test-Path (Join-Path $root "usr/share/doc/bdinfo-rs-gui/$name")) "AppImage carries $name"
+            }
         }
         finally { Pop-Location }
         Remove-Item -Recurse -Force $work

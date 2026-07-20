@@ -94,6 +94,13 @@ Copy-Item $binary (Join-Path $appDir 'usr/bin/bdinfo-rs-gui')
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: chmod'; exit 1 }
 Copy-Item (Join-Path $packaging "$appId.desktop") (Join-Path $appDir 'usr/share/applications')
 Copy-Item (Join-Path $packaging "$appId.metainfo.xml") (Join-Path $appDir 'usr/share/metainfo')
+# The LGPL-2.1 text and the attribution notice ride inside the AppImage — a
+# portable format carries no package-manager license metadata, so the texts
+# themselves are the only license information a recipient gets.
+$doc = Join-Path $appDir 'usr/share/doc/bdinfo-rs-gui'
+New-Item -ItemType Directory $doc -Force | Out-Null
+Copy-Item (Join-Path $repo 'LICENSE') $doc
+Copy-Item (Join-Path $repo 'NOTICE') $doc
 # The icons install under the AppStream id, which is what the desktop file's
 # Icon= key names; their source name is the crate's.
 foreach ($size in 16, 24, 32, 48, 64, 128, 256, 512) {

@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- WiX v3 source for the bdinfo-rs GUI installer. Compiled per arch by
      .github/scripts/gui-package-windows.ps1 (candle -arch x64|arm64, which
-     also sets the components' Win64 default) with -dVersion, -dExePath and
-     -dIconPath, so nothing here couples to a checkout layout or version. The
+     also sets the components' Win64 default) with -dVersion, -dExePath,
+     -dIconPath, -dLicensePath and -dNoticePath, so nothing here couples to a
+     checkout layout or version. The
      license RTF resolves off this file's own directory through
      sys.SOURCEFILEDIR and so needs no -d switch of its own.
 
@@ -95,6 +96,12 @@
                              Value="[INSTALLDIR]"
                              KeyPath="yes" />
               <File Id="MainExe" Source="$(var.ExePath)" Name="bdinfo-rs-gui.exe" />
+              <!-- The LGPL-2.1 text and the attribution notice install next to
+                   the binary — the same payload the portable zip carries. The
+                   install-time license page leaves no copy behind, and a
+                   silent or winget-driven install never shows it at all. -->
+              <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE" />
+              <File Id="NoticeFile" Source="$(var.NoticePath)" Name="NOTICE" />
               <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLDIR" On="uninstall" />
               <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
             </Component>
