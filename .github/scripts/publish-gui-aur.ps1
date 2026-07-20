@@ -37,12 +37,14 @@ function Stop-Leg([string] $why) {
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..')).Path
 
-$sums = @{}
+# Not `$sums`: PowerShell variable names are case-insensitive, so that would
+# overwrite the $Sums path parameter before the loop reads it.
+$shaByName = @{}
 foreach ($line in Get-Content -LiteralPath $Sums) {
-    if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $sums[$Matches[2].Trim()] = $Matches[1] }
+    if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $shaByName[$Matches[2].Trim()] = $Matches[1] }
 }
-$shaX64 = $sums['bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb']
-$shaArm64 = $sums['bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb']
+$shaX64 = $shaByName['bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb']
+$shaArm64 = $shaByName['bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb']
 if (-not $shaX64 -or -not $shaArm64) { Stop-Leg 'SHA256SUMS carries no entry for one of the two .deb assets' }
 
 $template = Join-Path $repoRoot 'packaging/aur/PKGBUILD-gui.template'
