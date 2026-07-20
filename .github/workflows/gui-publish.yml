@@ -1,14 +1,27 @@
 name: gui-publish
 
-# The GUI's package-manager fan-out — the on-demand counterpart of the CLI's
+# The GUI's package-manager fan-out — the counterpart of the CLI's
 # packages.yml / homebrew.yml / publish-crates.yml, publishing an EXISTING
 # immutable gui-v* release's attested bytes to winget, the Homebrew tap
-# (cask), the AUR, Cloudsmith, and crates.io. workflow_dispatch ONLY: the
-# gui-v* tag ships the GitHub Release and nothing else (gui-release.yml), so
-# every channel rollout is a deliberate dispatch — per channel for a staged
-# first release, one `all` dispatch at steady state. Nothing is rebuilt here;
-# every leg consumes (or points komac / the AUR at) release assets the verify
-# job proved complete, checksum-exact, and attestation-verified.
+# (cask), the AUR, Cloudsmith, and crates.io. Two ways in:
+#
+#   workflow_dispatch  the deliberate rollout: per channel for a staged
+#                      first release, `all` at steady state, and the
+#                      re-dispatch path that heals a failed leg.
+#   workflow_run       the hands-off path, OFF until the repository variable
+#                      GUI_AUTOPUBLISH is 'true': a successful TAG-triggered
+#                      gui-release run (its dry-run dispatches never
+#                      qualify) publishes every channel of that release.
+#                      Variable-gated because the first release must stay
+#                      staged — until the two manual bootstraps below
+#                      (crates.io first publish, winget `komac new`) the
+#                      winget and crates legs can only fail. Once they are
+#                      done, set the variable and a gui-v* tag push carries
+#                      all the way to the channels on its own.
+#
+# Nothing is rebuilt here; every leg consumes (or points komac / the AUR at)
+# release assets the verify job proved complete, checksum-exact, and
+# attestation-verified.
 #
 # All-or-nothing: publishing starts only after EVERY selected channel's
 # payload has validated. Three sequential phases:
@@ -44,15 +57,19 @@ name: gui-publish
 #     the leg auto-submits every version after that PR merges.
 #
 # Secrets (all on the `release` ENVIRONMENT, like packages.yml — its
-# deployment rules admit `master`, which is what a workflow_dispatch from the
-# default branch resolves to): WINGET_TOKEN, HOMEBREW_TAP_TOKEN, AUR_SSH_KEY,
+# deployment rules admit `master`, which is what both a workflow_dispatch
+# from the default branch and a workflow_run resolve to):
+# WINGET_TOKEN, HOMEBREW_TAP_TOKEN, AUR_SSH_KEY,
 # CLOUDSMITH_API_KEY. crates.io needs no stored secret (OIDC Trusted
 # Publishing, configured on crates.io for THIS workflow file). Only the
 # publish job binds the environment; verify + prepare run with the read-only
 # default token, so phase 1/2 cannot touch any external registry even in
 # principle.
 
-on:
+on:  # zizmor: ignore[dangerous-triggers] runs only after our own tag-triggered gui-release; publishes that release's attested assets, never PR code
+  workflow_run:
+    workflows: [gui-release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -77,8 +94,10 @@ permissions:
 
 # One run per tag at a time: two concurrent publishes of the same release
 # could race a channel's idempotency preflight into a duplicate submission.
+# On the workflow_run path the upstream run's head_branch IS the gui-v* tag
+# name, so both triggers key the same group for the same release.
 concurrency:
-  group: gui-publish-${{ github.event.inputs.tag }}
+  group: gui-publish-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 env:
@@ -88,8 +107,47 @@ env:
   CLOUDSMITH_CLI_VERSION: 1.19.0
 
 jobs:
+  # Resolve tag/channels/mode from either trigger (the packages.yml gate
+  # pattern). The auto path proceeds only for a successful gui-release run
+  # that a gui-v* TAG push triggered — a completing dry-run dispatch must
+  # never publish — and only once GUI_AUTOPUBLISH opts the repo in.
+  resolve:
+    name: resolve the release + mode
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       vars.GUI_AUTOPUBLISH == 'true')
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      channels: ${{ steps.resolve.outputs.channels }}
+      mode: ${{ steps.resolve.outputs.mode }}
+    steps:
+      - name: Resolve from the event
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_CHANNELS: ${{ inputs.channels }}
+          INPUT_MODE: ${{ inputs.mode }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ "$EVENT" = 'workflow_dispatch' ]; then
+            tag="$INPUT_TAG"; channels="$INPUT_CHANNELS"; mode="$INPUT_MODE"
+          else
+            tag="$RUN_TAG"; channels=all; mode=publish
+          fi
+          case "$tag" in
+            gui-v[0-9]*) ;;
+            *) echo "::error::'$tag' is not a gui-vX.Y.Z tag"; exit 1 ;;
+          esac
+          { echo "tag=$tag"; echo "channels=$channels"; echo "mode=$mode"; } >> "$GITHUB_OUTPUT"
+          echo "resolved $tag / channels=$channels / mode=$mode"
+
   verify:
     name: verify the release (assets + checksums + attestations)
+    needs: resolve
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.verify.outputs.version }}
@@ -104,8 +162,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag }}
-          CHANNELS: ${{ inputs.channels }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          CHANNELS: ${{ needs.resolve.outputs.channels }}
           AUR_ENABLED: ${{ vars.AUR_ENABLED }}
         run: >-
           .github/scripts/publish-gui-verify.ps1
@@ -123,7 +181,7 @@ jobs:
 
   prepare:
     name: prepare ${{ matrix.channel }}
-    needs: verify
+    needs: [resolve, verify]
     runs-on: ubuntu-latest
     strategy:
       # The all-or-nothing barrier: any leg failing to validate kills the run
@@ -133,7 +191,7 @@ jobs:
         channel: ${{ fromJson(needs.verify.outputs.channels) }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ needs.resolve.outputs.tag }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -185,7 +243,7 @@ jobs:
         if: matrix.channel == 'crates'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.resolve.outputs.tag }}
           path: tag-src
           persist-credentials: false
 
@@ -209,8 +267,8 @@ jobs:
 
   publish:
     name: publish ${{ matrix.channel }}
-    needs: [verify, prepare]
-    if: inputs.mode == 'publish'
+    needs: [resolve, verify, prepare]
+    if: needs.resolve.outputs.mode == 'publish'
     runs-on: ubuntu-latest
     # The four channel secrets are ENVIRONMENT secrets on `release` (see the
     # header); a workflow_dispatch runs on the default branch's ref, which
@@ -228,7 +286,7 @@ jobs:
         channel: ${{ fromJson(needs.verify.outputs.channels) }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ needs.resolve.outputs.tag }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -286,7 +344,7 @@ jobs:
           test: true
           commit_username: bdinfo-rs CI
           commit_email: bdinfo-rs@users.noreply.github.com
-          commit_message: Update to ${{ inputs.tag }}
+          commit_message: Update to ${{ needs.resolve.outputs.tag }}
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
 
       - name: cloudsmith — push the packages
@@ -302,7 +360,7 @@ jobs:
         if: matrix.channel == 'crates'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.resolve.outputs.tag }}
           path: tag-src
           persist-credentials: false
 
