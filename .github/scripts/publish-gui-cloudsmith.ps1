@@ -52,9 +52,11 @@ function Stop-Leg([string] $why) {
 
 if ($Mode -eq 'prepare') {
     if (-not $Sums) { Stop-Leg 'prepare needs -Sums' }
-    $sums = @{}
+    # Not `$sums`: PowerShell variable names are case-insensitive, so that
+    # would overwrite the $Sums path parameter before the loop reads it.
+    $shaByName = @{}
     foreach ($line in Get-Content -LiteralPath $Sums) {
-        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $sums[$Matches[2].Trim()] = $Matches[1] }
+        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $shaByName[$Matches[2].Trim()] = $Matches[1] }
     }
 
     New-Item -ItemType Directory -Force $Payload | Out-Null
@@ -63,7 +65,7 @@ if ($Mode -eq 'prepare') {
         if ($LASTEXITCODE -ne 0) { Stop-Leg "gh release download $name failed" }
         $path = Join-Path $Payload $name
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
-        if ($hash -ne $sums[$name]) { Stop-Leg "checksum mismatch for $name (SHA256SUMS $($sums[$name]), downloaded $hash)" }
+        if ($hash -ne $shaByName[$name]) { Stop-Leg "checksum mismatch for $name (SHA256SUMS $($shaByName[$name]), downloaded $hash)" }
         Write-Host "    sha256 ok  $name"
     }
 

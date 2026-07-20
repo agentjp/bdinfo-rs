@@ -43,12 +43,14 @@ $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..')).Path
 if ($Mode -eq 'prepare') {
     foreach ($p in @($Sums, $Payload)) { if (-not $p) { Stop-Leg 'prepare needs -Sums and -Payload' } }
 
-    $sums = @{}
+    # Not `$sums`: PowerShell variable names are case-insensitive, so that
+    # would overwrite the $Sums path parameter before the loop reads it.
+    $shaByName = @{}
     foreach ($line in Get-Content -LiteralPath $Sums) {
-        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $sums[$Matches[2].Trim()] = $Matches[1] }
+        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $shaByName[$Matches[2].Trim()] = $Matches[1] }
     }
-    $shaArm = $sums['bdinfo-rs-gui-aarch64-apple-darwin.dmg']
-    $shaIntel = $sums['bdinfo-rs-gui-x86_64-apple-darwin.dmg']
+    $shaArm = $shaByName['bdinfo-rs-gui-aarch64-apple-darwin.dmg']
+    $shaIntel = $shaByName['bdinfo-rs-gui-x86_64-apple-darwin.dmg']
     if (-not $shaArm -or -not $shaIntel) { Stop-Leg 'SHA256SUMS carries no entry for one of the two .dmg assets' }
 
     $template = Join-Path $repoRoot 'packaging/homebrew/bdinfo-rs-gui.rb.template'
