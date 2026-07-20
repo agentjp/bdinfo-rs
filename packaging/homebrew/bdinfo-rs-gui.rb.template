@@ -1,3 +1,6 @@
+# typed: strict
+# frozen_string_literal: true
+
 # Cask for the agentjp/homebrew-tap third-party tap. The `gui-publish.yml`
 # homebrew leg replaces __PKGVER__ / __SHA256_ARM__ / __SHA256_INTEL__ from the
 # release's verified SHA256SUMS and commits the result to the tap as
