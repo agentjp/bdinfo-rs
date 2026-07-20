@@ -10,6 +10,11 @@ body:
         instead, via the **Security** tab → **Report a vulnerability** (see
         [SECURITY.md](https://github.com/agentjp/bdinfo-rs/blob/master/SECURITY.md)).
 
+        If the **desktop app** itself misbehaves — won't start, renders wrong,
+        window or settings trouble — use the [Desktop app bug
+        report](https://github.com/agentjp/bdinfo-rs/issues/new?template=gui_bug_report.yml)
+        form instead; it asks for `gui.log`.
+
         > **Do not attach copyrighted disc content.** Describe the on-disc
         > structure that triggers the issue, or attach a small synthetic /
         > minimized reproducer — not real movie data.
