@@ -4,13 +4,17 @@
 # bytes were built from that same commit, and the attested release is what
 # admitted the tag into this workflow).
 #
-#   -Mode prepare  guard tag == crate version, then `cargo publish --dry-run
-#                  --locked`: packages the crate and verify-builds it against
-#                  the registry, which is also where the sequencing rule
+#   -Mode prepare  guard tag == crate version, then `cargo package --locked`:
+#                  packages the crate and verify-builds it against the
+#                  registry, which is also where the sequencing rule
 #                  bites — bdinfo-rs-gui depends on bdinfo-rs-core at the
 #                  same version, so this fails cleanly until the CLI
 #                  release's publish-crates.yml run has put that core version
 #                  on crates.io. The built .crate lands in -Payload.
+#                  `package`, not `publish --dry-run`: the latter stages the
+#                  .crate under target/package/tmp-crate/ and only a real
+#                  publish promotes it (observed with cargo 1.96), while
+#                  `package` finalizes target/package/<name>-<ver>.crate.
 #   -Mode publish  the same guard, then `cargo publish --locked`, tolerating
 #                  "already uploaded" as success — crates.io versions are
 #                  immutable, so that error IS the idempotent re-dispatch
@@ -65,7 +69,7 @@ Push-Location -LiteralPath $crate
 $code = 1
 try {
     if ($Mode -eq 'prepare') {
-        cargo publish --dry-run --locked -p bdinfo-rs-gui
+        cargo package --locked -p bdinfo-rs-gui
         $code = $LASTEXITCODE
     }
     else {
