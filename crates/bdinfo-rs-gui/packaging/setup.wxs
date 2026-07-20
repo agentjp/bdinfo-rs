@@ -1,17 +1,46 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- WiX v3 source for the bdinfo-rs GUI installer. Compiled per arch by
      .github/scripts/gui-package-windows.ps1 (candle -arch x64|arm64, which
-     also sets the components' Win64 default) with -dVersion, -dExePath and
-     -dIconPath, so nothing here couples to a checkout layout or version.
+     also sets the components' Win64 default) with -dVersion, -dExePath,
+     -dIconPath, -dLicensePath and -dNoticePath, so nothing here couples to a
+     checkout layout or version. The
+     license RTF resolves off this file's own directory through
+     sys.SOURCEFILEDIR and so needs no -d switch of its own.
 
-     winget-clean authoring, deliberately: a stable UpgradeCode forever with
-     Product Id="*" (fresh ProductCode per version) + MajorUpgrade scheduled
-     afterInstallInitialize; perMachine scope; NO custom UI, license dialog, or
-     launch-after-install action, so msiexec's silent (/qn) and passive
-     (/passive) sequences are never blocked and a future winget manifest needs
-     zero InstallerSwitches. The per-user config (%APPDATA%\bdinfo-rs) is
-     runtime data the app creates; the MSI must never own it, so uninstall
-     leaves it in place. -->
+     Per-user by design: the analyzer reads discs and writes reports and needs
+     no privilege the invoking user already holds, so the package must never
+     raise a UAC prompt. Package/@InstallScope="perUser" is what enforces that
+     — it sets InstallPrivileges="limited", i.e. bit 3 of the summary-
+     information word count ("elevated privileges are not required"), and
+     leaves ALLUSERS unset, which IS the per-user installation context.
+
+     The directory tree is rooted at LocalAppDataFolder rather than
+     ProgramFiles64Folder deliberately. Windows Installer redirects
+     ProgramFiles64Folder to %LOCALAPPDATA%\Programs only for a dual-purpose
+     package (ALLUSERS=2 plus MSIINSTALLPERUSER=1); under a plain perUser
+     package it still resolves to C:\Program Files and the install dies with
+     error 1303, insufficient privileges — contradicting Microsoft's
+     Installation Context page, which claims the redirection is a property of
+     the per-user context. Measured 2026-07-19, WiX 3.14.1 on Windows 11.
+
+     This package is deliberately NOT dual-purpose. WiX v3 cannot author
+     ALLUSERS=2 through InstallScope; Windows Installer refuses
+     MSIINSTALLPERUSER outright for a package that declares limited privileges;
+     winget passes neither; and the installation context, once chosen, is
+     sticky for every later update, repair and removal.
+
+     The dialog set lives in InstallUISequence alone, so msiexec /qn — which
+     skips that sequence entirely — and /passive are unaffected. The two
+     sequences are independent, and the UI set's own custom action,
+     WixUIPrintEula, is reachable only from the license dialog's Print button.
+     InstallExecuteSequence carries exactly one custom action, the type-51
+     property assignment below that fills ARPINSTALLLOCATION, and nothing in it
+     runs code. Keep it that way: an execute-sequence custom action is how a
+     silent or winget-driven install would come to spawn a window or demand
+     elevation. There is deliberately no launch-after-install checkbox.
+
+     The per-user config (%APPDATA%\bdinfo-rs) is runtime data the app creates;
+     the MSI must never own it, so uninstall leaves it in place. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
            Name="bdinfo-rs GUI"
@@ -21,9 +50,13 @@
            Language="1033">
     <Package InstallerVersion="500"
              Compressed="yes"
-             InstallScope="perMachine"
+             InstallScope="perUser"
              Description="bdinfo-rs GUI installer"
              Comments="Blu-ray disc analyzer" />
+    <!-- FindRelatedProducts searches only the current installation context, so
+         this replaces per-user predecessors and cannot see a per-machine one.
+         A machine-wide install from an earlier release therefore coexists with
+         this package instead of being upgraded away. -->
     <MajorUpgrade Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer version of bdinfo-rs GUI is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
@@ -31,35 +64,141 @@
     <Icon Id="AppIcon.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/agentjp/bdinfo-rs" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/agentjp/bdinfo-rs/issues" />
+    <!-- ARPINSTALLLOCATION is what fills Add/Remove Programs' InstallLocation,
+         the value a package manager reads the install path back out of; left
+         unset it registers as an empty string. It has to be assigned after
+         costing rather than authored as a Property row, because Property
+         values are not formatted — a row would register the literal text
+         "[INSTALLDIR]" instead of the resolved path. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize" />
+    <!-- No ARPNOMODIFY: the feature tree makes Change a working modify/repair
+         path, which is the point of shipping a feature selection at all. -->
 
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLDIR" Name="bdinfo-rs GUI">
-          <Component Id="MainExecutable" Guid="*">
-            <File Id="MainExe"
-                  Source="$(var.ExePath)"
-                  Name="bdinfo-rs-gui.exe"
-                  KeyPath="yes">
-              <!-- Advertised, so it rides the executable's component — no
-                   second component with a registry key-path needed. -->
-              <Shortcut Id="StartMenuShortcut"
-                        Advertise="yes"
-                        Directory="ProgramMenuFolder"
-                        Name="bdinfo-rs GUI"
-                        WorkingDirectory="INSTALLDIR"
-                        Icon="AppIcon.ico"
-                        IconIndex="0"
-                        Description="Blu-ray disc analyzer" />
-            </File>
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLDIR" Name="bdinfo-rs GUI">
+            <!-- Explicit Guid, not "*": WiX refuses to generate one for a
+                 component holding both a registry key path and a file
+                 (CNDL0230). The HKCU key path is what ICE38 requires of every
+                 component installed under the user's profile.
+
+                 The RemoveFolder rows answer ICE64: a directory created inside
+                 the profile and absent from the RemoveFile table survives
+                 uninstall, because a roaming-profile copy-down leaves the
+                 installer believing the directory predates the package. -->
+            <Component Id="MainExecutable" Guid="7C1A6E42-9E3B-4F0D-9C51-2B7A5D8E1F30">
+              <RegistryValue Root="HKCU"
+                             Key="Software\bdinfo-rs\GUI"
+                             Name="InstallDir"
+                             Type="string"
+                             Value="[INSTALLDIR]"
+                             KeyPath="yes" />
+              <File Id="MainExe" Source="$(var.ExePath)" Name="bdinfo-rs-gui.exe" />
+              <!-- The LGPL-2.1 text and the attribution notice install next to
+                   the binary — the same payload the portable zip carries. The
+                   install-time license page leaves no copy behind, and a
+                   silent or winget-driven install never shows it at all. -->
+              <File Id="LicenseFile" Source="$(var.LicensePath)" Name="LICENSE" />
+              <File Id="NoticeFile" Source="$(var.NoticePath)" Name="NOTICE" />
+              <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLDIR" On="uninstall" />
+              <RemoveFolder Id="RemoveProgramsFolder" Directory="ProgramsFolder" On="uninstall" />
+            </Component>
+
+            <!-- Part="last" is what emits the "[~];[INSTALLDIR]" value shape.
+                 The [~] token stands for the variable's existing content; a
+                 value written without it replaces PATH wholesale rather than
+                 extending it, which can leave a machine unbootable. Never
+                 hand-author the value. System="no" targets HKCU\Environment,
+                 the only half a limited user may write. -->
+            <Component Id="PathEntry" Guid="*">
+              <RegistryValue Root="HKCU"
+                             Key="Software\bdinfo-rs\GUI"
+                             Name="PathEntry"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+              <Environment Id="AppPath"
+                           Name="PATH"
+                           Value="[INSTALLDIR]"
+                           Action="set"
+                           Part="last"
+                           System="no"
+                           Permanent="no" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppMenuFolder" Name="bdinfo-rs GUI">
+          <!-- Advertise="no" is forced: an advertised shortcut resolves through
+               its component's key path, and this component's key path is a
+               registry value rather than the executable. ICE43 in turn requires
+               that a component carrying a non-advertised shortcut key off HKCU,
+               since a file key path installs the shortcut for the first user on
+               the machine only. -->
+          <Component Id="StartMenuShortcut" Guid="*">
+            <RegistryValue Root="HKCU"
+                           Key="Software\bdinfo-rs\GUI"
+                           Name="Shortcut"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+            <Shortcut Id="StartMenuShortcut"
+                      Name="bdinfo-rs GUI"
+                      Target="[#MainExe]"
+                      WorkingDirectory="INSTALLDIR"
+                      Icon="AppIcon.ico"
+                      IconIndex="0"
+                      Description="Blu-ray disc analyzer">
+              <!-- Absent an explicit application id, the shell groups and pins
+                   the window under one it derives from the target path, so a
+                   pinned tile and a running window can split into two taskbar
+                   entries. The shell applies this id to the process it launches
+                   from the shortcut; the binary sets none of its own on
+                   Windows, so this is the only place it is declared. The string
+                   is the one the binary hands the windowing system elsewhere
+                   (`APP_ID` in crates/bdinfo-rs-gui/src/main.rs), keeping the
+                   Windows and Wayland identities a single name. -->
+              <ShortcutProperty Key="System.AppUserModel.ID" Value="bdinfo-rs-gui" />
+            </Shortcut>
+            <RemoveFolder Id="RemoveAppMenuFolder" Directory="AppMenuFolder" On="uninstall" />
           </Component>
         </Directory>
       </Directory>
-      <Directory Id="ProgramMenuFolder" />
     </Directory>
 
-    <Feature Id="Main" Level="1" Title="bdinfo-rs GUI" Absent="disallow">
+    <Feature Id="Main" Level="1" Title="bdinfo-rs GUI" Absent="disallow"
+             Description="The bdinfo-rs GUI application and its Start Menu entry.">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
     </Feature>
+
+    <!-- The level exceeds the default INSTALLLEVEL of 1, so the feature is
+         listed in the customize dialog but unselected: a windowed app has no
+         reason to claim a PATH entry unasked, and the command-line analyzer
+         ships as its own package with its own shim. Opt in interactively, or
+         with ADDLOCAL=Main,PathEnvironment for an unattended install. -->
+    <Feature Id="PathEnvironment" Level="1000" Title="Add to PATH" Absent="allow"
+             Description="Add the install directory to your user PATH.">
+      <ComponentRef Id="PathEntry" />
+    </Feature>
+
+    <!-- WixUI_FeatureTree is the smallest built-in set carrying both a license
+         page and a feature selection. Its sibling WixUI_InstallDir is rejected
+         on purpose: a non-default INSTALLDIR is not persisted, so uninstall
+         resolves the property back to its default and leaves the real files
+         behind — which is also why an INSTALLDIR override is nowhere
+         documented as supported. WixUI_Advanced is rejected too; its own source
+         in the WiX repository is headed "Use at your own risk."
+
+         The license control is rich-text and renders plain text as literal
+         markup, so this file must stay RTF. Keep it terse and ASCII: the
+         control can display complex RTF, such as Word's output, as a blank page
+         until the reader scrolls. -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)license.rtf" />
+    <UIRef Id="WixUI_FeatureTree" />
   </Product>
 </Wix>

@@ -552,6 +552,14 @@ jobs:
           # is stable, so an occasional lag is harmless.
           $komacPin = Read-Pin '.github/workflows/packages.yml' 'KOMAC_VERSION:\s*([0-9.]+)'
           if (-not $komacPin) { throw 'No KOMAC_VERSION pin in packages.yml' }
+          # gui-publish.yml pins the same tool for the GUI's winget leg; the
+          # agreement check keeps that copy from rotting invisibly behind the
+          # freshness check on the packages.yml value below.
+          $komacGuiPin = Read-Pin '.github/workflows/gui-publish.yml' 'KOMAC_VERSION:\s*([0-9.]+)'
+          if (-not $komacGuiPin) { throw 'No KOMAC_VERSION pin in gui-publish.yml' }
+          if ($komacGuiPin -ne $komacPin) {
+            Add-Problem 'komac pins disagree' "- KOMAC_VERSION mismatch: packages.yml ``$komacPin`` vs gui-publish.yml ``$komacGuiPin`` — bump both together"
+          }
           $komacLatest = Latest-Semver 'russellbanks/Komac'
           if (-not $komacLatest) {
             Add-Problem 'komac (query failed)' '- could not query the latest komac release (russellbanks/Komac)'
@@ -564,14 +572,19 @@ jobs:
           # (pipx). A pip pin invisible to Dependabot's cargo/npm/actions scans, so a
           # server-side API change could break the frozen client silently; nag here
           # like the other hand-bumped tools when a newer client ships. The pin
-          # occurs once PER PUSH JOB (.deb and .rpm), so read every occurrence and
-          # assert they agree — a first-match-only read validates one job while the
-          # other drifts unseen — then run freshness on the agreed value.
+          # occurs once PER PUSH JOB (.deb and .rpm) in packages.yml plus as the
+          # CLOUDSMITH_CLI_VERSION env in gui-publish.yml, so read every
+          # occurrence and assert they agree — a first-match-only read validates
+          # one job while the others drift unseen — then run freshness on the
+          # agreed value.
           $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
           if (-not $cloudsmithPins.Count) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
+          $cloudsmithGuiPin = Read-Pin '.github/workflows/gui-publish.yml' 'CLOUDSMITH_CLI_VERSION:\s*([0-9.]+)'
+          if (-not $cloudsmithGuiPin) { throw 'No CLOUDSMITH_CLI_VERSION pin in gui-publish.yml' }
+          $cloudsmithPins = @($cloudsmithPins) + $cloudsmithGuiPin
           $cloudsmithPin = $cloudsmithPins[0]
           if (@($cloudsmithPins | Sort-Object -Unique).Count -gt 1) {
-            Add-Problem 'cloudsmith-cli pins disagree' "- cloudsmith-cli pin mismatch inside packages.yml: ``$($cloudsmithPins -join '` / `')`` — the .deb and .rpm push jobs must pin the same version"
+            Add-Problem 'cloudsmith-cli pins disagree' "- cloudsmith-cli pin mismatch across packages.yml / gui-publish.yml: ``$($cloudsmithPins -join '` / `')`` — every push job must pin the same version"
           }
           $cloudsmithLatest = Latest-PyPI 'cloudsmith-cli'
           if (-not $cloudsmithLatest) {

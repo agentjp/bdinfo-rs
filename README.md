@@ -16,7 +16,7 @@
 [![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
 
-[Desktop app](#desktop-app) · [Command line](#command-line) · [Browser](#browser) · [Install](INSTALL.md) · [Differences](DIFFERENCES.md) · [Security](#quality--security)
+[Desktop app](#desktop-app) · [Command line](#command-line) · [Browser](#browser) · [Install](INSTALL.md) · [Differences](DIFFERENCES.md) · [About](ABOUT.md) · [Security](#quality--security)
 
 </div>
 
@@ -51,9 +51,18 @@ Open a `BDMV` folder or `.iso`, pick playlists from the familiar three-pane view
 progress, then save or copy the report. Pure Rust and GPU-accelerated (wgpu, with a software
 fallback) — no webview and no bundled runtime.
 
+```sh
+winget install agentjp.bdinfo-rs-gui              # Windows
+brew install --cask agentjp/tap/bdinfo-rs-gui     # macOS / Linux
+yay -S bdinfo-rs-gui-bin                          # Arch
+```
+
 | Windows | macOS | Linux |
 |---|---|---|
-| [Installer · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) |
+| [`.msi` · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) |
+
+apt/dnf, `cargo install`, the portable-mode marker, and the first-launch prompts on unsigned
+Windows and macOS builds are in **[INSTALL.md](INSTALL.md#desktop-app)**.
 
 The desktop app releases on its own `gui-v*` tags, independently of the command-line releases.
 

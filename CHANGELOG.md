@@ -12,6 +12,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v2.0.0](https://github.com/agentjp/bdinfo-rs/compare/v1.2.0...v2.0.0) (2026-07-20)
+
+### ⚠ BREAKING CHANGES
+
+* **core:** `BdRom::open`, `open_with`, `open_resilient`, and `open_resilient_with` take a
+  `ScanMode` — `Metadata`, `Codecs`, or `Full` — where they previously took a `bool` selecting the
+  measured pass. `open_with` and `open_resilient_with` also take a `&AtomicBool` cancel flag:
+  set it from any thread and the scan aborts at its next read chunk with
+  `BdError::ScanCancelled`. (#114)
+* **report:** `report::text::render_with` takes a `RenderOptions` argument, gating each
+  playlist's `STREAM DIAGNOSTICS` and `QUICK SUMMARY` sections. `render` is unchanged and
+  still emits the locked default report with every section on. (#114)
+
+### Added
+
+* **Desktop app:** `bdinfo-rs-gui`, a native GUI over the same analyzer — open a `BDMV` folder
+  or `.iso`, pick playlists from the familiar three-pane view with draggable splitters and
+  resizable sortable columns, scan with live progress and cancel, then view, save, or copy the
+  report. Pure Rust on `iced`, GPU-accelerated through wgpu with a software fallback; no
+  webview and no bundled runtime. The report it renders is byte-identical to the CLI's.
+  Settings, window geometry, theme, and UI scale persist; a per-launch `gui.log` records the
+  selected graphics adapter, panics, and otherwise-swallowed errors. (#114)
+* **Desktop app distribution:** `gui-v*` tags publish their own GitHub Release with twelve
+  artifacts — per-user `.msi` and portable `.zip` for Windows x64/arm64, `.dmg` for Intel and
+  Apple Silicon, and `.AppImage` / `.deb` / `.rpm` for Linux x64/arm64 — each covered by
+  `SHA256SUMS` and a Sigstore build-provenance attestation. The app is also published to
+  WinGet (`agentjp.bdinfo-rs-gui`), a Homebrew cask, the AUR (`bdinfo-rs-gui-bin`), the
+  Cloudsmith apt/dnf repository, and crates.io. Installation and the first-launch prompts on
+  the unsigned Windows and macOS builds are documented in
+  [INSTALL.md](INSTALL.md#desktop-app). (#132)
+* **CLI:** `Ctrl+C` during a scan cancels it gracefully and exits with code 130, instead of
+  killing the process mid-write. (#114)
+
+### Fixes
+
+* **codec:** print the Maximum Content Light Level unit as `cd/m2`, matching the MaxFALL and
+  mastering-display luminance lines; the BDInfo lineage spells this one line `cd / m2`. The
+  divergence is recorded in [DIFFERENCES.md](DIFFERENCES.md). (#114)
+* **ci:** resolve appimagetool freshness against its highest semver tag (#136), stage the GUI
+  release downloads outside the tracked assets directory (#134), and compile the Linux
+  packagers from source on the GUI release legs (#133).
+
 ## [v1.2.0](https://github.com/agentjp/bdinfo-rs/compare/v1.1.0...v1.2.0) (2026-07-11)
 
 ### Fixes

@@ -1,6 +1,7 @@
 //! bdinfo-rs desktop GUI — the library half.
 //!
-//! Holds the pure logic — the playlist view-model ([`model`]), the
+//! Holds the pure logic — the argv surface and attended-session evidence
+//! ([`args`]), the playlist view-model ([`model`]), the
 //! master-detail pane view-models ([`panes`]), the selection model (`selection`),
 //! the live-progress model ([`progress`]), the flow state machine ([`flow`]),
 //! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
@@ -25,6 +26,7 @@
 // `volume` opt out of the 100% coverage floor, as in the CLI.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod args;
 pub mod clipboard;
 pub mod columns;
 pub mod diagnostics;

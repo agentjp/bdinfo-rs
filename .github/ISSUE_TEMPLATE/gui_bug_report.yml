@@ -1,0 +1,112 @@
+name: Desktop app bug report
+description: The bdinfo-rs GUI won't start, renders wrong, or misbehaves as an application.
+labels: ["bug", "gui"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for the **desktop app as an application** — it won't start, the
+        window renders wrong or not at all, fonts/scaling/multi-monitor problems,
+        controls that don't respond, settings that don't stick, a crash on launch.
+
+        The app and the `bdinfo-rs` command line produce the **byte-identical**
+        disc report, so a wrong value in the report is not a GUI issue: file it with
+        the [Bug report](https://github.com/agentjp/bdinfo-rs/issues/new?template=bug_report.yml)
+        or [Output difference](https://github.com/agentjp/bdinfo-rs/issues/new?template=output_difference.yml)
+        form instead.
+
+        A panic, hang, or out-of-bounds read on malformed input is a **security
+        issue** — please report those privately via the **Security** tab →
+        **Report a vulnerability** (see
+        [SECURITY.md](https://github.com/agentjp/bdinfo-rs/blob/master/SECURITY.md)).
+
+        > **Do not attach copyrighted disc content.** Screenshots of the app are
+        > welcome; describe the on-disc structure rather than attaching real movie
+        > data.
+  - type: input
+    id: version
+    attributes:
+      label: bdinfo-rs GUI version
+      description: Output of `bdinfo-rs-gui --version`.
+      placeholder: "2.0.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: "Windows 11 x64 / Ubuntu 24.04 arm64 / macOS 15 arm64"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-route
+    attributes:
+      label: How did you install it?
+      options:
+        - WinGet
+        - MSI installer
+        - Portable .zip
+        - Homebrew cask
+        - .dmg
+        - AppImage
+        - .deb / .rpm
+        - AUR
+        - cargo install
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: display
+    attributes:
+      label: Display environment
+      description: >-
+        On Linux, Wayland or X11 (and the desktop — GNOME, KDE, …). Everywhere,
+        anything unusual about the display: fractional or per-monitor scaling,
+        multiple monitors, a remote/virtual session, a specific GPU or driver.
+        The app logs the graphics adapter it selected; the log below carries it.
+      placeholder: "Wayland / GNOME 46, single 4K monitor at 150% scaling, AMD RADV"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead, and the steps that get there from a fresh launch.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: gui.log
+      description: >-
+        Attach or paste `gui.log`. It sits next to the settings file `gui.conf`:
+        `%APPDATA%\bdinfo-rs\` on Windows, `~/Library/Application Support/bdinfo-rs/`
+        on macOS, `$XDG_CONFIG_HOME/bdinfo-rs/` (usually `~/.config/bdinfo-rs/`) on
+        Linux — or beside the executable in portable mode (a `bdinfo-rs-gui.portable`
+        file in that directory). It is **truncated at every launch**, so reproduce the
+        problem and collect the file before starting the app again.
+
+        It records the selected graphics adapter, panics, and errors the app
+        otherwise tolerates. It can also contain **local file paths** (the disc you
+        opened, where a report was saved) — redact them if you'd rather not share
+        them.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report contains no copyrighted disc content.
+          required: true
+        - label: This is about the app's behavior, not a value in the disc report (those go to the Bug report or Output difference form).
+          required: true
+        - label: This is not a security issue (panics / hangs / out-of-bounds reads on malformed input go through the Security tab).
+          required: true

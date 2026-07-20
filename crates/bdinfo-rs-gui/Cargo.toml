@@ -1,16 +1,24 @@
 [package]
 name = "bdinfo-rs-gui"
 # Lock-stepped with the root workspace's version by hand (this independent
-# workspace cannot inherit [workspace.package]); publish = false makes it
-# cosmetic, but a public tree should not carry a stray number.
+# workspace cannot inherit [workspace.package]); the gui-release.yml tag guard
+# and the gui-publish.yml crates leg both refuse a gui-v* tag that disagrees.
 version = "2.0.0"
-publish = false
 edition = "2024"
 rust-version = "1.96"
 license = "LGPL-2.1-or-later"
 authors = ["bdinfo-rs contributors"]
 repository = "https://github.com/agentjp/bdinfo-rs"
 description = "Native desktop GUI for the bdinfo-rs Blu-ray analyzer (iced, pure-Rust)."
+readme = "README.md"
+keywords = ["bluray", "bdmv", "m2ts", "gui", "video"]
+categories = ["multimedia::video", "gui"]
+
+# Keep the OS-packaging inputs (WiX source, icons, metainfo, license RTF) and
+# the CI snapshot pins out of the published crate — `cargo install` builds the
+# binary from src/ + assets/; these directories feed only the repo's release
+# packaging and snapshot gates.
+exclude = ["/packaging", "/snapshots"]
 
 # INDEPENDENT workspace — keeps the large iced/wgpu/winit/cosmic-text dependency
 # tree (its runtime graphics deps + unavoidable transitive version duplications)
@@ -40,7 +48,10 @@ name = "bdinfo-rs-gui"
 path = "src/main.rs"
 
 [dependencies]
-bdinfo-rs-core = { path = "../bdinfo-rs-core" }
+# path + version, the same shape as the root [workspace.dependencies] pin, so
+# the crate is publishable: cargo strips the path on publish and resolves the
+# registry copy from the version alone. Keep lock-stepped with `version` above.
+bdinfo-rs-core = { path = "../bdinfo-rs-core", version = "2.0.0" }
 # Pure-Rust GUI: wgpu (+ tiny-skia CPU fallback) / cosmic-text / winit. No C.
 # `tokio` makes iced's executor a Tokio runtime — the ambient context zbus's
 # tokio backend (forced tree-wide by rfd below; cargo features are additive)
@@ -83,7 +94,9 @@ proptest = "1"
 # desktop portal (without a portal + backend the pickers silently fail), and
 # wgpu dlopens the Vulkan loader (without it iced falls back to tiny-skia
 # software rendering). No config file is packaged: gui.conf is per-user runtime
-# data the app creates, left untouched on uninstall.
+# data the app creates, left untouched on uninstall. The icons install under the
+# AppStream id rather than their source name, which is what the desktop file's
+# Icon= key names.
 [package.metadata.deb]
 maintainer = "bdinfo-rs contributors <bdinfo-rs@users.noreply.github.com>"
 section = "utils"
@@ -94,16 +107,16 @@ extended-description = "Native desktop GUI for bdinfo-rs, the memory-safe Blu-ra
 assets = [
     ["target/release/bdinfo-rs-gui", "usr/bin/", "755"],
     ["packaging/copyright", "usr/share/doc/bdinfo-rs-gui/copyright", "644"],
-    ["packaging/bdinfo-rs-gui.desktop", "usr/share/applications/", "644"],
-    ["packaging/io.github.agentjp.bdinfo_rs_gui.metainfo.xml", "usr/share/metainfo/", "644"],
-    ["packaging/icons/hicolor/16x16/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
-    ["packaging/icons/hicolor/24x24/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
-    ["packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
-    ["packaging/icons/hicolor/48x48/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
-    ["packaging/icons/hicolor/64x64/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
-    ["packaging/icons/hicolor/128x128/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
-    ["packaging/icons/hicolor/256x256/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
-    ["packaging/icons/hicolor/512x512/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["packaging/io.github.agentjp.bdinfo-rs.desktop", "usr/share/applications/", "644"],
+    ["packaging/io.github.agentjp.bdinfo-rs.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["packaging/icons/hicolor/16x16/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/16x16/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/24x24/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/24x24/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/32x32/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/48x48/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/48x48/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/64x64/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/64x64/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/128x128/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/128x128/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/256x256/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/256x256/apps/io.github.agentjp.bdinfo-rs.png", "644"],
+    ["packaging/icons/hicolor/512x512/apps/bdinfo-rs-gui.png", "usr/share/icons/hicolor/512x512/apps/io.github.agentjp.bdinfo-rs.png", "644"],
 ]
 
 # cargo-generate-rpm (same asset set). auto-req scans the binary's dynamic
@@ -113,16 +126,16 @@ assets = [
 auto-req = "auto"
 assets = [
     { source = "target/release/bdinfo-rs-gui", dest = "/usr/bin/bdinfo-rs-gui", mode = "755" },
-    { source = "packaging/bdinfo-rs-gui.desktop", dest = "/usr/share/applications/bdinfo-rs-gui.desktop", mode = "644" },
-    { source = "packaging/io.github.agentjp.bdinfo_rs_gui.metainfo.xml", dest = "/usr/share/metainfo/io.github.agentjp.bdinfo_rs_gui.metainfo.xml", mode = "644" },
-    { source = "packaging/icons/hicolor/16x16/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/16x16/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/24x24/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/24x24/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/32x32/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/48x48/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/48x48/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/64x64/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/64x64/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/128x128/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/128x128/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/256x256/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/256x256/apps/bdinfo-rs-gui.png", mode = "644" },
-    { source = "packaging/icons/hicolor/512x512/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/512x512/apps/bdinfo-rs-gui.png", mode = "644" },
+    { source = "packaging/io.github.agentjp.bdinfo-rs.desktop", dest = "/usr/share/applications/io.github.agentjp.bdinfo-rs.desktop", mode = "644" },
+    { source = "packaging/io.github.agentjp.bdinfo-rs.metainfo.xml", dest = "/usr/share/metainfo/io.github.agentjp.bdinfo-rs.metainfo.xml", mode = "644" },
+    { source = "packaging/icons/hicolor/16x16/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/16x16/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/24x24/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/24x24/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/32x32/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/48x48/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/48x48/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/64x64/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/64x64/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/128x128/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/256x256/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
+    { source = "packaging/icons/hicolor/512x512/apps/bdinfo-rs-gui.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.agentjp.bdinfo-rs.png", mode = "644" },
 ]
 
 # The portal + Vulkan runtime couplings, as weak deps (see the deb recommends;
@@ -168,12 +181,10 @@ arithmetic_side_effects = "deny"
 unwrap_used = "deny"
 panic = "deny"
 
-# ── allow-list: each is intrinsic to a publish=false iced GUI leaf, not a bug ──
+# ── allow-list: each is intrinsic to an iced GUI leaf, not a bug ──
 # The iced/wgpu/winit tree carries duplicate versions of low-level crates that no
 # leaf can dedupe (design-review §2.2), so dup-detection is noise here.
 multiple_crate_versions = "allow"
-# Not a crates.io package (publish=false leaf): it carries no keywords/categories.
-cargo_common_metadata = "allow"
 # The view-model lives in a `model` module and the scan seam in `scan`; names like
 # `model::PlaylistRow` / `scan::ScanData` read naturally and renaming to dodge the
 # prefix would be worse (the core workspace allows this lint for the same reason).

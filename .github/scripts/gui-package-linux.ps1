@@ -40,6 +40,9 @@ $appimagetoolVersion = '1.9.1'
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..')).Path
 $crate = Join-Path $repo 'crates/bdinfo-rs-gui'
 $packaging = Join-Path $crate 'packaging'
+# The AppStream component id, which also names the desktop file, the metainfo
+# file and the icons as installed (see the metainfo's own header for the shape).
+$appId = 'io.github.agentjp.bdinfo-rs'
 $binary = Join-Path $crate 'target/release/bdinfo-rs-gui'
 if (-not (Test-Path $binary)) { Write-Host "FAILED: no release binary at $binary"; exit 1 }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -89,16 +92,25 @@ New-Item -ItemType Directory (Join-Path $appDir 'usr/share/metainfo') -Force | O
 Copy-Item $binary (Join-Path $appDir 'usr/bin/bdinfo-rs-gui')
 & chmod +x (Join-Path $appDir 'usr/bin/bdinfo-rs-gui')
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: chmod'; exit 1 }
-Copy-Item (Join-Path $packaging 'bdinfo-rs-gui.desktop') (Join-Path $appDir 'usr/share/applications')
-Copy-Item (Join-Path $packaging 'io.github.agentjp.bdinfo_rs_gui.metainfo.xml') (Join-Path $appDir 'usr/share/metainfo')
+Copy-Item (Join-Path $packaging "$appId.desktop") (Join-Path $appDir 'usr/share/applications')
+Copy-Item (Join-Path $packaging "$appId.metainfo.xml") (Join-Path $appDir 'usr/share/metainfo')
+# The LGPL-2.1 text and the attribution notice ride inside the AppImage — a
+# portable format carries no package-manager license metadata, so the texts
+# themselves are the only license information a recipient gets.
+$doc = Join-Path $appDir 'usr/share/doc/bdinfo-rs-gui'
+New-Item -ItemType Directory $doc -Force | Out-Null
+Copy-Item (Join-Path $repo 'LICENSE') $doc
+Copy-Item (Join-Path $repo 'NOTICE') $doc
+# The icons install under the AppStream id, which is what the desktop file's
+# Icon= key names; their source name is the crate's.
 foreach ($size in 16, 24, 32, 48, 64, 128, 256, 512) {
     $dir = Join-Path $appDir "usr/share/icons/hicolor/${size}x${size}/apps"
     New-Item -ItemType Directory $dir -Force | Out-Null
-    Copy-Item (Join-Path $packaging "icons/hicolor/${size}x${size}/apps/bdinfo-rs-gui.png") $dir
+    Copy-Item (Join-Path $packaging "icons/hicolor/${size}x${size}/apps/bdinfo-rs-gui.png") (Join-Path $dir "$appId.png")
 }
 # The four spec-mandated root entries.
-Copy-Item (Join-Path $packaging 'bdinfo-rs-gui.desktop') $appDir
-Copy-Item (Join-Path $packaging 'icons/hicolor/256x256/apps/bdinfo-rs-gui.png') (Join-Path $appDir 'bdinfo-rs-gui.png')
+Copy-Item (Join-Path $packaging "$appId.desktop") $appDir
+Copy-Item (Join-Path $packaging 'icons/hicolor/256x256/apps/bdinfo-rs-gui.png') (Join-Path $appDir "$appId.png")
 Copy-Item (Join-Path $packaging 'icons/hicolor/256x256/apps/bdinfo-rs-gui.png') (Join-Path $appDir '.DirIcon')
 & ln -s usr/bin/bdinfo-rs-gui (Join-Path $appDir 'AppRun')
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: ln -s AppRun'; exit 1 }

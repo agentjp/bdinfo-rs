@@ -16,6 +16,9 @@
 //! or a boot argument (`bdinfo-rs-gui <path>`) — all funnelling into the same
 //! open flow. The recalled last source is not a fourth: it only pre-fills the
 //! Source field with Rescan live (see `boot`); nothing scans until asked.
+//! The only non-window surface is `--version`/`--help` ([`args::classify`]),
+//! answered on stdout with exit 0 before any iced machinery loads — the
+//! handle unattended packaging validators probe a shipped binary with.
 #![forbid(unsafe_code)]
 // The window is a leaf binary, not a library: a Windows release build hides the
 // console so launching it does not flash a terminal. No effect on other targets.
@@ -23,7 +26,9 @@
 
 mod ui;
 
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -39,7 +44,7 @@ use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::{self, ProgressModel};
 use bdinfo_rs_gui::scan::{self, Input, Structural};
 use bdinfo_rs_gui::theme::{Palette, ThemePref};
-use bdinfo_rs_gui::{clipboard, columns, icon, paths, settings};
+use bdinfo_rs_gui::{args, clipboard, columns, icon, paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
@@ -66,12 +71,43 @@ const ICON_SIZE: u32 = 128;
 /// every platform, and (via [`window_settings`]) the Wayland/X11
 /// `application_id` on Linux. On Wayland the runtime RGBA icon is ignored by
 /// protocol: the dock icon, window grouping, and pinning come solely from a
-/// `.desktop` file matched against this id, so it must equal the shipped
-/// `.desktop` file's basename / `StartupWMClass` — an empty id (iced's Linux
-/// default) means a generic gear icon and broken grouping.
+/// `.desktop` file matched against this id — first by basename, then by
+/// `StartupWMClass`. The shipped entry is named for the AppStream component id
+/// instead, so it is the `StartupWMClass` line that must equal this string. An
+/// empty id (iced's Linux default) means a generic gear icon and broken
+/// grouping.
 const APP_ID: &str = "bdinfo-rs-gui";
 
-fn main() -> iced::Result {
+fn main() -> ExitCode {
+    // The two informational flags are answered before any iced/winit/tokio
+    // machinery loads: package-manager validation harnesses launch installed
+    // binaries unattended with `--version` and judge the exit code, so this
+    // path must not depend on a display, a GPU, or an event loop. The print
+    // results are discarded exactly like the `bdinfo-rs` CLI's bare-invocation
+    // help print: a closed or failed stdout must not turn an informational
+    // print into a non-zero exit. On a Windows release build
+    // (`windows_subsystem = "windows"`) no console is attached and the prints
+    // go nowhere — the exit code is the contract a validator reads; attaching
+    // to the parent console would take `AttachConsole`, an `unsafe` extern
+    // call, unavailable under `forbid(unsafe_code)`.
+    match args::classify(std::env::args_os().skip(1)) {
+        args::Invocation::Version => {
+            let _ = writeln!(std::io::stdout(), "{}", args::VERSION_LINE).is_ok();
+            ExitCode::SUCCESS
+        }
+        args::Invocation::Help => {
+            let _ = writeln!(std::io::stdout(), "{}", args::USAGE).is_ok();
+            ExitCode::SUCCESS
+        }
+        args::Invocation::Window(path) => run_window(path),
+    }
+}
+
+/// Boots the window: diagnostics, the persisted state, then the iced
+/// application. `open` is the disc path argv carried, if any. A failed boot
+/// exits non-zero with the error on stderr; the dialog in
+/// [`surface_boot_failure`] is presentation, not the exit path.
+fn run_window(open: Option<PathBuf>) -> ExitCode {
     // One boot-time resolution of the config path and load of the persisted
     // state: the geometry feeds the window settings, the rest seeds the app in
     // `boot`. The path travels into the app so every later save writes the
@@ -98,56 +134,74 @@ fn main() -> iced::Result {
     let persisted = config.as_deref().map_or_else(settings::Settings::default, settings::load_from);
     let persisted = debug_window_override(persisted);
     let window = window_settings(&persisted);
-    let result =
-        iced::application(move || boot(config.clone(), persisted.clone()), App::update, App::view)
-            // Replaces the whole Settings, so it comes before the font
-            // builders below (which merge into it).
-            .settings(iced::Settings { id: Some(APP_ID.to_owned()), ..iced::Settings::default() })
-            .title(App::title)
-            .theme(App::theme)
-            .style(App::style)
-            // The persisted UI scale, multiplied on top of the OS DPI — the
-            // X11 fractional-DPI escape hatch, doubling as an accessibility
-            // zoom. The open Settings dialog's draft previews its pick live,
-            // exactly like the theme chips.
-            .scale_factor(App::ui_scale)
-            // "Auto" tracks the desktop live; while the initial scan runs, also drive
-            // the indeterminate progress-bar animation.
-            .subscription(App::subscription)
-            .default_font(ui::UI)
-            .font(
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/assets/fonts/Inter-Variable.ttf"
-                ))
-                .as_slice(),
-            )
-            .font(
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/assets/fonts/JetBrainsMono-Regular.ttf"
-                ))
-                .as_slice(),
-            )
-            .window(window)
-            .run();
-    if let Err(error) = &result {
-        surface_boot_failure(error, log_path.as_deref());
+    let result = iced::application(
+        move || boot(config.clone(), persisted.clone(), open.clone()),
+        App::update,
+        App::view,
+    )
+    // Replaces the whole Settings, so it comes before the font
+    // builders below (which merge into it).
+    .settings(iced::Settings { id: Some(APP_ID.to_owned()), ..iced::Settings::default() })
+    .title(App::title)
+    .theme(App::theme)
+    .style(App::style)
+    // The persisted UI scale, multiplied on top of the OS DPI — the
+    // X11 fractional-DPI escape hatch, doubling as an accessibility
+    // zoom. The open Settings dialog's draft previews its pick live,
+    // exactly like the theme chips.
+    .scale_factor(App::ui_scale)
+    // "Auto" tracks the desktop live; while the initial scan runs, also drive
+    // the indeterminate progress-bar animation.
+    .subscription(App::subscription)
+    .default_font(ui::UI)
+    .font(
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Inter-Variable.ttf"))
+            .as_slice(),
+    )
+    .font(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/fonts/JetBrainsMono-Regular.ttf"
+        ))
+        .as_slice(),
+    )
+    .window(window)
+    .run();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // Returning `ExitCode` instead of the error skips `Termination`'s
+            // own stderr report, so the error is printed here — before the
+            // dialog, which blocks on a human.
+            let _ = writeln!(std::io::stderr(), "Error: {error}").is_ok();
+            surface_boot_failure(&error, log_path.as_deref());
+            ExitCode::FAILURE
+        }
     }
-    result
 }
 
 /// A failed boot (both compositors declining, or the event loop dying) must
-/// not end as an invisible exit 1: log it, then show it. rfd's synchronous
-/// message dialog is plain `MessageBoxW` on Windows — a native modal that
-/// needs no event loop, so it renders fine after `run()` has failed
-/// (verified live) — and `NSAlert` on macOS. On Linux it rides the desktop
-/// portal over zbus, whose tokio backend panics without an ambient runtime;
-/// the app's executor died with the boot, so the dialog runs inside a fresh
-/// one. Wherever no dialog host exists it fails into the same log
-/// (best-effort by construction — rfd routes its own errors to the facade).
+/// not end as an invisible exit 1: log it, then — only for a human at a
+/// desktop — show it. rfd's synchronous message dialog is plain `MessageBoxW`
+/// on Windows — a native modal that needs no event loop, so it renders fine
+/// after `run()` has failed (verified live) — and `NSAlert` on macOS. On
+/// Linux it rides the desktop portal over zbus, whose tokio backend panics
+/// without an ambient runtime; the app's executor died with the boot, so the
+/// dialog runs inside a fresh one. Wherever no dialog host exists it fails
+/// into the same log (best-effort by construction — rfd routes its own
+/// errors to the facade).
+///
+/// In an unattended session ([`attended_session`]) the dialog is suppressed:
+/// a modal nobody can dismiss blocks the process until some job timeout —
+/// strictly worse than the non-zero exit and stderr line it decorates, and
+/// exactly what a packaging validation sandbox with a desktop but no human
+/// would hit.
 fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>) {
     log::error!("boot failed: {error}");
+    if !attended_session() {
+        log::info!("unattended session: boot-failure dialog suppressed");
+        return;
+    }
     let mut description = format!("The window could not be started.\n\n{error}");
     if let Some(path) = log_path {
         use std::fmt::Write as _;
@@ -174,6 +228,38 @@ fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>)
     show();
 }
 
+/// Whether a human is plausibly at this desktop — the boot-failure dialog is
+/// shown only then. The one env-bound read in the attended story; the
+/// decision itself is pure ([`args::attended`] / [`args::attended_unix`],
+/// where the signals are documented).
+///
+/// Environment evidence is the whole mechanism, per platform the narrowest
+/// reliable signal available to safe code: on Windows the direct probe (an
+/// interactive window station, `GetUserObjectInformationW`) is an `unsafe`
+/// extern call, unavailable under `forbid(unsafe_code)` — and the truly
+/// window-station-less case needs no gate, since `MessageBoxW` fails
+/// immediately there; macOS has no safe process-level probe either. Unix
+/// adds the display-server variables: without one no dialog can render at
+/// all.
+fn attended_session() -> bool {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        args::attended(
+            std::env::var_os("CI").as_deref(),
+            std::env::var_os("BDINFO_GUI_NONINTERACTIVE").as_deref(),
+        )
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        args::attended_unix(
+            std::env::var_os("CI").as_deref(),
+            std::env::var_os("BDINFO_GUI_NONINTERACTIVE").as_deref(),
+            std::env::var_os("DISPLAY").as_deref(),
+            std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        )
+    }
+}
+
 /// Boots the app and fires a one-shot request for the OS theme, so the first
 /// frame matches the desktop's light/dark setting. The persisted state seeds
 /// the launch: the stored theme preference applies, and the last opened source
@@ -181,10 +267,15 @@ fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>)
 /// (`BDInfo` seeds its source box from `LastPath` the same way), but nothing
 /// scans until asked; a vanished path starts clean. A command-line path
 /// (`bdinfo-rs-gui <path>`, `BDInfo`'s `args[0]`) opens at boot through the same
-/// classify-and-list road a drop takes — read from the OS-native argv, so a
-/// non-UTF-8 path survives intact. In a **debug** build it also applies the
-/// screenshot-harness environment hooks (see [`debug_boot`]).
-fn boot(config: Option<PathBuf>, persisted: settings::Settings) -> (App, Task<Message>) {
+/// classify-and-list road a drop takes — `open` arrives from
+/// [`args::classify`] over the OS-native argv, so a non-UTF-8 path survives
+/// intact. In a **debug** build it also applies the screenshot-harness
+/// environment hooks (see the debug `boot_with`).
+fn boot(
+    config: Option<PathBuf>,
+    persisted: settings::Settings,
+    open: Option<PathBuf>,
+) -> (App, Task<Message>) {
     let mut app = App {
         config,
         theme_pref: ThemePref::from_choice(persisted.theme),
@@ -200,8 +291,8 @@ fn boot(config: Option<PathBuf>, persisted: settings::Settings) -> (App, Task<Me
         app.flow = Flow::recall(input);
     }
     let mut tasks = vec![iced::system::theme().map(Message::OsTheme)];
-    if let Some(path) = std::env::args_os().nth(1) {
-        tasks.push(Task::done(Message::OpenPath(PathBuf::from(path))));
+    if let Some(path) = open {
+        tasks.push(Task::done(Message::OpenPath(path)));
     }
     boot_with(app, Task::batch(tasks))
 }
@@ -572,11 +663,21 @@ fn drive_marker(index: usize, name: &str, stage: Stage) {
     }
 }
 
-/// The per-platform config file location, resolved from the process
-/// environment — `None` when no base directory can be resolved (the app then
-/// runs without persistence). The one env-bound read in the config story; the
-/// per-platform path math it dispatches to is pure ([`settings`]).
+/// The config file location, resolved from the process environment: the
+/// portable path beside the executable when its marker file is there,
+/// otherwise the per-platform user directory. `None` when no base directory
+/// can be resolved (the app then runs without persistence). The one env-bound
+/// read in the config story; the path math it dispatches to is pure
+/// ([`settings`]).
 fn config_path() -> Option<PathBuf> {
+    // Portable mode wins where it applies, so a copy carried between machines
+    // keeps its settings instead of writing into each host's user profile.
+    // `current_exe()` can fail; a launch that cannot locate itself is simply
+    // not portable and still boots.
+    if let Some(portable) = settings::portable_config_path(std::env::current_exe().ok().as_deref())
+    {
+        return Some(portable);
+    }
     #[cfg(target_os = "windows")]
     {
         settings::windows_config_path(std::env::var_os("APPDATA").as_deref())

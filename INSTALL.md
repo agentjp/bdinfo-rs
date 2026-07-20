@@ -8,6 +8,7 @@ are separate downloads; the browser version needs no install at all
 
 | Route | Platforms | Updates | Ships man page + completions |
 |---|---|---|---|
+| [Desktop app](#desktop-app) | Windows, macOS, Linux | automatic via a package manager | n/a |
 | [Package manager](#package-managers) | all | automatic | Homebrew, apt, dnf |
 | [apt / dnf repository](#apt--dnf) | Linux | automatic | yes |
 | [Install script](#install-script) | all | manual | no |
@@ -16,6 +17,81 @@ are separate downloads; the browser version needs no install at all
 | [From source](#from-source) | all | `git pull` | regenerated at build |
 
 ---
+
+## Desktop app
+
+The desktop app is `bdinfo-rs-gui`, released on its own `gui-v*` tags and versioned
+independently of the command-line binary. The rest of this page covers the command line.
+
+```sh
+# Windows — WinGet
+winget install agentjp.bdinfo-rs-gui
+
+# macOS / Linux — Homebrew cask
+brew install --cask agentjp/tap/bdinfo-rs-gui
+
+# Arch Linux — AUR (with your helper of choice)
+yay -S bdinfo-rs-gui-bin
+
+# Debian / Ubuntu and derivatives — Cloudsmith
+curl -1sLf 'https://dl.cloudsmith.io/public/bdinfo-rs/bdinfo-rs/setup.deb.sh' | sudo -E bash
+sudo apt install bdinfo-rs-gui
+
+# Fedora / RHEL / openSUSE — Cloudsmith
+curl -1sLf 'https://dl.cloudsmith.io/public/bdinfo-rs/bdinfo-rs/setup.rpm.sh' | sudo -E bash
+sudo dnf install bdinfo-rs-gui
+
+# Rust — build from crates.io
+cargo install bdinfo-rs-gui
+```
+
+Or download an artifact directly from a
+[`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true). Every
+asset is listed in the release's `SHA256SUMS` and carries a Sigstore build-provenance
+attestation (`gh attestation verify <asset> --repo agentjp/bdinfo-rs`).
+
+| Platform | Artifacts |
+|---|---|
+| Windows x64 | `bdinfo-rs-gui-x86_64-pc-windows-msvc.msi` · `bdinfo-rs-gui-x86_64-pc-windows-msvc.zip` |
+| Windows arm64 | `bdinfo-rs-gui-aarch64-pc-windows-msvc.msi` · `bdinfo-rs-gui-aarch64-pc-windows-msvc.zip` |
+| macOS Intel | `bdinfo-rs-gui-x86_64-apple-darwin.dmg` |
+| macOS Apple Silicon | `bdinfo-rs-gui-aarch64-apple-darwin.dmg` |
+| Linux x64 | `bdinfo-rs-gui-x86_64-unknown-linux-gnu.AppImage` · `.deb` · `.rpm` |
+| Linux arm64 | `bdinfo-rs-gui-aarch64-unknown-linux-gnu.AppImage` · `.deb` · `.rpm` |
+
+### Windows
+
+The `.msi` installs for the current user only and never asks for administrator rights. It shows
+a license page and one optional feature — adding the install directory to your user `PATH`, off
+unless you pick it. It creates a Start-menu entry and uninstalls from Apps & features.
+
+The `.zip` is the portable route: extract it anywhere and run `bdinfo-rs-gui.exe`. By default
+settings and the log still live in `%APPDATA%\bdinfo-rs`; create an empty file named
+`bdinfo-rs-gui.portable` next to the executable and the app keeps `gui.conf` and `gui.log`
+beside itself instead, so the whole folder can move between machines.
+
+The binaries are not code-signed, so SmartScreen may warn on a new release ("Windows protected
+your PC") until that build has been seen enough times. Choose **More info** → **Run anyway**.
+
+### macOS
+
+The `.dmg` is not signed or notarized — there is no Apple Developer account behind this
+project — so Gatekeeper blocks the first launch. Drag the app to Applications, try to open it
+once, then allow it under **System Settings → Privacy & Security → "Open Anyway"**. The
+command-line equivalent:
+
+```sh
+xattr -d com.apple.quarantine "/Applications/bdinfo-rs GUI.app"
+```
+
+On macOS 26 (Tahoe) the same block is reported as **"bdinfo-rs GUI" is damaged and can't be
+opened. You should move it to the Trash.** The app is not damaged; that is Tahoe's wording for
+an unsigned quarantined app, and the two steps above still apply.
+
+### Linux
+
+The `.AppImage` is self-contained — `chmod +x` it and run it. The `.deb` and `.rpm` packages
+install a desktop entry and icon; the Cloudsmith repository above keeps them updated.
 
 ## Package managers
 
