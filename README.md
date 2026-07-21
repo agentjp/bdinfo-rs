@@ -15,12 +15,13 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue)](rust-toolchain.toml)
 [![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
+[![OSS hosting by Cloudsmith](https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith)](https://cloudsmith.com)
 
 [Desktop app](#desktop-app) · [Command line](#command-line) · [Browser](#browser) · [Install](INSTALL.md) · [Differences](DIFFERENCES.md) · [About](ABOUT.md) · [Security](#quality--security)
 
 </div>
 
-![The bdinfo-rs desktop app](assets/screenshot-gui.png)
+![The bdinfo-rs desktop app](crates/bdinfo-rs-gui/packaging/screenshot-report.png)
 
 bdinfo-rs scans `BDMV` folders and `.iso` images — playlists, clips, M2TS demux — and produces the
 classic BDInfo disc report: per-stream video and audio specs, codecs, measured bitrates, resolution,
@@ -59,7 +60,7 @@ yay -S bdinfo-rs-gui-bin                          # Arch
 
 | Windows | macOS | Linux |
 |---|---|---|
-| [`.msi` · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) |
+| [`.msi` · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) |
 
 apt/dnf, `cargo install`, the portable-mode marker, and the first-launch prompts on unsigned
 Windows and macOS builds are in **[INSTALL.md](INSTALL.md#desktop-app)**.
@@ -161,5 +162,8 @@ affiliated with or endorsed by BDInfo; see [NOTICE](NOTICE) for attribution.
 [LGPL-2.1-or-later](LICENSE) — the library may be used from applications under other licenses;
 changes to bdinfo-rs itself must be shared under the same terms. Derived from BDInfo
 (© 2010 Cinema Squid), also LGPL-2.1-or-later.
+
+Package repository hosting (apt/dnf) is graciously provided by
+[Cloudsmith](https://cloudsmith.com).
 
 Why this project exists, and how it is built and maintained: [ABOUT.md](ABOUT.md).

@@ -46,7 +46,7 @@ cargo install bdinfo-rs-gui
 ```
 
 Or download an artifact directly from a
-[`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true). Every
+[`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true). Every
 asset is listed in the release's `SHA256SUMS` and carries a Sigstore build-provenance
 attestation (`gh attestation verify <asset> --repo agentjp/bdinfo-rs`).
 
@@ -118,8 +118,8 @@ cargo install bdinfo-rs
 
 ## apt / dnf
 
-Add the repository once, then use your package manager normally. Hosted by
-[Cloudsmith](https://cloudsmith.com) ♥ OSS.
+Add the repository once, then use your package manager normally. Package repository hosting is
+graciously provided by [Cloudsmith](https://cloudsmith.com) ♥ OSS.
 
 ```sh
 # Debian / Ubuntu and derivatives

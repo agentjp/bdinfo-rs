@@ -13,7 +13,7 @@ is found.
 
 ## Installing
 
-Every [`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true)
+Every [`gui-v*` release](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true)
 ships, for x64 and arm64:
 
 - **Windows** — an `.msi` installer (Start-menu entry, clean uninstall) and a portable `.zip`.
