@@ -58,7 +58,7 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
-version = "4.6.2"
+version = "4.6.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_builder]]
@@ -70,7 +70,7 @@ version = "4.6.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_derive]]
-version = "4.6.1"
+version = "4.6.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
@@ -110,7 +110,7 @@ version = "1.70.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
-version = "0.2.186"
+version = "0.2.188"
 criteria = "safe-to-deploy"
 
 [[exemptions.litrs]]
@@ -238,9 +238,9 @@ version = "0.61.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]
-version = "0.8.54"
+version = "0.8.55"
 criteria = "safe-to-run"
 
 [[exemptions.zerocopy-derive]]
-version = "0.8.54"
+version = "0.8.55"
 criteria = "safe-to-run"
