@@ -15,6 +15,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.96-blue)](rust-toolchain.toml)
 [![license](https://img.shields.io/badge/license-LGPL--2.1--or--later-blue)](LICENSE)
 [![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success)](Cargo.toml)
+[![OSS hosting by Cloudsmith](https://img.shields.io/badge/OSS%20hosting%20by-cloudsmith-blue?logo=cloudsmith)](https://cloudsmith.com)
 
 [Desktop app](#desktop-app) · [Command line](#command-line) · [Browser](#browser) · [Install](INSTALL.md) · [Differences](DIFFERENCES.md) · [About](ABOUT.md) · [Security](#quality--security)
 
