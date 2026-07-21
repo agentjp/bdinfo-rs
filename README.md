@@ -21,7 +21,7 @@
 
 </div>
 
-![The bdinfo-rs desktop app](assets/screenshot-gui.png)
+![The bdinfo-rs desktop app](crates/bdinfo-rs-gui/packaging/screenshot-report.png)
 
 bdinfo-rs scans `BDMV` folders and `.iso` images — playlists, clips, M2TS demux — and produces the
 classic BDInfo disc report: per-stream video and audio specs, codecs, measured bitrates, resolution,
