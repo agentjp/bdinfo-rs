@@ -11,7 +11,8 @@ name: release-status
 # 503; transient errors are retried before this verdict, so a stray UNKNOWN just means
 # "re-run"). It is a diagnostic, so it NEVER reports a transient failure as ABSENT. npm's
 # staged (not-yet-approved) queue is not visible here (needs auth), so ABSENT on npm means
-# "not live"; Homebrew is a rolling tap, so it reports the tap's CURRENT version.
+# "not live"; the Homebrew tap (CLI formula + GUI cask) and the AUR are rolling channels,
+# so their rows report the CURRENT version rather than an archive lookup.
 
 on:
   workflow_dispatch:
@@ -57,17 +58,17 @@ jobs:
 
           # GitHub Release (archive). Accepts a CLI tag (vX.Y.Z) or a GUI tag
           # (gui-vX.Y.Z): the version base is stripped of either prefix, and
-          # both lanes' releases are reported — the GUI's only channel is its
-          # GitHub Release (gui-release.yml), and the two lanes version
-          # independently, so its row simply reads ABSENT when no GUI release
-          # carries this number.
+          # both lanes' releases are reported — the two lanes version
+          # independently, so a lane's row simply reads ABSENT when no release
+          # of that lane carries this number. The GUI's other channels
+          # (gui-publish.yml) have their own rows below.
           ver="${ver#gui-}"
           ver="${ver#v}"
           if try3 gh release view "v$ver" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release (CLI)" "PRESENT"; else add "GitHub Release (CLI)" "ABSENT"; fi
           if try3 gh release view "gui-v$ver" --repo "$GITHUB_REPOSITORY"; then add "GitHub Release (GUI)" "PRESENT"; else add "GitHub Release (GUI)" "ABSENT"; fi
 
-          # crates.io — both crates: 200 present, 404 absent, anything else = couldn't check
-          for crate in bdinfo-rs-core bdinfo-rs; do
+          # crates.io — the three published crates: 200 present, 404 absent, anything else = couldn't check
+          for crate in bdinfo-rs-core bdinfo-rs bdinfo-rs-gui; do
             code=$(http_status "https://crates.io/api/v1/crates/$crate/$ver")
             case "$code" in
               200) add "crates.io/$crate" "PRESENT" ;;
@@ -89,8 +90,24 @@ jobs:
           hbver=$(gh api "repos/agentjp/homebrew-tap/contents/Formula/bdinfo-rs.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -oE 'version "[^"]+"' | head -1 | sed -E 's/version "([^"]+)"/\1/')
           if [ "$hbver" = "$ver" ]; then add "Homebrew tap" "PRESENT (tap at $hbver)"; else add "Homebrew tap" "ABSENT (tap at ${hbver:-none})"; fi
 
+          # Homebrew cask (GUI) — the same rolling shape, read from the tap's
+          # Casks/bdinfo-rs-gui.rb. The read is retried while empty, so a failed
+          # query is reported as UNKNOWN, never as ABSENT.
+          hcver=""; i=0
+          while [ "$i" -lt 3 ]; do
+            hcver=$(gh api "repos/agentjp/homebrew-tap/contents/Casks/bdinfo-rs-gui.rb" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | grep -oE 'version "[^"]+"' | head -1 | sed -E 's/version "([^"]+)"/\1/')
+            [ -n "$hcver" ] && break
+            i=$((i+1)); sleep 2
+          done
+          if [ -z "$hcver" ]; then add "Homebrew cask (GUI)" "UNKNOWN (query failed)"
+          elif [ "$hcver" = "$ver" ]; then add "Homebrew cask (GUI)" "PRESENT (cask at $hcver)"
+          else add "Homebrew cask (GUI)" "ABSENT (cask at $hcver)"; fi
+
           # WinGet — the version manifest directory in microsoft/winget-pkgs (an archive)
           if try3 gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs/$ver"; then add "WinGet" "PRESENT"; else add "WinGet" "ABSENT"; fi
+
+          # WinGet (GUI) — the agentjp.bdinfo-rs-gui manifest tree, same archive shape
+          if try3 gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs-gui/$ver"; then add "WinGet (GUI)" "PRESENT"; else add "WinGet (GUI)" "ABSENT"; fi
 
           # AUR — rolling like the Homebrew tap (one current version per package base).
           # The public RPC reports the pkgver-pkgrel of bdinfo-rs-bin; compare the
@@ -106,6 +123,18 @@ jobs:
           elif [ "${aurv%-*}" = "$ver" ]; then add "AUR bdinfo-rs-bin" "PRESENT (at $aurv)"
           else add "AUR bdinfo-rs-bin" "ABSENT (at $aurv)"; fi
 
+          # AUR bdinfo-rs-gui-bin — the GUI package base, the same rolling RPC check
+          gaurv="?"; i=0
+          while [ "$i" -lt 3 ]; do
+            gaurv=$(curl -sS -A "bdinfo-rs-release-status" "https://aur.archlinux.org/rpc/v5/info?arg[]=bdinfo-rs-gui-bin" 2>/dev/null \
+              | jq -r 'if .resultcount == 0 then "none" else .results[0].Version end' 2>/dev/null || echo "?")
+            { [ "$gaurv" != "?" ] && [ -n "$gaurv" ]; } && break
+            i=$((i+1)); sleep 2
+          done
+          if [ "$gaurv" = "?" ] || [ -z "$gaurv" ]; then add "AUR bdinfo-rs-gui-bin" "UNKNOWN (query failed)"
+          elif [ "${gaurv%-*}" = "$ver" ]; then add "AUR bdinfo-rs-gui-bin" "PRESENT (at $gaurv)"
+          else add "AUR bdinfo-rs-gui-bin" "ABSENT (at $gaurv)"; fi
+
           # Cloudsmith deb/rpm — anonymous public API. Cloudsmith stores the packaging-
           # revisioned version (e.g. 1.2.0-1), so match the version BASE (strip -<revision>),
           # NOT a bare version: query. Expect 4 (deb+rpm x2 arch). Retry a transient failure.
@@ -119,6 +148,21 @@ jobs:
           if [ "$cs" = "?" ] || [ -z "$cs" ]; then add "Cloudsmith deb/rpm" "UNKNOWN (query failed)"
           elif [ "$cs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm" "PRESENT ($cs/4)"
           else add "Cloudsmith deb/rpm" "ABSENT"; fi
+
+          # Cloudsmith deb/rpm (GUI) — the bdinfo-rs-gui packages share the
+          # bdinfo-rs/bdinfo-rs repository with the CLI's, so this row also
+          # filters on the exact package name; the version compare is the same
+          # base-only match. Expect 4 (deb+rpm x2 arch).
+          gcs="?"; i=0
+          while [ "$i" -lt 3 ]; do
+            gcs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=name:bdinfo-rs-gui version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
+              | jq --arg v "$ver" '[.[] | select(.name == "bdinfo-rs-gui") | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
+            { [ "$gcs" != "?" ] && [ -n "$gcs" ]; } && break
+            i=$((i+1)); sleep 2
+          done
+          if [ "$gcs" = "?" ] || [ -z "$gcs" ]; then add "Cloudsmith deb/rpm (GUI)" "UNKNOWN (query failed)"
+          elif [ "$gcs" -gt 0 ] 2>/dev/null; then add "Cloudsmith deb/rpm (GUI)" "PRESENT ($gcs/4)"
+          else add "Cloudsmith deb/rpm (GUI)" "ABSENT"; fi
 
           # Render to the log and the job summary.
           printf '\n=== release status for %s ===\n' "$tag"
