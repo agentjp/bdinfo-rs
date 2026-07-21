@@ -162,4 +162,7 @@ affiliated with or endorsed by BDInfo; see [NOTICE](NOTICE) for attribution.
 changes to bdinfo-rs itself must be shared under the same terms. Derived from BDInfo
 (© 2010 Cinema Squid), also LGPL-2.1-or-later.
 
+Package repository hosting (apt/dnf) is graciously provided by
+[Cloudsmith](https://cloudsmith.com).
+
 Why this project exists, and how it is built and maintained: [ABOUT.md](ABOUT.md).
