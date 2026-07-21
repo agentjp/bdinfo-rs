@@ -497,6 +497,30 @@ jobs:
           BDINFO_GUI_SMOKE_MS: "8000"
         run: xvfb-run -a cargo run --locked
 
+      # The portable marker end to end, one leg: an empty file named
+      # `bdinfo-rs-gui.portable` beside the executable must switch the config
+      # write to `gui.conf` beside the executable and leave the per-user
+      # location untouched (src/settings.rs owns the path choice and
+      # unit-tests it; this asserts the built binary actually consults it).
+      # The marker-less smoke above already proved the other half — a
+      # successful listing persists the config to the per-user location —
+      # which the first assertion reads back before clearing it.
+      - name: Portable-marker smoke (config lands beside the executable)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: |
+          conf="${XDG_CONFIG_HOME:-$HOME/.config}/bdinfo-rs/gui.conf"
+          test -f "$conf" || { echo "the marker-less smoke left no per-user config at $conf"; exit 1; }
+          rm -rf "$(dirname "$conf")"
+          touch target/debug/bdinfo-rs-gui.portable
+          xvfb-run -a ./target/debug/bdinfo-rs-gui
+          test -f target/debug/gui.conf || { echo "portable mode wrote no gui.conf beside the executable"; exit 1; }
+          test ! -e "$conf" || { echo "portable mode still wrote the per-user config at $conf"; exit 1; }
+          rm -f target/debug/bdinfo-rs-gui.portable target/debug/gui.conf
+
       - name: Launch smoke (DX12 WARP)
         if: runner.os == 'Windows'
         working-directory: crates/bdinfo-rs-gui
