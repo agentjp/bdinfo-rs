@@ -60,7 +60,7 @@ yay -S bdinfo-rs-gui-bin                          # Arch
 
 | Windows | macOS | Linux |
 |---|---|---|
-| [`.msi` · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=gui-v&expanded=true) |
+| [`.msi` · portable `.zip`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) | [`.dmg`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) | [`AppImage` · `.deb` · `.rpm`](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true) |
 
 apt/dnf, `cargo install`, the portable-mode marker, and the first-launch prompts on unsigned
 Windows and macOS builds are in **[INSTALL.md](INSTALL.md#desktop-app)**.
