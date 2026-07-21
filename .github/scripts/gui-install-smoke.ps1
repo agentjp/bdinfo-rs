@@ -19,7 +19,11 @@
 #   windows      the portable zip's exe, extracted and probed; then the MSI:
 #                msiexec /i /qn (per-user by design, so the unattended
 #                install itself asserts that no elevation prompt appears),
-#                probe under %LOCALAPPDATA%\Programs, msiexec /x, gone-check.
+#                probe under %LOCALAPPDATA%\Programs, assert the Add/Remove
+#                Programs entry and that the user PATH stays untouched,
+#                msiexec /x, gone-checks; then a second install pass with
+#                ADDLOCAL selecting the opt-in PATH feature, asserting the
+#                PATH entry appears and its uninstall removes it.
 #   windows-zip  the zip probe alone — the release lane's windows-11-arm leg
 #                has no MSI (authored on the x64 runner, where an Arm64
 #                package cannot be installed).
@@ -74,6 +78,28 @@ function Invoke-VersionProbe([string] $exe, [string] $what) {
     Remove-Item -Force $outFile -ErrorAction SilentlyContinue
 }
 
+# The Add/Remove Programs entries whose DisplayName is exactly the product
+# name, searched in both the per-user and the machine hive. A per-user MSI's
+# ARP entry lands under HKLM, not HKCU: Windows Installer's ProductRegister
+# opcode takes no hive argument, so the hive is not authorable. Searching
+# both hives keeps the assertion on the contract — exactly one entry,
+# correct strings — rather than on that quirk.
+function Get-ArpEntry {
+    foreach ($hive in 'HKCU:', 'HKLM:') {
+        Get-ChildItem "$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.GetValue('DisplayName') -eq 'bdinfo-rs GUI' }
+    }
+}
+
+# The stored user PATH (HKCU\Environment), split into entries. Read from the
+# registry, unexpanded, rather than from $env:PATH: the installer edits the
+# stored value, and a running process's environment never sees that edit.
+function Get-UserPathEntry {
+    (Get-Item HKCU:\Environment).GetValue('Path', '',
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -split ';' |
+        Where-Object { $_ }
+}
+
 switch ($Kind) {
     { $_ -in 'windows', 'windows-zip' } {
         # ── portable zip: the exe runs from a plain unpack ───────────────────
@@ -94,12 +120,48 @@ switch ($Kind) {
                 Write-Host '--- msiexec install log (tail) ---'
                 Get-Content $log -Tail 40 | ForEach-Object { Write-Host "    $_" }
             }
-            $installed = Join-Path $env:LOCALAPPDATA 'Programs/bdinfo-rs GUI/bdinfo-rs-gui.exe'
+            $installDir = Join-Path $env:LOCALAPPDATA 'Programs\bdinfo-rs GUI'
+            $installed = Join-Path $installDir 'bdinfo-rs-gui.exe'
             Assert (Test-Path $installed) "install lands at $installed"
             if (Test-Path $installed) { Invoke-VersionProbe $installed 'installed exe' }
+
+            # winget correlates the installed app to its manifest through
+            # these exact strings (AppsAndFeaturesEntries); a drifted
+            # Name/Manufacturer/Version in setup.wxs would break upgrade and
+            # uninstall correlation for every winget user. Exactly one entry:
+            # a second match would mean a stale install leaked in.
+            $arp = @(Get-ArpEntry)
+            Assert ($arp.Count -eq 1) "exactly one ARP entry named 'bdinfo-rs GUI' (got $($arp.Count))"
+            if ($arp.Count -eq 1) {
+                $v = [string]$arp[0].GetValue('DisplayVersion')
+                $pub = [string]$arp[0].GetValue('Publisher')
+                Assert ($v -eq $Version) "ARP DisplayVersion is $Version (got '$v')"
+                Assert ($pub -eq 'bdinfo-rs contributors') "ARP Publisher is 'bdinfo-rs contributors' (got '$pub')"
+            }
+            # The PathEnvironment feature (setup.wxs) sits above the default
+            # INSTALLLEVEL, so the silent road winget and unattended installs
+            # take must leave the user PATH alone.
+            Assert (@(Get-UserPathEntry | Where-Object { $_.TrimEnd('\') -eq $installDir }).Count -eq 0) `
+                'default /qn install leaves the user PATH untouched'
+
             $proc = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
             Assert ($proc.ExitCode -eq 0) "msiexec /x /qn succeeds (got $($proc.ExitCode))"
             Assert (-not (Test-Path $installed)) 'uninstall removes the exe'
+            Assert (@(Get-ArpEntry).Count -eq 0) 'uninstall removes the ARP entry'
+
+            # ── MSI second pass: the opt-in PATH feature ─────────────────────
+            # Feature ids from setup.wxs: Main is the app, PathEnvironment
+            # holds the Environment element that appends [INSTALLDIR] to the
+            # HKCU PATH (Part="last", Permanent="no" — uninstall must take
+            # the entry back out).
+            $proc = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn ADDLOCAL=Main,PathEnvironment" -Wait -PassThru
+            Assert ($proc.ExitCode -eq 0) "msiexec /i /qn ADDLOCAL=Main,PathEnvironment succeeds (got $($proc.ExitCode))"
+            Assert (@(Get-UserPathEntry | Where-Object { $_.TrimEnd('\') -eq $installDir }).Count -eq 1) `
+                'ADDLOCAL install appends the install dir to the user PATH'
+            $proc = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn" -Wait -PassThru
+            Assert ($proc.ExitCode -eq 0) "msiexec /x /qn (PATH pass) succeeds (got $($proc.ExitCode))"
+            Assert (@(Get-UserPathEntry | Where-Object { $_.TrimEnd('\') -eq $installDir }).Count -eq 0) `
+                'uninstall removes the PATH entry'
             Remove-Item -Force $log -ErrorAction SilentlyContinue
         }
     }

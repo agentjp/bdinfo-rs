@@ -1,20 +1,29 @@
 name: install-smoke-test
 
-# Smoke test of the PUBLISHED Homebrew formula (macOS + Linuxbrew): it `brew install`s
-# from the tap and asserts the binary runs AND the man page + bash/zsh/fish completions
-# land in Homebrew's standard locations.
+# Smoke test of the PUBLISHED Homebrew channels: the CLI formula (macOS +
+# Linuxbrew) — `brew install` from the tap, assert the binary runs AND the man
+# page + bash/zsh/fish completions land in Homebrew's standard locations — and
+# the GUI cask (macOS only; a cask is a macOS concept) — `brew install --cask`
+# from the tap and a --version probe of the installed app bundle.
 #
-# Runs AUTOMATICALLY after every release — cargo-dist publishes the formula during
-# v-release.yml, so by the time that workflow completes the tap has the new version —
-# PLUS daily to catch Homebrew/macOS ecosystem drift between releases, PLUS on demand.
+# Runs AUTOMATICALLY after every release — cargo-dist publishes the formula
+# during v-release.yml, and gui-publish.yml commits the cask once gui-release
+# completes — PLUS daily to catch Homebrew/macOS ecosystem drift between
+# releases, PLUS on demand. Either release lane re-runs BOTH jobs; that is
+# deliberate — every probe here is read-only, idempotent, and runs on free
+# hosted runners, so per-workflow job routing would buy nothing.
 #
 # Out of scope by design: Scoop, WinGet, and cargo install/binstall ship the bare
 # executable only (no man/completions), so there is nothing to verify there. The
 # .deb/.rpm/Cloudsmith man+completions contract is verified per-release in packages.yml.
+# The GUI's other channels (crates.io, winget, AUR, Cloudsmith) are likewise
+# checksum- and attestation-verified per release by gui-publish.yml's
+# verify/prepare phases; for both binaries Homebrew is the one rolling channel
+# worth re-probing between releases.
 
-on:  # zizmor: ignore[dangerous-triggers] only installs the published formula; never checks out untrusted PR code
+on:  # zizmor: ignore[dangerous-triggers] only installs the published formula/cask; never checks out untrusted PR code
   workflow_run:
-    workflows: ["Release"]
+    workflows: ["Release", "gui-release"]
     types: [completed]
   schedule:
     - cron: "0 7 * * *" # daily 07:00 UTC
@@ -50,17 +59,40 @@ jobs:
 
       # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
       # check then warns about them on every brew command. We install bdinfo-rs by its
-      # fully-qualified name (which trusts only that item), so those taps are unrelated noise
-      # — trust them to silence it. Scoped to the two named taps ON PURPOSE: if the image
-      # later pre-taps a new one we WANT that warning, so we never blanket-disable the
-      # feature. Tolerant: those taps don't exist on the Linux runner. (The lone remaining
-      # "Sandbox unavailable" warning on Linux is left deliberately — it's an honest signal
-      # that self-resolves when the runner gains a usable sandbox; HOMEBREW_NO_SANDBOX_LINUX
-      # would force-disable it forever and hide that, for a binary formula with nothing to
-      # sandbox.)
-      - name: Trust the runner's pre-tapped third-party taps
+      # fully-qualified name, so those taps are unrelated noise — trust them to silence it.
+      # Scoped to the two named taps ON PURPOSE: if the image later pre-taps a new one we
+      # WANT that warning, so we never blanket-disable the feature. Tolerant: those taps
+      # don't exist on the Linux runner. Our own tap is tapped and trusted up front as
+      # well: a fully-qualified install trusts only the named item, leaves the tap it
+      # auto-adds untrusted, and then warns it is skipping that tap.
+      - name: Trust the taps (ours + the runner's pre-tapped ones)
         shell: bash
-        run: for tap in aws/tap azure/bicep; do brew trust "$tap" 2>/dev/null || true; done
+        run: |
+          brew tap agentjp/tap
+          brew trust agentjp/tap
+          for tap in aws/tap azure/bicep; do brew trust "$tap" 2>/dev/null || true; done
+
+      # Homebrew sandboxes Linux installs through its own bottled bubblewrap.
+      # Ubuntu 24.04 grants unprivileged user namespaces only to binaries an
+      # AppArmor profile admits (kernel.apparmor_restrict_unprivileged_userns=1),
+      # and no stock profile covers linuxbrew's bwrap, so the sandbox probe dies
+      # ("bwrap: setting up uid map: Permission denied") and every install warns
+      # "Sandbox unavailable: building without sandboxing!". An unconfined
+      # profile carrying a userns rule — the same shape Ubuntu ships for
+      # browsers — makes the sandbox work instead of silencing the warning.
+      - name: Grant linuxbrew's bubblewrap unprivileged user namespaces (AppArmor)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo tee /etc/apparmor.d/bwrap-linuxbrew >/dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap-linuxbrew /home/linuxbrew/.linuxbrew/**/bwrap flags=(unconfined) {
+            userns,
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-linuxbrew
 
       - name: Install bdinfo-rs from the tap
         run: brew install agentjp/tap/bdinfo-rs
@@ -75,3 +107,51 @@ jobs:
           test -f "$prefix/share/zsh/site-functions/_bdinfo-rs" || { echo "missing zsh completion"; exit 1; }
           test -f "$prefix/share/fish/vendor_completions.d/bdinfo-rs.fish" || { echo "missing fish completion"; exit 1; }
           echo "Homebrew install OK: binary + man + completions present"
+
+  # The GUI counterpart: install the published cask from the tap and probe the
+  # app bundle's binary. No man/completions contract here — the cask ships
+  # only the .app.
+  homebrew-cask:
+    name: Homebrew cask (macos-15)
+    runs-on: macos-15
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      # A SHA-frozen Homebrew/actions pin — the full rationale sits on the
+      # homebrew job's identical line above.
+      - uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef # zizmor: ignore[ref-version-mismatch]
+
+      # The same tap-trust story as the homebrew job above, for its reasons.
+      - name: Trust the taps (ours + the runner's pre-tapped ones)
+        shell: bash
+        run: |
+          brew tap agentjp/tap
+          brew trust agentjp/tap
+          for tap in aws/tap azure/bicep; do brew trust "$tap" 2>/dev/null || true; done
+
+      - name: Install the GUI cask from the tap
+        run: brew install --cask agentjp/tap/bdinfo-rs-gui
+
+      # The app is ad-hoc signed and never notarized, so Gatekeeper blocks a
+      # quarantined copy before it can execute — the cask's own caveats
+      # section walks interactive users through the same friction, and
+      # brew install accepts no flag to skip quarantining at install time.
+      # Best-effort (`|| true`): the probe below is the assertion, and it
+      # fails loudly if the attribute stuck.
+      - name: Clear the quarantine attribute from the installed app
+        run: xattr -dr com.apple.quarantine '/Applications/bdinfo-rs GUI.app' || true
+
+      # The tap is a rolling channel, so the probe asserts against whatever
+      # version the tap currently ships (read back from brew), never a pinned
+      # literal — the formula job's posture. macOS reads the binary's stdout
+      # fine (unlike a windows_subsystem build), so the printed line is
+      # asserted, not just the exit code.
+      - name: Verify the installed app binary runs and reports the cask's version
+        shell: bash
+        run: |
+          version="$(brew info --cask --json=v2 agentjp/tap/bdinfo-rs-gui | jq -r '.casks[0].version')"
+          out="$('/Applications/bdinfo-rs GUI.app/Contents/MacOS/bdinfo-rs-gui' --version)"
+          [ "$out" = "bdinfo-rs-gui $version" ] || { echo "probe printed '$out'; the tap ships $version"; exit 1; }
+          echo "Homebrew cask install OK: $out"
+
+      - name: Uninstall the cask
+        run: brew uninstall --cask agentjp/tap/bdinfo-rs-gui
