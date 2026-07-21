@@ -81,10 +81,9 @@ function Invoke-VersionProbe([string] $exe, [string] $what) {
 # The Add/Remove Programs entries whose DisplayName is exactly the product
 # name, searched in both the per-user and the machine hive. A per-user MSI's
 # ARP entry lands under HKLM, not HKCU: Windows Installer's ProductRegister
-# opcode takes no hive argument, so the hive is not authorable (measured
-# 2026-07-19, Windows 11 10.0.26200, WiX 3.14.1). Searching both hives keeps
-# the assertion on the contract — exactly one entry, correct strings —
-# rather than on that quirk.
+# opcode takes no hive argument, so the hive is not authorable. Searching
+# both hives keeps the assertion on the contract — exactly one entry,
+# correct strings — rather than on that quirk.
 function Get-ArpEntry {
     foreach ($hive in 'HKCU:', 'HKLM:') {
         Get-ChildItem "$hive\Software\Microsoft\Windows\CurrentVersion\Uninstall" -ErrorAction SilentlyContinue |

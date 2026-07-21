@@ -133,10 +133,10 @@ jobs:
 
       # The app is ad-hoc signed and never notarized, so Gatekeeper blocks a
       # quarantined copy before it can execute — the cask's own caveats
-      # section walks interactive users through the same friction, and brew
-      # itself no longer takes --no-quarantine (removed upstream; probed
-      # 2026-07-21, "invalid option"). Best-effort (`|| true`): the probe
-      # below is the assertion, and it fails loudly if the attribute stuck.
+      # section walks interactive users through the same friction, and
+      # brew install accepts no flag to skip quarantining at install time.
+      # Best-effort (`|| true`): the probe below is the assertion, and it
+      # fails loudly if the attribute stuck.
       - name: Clear the quarantine attribute from the installed app
         run: xattr -dr com.apple.quarantine '/Applications/bdinfo-rs GUI.app' || true
 
