@@ -58,7 +58,7 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
-version = "4.6.3"
+version = "4.6.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_builder]]
@@ -70,7 +70,7 @@ version = "4.6.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_derive]]
-version = "4.6.3"
+version = "4.6.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
@@ -110,7 +110,7 @@ version = "1.70.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
-version = "0.2.188"
+version = "0.2.189"
 criteria = "safe-to-deploy"
 
 [[exemptions.litrs]]
