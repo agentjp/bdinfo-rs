@@ -48,6 +48,20 @@ pub enum BdError {
     /// them.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// A metadata file (`index.bdmv`, `*.mpls`, `*.clpi`, `bdmt_*.xml`) is larger
+    /// than the parsers are willing to buffer whole. Authored BDMV metadata is
+    /// kilobytes, so this only fires on malformed or hostile input — notably a
+    /// UDF File Entry may declare any `InformationLength` over *not-recorded*
+    /// extents, which the reader serves as zeros without the `.iso` storing a
+    /// single corresponding byte, so a file's declared size is no evidence that
+    /// its data exists. Carries the file's name and the cap it exceeded.
+    #[error("metadata file too large: {file} exceeds {limit} bytes")]
+    MetadataTooLarge {
+        /// The file, as named on the disc.
+        file: String,
+        /// The cap, in bytes.
+        limit: u64,
+    },
     /// The packet scan was cancelled through the caller's cooperative cancel
     /// flag (the `cancel` parameter of `BdRom::open_with` /
     /// `BdRom::open_resilient_with`) — the caller's abort, not a disc failure.
@@ -139,6 +153,11 @@ mod tests {
         );
         let io = BdError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
         assert_eq!(io.to_string(), "io error: denied");
+        assert_eq!(
+            BdError::MetadataTooLarge { file: "00000.MPLS".to_owned(), limit: 67_108_864 }
+                .to_string(),
+            "metadata file too large: 00000.MPLS exceeds 67108864 bytes"
+        );
         assert_eq!(BdError::ScanCancelled.to_string(), "scan cancelled");
     }
 
@@ -155,7 +174,7 @@ mod tests {
     fn only_the_io_variant_exposes_an_underlying_cause() {
         // The wrapped IO error is reachable as the error's `source` (the chain the
         // stringifying predecessor discarded); every other variant has no source.
-        // Exercising `source` on all five covers each arm thiserror generates.
+        // Exercising `source` on all six covers each arm thiserror generates.
         let io = BdError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "short"));
         assert_eq!(io.source().expect("Io carries a source").to_string(), "short");
         for sourceless in [
@@ -163,6 +182,7 @@ mod tests {
             BdError::UnexpectedEof,
             BdError::StructureNotFound,
             BdError::MissingClipFile("00000.CLPI".to_owned()),
+            BdError::MetadataTooLarge { file: "00000.MPLS".to_owned(), limit: 1 },
             BdError::ScanCancelled,
         ] {
             assert!(sourceless.source().is_none());
