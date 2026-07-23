@@ -428,6 +428,22 @@ impl TsStreamFile {
         }
     }
 
+    /// Releases the per-PID demux scratch ([`stream_states`](Self::stream_states))
+    /// once a completed scan's public outputs (`streams`, `stream_order`,
+    /// `stream_diagnostics`, `size`, `length`) have been captured.
+    ///
+    /// Pure memory reclaim with no effect on any output: `stream_states` is
+    /// private scratch the demux fills while parsing — including the per-PID PES
+    /// reassembly buffers, which reach the 5 MiB PES clamp
+    /// ([`TsStreamBuffer`]'s `BUFFER_SIZE`) for video — and nothing reads it once
+    /// the scan returns. Each scanned clip is otherwise retained (in both
+    /// measurement passes) in the disc scan's result map with this scratch alive,
+    /// so a multi-clip disc holds every clip's buffers at once at peak. The demux
+    /// unit tests inspect `stream_states` after a scan and so must not call this.
+    pub(crate) fn release_scratch(&mut self) {
+        self.stream_states = BTreeMap::new();
+    }
+
     /// The name shown for this clip — the interleaved `*.ssif`
     /// [`name`](TsInterleavedFile::name) when present and SSIF reading is enabled,
     /// else the `*.m2ts` [`name`](Self::name).
@@ -2126,6 +2142,32 @@ mod tests {
         assert_eq!(st.transfer_count, 3);
         assert_eq!(st.peak_transfer_length, 100);
         assert_eq!(st.peak_transfer_rate, 0); // video: no audio peak rate
+    }
+
+    #[test]
+    fn release_scratch_frees_the_demux_state_and_keeps_the_public_outputs() {
+        // release_scratch drops the private per-PID scratch (its PES buffers)
+        // once the scan is done — the disc scan calls it before parking the
+        // clip in its result map. Its effect is invisible to the report, so it
+        // is pinned directly here: the scratch goes empty while the public
+        // outputs the disc scan reads afterwards (`streams`, `stream_order`,
+        // `stream_diagnostics`, `size`, `length`) are untouched.
+        let mut file = TsStreamFile::new("00000.m2ts");
+        file.stream_states.entry(0x1011).or_default();
+        file.stream_states.entry(0x1100).or_default();
+        file.stream_order.push(0x1011);
+        file.stream_diagnostics.insert(0x1011, Vec::new());
+        file.size = 4096;
+        file.length = 2.5;
+        assert!(!file.stream_states.is_empty(), "the scan populated the scratch");
+
+        file.release_scratch();
+
+        assert!(file.stream_states.is_empty(), "the scratch is freed");
+        assert_eq!(file.stream_order, vec![0x1011], "stream order retained");
+        assert!(file.stream_diagnostics.contains_key(&0x1011), "diagnostics retained");
+        assert_eq!(file.size, 4096, "size retained");
+        assert_eq!(file.length.to_bits(), 2.5_f64.to_bits(), "length retained");
     }
 
     #[test]

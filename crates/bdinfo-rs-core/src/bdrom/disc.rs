@@ -1850,6 +1850,11 @@ fn scan_one_stream_file(
     let cancel = progress.cancel;
     let mut reader = CountingReader { inner, name: file.name().to_ascii_uppercase(), progress };
     stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel)?;
+    // The scan's public outputs are now captured; free the demux scratch (its
+    // per-PID PES buffers) before the file is parked in the result map, so a
+    // multi-clip disc holds only the in-flight clip's buffers, not every scanned
+    // clip's at once. Pure reclaim — see `TsStreamFile::release_scratch`.
+    stream_file.release_scratch();
     Ok(stream_file)
 }
 
