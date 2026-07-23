@@ -397,10 +397,18 @@ cargo build --release                   # app at target/release/bdinfo-rs-gui
 
 Every release asset — both lanes, `v*` and `gui-v*` — is covered by a checksum manifest attached
 to its release (`sha256.sum` on CLI releases, `SHA256SUMS` on GUI releases; CLI archives also
-carry a per-archive `.sha256` sidecar) and a Sigstore build-provenance attestation:
+carry a per-archive `.sha256` sidecar) and a GitHub Artifact Attestation, verifiable with the
+[GitHub CLI](https://cli.github.com/manual/gh_attestation_verify):
 
 ```sh
-gh attestation verify <asset> --repo agentjp/bdinfo-rs
+gh attestation verify <file-path of downloaded artifact> --repo agentjp/bdinfo-rs
+```
+
+You can also download the attestation from
+[GitHub](https://github.com/agentjp/bdinfo-rs/attestations) and verify against that directly:
+
+```sh
+gh attestation verify <file-path of downloaded artifact> --bundle <file-path of downloaded attestation>
 ```
 
 # Shell completions and the man page
