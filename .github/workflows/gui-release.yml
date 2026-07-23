@@ -371,9 +371,20 @@ jobs:
           exe — "More info" → "Run anyway". The `.msi` installs for the
           current user only and never asks for administrator rights.
 
-          Every asset is covered by `SHA256SUMS` and a Sigstore
-          build-provenance attestation:
-          `gh attestation verify <asset> --repo agentjp/bdinfo-rs`.
+          Every asset is listed in the `SHA256SUMS` manifest attached to
+          this release.
+
+          ## Verifying GitHub Artifact Attestations
+
+          The artifacts in this release have attestations generated with GitHub Artifact Attestations. These can be verified by using the [GitHub CLI](https://cli.github.com/manual/gh_attestation_verify):
+          ```sh
+          gh attestation verify <file-path of downloaded artifact> --repo agentjp/bdinfo-rs
+          ```
+
+          You can also download the attestation from [GitHub](https://github.com/agentjp/bdinfo-rs/attestations) and verify against that directly:
+          ```sh
+          gh attestation verify <file-path of downloaded artifact> --bundle <file-path of downloaded attestation>
+          ```
           EOF
           gh release create "$TAG" \
             --verify-tag \
