@@ -2116,6 +2116,59 @@ mod tests {
         assert!(UdfSource::read_label(&*factory).is_err());
     }
 
+    /// The largest length a 30-bit `short_ad` extent can encode (~1 GiB).
+    const MAX_EXTENT: u32 = 0x3FFF_FFFF;
+
+    /// A tiny `.iso` whose `00000.MPLS` declares `extents` × [`MAX_EXTENT`]
+    /// bytes of *not-recorded* (zero-filled, no backing bytes) data.
+    fn sparse_overdeclared_iso(extents: u32) -> Vec<u8> {
+        let mut iso = Iso::new(300);
+        iso.write(256, &avdp(257, 2 * SS as u32));
+        iso.write(257, &pd(0, 260, 50));
+        iso.write(258, &lvd("HOSTILE", SS as u32, 1, 0, &phys_map(0), 1));
+        iso.write(261, &fsd(0, 2));
+        let root_fids = dir_data(&[fid(0x0A, "", 2, 0), fid(0x00, "00000.MPLS", 6, 0)]);
+        let root_len = root_fids.len() as u64;
+        iso.write(262, &fe(261, 4, 0, root_len, &sad(0, root_len as u32, 3)));
+        iso.write(263, &root_fids);
+        // The payload: N not-recorded extents, each the maximum 30-bit length,
+        // and an InformationLength covering them all. None of it is backed by a
+        // single byte of the image.
+        let mut ads = Vec::new();
+        for _ in 0..extents {
+            ads.extend_from_slice(&sad(1, MAX_EXTENT, 99));
+        }
+        let info_len = u64::from(MAX_EXTENT) * u64::from(extents);
+        iso.write(266, &fe(261, 5, 0, info_len, &ads));
+        iso.into_bytes()
+    }
+
+    #[test]
+    fn not_recorded_extents_serve_their_declared_length_without_backing_bytes() {
+        // The amplification primitive `bdrom::disc`'s metadata read cap exists to
+        // bound: a ~600 KB image hands out a 2 GiB file whose bytes are stored
+        // nowhere, so a declared size is no evidence the data exists. Only a
+        // short prefix is read here — materialising the whole declared length is
+        // exactly what the cap prevents.
+        let image = sparse_overdeclared_iso(2);
+        let image_len = u64::try_from(image.len()).expect("image size fits");
+        let src = UdfSource::open(MemIso::boxed(image)).expect("open");
+        let files = src.root().get_files().expect("get_files");
+        let target = files
+            .iter()
+            .find(|f| f.name().eq_ignore_ascii_case("00000.MPLS"))
+            .expect("the over-declared file is listed");
+        let declared = u64::from(MAX_EXTENT).saturating_mul(2);
+        assert_eq!(target.length(), declared);
+        assert!(
+            declared > image_len.saturating_mul(3000),
+            "amplification is unbounded by image size"
+        );
+        let mut prefix = vec![0xAA_u8; 4096];
+        target.open_read().expect("open_read").read_exact(&mut prefix).expect("read prefix");
+        assert!(prefix.iter().all(|&b| b == 0), "not-recorded extents read as zeros");
+    }
+
     #[test]
     fn read_label_propagates_an_open_failure() {
         // The factory itself fails to open → the IO error surfaces.

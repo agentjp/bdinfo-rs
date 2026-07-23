@@ -1850,6 +1850,11 @@ fn scan_one_stream_file(
     let cancel = progress.cancel;
     let mut reader = CountingReader { inner, name: file.name().to_ascii_uppercase(), progress };
     stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel)?;
+    // The scan's public outputs are now captured; free the demux scratch (its
+    // per-PID PES buffers) before the file is parked in the result map, so a
+    // multi-clip disc holds only the in-flight clip's buffers, not every scanned
+    // clip's at once. Pure reclaim — see `TsStreamFile::release_scratch`.
+    stream_file.release_scratch();
     Ok(stream_file)
 }
 
@@ -1966,11 +1971,44 @@ fn recover_backup<T>(
     Some(read_file(&**file).and_then(|bytes| parse(file.name(), &bytes)))
 }
 
+/// The most bytes [`read_file`] buffers for one metadata file.
+///
+/// The largest `*.mpls`/`*.clpi` an authored disc carries is well under a
+/// megabyte, so this never bites real media. It exists because a file's
+/// *declared* size is attacker-controlled and need not be backed by stored
+/// bytes at all: a UDF File Entry can claim an arbitrary `InformationLength`
+/// over not-recorded extents, which `vfs::udf` serves as zeros without reading
+/// the image. Without a cap a few-hundred-KB `.iso` can drive an unbounded
+/// allocation. `vfs::udf`'s own `max_dir_bytes` bounds the directory side of
+/// exactly this hazard, and matches this value.
+const MAX_METADATA_BYTES: u64 = 64 << 20;
+
 /// Reads a VFS file fully into a byte vector, mapping IO errors to [`BdError::Io`].
+///
+/// Capped at [`MAX_METADATA_BYTES`]; see [`read_file_capped`].
 fn read_file(file: &dyn BdFile) -> Result<Vec<u8>, BdError> {
-    let mut reader = file.open_read()?;
+    read_file_capped(file, MAX_METADATA_BYTES)
+}
+
+/// Reads a VFS file fully into a byte vector, refusing to buffer more than
+/// `cap` bytes.
+///
+/// The cap is a parameter only so the boundary cases can be tested against a
+/// handful of bytes instead of materializing [`MAX_METADATA_BYTES`]; production
+/// always goes through [`read_file`].
+///
+/// Reads one byte past `cap`, because that overshoot is what separates a file
+/// sitting exactly on the cap from one running past it — [`std::io::Take::limit`]
+/// reaching zero means the latter. Truncating instead would hand a silently
+/// clipped buffer to a parser, which would then report a misleading
+/// [`BdError::UnexpectedEof`].
+fn read_file_capped(file: &dyn BdFile, cap: u64) -> Result<Vec<u8>, BdError> {
+    let mut reader = file.open_read()?.take(cap.saturating_add(1));
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
+    if reader.limit() == 0 {
+        return Err(BdError::MetadataTooLarge { file: file.name().to_owned(), limit: cap });
+    }
     Ok(bytes)
 }
 
@@ -1985,12 +2023,13 @@ mod tests {
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        BdError, BdRom, ClipMeta, ClipSummary, MVC_PID, PlaylistFilter, PlaylistSummary, Progress,
-        ScanMode, ScanProgress, ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
-        build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
-        clip_has_50hz_video, clip_stem, collect_backups, merge_stream, rate_over, read_disc_title,
-        read_file, resolve_playlist_streams, scan_stream_files, scan_total, select_reference,
-        stream_summary, walked_disc_root,
+        BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID, PlaylistFilter,
+        PlaylistSummary, Progress, ScanMode, ScanProgress, ScanStage, Sink, TsPlaylistFile,
+        TsStreamFile, backup_subdir_files, build_chapter_summaries, build_clip_summaries,
+        build_sorted_streams, clear_measurements, clip_has_50hz_video, clip_stem, collect_backups,
+        merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
+        resolve_playlist_streams, scan_stream_files, scan_total, select_reference, stream_summary,
+        walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::interleaved::{MemBdFile, TsInterleavedFile};
@@ -4632,6 +4671,119 @@ mod tests {
         // Exercise the failing reader's seek.
         let mut reader = unreadable.open_read().expect("open");
         assert_eq!(reader.seek(SeekFrom::Start(0)).expect("seek"), 0);
+    }
+
+    /// A reader that never reaches EOF — the in-process analogue of a `.iso`
+    /// file entry whose not-recorded extents serve unlimited zeros without the
+    /// image storing them.
+    struct EndlessReader;
+
+    impl Read for EndlessReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            buf.fill(0);
+            Ok(buf.len())
+        }
+    }
+
+    impl Seek for EndlessReader {
+        fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// A file that claims `len` bytes and yields them forever.
+    struct EndlessFile {
+        name: String,
+        extension: String,
+        len: u64,
+    }
+
+    impl BdFile for EndlessFile {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn full_name(&self) -> &str {
+            &self.name
+        }
+
+        fn extension(&self) -> &str {
+            &self.extension
+        }
+
+        fn length(&self) -> u64 {
+            self.len
+        }
+
+        fn is_dir(&self) -> bool {
+            false
+        }
+
+        fn open_read(&self) -> io::Result<Box<dyn ReadSeek>> {
+            Ok(Box::new(EndlessReader))
+        }
+
+        fn open_text(&self) -> io::Result<Box<dyn BufRead>> {
+            Ok(Box::new(BufReader::new(EndlessReader)))
+        }
+    }
+
+    #[test]
+    fn read_file_capped_accepts_a_file_sitting_exactly_on_the_cap() {
+        let file = MockFile {
+            name: "00000.MPLS".to_owned(),
+            extension: ".mpls".to_owned(),
+            bytes: vec![7; 8],
+            trip: Trip::new(usize::MAX),
+            fail_read: false,
+        };
+        // Exactly `cap` bytes is legal — only the byte *past* the cap is not.
+        assert_eq!(read_file_capped(&file, 8).expect("at the cap"), vec![7; 8]);
+    }
+
+    #[test]
+    fn read_file_capped_rejects_a_file_one_byte_over_the_cap() {
+        let file = MockFile {
+            name: "00000.MPLS".to_owned(),
+            extension: ".mpls".to_owned(),
+            bytes: vec![7; 9],
+            trip: Trip::new(usize::MAX),
+            fail_read: false,
+        };
+        let err = read_file_capped(&file, 8).expect_err("one byte over the cap");
+        assert!(matches!(
+            err,
+            BdError::MetadataTooLarge { ref file, limit: 8 } if file == "00000.MPLS"
+        ));
+    }
+
+    #[test]
+    fn read_file_caps_an_endless_reader_instead_of_buffering_it_forever() {
+        // A hostile `.iso` can declare any InformationLength over not-recorded
+        // extents, which the UDF reader serves as zeros without the image
+        // holding a byte of them; before the cap this read_to_end grew until
+        // the allocator gave up. The declared length is deliberately absurd to
+        // pin that the guard is the read cap, not a trusted size field.
+        let file = EndlessFile {
+            name: "00000.MPLS".to_owned(),
+            extension: ".mpls".to_owned(),
+            len: u64::MAX,
+        };
+        let err = read_file(&file).expect_err("an endless file is refused");
+        assert!(matches!(
+            err,
+            BdError::MetadataTooLarge { limit, .. } if limit == MAX_METADATA_BYTES
+        ));
+        // The mock's remaining trait surface, so the mock itself stays covered.
+        assert_eq!(file.name(), "00000.MPLS");
+        assert_eq!(file.full_name(), "00000.MPLS");
+        assert_eq!(file.extension(), ".mpls");
+        assert_eq!(file.length(), u64::MAX);
+        assert!(!file.is_dir());
+        let mut one = [0xAA_u8; 1];
+        file.open_text().expect("open_text").read_exact(&mut one).expect("read");
+        assert_eq!(one, [0]);
+        assert_eq!(file.open_read().expect("open_read").seek(SeekFrom::End(0)).expect("seek"), 0);
     }
 
     #[test]

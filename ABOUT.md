@@ -2,7 +2,7 @@
 
 ## Why BDInfo
 
-BDInfo is mostly dead code. Blu-ray is a finished format and the spec is very unlikely to change
+Blu-ray is a finished format and the spec is very unlikely to change
 again. That made it a near-perfect target: a real, non-trivial, widely used tool with a frozen
 specification and a fixed, verifiable output — you can tell exactly when a port is correct.
 
@@ -36,7 +36,7 @@ straight back into the loop. Issues get handled.
 |---|---|
 | [`bdinfo-rs-core`](https://crates.io/crates/bdinfo-rs-core) | The analyzer: discovery, MPLS/CLPI/index, M2TS demux, 13 codec scanners, UDF 2.50, report renderer |
 | [`bdinfo-rs`](https://crates.io/crates/bdinfo-rs) | The command-line front-end |
-| `bdinfo-rs-gui` | The native desktop app (iced) |
+| [`bdinfo-rs-gui`](https://crates.io/crates/bdinfo-rs-gui) | The native desktop app (iced) |
 | [`@bdinfo-rs/wasm`](https://www.npmjs.com/package/@bdinfo-rs/wasm) | The same analyzer compiled to WebAssembly |
 
 The three front-ends are thin shells. All of the parsing, and the report itself, lives in the core
