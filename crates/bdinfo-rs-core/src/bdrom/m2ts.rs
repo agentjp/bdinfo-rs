@@ -614,7 +614,7 @@ impl TsStreamFile {
             let mut read_result: Result<(), BdError> = Ok(());
             let this = &mut *self;
             let (full_tx, full_rx) = mpsc::sync_channel::<Vec<u8>>(1);
-            let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(3);
+            let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(2);
             thread::scope(|scope| {
                 let read_failed = &read_failed;
                 let finished_early = &finished_early;
@@ -642,10 +642,13 @@ impl TsStreamFile {
                     }
                     this.finish_scan(&mut relevant);
                 });
-                // Three fresh buffers prime the pipeline; afterwards each iteration
-                // blocks on a recycled one (a closed channel means the worker
-                // finished early — stop reading).
-                let mut fresh: u8 = 3;
+                // Two fresh buffers prime the pipeline — one in flight to the
+                // parser, one being filled — which double-buffers the read against
+                // the parse; afterwards each iteration blocks on a recycled one (a
+                // closed channel means the worker finished early — stop reading).
+                // The parse is the bottleneck (the reader outruns it on any disk),
+                // so a deeper read-ahead only holds more idle buffers, not speed.
+                let mut fresh: u8 = 2;
                 loop {
                     let mut buffer = if fresh > 0 {
                         fresh = fresh.wrapping_sub(1);
