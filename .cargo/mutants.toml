@@ -91,8 +91,8 @@ exclude_re = [
 
     # `codec::mpeg2::scan` picture-counter guard: `picture_parse > 0` vs `>= 0`
     # (pinned by COLUMN 33 — the operator's own position, which an edit above it
-    # cannot move; the 2026-06-11 audit found the then-current `:52:` LINE pin
-    # stale, which resurfaced this known mutant).
+    # cannot move; a LINE pin here goes stale when code above it shifts, which
+    # resurfaces this known mutant).
     # `picture_parse` is only ever set to 2 (a picture start code) and
     # decremented; the only readers are this branch and the inner `if picture_parse
     # == 0`. At `picture_parse == 0` the `>= 0` mutant enters and decrements to -1
@@ -104,18 +104,18 @@ exclude_re = [
     # `a_picture_started_inside_a_sequence_header_decodes_after_init`.
     "mpeg2\\.rs:\\d+:33: replace > with >= in scan",
 
-    # ── 2026-06-11 audit: PES/PAT/PMT window guards proven equivalent ─────────
-    # (These CANNOT be de-pinned to the bare fn name: each of parse_chunk /
-    # parse_pat / parse_pmt holds many other `>` guards that are NOT equivalent and
-    # must stay killable, so the position is the only disambiguator. Four of the six
-    # position-pinned exclusions — 832, 837 and 1133 below, plus mpeg2.rs `scan`
-    # above — are pinned by COLUMN, which no edit above them can shift, so they never
-    # need re-pinning. Only 1204 and 1358 still drift with the file: their columns
-    # (48, 54) COLLIDE with the non-equivalent guards at 1183 and 1330, and a pin
-    # wide enough to cover those would exclude a real test gap SILENTLY — strictly
-    # worse than a stale pin, which fails loudly as a MISSED mutant. So those two
-    # stay line-pinned; re-pin them when m2ts.rs shifts (last re-pinned 2026-07-12,
-    # after the cancel-flag plumbing moved the file by ~53 lines).)
+    # ── PES/PAT/PMT window guards proven equivalent ──────────────────────────
+    # These cannot be de-pinned to the bare fn name: parse_chunk, parse_pat, and
+    # parse_pmt each hold other `>` guards that are NOT equivalent and must stay
+    # killable, so a position disambiguates each exclusion. When the equivalent
+    # guard's operator column is unique within its function the pin uses only that
+    # column, which no edit above it can shift. Two are not unique: parse_pat's
+    # `pat_section_parse > 0` shares column 48 with the non-equivalent
+    # `pat_pointer_field > 0`, and parse_pmt's `pmt_program_info_length > 0` shares
+    # column 54 with `pmt_section_length > 1021`. A column-only pin there would
+    # SILENTLY exclude a real test gap, so those two also pin the operator's line
+    # and must be re-pinned to its current line when code above them in m2ts.rs
+    # shifts — a stale line pin surfaces loudly as a MISSED mutant.
 
     # `parse_chunk` branch A guard `state.packet_length > 0` vs `>=`: a bounded
     # transfer closes the instant packet_length reaches 0 (transfer_state goes
@@ -139,7 +139,7 @@ exclude_re = [
     # is a u32 that the mutant only ever decrements from the wrapped u32::MAX, so
     # the acting arms (1, 0) are ~4 GiB of PID-0 bytes away, and the corrupted
     # pat_section_length is only read under those arms.
-    "m2ts\\.rs:1204:\\d+: replace > with >= in TsStreamFile::parse_pat",
+    "m2ts\\.rs:1223:\\d+: replace > with >= in TsStreamFile::parse_pat",
 
     # `parse_pmt` program-info guard `pmt_program_info_length > 0` vs `>=`: the dead
     # branch decrements pmt_section_length and the program-info countdown in
@@ -148,9 +148,9 @@ exclude_re = [
     # transfer is zero-length and the stale section re-walk is idempotent
     # (create_stream is keyed on contains_key). Traced and verified empirically
     # with a 357-padding-packet stream.
-    "m2ts\\.rs:1358:\\d+: replace > with >= in TsStreamFile::parse_pmt",
+    "m2ts\\.rs:1377:\\d+: replace > with >= in TsStreamFile::parse_pmt",
 
-    # ── 2026-06-11 audit: environment/platform probes no test process can observe ──
+    # ── environment/platform probes no test process can observe ──────────────
 
     # CLI `stderr_styles -> false`: the wrapper samples `stderr().is_terminal()`,
     # which is genuinely false in every captured-stdio test process — the mutant
@@ -162,7 +162,7 @@ exclude_re = [
     # crossterm console probe — `ansi_probe_matches_the_crossterm_oracle` kills
     # whichever fixed bool contradicts the current console, but the one matching it
     # is indistinguishable inside a single test process (no second terminal state
-    # exists). The non-Windows arm is cfg'd out on the Windows audit host entirely.
+    # exists). The non-Windows arm is cfg'd out on a Windows host entirely.
     "main\\.rs:\\d+:\\d+: replace ansi_supported -> bool with (true|false)",
 
     # CLI `write_stderr with ()`: writes/flushes the process's real stderr; a test
@@ -179,8 +179,7 @@ exclude_re = [
     # would pin the live probe against unknown consoles (TIOCGWINSZ can
     # genuinely report 0 columns). The width-driven rendering it feeds
     # (compose_styled_progress / redraw_sequence) is tested with explicit
-    # columns; only the live sample is opaque. Surfaced by the first sharded CI
-    # sweep, 2026-07-18.
+    # columns; only the live sample is opaque.
     "main\\.rs:\\d+:\\d+: replace terminal_columns -> usize with \\d+",
 
     # CLI `ctrl_c_pressed` (the `-> false` replacement and every internal mutant):
@@ -194,8 +193,7 @@ exclude_re = [
     # (The `delete !` on the not-intercepting early return is in the same class:
     # both arms then reach a poll that answers false in every test environment —
     # console-less runners error the poll, console-attached ones have no pending
-    # events. A 2026-07-15 run flagged it "caught", but the failing test was an
-    # unrelated core temp-dir pid collision, not a real kill.)
+    # events.)
     "main\\.rs:\\d+:\\d+: replace ctrl_c_pressed -> bool with false",
     "main\\.rs:\\d+:\\d+: (replace|delete) .* in ctrl_c_pressed",
 
