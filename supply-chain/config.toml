@@ -210,7 +210,7 @@ version = "2.0.119"
 criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
-version = "3.0.2"
+version = "3.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror-impl]]
