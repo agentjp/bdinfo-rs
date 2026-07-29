@@ -84,7 +84,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-nextest
 
@@ -199,7 +199,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
 
@@ -362,7 +362,7 @@ jobs:
       # source if missing — this pre-install just makes the smoke fast.
       - name: Install cargo-deb + cargo-generate-rpm (release-pinned)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
           tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
 
