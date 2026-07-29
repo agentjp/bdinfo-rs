@@ -4,10 +4,16 @@ name: CI
 # uv, cargo, zed and wgpu converged on independently): a ~10 s `plan` job
 # classifies the event's diff into AREAS, every gate job runs only when its
 # area fired, and a final `ci-ok` fan-in job is the single branch-protection
-# context. The gating loses nothing: sweep.yml re-runs this whole orchestrator
-# UNGATED on master daily (workflow_call, every area forced), so untouched
-# areas are re-verified within 24 h and environment drift (runner images,
-# toolchain point releases) cannot hide behind a skipped job.
+# context.
+#
+# A job fires if and only if the diff could change that job's verdict, so the
+# classifier asks what KIND of input a file is before it asks which directory
+# holds it — see .github/scripts/classify-diff.ps1, which owns the rules, the
+# mechanism behind each one, and a self-test that refuses any tracked path no
+# rule claims. Because that self-test makes an unclassified file a failure
+# rather than a silent skip, gating rests on the rules themselves; sweep.yml
+# re-runs this orchestrator UNGATED on master daily so that environment drift
+# (runner images, toolchain point releases, link rot) is caught as well.
 #
 # WHY plan + `if:`, never `on.paths:`, on anything required: a job skipped via
 # `if:` still reports a check-run with conclusion `skipped`, which satisfies a
@@ -54,19 +60,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Classify the event's changed files into areas. Areas are unions of
-  # pathspecs; one file can hit several. Cross-crate dependency edges are
-  # encoded HERE (core → gui/wasm/fuzz), never guessed at runtime; the one
-  # deliberate exception is a root Cargo.lock-only change, which does NOT
-  # propagate to gui/wasm — they are excluded workspaces with their own
-  # lockfiles, so the daily Dependabot root-lockfile chore cannot re-fire
-  # their gates.
-  #
-  # A gate's implementation files belong to its area, not just `meta`: the
-  # reusable workflow files and the .github/scripts helpers a gate executes
-  # (gui.yml + gui-*.ps1 → gui, wasm.yml → wasm, source-rules.ps1 → core)
-  # re-fire the gate they implement — editing a gate must re-run it, or the
-  # edit ships proven only by YAML lint.
+  # Classify the event's changed files into areas. The rules, the mechanism
+  # behind each one and the self-test that holds them honest all live in
+  # .github/scripts/classify-diff.ps1; this job only decides WHICH files to
+  # hand it.
   #
   # Fail-safes: if the diff cannot be computed (missing before-SHA,
   # force-push, git error) every area fires; so does the `ci-full` PR label.
@@ -81,11 +78,14 @@ jobs:
       wasm: ${{ steps.classify.outputs.wasm }}
       fuzz: ${{ steps.classify.outputs.fuzz }}
       deps: ${{ steps.classify.outputs.deps }}
-      meta: ${{ steps.classify.outputs.meta }}
+      yaml: ${{ steps.classify.outputs.yaml }}
+      workflows: ${{ steps.classify.outputs.workflows }}
+      canary: ${{ steps.classify.outputs.canary }}
       dist: ${{ steps.classify.outputs.dist }}
       pkg: ${{ steps.classify.outputs.pkg }}
       toml: ${{ steps.classify.outputs.toml }}
-      docs: ${{ steps.classify.outputs.docs }}
+      links: ${{ steps.classify.outputs.links }}
+      typos: ${{ steps.classify.outputs.typos }}
       test: ${{ steps.classify.outputs.test }}
       test-os: ${{ steps.classify.outputs.test-os }}
     steps:
@@ -99,120 +99,70 @@ jobs:
           filter: blob:none
           sparse-checkout: .github
 
+      # The classifier gates every job below, so prove it still holds its own
+      # rules before trusting it — the same order conventional.yml uses for
+      # check-banned-words.ps1. Also fails when a tracked path matches no rule,
+      # which is what keeps a newly added file from silently gating nothing.
+      - name: Self-test the classifier
+        shell: pwsh
+        run: ./.github/scripts/classify-diff.ps1 -SelfTest
+
       - name: Classify the changed files into areas
         id: classify
+        shell: pwsh
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
           CI_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
         run: |
-          # ---- pick the file list (mode=all = the fail-safe: everything fires)
-          mode=diff
-          reason=""
-          changed=""
-          if [ "$CI_FULL" = "true" ]; then
-            mode=all; reason="ci-full label"
-          elif [ "$EVENT" = "pull_request" ]; then
+          $ErrorActionPreference = 'Stop'
+          $mode = 'diff'
+          $reason = ''
+          $changed = @()
+
+          if ($env:CI_FULL -eq 'true') {
+            $mode = 'all'; $reason = 'ci-full label'
+          }
+          elseif ($env:EVENT -eq 'pull_request') {
             # HEAD is the PR merge commit, so parent 1 is the up-to-date base
             # tip and this two-dot diff is exactly the PR's effective diff
             # against master.
-            changed=$(git diff --name-only HEAD^1 HEAD) || { mode=all; reason="git diff failed"; }
-          elif [ "$EVENT" = "push" ]; then
-            # event.before...after is exactly the squash-merge's diff. A zero
-            # or missing before (branch creation, history rewrite) fails safe.
-            case "$BEFORE" in
-              ""|0000000000000000000000000000000000000000) mode=all; reason="no usable before SHA" ;;
-              *) changed=$(git diff --name-only "$BEFORE" "$AFTER") || { mode=all; reason="git diff failed"; } ;;
-            esac
-          else
+            $changed = @(git diff --name-only 'HEAD^1' HEAD)
+            if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
+          }
+          elseif ($env:EVENT -eq 'push') {
+            # before...after is exactly the squash-merge's diff. A zero or
+            # missing before (branch creation, history rewrite) fails safe.
+            if (-not $env:BEFORE -or $env:BEFORE -eq ('0' * 40)) {
+              $mode = 'all'; $reason = 'no usable before SHA'
+            }
+            else {
+              $changed = @(git diff --name-only $env:BEFORE $env:AFTER)
+              if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
+            }
+          }
+          else {
             # workflow_call from sweep.yml (schedule / workflow_dispatch).
-            mode=all; reason="$EVENT event — the sweep runs everything"
-          fi
+            $mode = 'all'; $reason = "$($env:EVENT) event — the sweep runs everything"
+          }
 
-          core=false; gui=false; wasm=false; fuzz=false; deps=false
-          meta=false; dist=false; pkg=false; toml=false; docs=false
-          # core minus root Cargo.lock: what propagates over the core→gui/wasm
-          # dependency edges (see the job comment).
-          core_edge=false
+          $areas = if ($mode -eq 'all') {
+            ./.github/scripts/classify-diff.ps1 -All
+          }
+          else {
+            $changed | ./.github/scripts/classify-diff.ps1
+          }
 
-          if [ "$mode" = "all" ]; then
-            core=true; gui=true; wasm=true; fuzz=true; deps=true
-            meta=true; dist=true; pkg=true; toml=true; docs=true
-          else
-            # `case` patterns: `*` crosses `/`, so `crates/bdinfo-rs/*` matches
-            # the whole subtree.
-            while IFS= read -r f; do
-              [ -n "$f" ] || continue
-              case "$f" in
-                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*|.github/scripts/source-rules.ps1) core=true ;;
-              esac
-              # source-rules.ps1 is deliberately NOT in core_edge: it only
-              # implements the core lint step, so it re-fires the core gate
-              # without dragging the sibling crates along.
-              case "$f" in
-                crates/bdinfo-rs-core/*|crates/bdinfo-rs/*|Cargo.toml|rust-toolchain.toml|rustfmt.toml|clippy.toml|typos.toml|.config/*|.cargo/*) core_edge=true ;;
-              esac
-              # gui-release.yml is deliberately NOT here, and gui-publish.yml
-              # plus its .github/scripts/publish-gui-*.ps1 helpers follow the
-              # same rule: the orchestrator never runs either lane
-              # (tag/dispatch-only), so a lane-only edit gets the meta checks
-              # (YAML schema/style/security) and its real verification from
-              # the next dispatch (dry run / prepare-only) — not a ~40-minute
-              # gui fleet re-run that exercises none of the changed lines.
-              # The helpers are named publish-gui-*.ps1 precisely so the
-              # gui-*.ps1 pattern below cannot catch them. The
-              # gui-package-*.ps1 scripts DO re-fire the area: the packaging
-              # smoke runs them.
-              case "$f" in crates/bdinfo-rs-gui/*|.github/workflows/gui.yml|.github/scripts/gui-*.ps1) gui=true ;; esac
-              case "$f" in crates/bdinfo-rs-wasm/*|.github/workflows/wasm.yml) wasm=true ;; esac
-              case "$f" in fuzz/*) fuzz=true ;; esac
-              case "$f" in Cargo.lock|Cargo.toml|*/Cargo.toml|deny.toml|supply-chain/*|crates/*/deny.toml) deps=true ;; esac
-              case "$f" in .github/*|.yamllint.yml) meta=true ;; esac
-              case "$f" in .github/workflows/v-release.yml|dist-workspace.toml|.github/build-setup.yml|Cargo.toml) dist=true ;; esac
-              case "$f" in .github/build-linux-packages.sh|crates/bdinfo-rs/debian/*|dist-workspace.toml|Cargo.lock|crates/bdinfo-rs/Cargo.toml) pkg=true ;; esac
-              case "$f" in *.toml) toml=true ;; esac
-              case "$f" in *.md|*.rs) docs=true ;; esac
-            done <<< "$changed"
-            # Cross-crate dependency edges: the sibling crates path-dep
-            # bdinfo-rs-core, so core changes re-fire their gates — except the
-            # root-lockfile-only case (core_edge). The fuzz targets link the
-            # core parsers and DO resolve against the root lockfile via their
-            # path deps' source, so full core re-fires the replay.
-            if [ "$core_edge" = "true" ]; then gui=true; wasm=true; fi
-            if [ "$core" = "true" ]; then fuzz=true; fi
-          fi
+          $areas | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-          # The canary: meta-only events —
-          # CI plumbing changed but no code — still build + test on one leg
-          # per OS/shell family, exercising the changed checkout / rust-cache /
-          # install-action plumbing from both sides without the 6-arch fleet.
-          # When the job is skipped it reports ONCE, unexpanded (a skipped
-          # matrix never materializes per-leg check runs — observed live), so
-          # the list's value only matters when the job actually runs.
-          test=false
-          test_os='["ubuntu-latest","ubuntu-24.04-arm","windows-2025","windows-11-arm","macos-15-intel","macos-15"]'
-          if [ "$core" = "true" ]; then
-            test=true
-          elif [ "$meta" = "true" ]; then
-            test=true
-            test_os='["ubuntu-latest","windows-2025"]'
-          fi
-
-          {
-            echo "core=$core"; echo "gui=$gui"; echo "wasm=$wasm"
-            echo "fuzz=$fuzz"; echo "deps=$deps"; echo "meta=$meta"
-            echo "dist=$dist"; echo "pkg=$pkg"; echo "toml=$toml"
-            echo "docs=$docs"; echo "test=$test"; echo "test-os=$test_os"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "mode: $mode${reason:+ ($reason)}"
-          if [ "$mode" = "diff" ]; then
-            echo "changed files:"
-            printf '%s\n' "$changed" | sed 's/^/  /'
-          fi
-          echo "areas: core=$core gui=$gui wasm=$wasm fuzz=$fuzz deps=$deps meta=$meta dist=$dist pkg=$pkg toml=$toml docs=$docs"
-          echo "build+test: run=$test os=$test_os"
+          Write-Host "mode: $mode$(if ($reason) { " ($reason)" })"
+          if ($mode -eq 'diff') {
+            Write-Host 'changed files:'
+            $changed | ForEach-Object { Write-Host "  $_" }
+          }
+          Write-Host 'areas:'
+          $areas | ForEach-Object { Write-Host "  $_" }
 
   test:
     name: build + test (${{ matrix.os }})
@@ -224,8 +174,8 @@ jobs:
     # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
     # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
     # runners, free for public repos. The OS list is plan output — the full six
-    # for `core`, the 2-leg canary for meta-only events; keep the plan job's
-    # list in lockstep with the six dist targets in dist-workspace.toml.
+    # for `core`, one leg per shell family for `canary`; keep the list in
+    # classify-diff.ps1 in lockstep with the six dist-workspace.toml targets.
     strategy:
       fail-fast: false
       matrix:
@@ -266,7 +216,7 @@ jobs:
   yaml:
     name: lint YAML (action-validator + ryl)
     needs: plan
-    if: needs.plan.outputs.meta == 'true'
+    if: needs.plan.outputs.yaml == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -379,7 +329,7 @@ jobs:
   # `replay` job), and the full mutants sweeps for every crate live in
   # sweep.yml; only the Windows-via-Docker fuzz runner stays local.
   lint:
-    name: lint (clippy, fmt, typos, doc, deps, semver)
+    name: lint (clippy, fmt, doc, deps, semver)
     needs: plan
     if: needs.plan.outputs.core == 'true'
     runs-on: ubuntu-latest
@@ -399,7 +349,7 @@ jobs:
       - name: Install gate tools
         uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
         with:
-          tool: cargo-machete,cargo-shear,cargo-semver-checks,typos
+          tool: cargo-machete,cargo-shear,cargo-semver-checks
 
       # House rules with no clippy equivalent (big-endian-only + no HashMap/HashSet
       # in the deterministic output path), mirrored from the local gate via the
@@ -414,9 +364,6 @@ jobs:
 
       - name: Clippy (-D warnings, pedantic/nursery/restriction)
         run: cargo lt
-
-      - name: Typos
-        run: typos
 
       - name: Unused deps (machete)
         run: cargo mc
@@ -809,7 +756,7 @@ jobs:
   zizmor:
     name: zizmor (workflow security)
     needs: plan
-    if: needs.plan.outputs.meta == 'true'
+    if: needs.plan.outputs.workflows == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -834,10 +781,32 @@ jobs:
   # push. This is the PR/push leg (`docs` = any .md or .rs, since doc-comments
   # carry links); the daily cron leg (links rot after merge without touching our
   # code) stays in link-check.yml.
+  # typos reads the whole working tree (minus files.extend-exclude in
+  # typos.toml), so prose changes reach it while changing no Rust source. It is
+  # its own job rather than a step of `lint` for that reason: the rest of that
+  # job compiles the workspace, which a Markdown edit cannot affect.
+  typos:
+    name: spell-check (typos)
+    needs: plan
+    if: needs.plan.outputs.typos == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install typos
+        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        with:
+          tool: typos
+
+      - name: Typos
+        run: typos
+
   links:
     name: Check links
     needs: plan
-    if: needs.plan.outputs.docs == 'true'
+    if: needs.plan.outputs.links == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1177,7 +1146,7 @@ jobs:
   # a manually-cancelled run must not end green.
   ci-ok:
     name: ci-ok
-    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, links, deny, vet, replay, pkg, gui, wasm]
+    needs: [plan, test, yaml, release-yaml, lint, coverage, e2e, isolation, taplo, zizmor, typos, links, deny, vet, replay, pkg, gui, wasm]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
