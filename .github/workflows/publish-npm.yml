@@ -154,7 +154,7 @@ jobs:
         with:
           # The active Node line (26 -> LTS Oct 2026); kept in lockstep with
           # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).
-          node-version: "26.5.0"
+          node-version: "26.5.1"
 
       # Staged publishing (`npm stage publish`) needs npm >= 11.15.0, and
       # `--provenance` needs a working bundled `sigstore`. npm 12.0.0 shipped
@@ -169,7 +169,7 @@ jobs:
       # lockstep with version-freshness.yml (its "behind latest" nag is the
       # reminder to bump).
       - name: Pin npm to a staged-publishing-capable version
-        run: npm install -g npm@12.0.1 # zizmor: ignore[adhoc-packages]
+        run: npm install -g npm@12.0.2 # zizmor: ignore[adhoc-packages]
 
       - name: Verify Node >= 26 and npm >= 11.15.0
         shell: pwsh
