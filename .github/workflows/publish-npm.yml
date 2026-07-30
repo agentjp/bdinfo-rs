@@ -140,7 +140,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install wasm-bindgen-cli (pinned to the crate version)
-        uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2.85.3
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: wasm-bindgen-cli@0.2.126
 
