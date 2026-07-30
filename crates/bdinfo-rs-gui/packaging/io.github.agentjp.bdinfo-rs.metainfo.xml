@@ -36,7 +36,7 @@
   </provides>
   <url type="homepage">https://github.com/agentjp/bdinfo-rs</url>
   <url type="bugtracker">https://github.com/agentjp/bdinfo-rs/issues</url>
-  <developer_name>bdinfo-rs contributors</developer_name>
+  <developer_name>agentjp</developer_name>
   <releases>
     <release version="2.0.0" date="2026-07-20"/>
   </releases>

@@ -55,7 +55,7 @@ fn main() {
     let info = winres::version_info(
         quad,
         &[
-            ("CompanyName", "bdinfo-rs contributors"),
+            ("CompanyName", "agentjp"),
             ("FileDescription", "bdinfo-rs GUI"),
             ("FileVersion", &version),
             ("InternalName", "bdinfo-rs-gui"),

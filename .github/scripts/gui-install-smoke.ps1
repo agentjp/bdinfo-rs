@@ -136,7 +136,7 @@ switch ($Kind) {
                 $v = [string]$arp[0].GetValue('DisplayVersion')
                 $pub = [string]$arp[0].GetValue('Publisher')
                 Assert ($v -eq $Version) "ARP DisplayVersion is $Version (got '$v')"
-                Assert ($pub -eq 'bdinfo-rs contributors') "ARP Publisher is 'bdinfo-rs contributors' (got '$pub')"
+                Assert ($pub -eq 'agentjp') "ARP Publisher is 'agentjp' (got '$pub')"
             }
             # The PathEnvironment feature (setup.wxs) sits above the default
             # INSTALLLEVEL, so the silent road winget and unattended installs

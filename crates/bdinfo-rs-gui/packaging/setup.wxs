@@ -44,7 +44,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
            Name="bdinfo-rs GUI"
-           Manufacturer="bdinfo-rs contributors"
+           Manufacturer="agentjp"
            Version="$(var.Version)"
            UpgradeCode="EBF0C1DC-6418-4BBA-A01E-B0382088969A"
            Language="1033">
