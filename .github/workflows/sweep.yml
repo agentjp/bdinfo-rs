@@ -11,8 +11,10 @@ name: sweep
 # Untouched areas are thus re-verified within 24 h, and environment drift
 # (runner images, toolchain point releases, a floating tool) cannot hide
 # behind a skipped PR job. A scheduled failure files/refreshes ONE rolling
-# issue (closed again on the next green sweep); workflow_dispatch exists so
-# the sweep can be exercised on demand.
+# issue; any green sweep that ran the orchestrator — scheduled or dispatched —
+# closes it again. workflow_dispatch exists so the sweep can be exercised on
+# demand, which is also how a fixed sweep clears the issue without waiting for
+# the next cron.
 #
 # Release tags (v* for the CLI/library lane, gui-v* for the GUI lane) run
 # the full-mutants legs ONLY — the authoritative 0-missed release checkpoint
@@ -38,7 +40,20 @@ name: sweep
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # daily 08:00 UTC
+    # Set EARLY on purpose, to compensate for a delay this repository does not
+    # control. Cron is a request, and the grant here runs late: measured on
+    # `0 8 * * *` over 2026-07-20..30 (n=11), every daily run fired, none on
+    # time, lag 2 h 17 m to 4 h 00 m — never under two hours. Asking for 05:37
+    # therefore lands the run at roughly 07:55-09:40 UTC.
+    #
+    # The lag tracks the day, not the workflow: this repository's 06:00 and
+    # 07:00 UTC workflows shift by the same amount on the same day, so it is
+    # neither this cron's hour nor its minute. Nor is it GitHub-wide — public
+    # repositories on other accounts scheduled at 08:00 UTC fired within 5 to
+    # 60 minutes of it when sampled on 2026-07-30. Cause unidentified; treat
+    # the start time as approximate, and drop the compensation if the grant
+    # ever tightens. Nothing downstream waits on this run.
+    - cron: "37 5 * * *"   # daily 05:37 UTC, landing ~2-4 h later
   push:
     tags: ['v*', 'gui-v*']
   workflow_dispatch:
@@ -313,14 +328,24 @@ jobs:
           path: .mutants-ok
           key: ${{ steps.key.outputs.key }}
 
-  # ONE rolling issue for scheduled failures (the ruff daily-fuzz pattern):
-  # refreshed while the sweep stays red, closed automatically on the next
-  # green sweep. Scheduled runs only — dispatch and tag runs have a human
-  # watching them.
+  # ONE rolling issue for sweep failures (the ruff daily-fuzz pattern):
+  # refreshed while the sweep stays red, closed again once a sweep passes.
+  #
+  # FILING stays scheduled-only — a workflow_dispatch run has a human reading
+  # its log, who does not need an issue filed at them. CLOSING also accepts
+  # workflow_dispatch, because re-dispatching is how a fixed sweep gets
+  # re-verified and that run covers the same legs as a scheduled one, so its
+  # green is equally authoritative. Gating the close on `schedule` too leaves a
+  # resolved failure's issue standing until the next cron fires — the 08:00 UTC
+  # schedule is routinely 1-3 h late, so that wait is a day, not hours.
+  #
+  # Tag pushes are excluded from both: the orchestrator job does not run on them
+  # (see its `if:`), so a green tag run attests the mutants legs alone, never the
+  # gated areas whose failure filed the issue.
   report:
     name: rolling failure issue
     needs: [orchestrator, core-mutants, core-mutants-ok, gui-mutants, gui-mutants-ok, wasm-mutants]
-    if: ${{ !cancelled() && github.event_name == 'schedule' }}
+    if: ${{ !cancelled() && github.event_name != 'push' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -333,6 +358,7 @@ jobs:
           # No checkout in this job, so gh has no git remote to infer the repo
           # from — name it explicitly.
           GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
           RESULTS: ${{ toJSON(needs) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -344,10 +370,17 @@ jobs:
           $existing = gh issue list --state open --label ci-sweep --json number --jq '.[0].number'
           if ($failed.Count -eq 0) {
             if ($existing) {
-              gh issue close $existing --comment "The daily sweep is green again: $env:RUN_URL" | Out-Null
+              gh issue close $existing --comment "The sweep is green again: $env:RUN_URL" | Out-Null
               Write-Host "Closed issue #$existing"
             }
             else { Write-Host 'Sweep green; nothing to file.' }
+            exit 0
+          }
+          # Red on a dispatched run: the operator who pressed the button reads
+          # the failing jobs directly. Filing here would also let a dispatch
+          # overwrite a scheduled failure's issue with a narrower one.
+          if ($env:EVENT -ne 'schedule') {
+            Write-Host "Sweep red on a $env:EVENT run ($($failed -join ', ')) — leaving the rolling issue to the scheduled sweep."
             exit 0
           }
           $title = "Daily sweep failed: $($failed -join ', ')"
@@ -358,7 +391,7 @@ jobs:
             ''
             "Run: $env:RUN_URL"
             ''
-            'This is one rolling issue: refreshed while the sweep stays red, closed automatically on the next green sweep.'
+            'This is one rolling issue: refreshed while the sweep stays red, closed automatically by the next green sweep — the daily one, or a workflow_dispatch run once the cause is fixed.'
           ) -join "`n"
           if ($existing) {
             gh issue edit $existing --title $title --body $body | Out-Null
