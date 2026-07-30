@@ -100,7 +100,7 @@ proptest = "1"
 # AppStream id rather than their source name, which is what the desktop file's
 # Icon= key names.
 [package.metadata.deb]
-maintainer = "bdinfo-rs contributors <bdinfo-rs@users.noreply.github.com>"
+maintainer = "agentjp <bdinfo-rs@users.noreply.github.com>"
 section = "utils"
 priority = "optional"
 depends = "$auto"

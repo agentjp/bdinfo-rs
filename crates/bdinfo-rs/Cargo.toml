@@ -73,7 +73,7 @@ bin-dir = "{ bin }{ binary-ext }"
 # the license paragraph) as the canonical-path asset; cargo-deb uses it verbatim
 # instead of generating one. The path is resolved relative to this crate dir.
 [package.metadata.deb]
-maintainer = "bdinfo-rs contributors <bdinfo-rs@users.noreply.github.com>"
+maintainer = "agentjp <bdinfo-rs@users.noreply.github.com>"
 section = "utils"
 priority = "optional"
 depends = ""
