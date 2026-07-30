@@ -66,7 +66,7 @@ jobs:
         with:
           # Keep in lockstep with wasm.yml + publish-npm.yml (version-freshness.yml
           # cross-checks the three agree). The active Node line: 26 -> LTS Oct 2026.
-          node-version: "26.5.0"
+          node-version: "26.5.1"
 
       - name: Install the web toolchain (binaryen / typescript / biome)
         working-directory: crates/bdinfo-rs-wasm/web
