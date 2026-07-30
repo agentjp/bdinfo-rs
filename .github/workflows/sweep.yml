@@ -40,16 +40,20 @@ name: sweep
 
 on:
   schedule:
-    # Cron is a request, and this repository's grant runs late. Measured
-    # 2026-07-20..30 (n=11): every daily run fired, none on time, lag 2 h 17 m
-    # to 4 h 00 m — never under two hours. The lag tracks the day, not the
-    # workflow: this repository's other scheduled workflows (06:00 and 07:00
-    # UTC) shift by the same amount on the same day, so it is not this cron's
-    # hour or minute. Nor is it GitHub-wide — public repositories on other
-    # accounts scheduled at 08:00 UTC fired within 5 to 60 minutes of it when
-    # sampled on 2026-07-30. Cause unidentified; treat the start time as
-    # approximate. Nothing downstream waits on this run.
-    - cron: "37 8 * * *"   # daily 08:37 UTC, in practice ~2-4 h later
+    # Set EARLY on purpose, to compensate for a delay this repository does not
+    # control. Cron is a request, and the grant here runs late: measured on
+    # `0 8 * * *` over 2026-07-20..30 (n=11), every daily run fired, none on
+    # time, lag 2 h 17 m to 4 h 00 m — never under two hours. Asking for 05:37
+    # therefore lands the run at roughly 07:55-09:40 UTC.
+    #
+    # The lag tracks the day, not the workflow: this repository's 06:00 and
+    # 07:00 UTC workflows shift by the same amount on the same day, so it is
+    # neither this cron's hour nor its minute. Nor is it GitHub-wide — public
+    # repositories on other accounts scheduled at 08:00 UTC fired within 5 to
+    # 60 minutes of it when sampled on 2026-07-30. Cause unidentified; treat
+    # the start time as approximate, and drop the compensation if the grant
+    # ever tightens. Nothing downstream waits on this run.
+    - cron: "37 5 * * *"   # daily 05:37 UTC, landing ~2-4 h later
   push:
     tags: ['v*', 'gui-v*']
   workflow_dispatch:
