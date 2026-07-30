@@ -52,9 +52,10 @@ name: gui-publish
 #     core version on crates.io; until then the dry-run fails in prepare. The
 #     crate must also already exist on crates.io for Trusted Publishing, so
 #     the FIRST publish is manual (the publish-crates.yml bootstrap rule).
-#   - winget: agentjp.bdinfo-rs-gui is a new package id komac cannot create
-#     headlessly, so the FIRST submission is a manual interactive komac run;
-#     the leg auto-submits every version after that PR merges.
+#   - winget: komac cannot create a package id headlessly, so a package's
+#     FIRST submission is a manual interactive komac run — done for
+#     agentjp.bdinfo-rs-gui via winget-pkgs#405038; the leg auto-submits
+#     every later version and records bootstrap-pending if the id is absent.
 #
 # Secrets (all on the `release` ENVIRONMENT, like packages.yml — its
 # deployment rules admit `master`, which is what both a workflow_dispatch
