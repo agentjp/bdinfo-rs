@@ -53,16 +53,10 @@ progress, then save or copy the report. Pure Rust and GPU-accelerated (wgpu, wit
 fallback) — no webview and no bundled runtime.
 
 ```sh
-winget install agentjp.bdinfo-rs-gui              # Windows (pending — see note)
+winget install agentjp.bdinfo-rs-gui              # Windows
 brew install --cask agentjp/tap/bdinfo-rs-gui     # macOS / Linux
 yay -S bdinfo-rs-gui-bin                          # Arch
 ```
-
-> [!WARNING]
-> The desktop app's WinGet package is still in review
-> ([winget-pkgs#405038](https://github.com/microsoft/winget-pkgs/pull/405038)); until it merges,
-> `winget install agentjp.bdinfo-rs-gui` fails with *No package found*. Use the `.msi`, the
-> Homebrew cask, or the AUR meanwhile.
 
 | Windows | macOS | Linux |
 |---|---|---|

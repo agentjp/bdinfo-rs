@@ -13,7 +13,7 @@ These update automatically through a package manager and uninstall cleanly:
 
 | OS | Command line | Desktop app |
 |---|---|---|
-| Windows | `winget install agentjp.bdinfo-rs` | `winget install agentjp.bdinfo-rs-gui` *(pending: [winget-pkgs#405038](https://github.com/microsoft/winget-pkgs/pull/405038))* |
+| Windows | `winget install agentjp.bdinfo-rs` | `winget install agentjp.bdinfo-rs-gui` |
 | macOS | `brew install agentjp/tap/bdinfo-rs` | `brew install --cask agentjp/tap/bdinfo-rs-gui` |
 | Debian / Ubuntu | [apt repository](#apt--dnf-repository-linux) | same repository, `bdinfo-rs-gui` |
 | Fedora / RHEL / openSUSE | [dnf repository](#apt--dnf-repository-linux) | same repository, `bdinfo-rs-gui` |
@@ -264,12 +264,6 @@ Release artifacts, per platform:
 
 ## WinGet (Windows)
 
-> [!WARNING]
-> Not available yet — the desktop app's WinGet package is in the community-repository review
-> queue ([winget-pkgs#405038](https://github.com/microsoft/winget-pkgs/pull/405038)). Until it
-> merges, `winget install agentjp.bdinfo-rs-gui` fails with *No package found*; install via the
-> [MSI installer](#msi-installer-windows) or [portable zip](#portable-zip-windows) below for now.
-
 ```powershell
 winget install agentjp.bdinfo-rs-gui
 ```
@@ -277,8 +271,9 @@ winget install agentjp.bdinfo-rs-gui
 - **Where it goes** — WinGet runs the MSI below silently, so everything in the next section
   applies: `%LOCALAPPDATA%\Programs\bdinfo-rs GUI\`, per-user, no administrator rights. A silent
   install never shows the license page and does not add the install directory to `PATH`.
-- **Updates** — `winget upgrade agentjp.bdinfo-rs-gui` (once the package is published).
-- **Uninstall** — `winget uninstall agentjp.bdinfo-rs-gui` (once it is published), or Apps & features.
+- **Updates** — `winget upgrade agentjp.bdinfo-rs-gui` (or `winget upgrade --all`). New releases
+  are submitted to the WinGet community repository automatically.
+- **Uninstall** — `winget uninstall agentjp.bdinfo-rs-gui`, or Apps & features.
 
 ## MSI installer (Windows)
 
