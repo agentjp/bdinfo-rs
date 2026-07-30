@@ -40,12 +40,16 @@ name: sweep
 
 on:
   schedule:
-    # Daily, off the top of the hour on purpose: GitHub queues `schedule` events
-    # on shared capacity and drops them under load, which peaks at :00. Measured
-    # on `0 8 * * *` here, 2026-07-20..30: all 11 runs fired, none on time, lag
-    # 1 h 39 m to 3 h 13 m (mean ~2 h 20 m). A quieter minute is the documented
-    # mitigation, not a guarantee — nothing downstream waits on this run.
-    - cron: "37 8 * * *"   # daily 08:37 UTC
+    # Cron is a request, and this repository's grant runs late. Measured
+    # 2026-07-20..30 (n=11): every daily run fired, none on time, lag 2 h 17 m
+    # to 4 h 00 m — never under two hours. The lag tracks the day, not the
+    # workflow: this repository's other scheduled workflows (06:00 and 07:00
+    # UTC) shift by the same amount on the same day, so it is not this cron's
+    # hour or minute. Nor is it GitHub-wide — public repositories on other
+    # accounts scheduled at 08:00 UTC fired within 5 to 60 minutes of it when
+    # sampled on 2026-07-30. Cause unidentified; treat the start time as
+    # approximate. Nothing downstream waits on this run.
+    - cron: "37 8 * * *"   # daily 08:37 UTC, in practice ~2-4 h later
   push:
     tags: ['v*', 'gui-v*']
   workflow_dispatch:
