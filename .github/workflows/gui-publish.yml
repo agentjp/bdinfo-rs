@@ -105,7 +105,7 @@ env:
   # Tool pins, hand-bumped (invisible to Dependabot; version-freshness.yml
   # watches them and asserts they agree with packages.yml's copies).
   KOMAC_VERSION: 2.16.0
-  CLOUDSMITH_CLI_VERSION: 1.19.0
+  CLOUDSMITH_CLI_VERSION: 1.20.2
 
 jobs:
   # Resolve tag/channels/mode from either trigger (the packages.yml gate
