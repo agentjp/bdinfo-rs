@@ -20,7 +20,10 @@
 //!
 //! The classic console flow: after the metadata scan, every mode but
 //! `-m/--mpls` prints the playlist selection table over the standard filtered
-//! set (short and looping playlists dropped). `-l/--list` exits after the
+//! set (short and looping playlists dropped), followed by a hint line naming
+//! what each active filter rule withheld. `--show-short-playlists` and
+//! `--show-looping-playlists` turn the matching rule off, widening the table
+//! and with it every mode that reads it. `-l/--list` exits after the
 //! table; `-w/--whole` selects everything the table lists; `-m/--mpls A,B`
 //! selects the named playlists (unfiltered, in the given order) without a
 //! table; and the default is the **interactive picker** — table indices typed
@@ -230,8 +233,14 @@ fn run(cli: &Cli) -> u8 {
         };
 
     let selection: Vec<String> = if cli.mpls.is_empty() {
-        // Every mode but `--mpls` starts from the playlist table.
-        let rows = table_rows(&bdrom.playlists);
+        // Every mode but `--mpls` starts from the playlist table, over the
+        // filtered set the `--show-*-playlists` switches widen.
+        let filter = PlaylistFilter {
+            filter_short_playlists: !cli.show_short_playlists,
+            filter_looping_playlists: !cli.show_looping_playlists,
+            ..PlaylistFilter::default()
+        };
+        let rows = table_rows(&bdrom.playlists, &filter);
         print!("{}", selection_table(&bdrom.playlists, &rows));
         if rows
             .iter()
@@ -242,6 +251,7 @@ fn run(cli: &Cli) -> u8 {
                  with an asterisk."
             );
         }
+        print!("{}", hidden_hint(&bdrom.playlists, &filter));
         if cli.whole || cli.list {
             row_names(&bdrom.playlists, &rows, &(1..=rows.len()).collect::<Vec<_>>())
         } else {
@@ -553,16 +563,78 @@ fn named_selection(playlists: &[PlaylistSummary], requested: &[String]) -> Vec<S
 }
 
 /// The playlist table rows as `(group number, playlist index)` pairs in table
-/// order: the shared-clip groups of the standard filtered set (short and
-/// looping playlists dropped), each group longest-first.
-fn table_rows(playlists: &[PlaylistSummary]) -> Vec<(usize, usize)> {
-    presentation_groups(playlists, &PlaylistFilter::default())
+/// order: the shared-clip groups of the playlists `filter` keeps, each group
+/// longest-first.
+fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(usize, usize)> {
+    presentation_groups(playlists, filter)
         .into_iter()
         .enumerate()
         .flat_map(|(group, members)| {
             members.into_iter().map(move |index| (group.saturating_add(1), index))
         })
         .collect()
+}
+
+/// How many playlist names a hint line spells out before it counts the rest —
+/// enough to recognize the disc's numbering, short enough to stay on one line
+/// on an 80-column console.
+const HINT_NAMES: usize = 3;
+
+/// The hint block under the selection table: one line per filter rule that is
+/// on *and* withheld at least one playlist, looping first, then short. Empty
+/// (so the flow's bytes are unchanged) when every rule is off or hid nothing.
+///
+/// Each rule is judged on its own against the whole disc, not against what the
+/// table dropped, so a playlist that is both short and looping is named on
+/// both lines and is only revealed when both switches are passed.
+///
+/// Console narration only: it is never written into the report, and `--mpls`
+/// mode — which prints no table — never reaches it.
+fn hidden_hint(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> String {
+    let mut out = String::new();
+    if filter.filter_looping_playlists {
+        out.push_str(&hint_line(playlists, "looping", "--show-looping-playlists", |playlist| {
+            playlist.has_loops
+        }));
+    }
+    if filter.filter_short_playlists {
+        out.push_str(&hint_line(playlists, "short", "--show-short-playlists", |playlist| {
+            playlist.total_length < filter.short_playlist_seconds
+        }));
+    }
+    out
+}
+
+/// One `Hidden by filters (KIND): NAMES - rerun with FLAG` line for the
+/// playlists `hides` matches, empty when it matches none. The names come in
+/// the order the table would have listed them (length descending, then name
+/// ascending), the first [`HINT_NAMES`] spelled out and the rest counted as
+/// ` and N more`.
+///
+/// ASCII only — the console flow must survive a legacy OEM codepage, so a
+/// plain hyphen stands where prose would take a dash.
+fn hint_line(
+    playlists: &[PlaylistSummary],
+    kind: &str,
+    flag: &str,
+    hides: impl Fn(&PlaylistSummary) -> bool,
+) -> String {
+    let mut hidden: Vec<&PlaylistSummary> =
+        playlists.iter().filter(|playlist| hides(playlist)).collect();
+    if hidden.is_empty() {
+        return String::new();
+    }
+    hidden.sort_by(|a, b| {
+        b.total_length
+            .partial_cmp(&a.total_length)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let named: Vec<&str> =
+        hidden.iter().take(HINT_NAMES).map(|playlist| playlist.name.as_str()).collect();
+    let rest = hidden.len().saturating_sub(HINT_NAMES);
+    let more = if rest == 0 { String::new() } else { format!(" and {rest} more") };
+    format!("Hidden by filters ({kind}): {}{more} - rerun with {flag}\n", named.join(", "))
 }
 
 /// Maps 1-based table indices (`picks`) back to playlist names, in pick
@@ -1002,15 +1074,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, ScanProgress};
+    use bdinfo_rs_core::bdrom::order::PlaylistFilter;
     use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
     use clap::Parser;
     use clap::error::ErrorKind;
 
     use super::{
         BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, compose_progress,
-        compose_styled_progress, erase_sequence, finish_early, group_n0, hms, named_selection,
-        normalize_playlist_name, pick_playlists, redraw_sequence, row_names, run, selection_order,
-        selection_stream_files, selection_table, table_length, table_rows,
+        compose_styled_progress, erase_sequence, finish_early, group_n0, hidden_hint, hms,
+        named_selection, normalize_playlist_name, pick_playlists, redraw_sequence, row_names, run,
+        selection_order, selection_stream_files, selection_table, table_length, table_rows,
     };
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
@@ -1057,6 +1130,29 @@ mod tests {
             bd
         }
 
+        /// `new()` plus three playlists over one shared clip: `00000.MPLS`
+        /// (60 s, one item) survives the default filter, `00001.MPLS` (two
+        /// items, 120 s) loops, and `00002.MPLS` (10 s, one item) is short —
+        /// so the default table lists only the first, and each
+        /// `--show-*-playlists` switch admits exactly one of the other two.
+        fn with_filtered_playlists() -> Self {
+            let bd = Self::new();
+            let bdmv = bd.root.join("BDMV");
+            for (name, items, seconds) in [("00000", 1, 60), ("00001", 2, 60), ("00002", 1, 10)] {
+                std::fs::write(
+                    bdmv.join("PLAYLIST").join(format!("{name}.mpls")),
+                    repeated_item_mpls(items, seconds),
+                )
+                .expect("write mpls");
+            }
+            std::fs::write(bdmv.join("CLIPINF").join("00000.clpi"), avc_clpi())
+                .expect("write clpi");
+            std::fs::create_dir_all(bdmv.join("STREAM")).expect("create STREAM");
+            std::fs::write(bdmv.join("STREAM").join("00000.m2ts"), vec![0_u8; 1024])
+                .expect("write m2ts");
+            bd
+        }
+
         /// The folder's expected report-file path (the default `REPORT_DEST`
         /// is the disc folder; the label is the directory name).
         fn report_file(&self) -> PathBuf {
@@ -1068,12 +1164,20 @@ mod tests {
     /// A valid single-item `*.mpls`: `MPLS0300`, one 60-second `PlayItem`
     /// over clip `00000.M2TS`, no angles, no Stream-Number table, no marks.
     fn one_item_mpls() -> Vec<u8> {
+        repeated_item_mpls(1, 60)
+    }
+
+    /// [`one_item_mpls`] with the play item repeated `items` times, each
+    /// running `seconds` from in-time 0. Every repeat replays one clip file
+    /// from one in-time, which is what the core's loop detection keys on, and
+    /// the playlist's total length is `items * seconds`.
+    fn repeated_item_mpls(items: u16, seconds: u32) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(b"00000"); // clip name
         body.extend_from_slice(b"M2TS");
         body.extend_from_slice(&[0_u8; 3]); // codec id pad + flags
         body.extend_from_slice(&0_u32.to_be_bytes()); // in time (45 kHz)
-        body.extend_from_slice(&2_700_000_u32.to_be_bytes()); // out time: 60 s
+        body.extend_from_slice(&seconds.wrapping_mul(45_000).to_be_bytes()); // out time
         body.extend_from_slice(&[0_u8; 12]);
         body.extend_from_slice(&[0_u8; 4]); // STN table length + reserved
         body.extend_from_slice(&[0_u8; 12]); // the empty stream counts + reserved
@@ -1082,10 +1186,13 @@ mod tests {
         let mut playlist = Vec::new();
         playlist.extend_from_slice(&[0_u8; 4]); // PlayList length
         playlist.extend_from_slice(&[0_u8; 2]); // reserved
-        playlist.extend_from_slice(&1_u16.to_be_bytes()); // item count
+        playlist.extend_from_slice(&items.to_be_bytes()); // item count
         playlist.extend_from_slice(&[0_u8; 2]); // sub-item count
-        playlist.extend_from_slice(&u16::try_from(body.len()).expect("item length").to_be_bytes());
-        playlist.extend_from_slice(&body);
+        for _ in 0..items {
+            playlist
+                .extend_from_slice(&u16::try_from(body.len()).expect("item length").to_be_bytes());
+            playlist.extend_from_slice(&body);
+        }
         let chapters_offset = playlist_offset.wrapping_add(playlist.len());
 
         let mut buf = b"MPLS0300".to_vec();
@@ -1594,7 +1701,7 @@ mod tests {
         }
         let c = summary("00003.MPLS", 30.0, &["Z.M2TS"]);
         let playlists = [a, b, c];
-        let rows = table_rows(&playlists);
+        let rows = table_rows(&playlists, &PlaylistFilter::default());
         assert_eq!(rows, [(1, 0), (1, 1), (2, 2)]);
         assert_eq!(
             selection_table(&playlists, &rows),
@@ -1611,6 +1718,147 @@ mod tests {
         );
         // Pick mapping: in pick order, out-of-range picks map to nothing.
         assert_eq!(row_names(&playlists, &rows, &[3, 1, 9]), ["00003.MPLS", "00001.MPLS"]);
+    }
+
+    #[test]
+    fn table_rows_follow_the_given_filter() {
+        let mut looping = summary("00001.MPLS", 3600.0, &["X.M2TS"]);
+        looping.has_loops = true;
+        let short = summary("00002.MPLS", 5.0, &["Y.M2TS"]);
+        let keeper = summary("00003.MPLS", 60.0, &["Z.M2TS"]);
+        let playlists = [looping, short, keeper];
+        // The default filter leaves only the plain 60-second playlist…
+        assert_eq!(table_rows(&playlists, &PlaylistFilter::default()), [(1, 2)]);
+        // …turning off one rule admits exactly that rule's playlist, which
+        // shares no clip with the keeper, so it opens its own group…
+        let keep_loops =
+            PlaylistFilter { filter_looping_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(table_rows(&playlists, &keep_loops), [(1, 0), (2, 2)]);
+        let keep_short =
+            PlaylistFilter { filter_short_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(table_rows(&playlists, &keep_short), [(1, 2), (2, 1)]);
+        // …and turning off both lists the whole disc.
+        assert_eq!(table_rows(&playlists, &PlaylistFilter::everything()).len(), 3);
+    }
+
+    #[test]
+    fn the_hidden_hint_names_what_each_rule_withheld_looping_first() {
+        let mut long_loop = summary("00001.MPLS", 5765.0, &["A.M2TS"]);
+        long_loop.has_loops = true;
+        let mut tiny_loop = summary("00090.MPLS", 5.0, &["C.M2TS"]);
+        tiny_loop.has_loops = true;
+        let playlists = [
+            long_loop,
+            summary("00013.MPLS", 3600.0, &["B.M2TS"]),
+            tiny_loop,
+            summary("00091.MPLS", 10.0, &["D.M2TS"]),
+        ];
+        let looping = "Hidden by filters (looping): 00001.MPLS, 00090.MPLS - rerun with \
+                       --show-looping-playlists\n";
+        // 00091 (10 s) precedes 00090 (5 s): the names come in table order,
+        // length descending — and 00090, short *and* looping, is on both lines.
+        let short = "Hidden by filters (short): 00091.MPLS, 00090.MPLS - rerun with \
+                     --show-short-playlists\n";
+        assert_eq!(
+            hidden_hint(&playlists, &PlaylistFilter::default()),
+            format!("{looping}{short}")
+        );
+        // Each switch suppresses exactly its own line.
+        let keep_loops =
+            PlaylistFilter { filter_looping_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(hidden_hint(&playlists, &keep_loops), short);
+        let keep_short =
+            PlaylistFilter { filter_short_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(hidden_hint(&playlists, &keep_short), looping);
+        // Both switches — the threshold still 20 s, both rules off — print
+        // nothing, and so does a disc with nothing to hide.
+        let keep_all = PlaylistFilter {
+            filter_short_playlists: false,
+            filter_looping_playlists: false,
+            ..PlaylistFilter::default()
+        };
+        assert!(hidden_hint(&playlists, &keep_all).is_empty());
+        let plain = [summary("00013.MPLS", 3600.0, &["B.M2TS"])];
+        assert!(hidden_hint(&plain, &PlaylistFilter::default()).is_empty());
+        // A playlist of exactly the threshold length is not short (the filter
+        // drops strictly shorter ones), so it is not named either.
+        let edge = [summary("00014.MPLS", 20.0, &["E.M2TS"])];
+        assert!(hidden_hint(&edge, &PlaylistFilter::default()).is_empty());
+    }
+
+    #[test]
+    fn the_hidden_hint_spells_three_names_then_counts_the_rest() {
+        // Equal-length playlists tie to ordinal name order, so the first three
+        // are the lowest-numbered ones.
+        let playlists: Vec<PlaylistSummary> =
+            (90..306).map(|n| summary(&format!("{n:05}.MPLS"), 1.0, &["A.M2TS"])).collect();
+        assert_eq!(
+            hidden_hint(&playlists, &PlaylistFilter::default()),
+            "Hidden by filters (short): 00090.MPLS, 00091.MPLS, 00092.MPLS and 213 more - rerun \
+             with --show-short-playlists\n"
+        );
+        // Exactly three fit with no remainder; a fourth starts the count.
+        assert_eq!(
+            hidden_hint(playlists.get(..3).expect("three rows"), &PlaylistFilter::default()),
+            "Hidden by filters (short): 00090.MPLS, 00091.MPLS, 00092.MPLS - rerun with \
+             --show-short-playlists\n"
+        );
+        assert!(
+            hidden_hint(playlists.get(..4).expect("four rows"), &PlaylistFilter::default())
+                .contains("00092.MPLS and 1 more - rerun")
+        );
+    }
+
+    #[test]
+    fn the_show_switches_are_long_only_and_default_off() {
+        let cli = Cli::try_parse_from(["bdinfo-rs", "disc"]).expect("parse");
+        assert!(!cli.show_short_playlists);
+        assert!(!cli.show_looping_playlists);
+        let cli = Cli::try_parse_from([
+            "bdinfo-rs",
+            "disc",
+            "--show-short-playlists",
+            "--show-looping-playlists",
+        ])
+        .expect("parse");
+        assert!(cli.show_short_playlists);
+        assert!(cli.show_looping_playlists);
+        // No short letters were taken for them.
+        for flag in ["-s", "-S"] {
+            assert!(Cli::try_parse_from(["bdinfo-rs", "disc", flag]).is_err(), "{flag}");
+        }
+    }
+
+    #[test]
+    fn the_show_switches_widen_what_whole_scans() {
+        // The table feeds `--whole`, so which playlists reach the report is
+        // the observable proof that each switch reached the filter.
+        let bd = TempBd::with_filtered_playlists();
+        let path = bd.root.to_string_lossy().into_owned();
+        let scanned = |args: &[&str]| -> String {
+            let mut full = vec![path.as_str(), "--whole"];
+            full.extend_from_slice(args);
+            assert_eq!(run_args(&full), 0, "{args:?}");
+            std::fs::read_to_string(bd.report_file()).expect("read the saved report")
+        };
+        let default = scanned(&[]);
+        assert!(default.contains("PLAYLIST: 00000.MPLS"), "{default}");
+        assert!(!default.contains("PLAYLIST: 00001.MPLS"), "the looping playlist stays hidden");
+        assert!(!default.contains("PLAYLIST: 00002.MPLS"), "the short playlist stays hidden");
+        let loops = scanned(&["--show-looping-playlists"]);
+        assert!(loops.contains("PLAYLIST: 00001.MPLS"), "{loops}");
+        assert!(!loops.contains("PLAYLIST: 00002.MPLS"), "the short playlist stays hidden");
+        let shorts = scanned(&["--show-short-playlists"]);
+        assert!(shorts.contains("PLAYLIST: 00002.MPLS"), "{shorts}");
+        assert!(!shorts.contains("PLAYLIST: 00001.MPLS"), "the looping playlist stays hidden");
+        let both = scanned(&["--show-short-playlists", "--show-looping-playlists"]);
+        for name in ["00000.MPLS", "00001.MPLS", "00002.MPLS"] {
+            assert!(both.contains(&format!("PLAYLIST: {name}")), "{name}: {both}");
+        }
+        // The hint is console narration; no report ever carries it.
+        for report in [&default, &loops, &shorts, &both] {
+            assert!(!report.contains("Hidden by filters"), "the hint leaked into the report");
+        }
     }
 
     #[test]
