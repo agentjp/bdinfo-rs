@@ -18,12 +18,14 @@
 // prose living on the man page instead — `build.rs` reattaches it to this same
 // `Command` before rendering it, so nothing documented here is lost.
 //
-// Three settings hold that card in shape. `-h`/`--help` is declared here with
+// Four settings hold that card in shape. `-h`/`--help` is declared here with
 // `HelpShort` (clap's own flag renders the long help for `--help`, which would
 // make the two spellings two different pages). `arg_required_else_help` routes a
-// bare invocation to the same card. And `help_template` drops clap's leading
-// `about` line, because the tagline already sits on the header line the binary
-// prints above the card.
+// bare invocation to the same card. `help_template` drops clap's leading `about`
+// line, because the tagline already sits on the header line the binary prints
+// above the card. And `bin_name` fixes the program name in the usage line, which
+// clap otherwise echoes from the invoked file — `bdinfo-rs.exe` on Windows — so
+// the card reads identically on every platform.
 //
 // NB: no `//!` inner doc comments here — this file is pasted into another module
 // by `include!`, where inner attributes are not allowed. Plain `//` only.
@@ -34,6 +36,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(
     name = "bdinfo-rs",
+    bin_name = "bdinfo-rs",
     version,
     about = "BDInfo-style Blu-ray disc reports",
     arg_required_else_help = true,

@@ -29,10 +29,12 @@ fn version_prints_and_succeeds() {
     }
 }
 
-/// The help card below its usage line, byte for byte. The usage line itself is
-/// excluded because clap names the program as it was invoked, which carries the
-/// `.exe` suffix on Windows.
-const CARD_BODY: &str = "\
+/// The help card the binary prints, byte for byte — usage line included, which
+/// holds only because the command pins `bin_name`: clap otherwise names the
+/// program as it was invoked, `.exe` suffix and all.
+const CARD: &str = "\
+Usage: bdinfo-rs [OPTIONS] <BD_PATH> [REPORT_DEST]
+
 Arguments:
   <BD_PATH>      BDMV folder or .iso image
   [REPORT_DEST]  Report folder (default: BD_PATH; required for .iso)
@@ -64,17 +66,13 @@ fn every_help_path_prints_the_same_compact_card() {
         assert!(output.stderr.is_empty(), "the help is not an error report: {:?}", output.stderr);
     }
 
-    let stdout = String::from_utf8_lossy(&long.stdout);
-    let mut lines = stdout.lines();
-    let header =
-        format!("bdinfo-rs {} - BDInfo-style Blu-ray disc reports", env!("CARGO_PKG_VERSION"));
     // A pipe gets the plain header, a blank line, then the card.
-    assert_eq!(lines.next(), Some(header.as_str()), "header: {stdout}");
-    assert_eq!(lines.next(), Some(""), "blank line under the header: {stdout}");
-    let usage = lines.next().unwrap_or_default();
-    assert!(usage.starts_with("Usage: "), "usage line: {stdout}");
-    assert!(usage.ends_with(" [OPTIONS] <BD_PATH> [REPORT_DEST]"), "usage line: {stdout}");
-    assert!(stdout.ends_with(CARD_BODY), "the card drifted: {stdout}");
+    let stdout = String::from_utf8_lossy(&long.stdout);
+    let expected = format!(
+        "bdinfo-rs {} - BDInfo-style Blu-ray disc reports\n\n{CARD}",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(stdout, expected, "the help page drifted");
     // No colour when piped, and one screen wide.
     assert!(!stdout.contains('\u{1b}'), "escape codes in a piped help: {stdout:?}");
     for line in stdout.lines() {
