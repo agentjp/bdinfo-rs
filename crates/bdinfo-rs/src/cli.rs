@@ -14,43 +14,34 @@
 // Keeping it in one file means the completions and the man page can never drift
 // from the binary's actual flags, defaults, or help text.
 //
+// The help is one screen: a single short line per argument, with the long-form
+// prose living on the man page instead — `build.rs` reattaches it to this same
+// `Command` before rendering it, so nothing documented here is lost.
+//
+// Four settings hold that card in shape. `-h`/`--help` is declared here with
+// `HelpShort` (clap's own flag renders the long help for `--help`, which would
+// make the two spellings two different pages). `arg_required_else_help` routes a
+// bare invocation to the same card. `help_template` drops clap's leading `about`
+// line, because the tagline already sits on the header line the binary prints
+// above the card. And `bin_name` fixes the program name in the usage line, which
+// clap otherwise echoes from the invoked file — `bdinfo-rs.exe` on Windows — so
+// the card reads identically on every platform.
+//
 // NB: no `//!` inner doc comments here — this file is pasted into another module
 // by `include!`, where inner attributes are not allowed. Plain `//` only.
 
 use clap::Parser;
 
-/// Memory-safe Blu-ray disc, folder, and image analyzer.
+/// The parsed `bdinfo-rs` command line.
 #[derive(Debug, Parser)]
 #[command(
     name = "bdinfo-rs",
+    bin_name = "bdinfo-rs",
     version,
-    about = "Memory-safe Blu-ray disc, folder, and image analyzer.",
-    long_about = "bdinfo-rs is a memory-safe, cross-platform Blu-ray analyzer — a drop-in \
-                  replacement for the classic BDInfo tool. It inspects a Blu-ray (a BDMV \
-                  folder or a .iso image) and writes the familiar human-readable disc \
-                  report: the playlists and clips, the M2TS stream layout, and the \
-                  per-stream video and audio technical specs — codecs, measured bitrates, \
-                  resolution, and HDR, Dolby Vision, or HDR10+ metadata.\n\n\
-                  It ships as a single statically-linked binary with no runtime, no shared \
-                  libraries, and nothing to install: the disc structures, the codec \
-                  scanners, and the read-only UDF 2.50 reader for .iso images are all pure \
-                  Rust.\n\n\
-                  Point BD_PATH at the disc and bdinfo-rs scans its metadata, presents the \
-                  playlist selection table, measures the chosen playlists, and writes \
-                  BDINFO.<volume label>.txt into REPORT_DEST.",
-    after_long_help = "Examples:\n  \
-        # Scan a ripped disc folder; pick playlists interactively, writing the\n  \
-        # report back into the same folder.\n  \
-        bdinfo-rs /media/MY_MOVIE\n\n  \
-        # Scan a disc image. A .iso has no folder to write into, so name a\n  \
-        # report destination explicitly.\n  \
-        bdinfo-rs MY_MOVIE.iso /tmp/reports\n\n  \
-        # Print the playlist selection table and stop, scanning nothing.\n  \
-        bdinfo-rs /media/MY_MOVIE --list\n\n  \
-        # Scan exactly the named playlists, in the given order.\n  \
-        bdinfo-rs /media/MY_MOVIE --mpls 00800,00801\n\n  \
-        # Scan every playlist the table lists.\n  \
-        bdinfo-rs /media/MY_MOVIE --whole",
+    about = "BDInfo-style Blu-ray disc reports",
+    arg_required_else_help = true,
+    help_template = "{usage-heading} {usage}\n\n{all-args}",
+    disable_help_flag = true,
     disable_version_flag = true
 )]
 #[expect(
@@ -59,83 +50,45 @@ use clap::Parser;
               switches are orthogonal — no state machine or two-variant enum fits them"
 )]
 struct Cli {
-    #[arg(
-        value_name = "BD_PATH",
-        help = "The disc to analyze: a BDMV folder or a .iso image",
-        long_help = "The Blu-ray to analyze. This may be the disc root (the folder \
-                     containing BDMV), the BDMV folder itself, any folder inside it, or a \
-                     .iso disc image. Folder input is read through the filesystem; a .iso \
-                     is read through the in-house pure-Rust UDF 2.50 reader. A folder's \
-                     disc label is taken from the directory name, while a .iso reports the \
-                     real UDF volume label, so the same disc can differ on that one line."
-    )]
+    #[arg(value_name = "BD_PATH", help = "BDMV folder or .iso image")]
     bd_path: String,
     #[arg(
         value_name = "REPORT_DEST",
-        help = "Folder to write BDINFO.<volume label>.txt into [default: the disc folder]",
-        long_help = "The folder the report is written into, as BDINFO.<volume label>.txt. \
-                     It defaults to BD_PATH, which works for folder input; a .iso image has \
-                     no folder to fall back on, so a report destination must then be given \
-                     explicitly. The destination must be an existing directory."
+        help = "Report folder (default: BD_PATH; required for .iso)"
     )]
     report_dest: Option<String>,
-    #[arg(
-        short = 'l',
-        long,
-        help = "Print the playlist table and exit without scanning",
-        long_help = "Print the playlist selection table — the standard filtered set of \
-                     playlists with their length and size — then exit without measuring \
-                     anything or writing a report."
-    )]
+    #[arg(short = 'l', long, help = "List playlists and exit")]
     list: bool,
     #[arg(
         short = 'm',
         long,
         value_name = "NAME,...",
         value_delimiter = ',',
-        help = "Scan exactly these playlists, by name, in the given order",
-        long_help = "Select playlists by name instead of from the table, as a \
-                     comma-separated list (for example 00800,00801). Names are matched \
-                     case-insensitively and the .MPLS extension may be omitted. The named \
-                     playlists are scanned in the order given, unfiltered, so this reaches \
-                     playlists the table would hide. It takes precedence over --whole and \
-                     the interactive picker."
+        help = "Scan only the named playlists (00800,00801)"
     )]
     mpls: Vec<String>,
-    #[arg(
-        short = 'w',
-        long,
-        help = "Scan every playlist the table lists",
-        long_help = "Select every playlist shown in the selection table — the standard \
-                     filtered set — and scan them all, rather than choosing interactively."
-    )]
+    #[arg(short = 'w', long, help = "Scan every listed playlist")]
     whole: bool,
-    #[arg(
-        long,
-        help = "Also list playlists shorter than 20s",
-        long_help = "Include playlists shorter than 20 seconds in the selection table. They are \
-                     hidden by default — a disc's menu, logo and transition playlists are \
-                     usually short — so this widens what --list prints, what the interactive \
-                     picker offers, and what --whole scans."
-    )]
+    #[arg(long, help = "Also list playlists shorter than 20s")]
     show_short_playlists: bool,
-    #[arg(
-        long,
-        help = "Also list looping playlists",
-        long_help = "Include looping playlists — those repeating a play item — in the selection \
-                     table. They are hidden by default as authoring artefacts, so this widens \
-                     what --list prints, what the interactive picker offers, and what --whole \
-                     scans. A disc that disguises its main feature as a loop needs this flag to \
-                     make that playlist selectable."
-    )]
+    #[arg(long, help = "Also list looping playlists")]
     show_looping_playlists: bool,
+    #[arg(long, help = "Never print the banner")]
+    no_banner: bool,
     #[arg(
         short = 'v',
         long,
         action = clap::ArgAction::Version,
         value_parser = clap::value_parser!(bool),
-        help = "Print version",
-        long_help = "Print the bdinfo-rs version and exit."
+        help = "Print version"
     )]
     version: Option<bool>,
+    #[arg(
+        short = 'h',
+        long,
+        action = clap::ArgAction::HelpShort,
+        value_parser = clap::value_parser!(bool),
+        help = "Print help"
+    )]
+    help: Option<bool>,
 }

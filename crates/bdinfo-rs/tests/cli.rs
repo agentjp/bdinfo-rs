@@ -29,35 +29,65 @@ fn version_prints_and_succeeds() {
     }
 }
 
+/// The help card the binary prints, byte for byte — usage line included, which
+/// holds only because the command pins `bin_name`: clap otherwise names the
+/// program as it was invoked, `.exe` suffix and all.
+const CARD: &str = "\
+Usage: bdinfo-rs [OPTIONS] <BD_PATH> [REPORT_DEST]
+
+Arguments:
+  <BD_PATH>      BDMV folder or .iso image
+  [REPORT_DEST]  Report folder (default: BD_PATH; required for .iso)
+
+Options:
+  -l, --list                    List playlists and exit
+  -m, --mpls <NAME,...>         Scan only the named playlists (00800,00801)
+  -w, --whole                   Scan every listed playlist
+      --show-short-playlists    Also list playlists shorter than 20s
+      --show-looping-playlists  Also list looping playlists
+      --no-banner               Never print the banner
+  -v, --version                 Print version
+  -h, --help                    Print help
+";
+
 #[test]
-fn help_shows_the_normalized_surface_and_exits_zero() {
-    let output = bdinfo_rs().arg("--help").output().expect("spawn bdinfo-rs");
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // The positional surface plus the four flags…
-    assert!(stdout.contains("<BD_PATH>"), "help: {stdout}");
-    assert!(stdout.contains("[REPORT_DEST]"), "help: {stdout}");
-    for flag in ["-l, --list", "-m, --mpls", "-w, --whole", "-h, --help", "-v, --version"] {
-        assert!(stdout.contains(flag), "help is missing {flag}: {stdout}");
+fn every_help_path_prints_the_same_compact_card() {
+    let long = bdinfo_rs().arg("--help").output().expect("spawn bdinfo-rs");
+    let short = bdinfo_rs().arg("-h").output().expect("spawn bdinfo-rs");
+    let bare = bdinfo_rs().output().expect("spawn bdinfo-rs");
+
+    // Every help path succeeds, the bare run included: it is a help request,
+    // not a usage error, so an install validator smoke-running the executable
+    // sees a clean exit.
+    assert!(long.status.success(), "--help: {:?}", long.status.code());
+    assert!(short.status.success(), "-h: {:?}", short.status.code());
+    assert!(bare.status.success(), "bare run: {:?}", bare.status.code());
+    assert_eq!(short.stdout, long.stdout, "-h and --help differ");
+    assert_eq!(bare.stdout, long.stdout, "a bare run and --help differ");
+    for output in [&long, &short, &bare] {
+        assert!(output.stderr.is_empty(), "the help is not an error report: {:?}", output.stderr);
     }
-    // …and nothing else: no subcommands, no removed switches.
-    for gone in ["dump", "--strict", "--output", "--save", "--no-", "--level"] {
-        assert!(!stdout.contains(gone), "help still shows {gone}: {stdout}");
+
+    // A pipe gets the plain header, a blank line, then the card.
+    let stdout = String::from_utf8_lossy(&long.stdout);
+    let expected = format!(
+        "bdinfo-rs {} - BDInfo-style Blu-ray disc reports\n\n{CARD}",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(stdout, expected, "the help page drifted");
+    // No colour when piped, and one screen wide.
+    assert!(!stdout.contains('\u{1b}'), "escape codes in a piped help: {stdout:?}");
+    for line in stdout.lines() {
+        assert!(line.chars().count() <= 80, "wider than 80 columns: {line:?}");
     }
 }
 
 #[test]
-fn no_arguments_print_help_and_exit_zero() {
-    // A bare invocation is treated as a help request: the long help goes to
-    // stdout and the process exits 0 (not clap's exit-2 usage error), with
-    // nothing on stderr. Any actual argument still parses — see
-    // `a_subcommand_style_invocation_is_just_a_bad_path` for the exit-2 path.
-    let output = bdinfo_rs().output().expect("spawn bdinfo-rs");
-    assert!(output.status.success(), "no-args exits 0: {:?}", output.status.code());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage:"), "no-args prints usage: {stdout}");
-    assert!(stdout.contains("<BD_PATH>"), "no-args prints help: {stdout}");
-    assert!(output.stderr.is_empty(), "no error output on a help request: {:?}", output.stderr);
+fn no_banner_drops_the_header_from_the_help_page() {
+    let output = bdinfo_rs().args(["--no-banner", "-h"]).output().expect("spawn bdinfo-rs");
+    assert!(output.status.success());
+    // The card alone: no header line, no blank line above it.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), CARD);
 }
 
 /// A valid zero-item `*.mpls` (magic `MPLS0300`, one empty `PlayList`, no marks)
@@ -359,6 +389,9 @@ fn list_prints_the_playlist_table_and_exits() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // A scan flow opens on the scan notice: the help header reaches no other
+    // path than the help itself.
+    assert!(stdout.starts_with("Please wait while we scan the disc..."), "opening: {stdout}");
     assert!(
         stdout.contains("#   Group  Playlist File  Length    Estimated Bytes Measured Bytes"),
         "table: {stdout}"
@@ -527,6 +560,9 @@ fn the_interactive_picker_selects_by_table_index() {
     assert!(output.status.success());
     assert!(saved, "the picked playlist reports");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // The session header greets a terminal only: piped here, so the picker
+    // session opens on the scan notice like every other mode.
+    assert!(stdout.starts_with("Please wait while we scan the disc..."), "opening: {stdout}");
     assert!(stdout.contains("Select (q when finished): "), "prompts: {stdout}");
     assert!(stdout.contains("Invalid Input!"), "rejects words: {stdout}");
     assert!(stdout.contains("Invalid Selection!"), "rejects out-of-range: {stdout}");
