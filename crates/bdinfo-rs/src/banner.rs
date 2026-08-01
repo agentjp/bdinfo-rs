@@ -108,15 +108,14 @@ pub(crate) fn header(caps: &Capabilities, version: &str) -> String {
     }
 }
 
-/// The header a scan session opens with, followed by a blank line — or nothing
-/// at all unless `interactive` and stdout is a terminal.
+/// The header a scan opens with, followed by a blank line — or nothing at all
+/// when `wanted` is false or stdout is not a terminal.
 ///
-/// Only the interactive picker has a human at the keyboard to greet. A
-/// flag-driven mode, or any run whose stdout is piped or redirected, gets the
-/// empty string, so its output is byte-for-byte what it would be without a
-/// header at all.
-pub(crate) fn session_header(caps: &Capabilities, version: &str, interactive: bool) -> String {
-    if interactive && caps.tty { format!("{}\n", header(caps, version)) } else { String::new() }
+/// The terminal check is what keeps automation unchanged: a piped or redirected
+/// run gets the empty string, so its output is byte-for-byte what it would be
+/// without this module, whatever `wanted` says.
+pub(crate) fn session_header(caps: &Capabilities, version: &str, wanted: bool) -> String {
+    if wanted && caps.tty { format!("{}\n", header(caps, version)) } else { String::new() }
 }
 
 /// The framed wordmark: the accent-painted rows between uncoloured block rails,
@@ -237,14 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn only_an_interactive_run_on_a_terminal_opens_with_a_header() {
+    fn only_a_wanted_header_on_a_terminal_opens_a_scan() {
         let piped = Capabilities { tty: false, ansi: false, no_color: false, columns: 120 };
         // The header, then a blank line before the flow narration.
         assert_eq!(
             session_header(&wide(), "9.9.9", true),
             format!("{}\n", header(&wide(), "9.9.9"))
         );
-        // A flag-driven mode, a pipe, or both: not a byte.
+        // Declined, piped, or both: not a byte.
         assert_eq!(session_header(&wide(), "9.9.9", false), "");
         assert_eq!(session_header(&piped, "9.9.9", true), "");
         assert_eq!(session_header(&piped, "9.9.9", false), "");

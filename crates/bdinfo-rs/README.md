@@ -41,6 +41,9 @@ The table hides playlists shorter than 20 seconds and looping ones, and names wh
 `--show-short-playlists` and `--show-looping-playlists` put each category back — into the table,
 the picker, and `--whole`.
 
+A run on a terminal opens with the bdinfo-rs banner; `--no-banner` drops it. Piped or redirected
+output never carries it.
+
 | Exit code | Meaning |
 |---|---|
 | 0 | Scan completed |

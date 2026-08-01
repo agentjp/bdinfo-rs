@@ -82,7 +82,7 @@ const EXAMPLES: &str = "Examples:\n  \
 /// The man page's per-argument descriptions, keyed by the derive's argument id
 /// — the `Cli` field name. `mut_arg` panics on an id that no longer exists, so
 /// a renamed field fails this build rather than silently dropping its prose.
-const LONG_HELP: [(&str, &str); 9] = [
+const LONG_HELP: [(&str, &str); 10] = [
     (
         "bd_path",
         "The Blu-ray to analyze. This may be the disc root (the folder containing BDMV), the \
@@ -128,6 +128,12 @@ const LONG_HELP: [(&str, &str); 9] = [
          are hidden by default as authoring artefacts, so this widens what --list prints, what \
          the interactive picker offers, and what --whole scans. A disc that disguises its main \
          feature as a loop needs this flag to make that playlist selectable.",
+    ),
+    (
+        "no_banner",
+        "Never print the bdinfo-rs banner — the wordmark above the help card and above the scan \
+         flow. It is only ever printed when stdout is a terminal, so a piped or redirected run \
+         needs no flag; this switch silences it on a terminal too.",
     ),
     ("version", "Print the bdinfo-rs version and exit."),
     ("help", "Print the one-screen help card and exit. -h and --help print the same card."),

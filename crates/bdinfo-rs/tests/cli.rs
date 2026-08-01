@@ -45,6 +45,7 @@ Options:
   -w, --whole                   Scan every listed playlist
       --show-short-playlists    Also list playlists shorter than 20s
       --show-looping-playlists  Also list looping playlists
+      --no-banner               Never print the banner
   -v, --version                 Print version
   -h, --help                    Print help
 ";
@@ -79,10 +80,14 @@ fn every_help_path_prints_the_same_compact_card() {
     for line in stdout.lines() {
         assert!(line.chars().count() <= 80, "wider than 80 columns: {line:?}");
     }
-    // No subcommands and no removed switches.
-    for gone in ["dump", "--strict", "--output", "--save", "--no-", "--level"] {
-        assert!(!stdout.contains(gone), "help still shows {gone}: {stdout}");
-    }
+}
+
+#[test]
+fn no_banner_drops_the_header_from_the_help_page() {
+    let output = bdinfo_rs().args(["--no-banner", "-h"]).output().expect("spawn bdinfo-rs");
+    assert!(output.status.success());
+    // The card alone: no header line, no blank line above it.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), CARD);
 }
 
 /// A valid zero-item `*.mpls` (magic `MPLS0300`, one empty `PlayList`, no marks)

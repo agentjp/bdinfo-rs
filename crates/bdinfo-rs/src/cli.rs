@@ -73,6 +73,8 @@ struct Cli {
     show_short_playlists: bool,
     #[arg(long, help = "Also list looping playlists")]
     show_looping_playlists: bool,
+    #[arg(long, help = "Never print the banner")]
+    no_banner: bool,
     #[arg(
         short = 'v',
         long,
