@@ -29,6 +29,14 @@
 //! from the same `src/cli.rs` the binary parses. That guarantees the completions
 //! and the man page can never drift from the shipped flags, help text, or
 //! defaults.
+//!
+//! The man page carries more prose than `--help` does. `src/cli.rs` deliberately
+//! holds no `long_about`, `long_help` or `after_long_help` — that is what keeps
+//! the help one screen and identical for `-h` and `--help` — so the long-form
+//! text lives here instead ([`LONG_ABOUT`], [`EXAMPLES`], [`LONG_HELP`]) and is
+//! attached to the shared command by [`man_command`] just before rendering. The
+//! completions are generated from the command untouched: they read only the
+//! short help.
 #![forbid(unsafe_code)]
 
 use std::fs;
@@ -40,6 +48,99 @@ use clap_complete::{Shell, generate_to};
 
 // Pull in the exact `Cli` the binary uses (brings `use clap::Parser;` with it).
 include!("src/cli.rs");
+
+/// What the tool is, for the man page's DESCRIPTION section.
+const LONG_ABOUT: &str = "bdinfo-rs is a memory-safe, cross-platform Blu-ray analyzer — a drop-in \
+                          replacement for the classic BDInfo tool. It inspects a Blu-ray (a BDMV \
+                          folder or a .iso image) and writes the familiar human-readable disc \
+                          report: the playlists and clips, the M2TS stream layout, and the \
+                          per-stream video and audio technical specs — codecs, measured bitrates, \
+                          resolution, and HDR, Dolby Vision, or HDR10+ metadata.\n\n\
+                          It ships as a single statically-linked binary with no runtime, no \
+                          shared libraries, and nothing to install: the disc structures, the \
+                          codec scanners, and the read-only UDF 2.50 reader for .iso images are \
+                          all pure Rust.\n\n\
+                          Point BD_PATH at the disc and bdinfo-rs scans its metadata, presents \
+                          the playlist selection table, measures the chosen playlists, and writes \
+                          BDINFO.<volume label>.txt into REPORT_DEST.";
+
+/// The worked invocations the man page closes with.
+const EXAMPLES: &str = "Examples:\n  \
+    # Scan a ripped disc folder; pick playlists interactively, writing the\n  \
+    # report back into the same folder.\n  \
+    bdinfo-rs /media/MY_MOVIE\n\n  \
+    # Scan a disc image. A .iso has no folder to write into, so name a\n  \
+    # report destination explicitly.\n  \
+    bdinfo-rs MY_MOVIE.iso /tmp/reports\n\n  \
+    # Print the playlist selection table and stop, scanning nothing.\n  \
+    bdinfo-rs /media/MY_MOVIE --list\n\n  \
+    # Scan exactly the named playlists, in the given order.\n  \
+    bdinfo-rs /media/MY_MOVIE --mpls 00800,00801\n\n  \
+    # Scan every playlist the table lists.\n  \
+    bdinfo-rs /media/MY_MOVIE --whole";
+
+/// The man page's per-argument descriptions, keyed by the derive's argument id
+/// — the `Cli` field name. `mut_arg` panics on an id that no longer exists, so
+/// a renamed field fails this build rather than silently dropping its prose.
+const LONG_HELP: [(&str, &str); 8] = [
+    (
+        "bd_path",
+        "The Blu-ray to analyze. This may be the disc root (the folder containing BDMV), the \
+         BDMV folder itself, any folder inside it, or a .iso disc image. Folder input is read \
+         through the filesystem; a .iso is read through the in-house pure-Rust UDF 2.50 reader. \
+         A folder's disc label is taken from the directory name, while a .iso reports the real \
+         UDF volume label, so the same disc can differ on that one line.",
+    ),
+    (
+        "report_dest",
+        "The folder the report is written into, as BDINFO.<volume label>.txt. It defaults to \
+         BD_PATH, which works for folder input; a .iso image has no folder to fall back on, so a \
+         report destination must then be given explicitly. The destination must be an existing \
+         directory.",
+    ),
+    (
+        "list",
+        "Print the playlist selection table — the standard filtered set of playlists with their \
+         length and size — then exit without measuring anything or writing a report.",
+    ),
+    (
+        "mpls",
+        "Select playlists by name instead of from the table, as a comma-separated list (for \
+         example 00800,00801). Names are matched case-insensitively and the .MPLS extension may \
+         be omitted. The named playlists are scanned in the order given, unfiltered, so this \
+         reaches playlists the table would hide. It takes precedence over --whole and the \
+         interactive picker.",
+    ),
+    (
+        "whole",
+        "Select every playlist shown in the selection table — the standard filtered set — and \
+         scan them all, rather than choosing interactively.",
+    ),
+    (
+        "show_short_playlists",
+        "Include playlists shorter than 20 seconds in the selection table. They are hidden by \
+         default — a disc's menu, logo and transition playlists are usually short — so this \
+         widens what --list prints, what the interactive picker offers, and what --whole scans.",
+    ),
+    (
+        "show_looping_playlists",
+        "Include looping playlists — those repeating a play item — in the selection table. They \
+         are hidden by default as authoring artefacts, so this widens what --list prints, what \
+         the interactive picker offers, and what --whole scans. A disc that disguises its main \
+         feature as a loop needs this flag to make that playlist selectable.",
+    ),
+    ("version", "Print the bdinfo-rs version and exit."),
+];
+
+/// The shared command with the long-form prose attached — the man page's input,
+/// and the only place that prose exists.
+fn man_command() -> clap::Command {
+    let mut cmd = Cli::command().long_about(LONG_ABOUT).after_long_help(EXAMPLES);
+    for (id, long_help) in LONG_HELP {
+        cmd = cmd.mut_arg(id, |arg| arg.long_help(long_help));
+    }
+    cmd
+}
 
 fn main() -> Result<(), Error> {
     // Only regenerate when the CLI surface or this script changes.
@@ -58,9 +159,10 @@ fn main() -> Result<(), Error> {
         generate_to(shell, &mut cmd, bin, &assets)?;
     }
 
-    // Man page (section 1, user commands), rendered from the same command.
+    // Man page (section 1, user commands), rendered from the same command with
+    // the long-form prose reattached.
     let mut page = Vec::new();
-    clap_mangen::Man::new(cmd).render(&mut page)?;
+    clap_mangen::Man::new(man_command()).render(&mut page)?;
     fs::write(assets.join("bdinfo-rs.1"), page)?;
 
     Ok(())

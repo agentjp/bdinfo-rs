@@ -35,11 +35,17 @@
 //! draws on stderr; the flow narration (table, picker, analysis preamble,
 //! classic epilogue, saved-report message) prints on stdout.
 //!
+//! `-h`/`--help` and a bare invocation all print the same one-screen help
+//! card, headed by a banner, a colour chip or a plain line depending on what
+//! the terminal can render (see [`banner`]). The long-form documentation is
+//! the man page `build.rs` generates from the same command.
+//!
 //! Exit codes: `0` success, `1` malformed/not a BD structure or no matching
 //! playlist, `2` no such path / unusable `REPORT_DEST` / unwritable report
-//! file, `3` completed with errors (a partial report was written), `130` scan
-//! cancelled by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every
-//! platform; no report is written).
+//! file / a bare invocation (whose required `BD_PATH` is missing), `3`
+//! completed with errors (a partial report was written), `130` scan cancelled
+//! by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every platform; no
+//! report is written).
 //!
 //! Ctrl+C during the packet scan, on the styled (ANSI-terminal) progress
 //! path, cancels cooperatively: the terminal is put in raw mode for the scan
@@ -71,7 +77,7 @@ use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
-use clap::CommandFactory as _;
+use clap::error::ErrorKind;
 use crossterm::style::Stylize as _;
 use crossterm::{Command as _, cursor, terminal};
 
@@ -82,22 +88,45 @@ use crossterm::{Command as _, cursor, terminal};
 // `use clap::Parser;` along with it, so `Cli::parse()` below resolves.
 include!("cli.rs");
 
+mod banner;
 mod volume;
 
 fn main() -> ExitCode {
-    // A bare invocation (no arguments at all) prints the help to stdout and
-    // exits 0, rather than letting clap reject the missing required BD_PATH with
-    // a usage error on stderr (exit 2). Treating "no arguments" as a help request
-    // is friendlier for a double-clicked binary, and keeps package-manager
-    // install validators that smoke-run the executable from reading a clean run
-    // as a failure. Any actual argument still parses normally — a missing or bad
-    // path remains the usual exit-2 usage error. `args_os` (not `args`) so a
-    // non-UTF-8 argument can't panic this check.
-    if std::env::args_os().nth(1).is_none() {
-        let _ = Cli::command().print_long_help().is_ok();
-        return ExitCode::SUCCESS;
+    match Cli::try_parse() {
+        Ok(cli) => ExitCode::from(run(&cli)),
+        Err(err) => ExitCode::from(report_parse_failure(&err)),
     }
-    ExitCode::from(run(&Cli::parse()))
+}
+
+/// Prints what clap could not parse, and returns the exit code clap itself
+/// would have exited with.
+///
+/// The two help kinds — `-h`/`--help`, and the bare invocation
+/// `arg_required_else_help` answers with that same card — print the
+/// capability-chosen header above clap's card on stdout, keeping clap's exit
+/// codes: `0` for a help that was asked for, `2` for the bare run, whose
+/// required `BD_PATH` is still missing. Every other kind, `--version` included,
+/// is clap's own output on clap's own stream.
+fn report_parse_failure(err: &clap::Error) -> u8 {
+    if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        print!("{}", help_page(&banner::Capabilities::probe(), err));
+    } else {
+        let _ = err.print().is_ok();
+    }
+    u8::try_from(err.exit_code()).unwrap_or(2)
+}
+
+/// The help page as printed: the header for `caps`, a blank line, then clap's
+/// rendered card. The card is ANSI-styled only where `caps` allows colour, so a
+/// piped or `NO_COLOR` run carries no escape byte at all — header and card
+/// alike.
+fn help_page(caps: &banner::Capabilities, err: &clap::Error) -> String {
+    let card = err.render();
+    let card = if caps.colors() { card.ansi().to_string() } else { card.to_string() };
+    format!("{}\n{card}", banner::header(caps, env!("CARGO_PKG_VERSION")))
 }
 
 /// Whether `path` is an `.iso` image (a file with the `.iso` extension,
@@ -1080,10 +1109,11 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::{
-        BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, compose_progress,
-        compose_styled_progress, erase_sequence, finish_early, group_n0, hidden_hint, hms,
-        named_selection, normalize_playlist_name, pick_playlists, redraw_sequence, row_names, run,
-        selection_order, selection_stream_files, selection_table, table_length, table_rows,
+        BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, banner, compose_progress,
+        compose_styled_progress, erase_sequence, finish_early, group_n0, help_page, hidden_hint,
+        hms, named_selection, normalize_playlist_name, pick_playlists, redraw_sequence,
+        report_parse_failure, row_names, run, selection_order, selection_stream_files,
+        selection_table, table_length, table_rows,
     };
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
@@ -1621,6 +1651,97 @@ mod tests {
         let bd = TempBd::new();
         let cli = Cli::try_parse_from(["bdinfo-rs", &bd.root.to_string_lossy()]).expect("parse");
         assert!(!format!("{cli:?}").is_empty());
+    }
+
+    /// The compact help card, byte for byte: the body every help path prints,
+    /// under whichever header the terminal earns.
+    const CARD: &str = "\
+Usage: bdinfo-rs [OPTIONS] <BD_PATH> [REPORT_DEST]
+
+Arguments:
+  <BD_PATH>      BDMV folder or .iso image
+  [REPORT_DEST]  Report folder (default: BD_PATH; required for .iso)
+
+Options:
+  -l, --list                    List playlists and exit
+  -m, --mpls <NAME,...>         Scan only the named playlists (00800,00801)
+  -w, --whole                   Scan every listed playlist
+      --show-short-playlists    Also list playlists shorter than 20s
+      --show-looping-playlists  Also list looping playlists
+  -v, --version                 Print version
+  -h, --help                    Print help
+";
+
+    /// A piped, colourless stdout — the header tier that pins a stable page.
+    fn piped_caps() -> banner::Capabilities {
+        banner::Capabilities { tty: false, ansi: false, no_color: false, columns: 80 }
+    }
+
+    /// The whole page a piped help path prints: the plain header, a blank line,
+    /// then [`CARD`].
+    fn plain_page() -> String {
+        format!("bdinfo-rs {} - {}\n\n{CARD}", env!("CARGO_PKG_VERSION"), banner::TAGLINE)
+    }
+
+    #[test]
+    fn every_help_path_prints_the_same_one_screen_card() {
+        let bare = Cli::try_parse_from(["bdinfo-rs"]).expect_err("a bare run asks for the help");
+        assert_eq!(bare.kind(), ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
+        assert_eq!(help_page(&piped_caps(), &bare), plain_page());
+        // `--help` matches `-h` only while no long help exists anywhere in the
+        // command; adding one back would split them into two pages.
+        for flag in ["-h", "--help"] {
+            let err = Cli::try_parse_from(["bdinfo-rs", flag]).expect_err("help exits parsing");
+            assert_eq!(err.kind(), ErrorKind::DisplayHelp, "{flag}");
+            assert_eq!(help_page(&piped_caps(), &err), plain_page(), "{flag}");
+        }
+        // One screen: nothing wraps at the classic 80 columns.
+        for line in plain_page().lines() {
+            assert!(line.chars().count() <= 80, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_colour_terminal_heads_the_card_with_the_banner() {
+        let err = Cli::try_parse_from(["bdinfo-rs", "-h"]).expect_err("help exits parsing");
+        let caps = banner::Capabilities { tty: true, ansi: true, no_color: false, columns: 120 };
+        let page = help_page(&caps, &err);
+        assert!(page.starts_with('█'), "the banner heads the page: {page}");
+        assert!(page.contains("\u{1b}[38;2;242;166;90m"), "the wordmark is painted: {page}");
+        assert!(page.contains("--show-looping-playlists"), "the card follows: {page}");
+        // The same card is styled here and bare when piped.
+        assert!(!plain_page().contains('\u{1b}'), "a piped page carries no escape byte");
+    }
+
+    #[test]
+    fn the_help_paths_keep_claps_exit_codes() {
+        for (args, code) in [
+            (["bdinfo-rs"].as_slice(), 2),
+            (&["bdinfo-rs", "-h"], 0),
+            (&["bdinfo-rs", "--help"], 0),
+            (&["bdinfo-rs", "-v"], 0),
+            (&["bdinfo-rs", "--nope"], 2),
+            (&["bdinfo-rs", "--list"], 2),
+        ] {
+            let err = Cli::try_parse_from(args.iter()).expect_err("none of these parse");
+            assert_eq!(report_parse_failure(&err), code, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_generated_man_page_carries_the_long_form_prose() {
+        // The card drops the long-form prose; `build.rs` reattaches it to the
+        // same command before rendering the man page. roff escapes every
+        // hyphen, so these probes carry none.
+        let man = include_str!(concat!(env!("OUT_DIR"), "/assets/bdinfo-rs.1"));
+        for prose in [
+            "It ships as a single statically",
+            "Scan a ripped disc folder",
+            "the .MPLS extension may be omitted",
+            "authoring artefacts",
+        ] {
+            assert!(man.contains(prose), "the man page is missing {prose:?}");
+        }
     }
 
     #[test]
