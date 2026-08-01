@@ -37,15 +37,16 @@
 //!
 //! `-h`/`--help` and a bare invocation all print the same one-screen help
 //! card, headed by a banner, a colour chip or a plain line depending on what
-//! the terminal can render (see [`banner`]). The long-form documentation is
+//! the terminal can render (see [`banner`]); the same header opens an
+//! interactive picker session on a terminal. The long-form documentation is
 //! the man page `build.rs` generates from the same command.
 //!
-//! Exit codes: `0` success, `1` malformed/not a BD structure or no matching
-//! playlist, `2` no such path / unusable `REPORT_DEST` / unwritable report
-//! file / a bare invocation (whose required `BD_PATH` is missing), `3`
-//! completed with errors (a partial report was written), `130` scan cancelled
-//! by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every platform; no
-//! report is written).
+//! Exit codes: `0` success (a bare invocation prints the help and lands here
+//! too), `1` malformed/not a BD structure or no matching playlist, `2` no such
+//! path / unusable `REPORT_DEST` / unwritable report file / an invalid
+//! argument, `3` completed with errors (a partial report was written), `130`
+//! scan cancelled by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every
+//! platform; no report is written).
 //!
 //! Ctrl+C during the packet scan, on the styled (ANSI-terminal) progress
 //! path, cancels cooperatively: the terminal is put in raw mode for the scan
@@ -98,24 +99,27 @@ fn main() -> ExitCode {
     }
 }
 
-/// Prints what clap could not parse, and returns the exit code clap itself
-/// would have exited with.
+/// Prints what clap could not parse, and returns the process exit code.
 ///
 /// The two help kinds — `-h`/`--help`, and the bare invocation
 /// `arg_required_else_help` answers with that same card — print the
-/// capability-chosen header above clap's card on stdout, keeping clap's exit
-/// codes: `0` for a help that was asked for, `2` for the bare run, whose
-/// required `BD_PATH` is still missing. Every other kind, `--version` included,
-/// is clap's own output on clap's own stream.
+/// capability-chosen header above clap's card on stdout and exit `0`. Every
+/// other kind, `--version` included, is clap's own output on clap's own stream,
+/// with clap's own exit code.
 fn report_parse_failure(err: &clap::Error) -> u8 {
     if matches!(
         err.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
     ) {
         print!("{}", help_page(&banner::Capabilities::probe(), err));
-    } else {
-        let _ = err.print().is_ok();
+        // A bare run is a help request, not a usage error, so it exits 0 where
+        // clap would exit 2: package-manager install validators smoke-run the
+        // executable with no arguments, and a non-zero exit there reads as a
+        // broken install (CHANGELOG.md, v1.0.1). An actual but invalid argument
+        // still takes the usage-error path below.
+        return 0;
     }
+    let _ = err.print().is_ok();
     u8::try_from(err.exit_code()).unwrap_or(2)
 }
 
@@ -234,6 +238,14 @@ fn report_errors(errors: &[ScanError]) {
     }
 }
 
+/// Whether this invocation ends at the interactive picker: no mode flag, so the
+/// table is offered to a person rather than consumed by one of `--list`,
+/// `--whole` or `--mpls`. The one flow with someone at the keyboard, and so the
+/// only scan flow [`banner::session_header`] greets.
+const fn picks_interactively(cli: &Cli) -> bool {
+    cli.mpls.is_empty() && !cli.list && !cli.whole
+}
+
 /// Executes the parsed CLI, returning the process exit code.
 ///
 /// The classic console flow: validate `BD_PATH`, resolve and validate
@@ -251,6 +263,15 @@ fn run(cli: &Cli) -> u8 {
         Err(code) => return code,
     };
 
+    // After the argument checks, so a bad path stays a bare error message.
+    print!(
+        "{}",
+        banner::session_header(
+            &banner::Capabilities::probe(),
+            env!("CARGO_PKG_VERSION"),
+            picks_interactively(cli),
+        )
+    );
     println!("Please wait while we scan the disc...");
     let (bdrom, errors) =
         match scan_disc(&cli.bd_path, false, None, &mut no_progress, &AtomicBool::new(false)) {
@@ -1111,9 +1132,9 @@ mod tests {
     use super::{
         BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, banner, compose_progress,
         compose_styled_progress, erase_sequence, finish_early, group_n0, help_page, hidden_hint,
-        hms, named_selection, normalize_playlist_name, pick_playlists, redraw_sequence,
-        report_parse_failure, row_names, run, selection_order, selection_stream_files,
-        selection_table, table_length, table_rows,
+        hms, named_selection, normalize_playlist_name, pick_playlists, picks_interactively,
+        redraw_sequence, report_parse_failure, row_names, run, selection_order,
+        selection_stream_files, selection_table, table_length, table_rows,
     };
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
@@ -1714,17 +1735,35 @@ Options:
     }
 
     #[test]
-    fn the_help_paths_keep_claps_exit_codes() {
+    fn the_help_paths_exit_zero_and_bad_arguments_exit_two() {
         for (args, code) in [
-            (["bdinfo-rs"].as_slice(), 2),
+            // A bare run is a help request, not a usage error.
+            (["bdinfo-rs"].as_slice(), 0),
             (&["bdinfo-rs", "-h"], 0),
             (&["bdinfo-rs", "--help"], 0),
             (&["bdinfo-rs", "-v"], 0),
+            // An actual argument that cannot parse still is one.
             (&["bdinfo-rs", "--nope"], 2),
             (&["bdinfo-rs", "--list"], 2),
         ] {
             let err = Cli::try_parse_from(args.iter()).expect_err("none of these parse");
             assert_eq!(report_parse_failure(&err), code, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_mode_free_invocation_reaches_the_picker() {
+        let bd = TempBd::new();
+        let path = bd.root.to_string_lossy().into_owned();
+        let parse = |args: &[&str]| {
+            let mut full = vec!["bdinfo-rs", &path];
+            full.extend_from_slice(args);
+            Cli::try_parse_from(full).expect("parse args")
+        };
+        assert!(picks_interactively(&parse(&[])));
+        assert!(picks_interactively(&parse(&["--show-looping-playlists"])));
+        for mode in [["--list"].as_slice(), &["--whole"], &["--mpls", "00000"]] {
+            assert!(!picks_interactively(&parse(mode)), "{mode:?}");
         }
     }
 

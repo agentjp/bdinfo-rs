@@ -2,9 +2,10 @@
 //! terminal can render: a framed wordmark, a one-line colour chip, or a plain
 //! ASCII line.
 //!
-//! It is a help-path affordance only. No other flow prints it, so a piped scan,
-//! `--list`, `--mpls` and `--version` emit the same bytes with or without this
-//! module.
+//! Two flows print it: the help paths, and the opening of an interactive
+//! picker session on a terminal. Every flag-driven mode (`--list`, `--whole`,
+//! `--mpls`, `--version`) and every piped or redirected run emit the same bytes
+//! with or without this module.
 
 // In a binary, `pub` items are unexported (`unreachable_pub`), so the reachable
 // visibility for these helpers is `pub(crate)` — which the nursery
@@ -107,6 +108,17 @@ pub(crate) fn header(caps: &Capabilities, version: &str) -> String {
     }
 }
 
+/// The header a scan session opens with, followed by a blank line — or nothing
+/// at all unless `interactive` and stdout is a terminal.
+///
+/// Only the interactive picker has a human at the keyboard to greet. A
+/// flag-driven mode, or any run whose stdout is piped or redirected, gets the
+/// empty string, so its output is byte-for-byte what it would be without a
+/// header at all.
+pub(crate) fn session_header(caps: &Capabilities, version: &str, interactive: bool) -> String {
+    if interactive && caps.tty { format!("{}\n", header(caps, version)) } else { String::new() }
+}
+
 /// The framed wordmark: the accent-painted rows between uncoloured block rails,
 /// closed top and bottom, then the [`plain`] line.
 fn banner(version: &str) -> String {
@@ -134,7 +146,9 @@ fn plain(version: &str) -> String {
 mod tests {
     use clap::CommandFactory as _;
 
-    use super::{BANNER_CELLS, Capabilities, TAGLINE, WORDMARK, WORDMARK_CELLS, header};
+    use super::{
+        BANNER_CELLS, Capabilities, TAGLINE, WORDMARK, WORDMARK_CELLS, header, session_header,
+    };
 
     /// A wide terminal with colour — the banner tier.
     fn wide() -> Capabilities {
@@ -220,6 +234,20 @@ mod tests {
             assert!(!out.contains('\u{1b}'), "no escape byte: {out:?}");
         }
         assert!(wide().colors());
+    }
+
+    #[test]
+    fn only_an_interactive_run_on_a_terminal_opens_with_a_header() {
+        let piped = Capabilities { tty: false, ansi: false, no_color: false, columns: 120 };
+        // The header, then a blank line before the flow narration.
+        assert_eq!(
+            session_header(&wide(), "9.9.9", true),
+            format!("{}\n", header(&wide(), "9.9.9"))
+        );
+        // A flag-driven mode, a pipe, or both: not a byte.
+        assert_eq!(session_header(&wide(), "9.9.9", false), "");
+        assert_eq!(session_header(&piped, "9.9.9", true), "");
+        assert_eq!(session_header(&piped, "9.9.9", false), "");
     }
 
     #[test]

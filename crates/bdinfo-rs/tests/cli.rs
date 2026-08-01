@@ -55,11 +55,12 @@ fn every_help_path_prints_the_same_compact_card() {
     let short = bdinfo_rs().arg("-h").output().expect("spawn bdinfo-rs");
     let bare = bdinfo_rs().output().expect("spawn bdinfo-rs");
 
-    // Asking for the help succeeds; a bare run prints the same page but is
-    // still a missing required argument, which is clap's exit 2.
+    // Every help path succeeds, the bare run included: it is a help request,
+    // not a usage error, so an install validator smoke-running the executable
+    // sees a clean exit.
     assert!(long.status.success(), "--help: {:?}", long.status.code());
     assert!(short.status.success(), "-h: {:?}", short.status.code());
-    assert_eq!(bare.status.code(), Some(2));
+    assert!(bare.status.success(), "bare run: {:?}", bare.status.code());
     assert_eq!(short.stdout, long.stdout, "-h and --help differ");
     assert_eq!(bare.stdout, long.stdout, "a bare run and --help differ");
     for output in [&long, &short, &bare] {
@@ -554,6 +555,9 @@ fn the_interactive_picker_selects_by_table_index() {
     assert!(output.status.success());
     assert!(saved, "the picked playlist reports");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // The session header greets a terminal only: piped here, so the picker
+    // session opens on the scan notice like every other mode.
+    assert!(stdout.starts_with("Please wait while we scan the disc..."), "opening: {stdout}");
     assert!(stdout.contains("Select (q when finished): "), "prompts: {stdout}");
     assert!(stdout.contains("Invalid Input!"), "rejects words: {stdout}");
     assert!(stdout.contains("Invalid Selection!"), "rejects out-of-range: {stdout}");
