@@ -37,6 +37,10 @@ bdinfo-rs /path/to/disc --mpls 00800,00801    # scan exactly these playlists
 bdinfo-rs /path/to/disc --whole               # scan everything the table lists
 ```
 
+The table hides playlists shorter than 20 seconds and looping ones, and names what it withheld.
+`--show-short-playlists` and `--show-looping-playlists` put each category back — into the table,
+the picker, and `--whole`.
+
 | Exit code | Meaning |
 |---|---|
 | 0 | Scan completed |

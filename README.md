@@ -97,6 +97,10 @@ bdinfo-rs D:\Rips\MY_MOVIE --mpls 00800,00801    # scan exactly these playlists
 bdinfo-rs D:\Rips\MY_MOVIE --whole               # scan everything the table lists
 ```
 
+The table hides playlists shorter than 20 seconds and looping ones, and names what it withheld.
+`--show-short-playlists` and `--show-looping-playlists` put each category back — into the table,
+the picker, and `--whole`.
+
 Unreadable files on a damaged disc are collected into a `WARNING` block and the rest is scanned
 (exit code 3). Release archives ship bash / zsh / fish / PowerShell completions and a
 `bdinfo-rs.1` man page.
