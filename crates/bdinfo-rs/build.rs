@@ -82,7 +82,7 @@ const EXAMPLES: &str = "Examples:\n  \
 /// The man page's per-argument descriptions, keyed by the derive's argument id
 /// — the `Cli` field name. `mut_arg` panics on an id that no longer exists, so
 /// a renamed field fails this build rather than silently dropping its prose.
-const LONG_HELP: [(&str, &str); 8] = [
+const LONG_HELP: [(&str, &str); 9] = [
     (
         "bd_path",
         "The Blu-ray to analyze. This may be the disc root (the folder containing BDMV), the \
@@ -130,6 +130,7 @@ const LONG_HELP: [(&str, &str); 8] = [
          feature as a loop needs this flag to make that playlist selectable.",
     ),
     ("version", "Print the bdinfo-rs version and exit."),
+    ("help", "Print the one-screen help card and exit. -h and --help print the same card."),
 ];
 
 /// The shared command with the long-form prose attached — the man page's input,

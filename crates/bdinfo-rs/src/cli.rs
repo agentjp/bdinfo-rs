@@ -14,17 +14,16 @@
 // Keeping it in one file means the completions and the man page can never drift
 // from the binary's actual flags, defaults, or help text.
 //
-// The help is one screen: a single short line per argument, and no `long_about`,
-// `long_help` or `after_long_help` anywhere. That absence is load-bearing —
-// clap renders the short card for `--help` only while no long help exists at
-// all (`Command::long_help_exists`), so removing one of those fields silently
-// splits `-h` and `--help` into two different pages. The long-form prose lives
-// on the man page instead: `build.rs` reattaches it to this same `Command`
-// before rendering it, so nothing documented here is lost.
+// The help is one screen: a single short line per argument, with the long-form
+// prose living on the man page instead — `build.rs` reattaches it to this same
+// `Command` before rendering it, so nothing documented here is lost.
 //
-// `arg_required_else_help` routes a bare invocation to that same card, and
-// `help_template` drops clap's leading `about` line because the tagline already
-// sits on the header line the binary prints above the card.
+// Three settings hold that card in shape. `-h`/`--help` is declared here with
+// `HelpShort` (clap's own flag renders the long help for `--help`, which would
+// make the two spellings two different pages). `arg_required_else_help` routes a
+// bare invocation to the same card. And `help_template` drops clap's leading
+// `about` line, because the tagline already sits on the header line the binary
+// prints above the card.
 //
 // NB: no `//!` inner doc comments here — this file is pasted into another module
 // by `include!`, where inner attributes are not allowed. Plain `//` only.
@@ -39,6 +38,7 @@ use clap::Parser;
     about = "BDInfo-style Blu-ray disc reports",
     arg_required_else_help = true,
     help_template = "{usage-heading} {usage}\n\n{all-args}",
+    disable_help_flag = true,
     disable_version_flag = true
 )]
 #[expect(
@@ -78,4 +78,12 @@ struct Cli {
         help = "Print version"
     )]
     version: Option<bool>,
+    #[arg(
+        short = 'h',
+        long,
+        action = clap::ArgAction::HelpShort,
+        value_parser = clap::value_parser!(bool),
+        help = "Print help"
+    )]
+    help: Option<bool>,
 }
