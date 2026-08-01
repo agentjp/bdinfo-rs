@@ -85,17 +85,25 @@ fn empty_mpls() -> Vec<u8> {
 /// A valid single-item `*.mpls`: one 60-second `PlayItem` over clip
 /// `00000.M2TS` — long enough to survive the default playlist filter, so the
 /// table lists it.
+fn one_item_mpls() -> Vec<u8> {
+    repeated_item_mpls(1, 60)
+}
+
+/// [`one_item_mpls`] with the play item repeated `items` times, each running
+/// `seconds` from in-time 0. Every repeat replays one clip file from one
+/// in-time, which is what the core's loop detection keys on, and the
+/// playlist's total length is `items * seconds`.
 #[expect(
     clippy::expect_used,
     reason = "test fixture setup; a failed conversion should abort the test loudly"
 )]
-fn one_item_mpls() -> Vec<u8> {
+fn repeated_item_mpls(items: u16, seconds: u32) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(b"00000"); // clip name
     body.extend_from_slice(b"M2TS");
     body.extend_from_slice(&[0_u8; 3]); // codec id pad + flags
     body.extend_from_slice(&0_u32.to_be_bytes()); // in time (45 kHz)
-    body.extend_from_slice(&2_700_000_u32.to_be_bytes()); // out time: 60 s
+    body.extend_from_slice(&seconds.wrapping_mul(45_000).to_be_bytes()); // out time
     body.extend_from_slice(&[0_u8; 12]);
     body.extend_from_slice(&[0_u8; 4]); // STN table length + reserved
     body.extend_from_slice(&[0_u8; 12]); // the empty stream counts + reserved
@@ -104,10 +112,12 @@ fn one_item_mpls() -> Vec<u8> {
     let mut playlist = Vec::new();
     playlist.extend_from_slice(&[0_u8; 4]); // PlayList length
     playlist.extend_from_slice(&[0_u8; 2]); // reserved
-    playlist.extend_from_slice(&1_u16.to_be_bytes()); // item count
+    playlist.extend_from_slice(&items.to_be_bytes()); // item count
     playlist.extend_from_slice(&[0_u8; 2]); // sub-item count
-    playlist.extend_from_slice(&u16::try_from(body.len()).expect("item length").to_be_bytes());
-    playlist.extend_from_slice(&body);
+    for _ in 0..items {
+        playlist.extend_from_slice(&u16::try_from(body.len()).expect("item length").to_be_bytes());
+        playlist.extend_from_slice(&body);
+    }
     let chapters_offset = playlist_offset.wrapping_add(playlist.len());
 
     let mut buf = b"MPLS0300".to_vec();
@@ -175,6 +185,35 @@ fn movie_bd(tag: &str) -> PathBuf {
     std::fs::create_dir_all(bdmv.join("CLIPINF")).expect("create CLIPINF");
     std::fs::create_dir_all(bdmv.join("STREAM")).expect("create STREAM");
     std::fs::write(bdmv.join("PLAYLIST").join("00000.mpls"), one_item_mpls()).expect("write mpls");
+    std::fs::write(bdmv.join("CLIPINF").join("00000.clpi"), avc_clpi()).expect("write clpi");
+    std::fs::write(bdmv.join("STREAM").join("00000.m2ts"), vec![0_u8; 4096]).expect("write m2ts");
+    root
+}
+
+/// A throwaway BD folder whose four playlists over one shared clip cover every
+/// combination the two filter rules can produce: `00000.MPLS` (60 s) survives
+/// the default filter, `00001.MPLS` (two items, 120 s) loops, `00002.MPLS`
+/// (10 s) is short, and `00003.MPLS` (two items, 10 s) is both. Caller removes
+/// it.
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture setup; a failed write should abort the test loudly"
+)]
+fn filtered_bd(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("bdinfo-rs-e2e-{tag}-{}", std::process::id()));
+    let bdmv = root.join("BDMV");
+    std::fs::create_dir_all(bdmv.join("PLAYLIST")).expect("create PLAYLIST");
+    std::fs::create_dir_all(bdmv.join("CLIPINF")).expect("create CLIPINF");
+    std::fs::create_dir_all(bdmv.join("STREAM")).expect("create STREAM");
+    for (name, items, seconds) in
+        [("00000", 1, 60), ("00001", 2, 60), ("00002", 1, 10), ("00003", 2, 5)]
+    {
+        std::fs::write(
+            bdmv.join("PLAYLIST").join(format!("{name}.mpls")),
+            repeated_item_mpls(items, seconds),
+        )
+        .expect("write mpls");
+    }
     std::fs::write(bdmv.join("CLIPINF").join("00000.clpi"), avc_clpi()).expect("write clpi");
     std::fs::write(bdmv.join("STREAM").join("00000.m2ts"), vec![0_u8; 4096]).expect("write m2ts");
     root
@@ -327,6 +366,104 @@ fn list_prints_the_playlist_table_and_exits() {
     assert!(stdout.contains("1   1      00000.MPLS     00:01:00"), "table: {stdout}");
     assert!(!stdout.contains("Preparing to analyze"), "--list exits after the table: {stdout}");
     assert!(!wrote_report, "--list writes no report file");
+}
+
+/// The `--list` stdout for `filtered_bd`, run with the given extra switches.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed spawn should abort the test loudly"
+)]
+fn listing(disc: &std::path::Path, switches: &[&str]) -> String {
+    let mut args = vec![disc.to_string_lossy().into_owned(), "--list".to_owned()];
+    args.extend(switches.iter().map(|&s| s.to_owned()));
+    let output = bdinfo_rs().args(&args).output().expect("spawn bdinfo-rs");
+    assert!(output.status.success(), "{switches:?}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The table's data rows, in table order — the lines opening with the row
+/// number, which the header and the hint lines never do.
+fn table_row_lines(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with(|c: char| c.is_ascii_digit()) && line.contains(".MPLS"))
+        .collect()
+}
+
+const LOOPING_HINT: &str =
+    "Hidden by filters (looping): 00001.MPLS, 00003.MPLS - rerun with --show-looping-playlists";
+const SHORT_HINT: &str =
+    "Hidden by filters (short): 00002.MPLS, 00003.MPLS - rerun with --show-short-playlists";
+
+#[test]
+fn the_hidden_playlist_hint_follows_the_table_and_names_both_rules() {
+    let root = filtered_bd("hint");
+    let stdout = listing(&root, &[]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    // Only the plain 60-second playlist is listed…
+    assert_eq!(table_row_lines(&stdout).len(), 1, "table: {stdout}");
+    assert!(stdout.contains("1   1      00000.MPLS     00:01:00"), "table: {stdout}");
+    // …and one hint line per rule follows the table, looping first, each
+    // naming the playlists that rule withheld — 00003.MPLS is short AND
+    // looping, so it is named on both. `--list` stops there, so the hint
+    // block is the tail of the whole run.
+    assert!(stdout.ends_with(&format!("{LOOPING_HINT}\n{SHORT_HINT}\n")), "hint block: {stdout}");
+}
+
+#[test]
+fn each_show_switch_reveals_and_silences_only_its_own_category() {
+    let root = filtered_bd("switches");
+    let loops = listing(&root, &["--show-looping-playlists"]);
+    let shorts = listing(&root, &["--show-short-playlists"]);
+    let both = listing(&root, &["--show-looping-playlists", "--show-short-playlists"]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    // The looping switch admits the 120-second loop — the longest playlist on
+    // the disc, so it heads the table — and drops the looping hint only.
+    assert_eq!(table_row_lines(&loops).len(), 2, "table: {loops}");
+    assert!(loops.contains("1   1      00001.MPLS     00:02:00"), "table: {loops}");
+    assert!(!loops.contains("(looping)"), "the looping hint is silenced: {loops}");
+    assert!(loops.contains(SHORT_HINT), "the short hint remains: {loops}");
+    // The short switch admits the 10-second playlist and drops the short hint
+    // only; 00003.MPLS is still withheld because it also loops.
+    assert_eq!(table_row_lines(&shorts).len(), 2, "table: {shorts}");
+    assert!(shorts.contains("2   1      00002.MPLS     00:00:10"), "table: {shorts}");
+    assert!(!shorts.contains("(short)"), "the short hint is silenced: {shorts}");
+    assert!(shorts.contains(LOOPING_HINT), "the looping hint remains: {shorts}");
+    // Both switches list the whole disc and print no hint at all.
+    assert_eq!(table_row_lines(&both).len(), 4, "table: {both}");
+    assert!(both.contains("4   1      00003.MPLS     00:00:10"), "table: {both}");
+    assert!(!both.contains("Hidden by filters"), "nothing is withheld: {both}");
+}
+
+#[test]
+fn mpls_mode_prints_no_table_and_no_hint() {
+    let root = filtered_bd("mplshint");
+    let path = root.to_string_lossy().into_owned();
+    let named = bdinfo_rs().args([&path, "--mpls", "00001"]).output().expect("spawn bdinfo-rs");
+    let named_report = std::fs::read(report_file(&root)).expect("read the report");
+    let _ = std::fs::remove_file(report_file(&root)).is_ok();
+    // The default table selects exactly 00000.MPLS, so `--whole` and
+    // `-m 00000` must write the identical report — the hint is console
+    // narration and never reaches the file.
+    let whole = bdinfo_rs().args([&path, "--whole"]).output().expect("spawn bdinfo-rs");
+    let whole_report = std::fs::read(report_file(&root)).expect("read the report");
+    let _ = std::fs::remove_file(report_file(&root)).is_ok();
+    let single = bdinfo_rs().args([&path, "--mpls", "00000"]).output().expect("spawn bdinfo-rs");
+    let single_report = std::fs::read(report_file(&root)).expect("read the report");
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    // `--mpls` reaches a playlist the table hides, without a table or a hint.
+    assert!(named.status.success());
+    let stdout = String::from_utf8_lossy(&named.stdout);
+    assert!(!stdout.contains("Playlist File"), "no table in mpls mode: {stdout}");
+    assert!(!stdout.contains("Hidden by filters"), "no hint in mpls mode: {stdout}");
+    assert!(String::from_utf8_lossy(&named_report).contains("PLAYLIST: 00001.MPLS"));
+    assert!(whole.status.success());
+    assert!(single.status.success());
+    assert_eq!(whole_report, single_report, "the table path and -m write the same bytes");
+    assert!(!String::from_utf8_lossy(&whole_report).contains("Hidden by filters"));
 }
 
 #[test]

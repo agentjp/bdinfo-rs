@@ -53,6 +53,11 @@ use clap::Parser;
         bdinfo-rs /media/MY_MOVIE --whole",
     disable_version_flag = true
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one bool per independent CLI switch; clap's derive has no other spelling, and the \
+              switches are orthogonal — no state machine or two-variant enum fits them"
+)]
 struct Cli {
     #[arg(
         value_name = "BD_PATH",
@@ -105,6 +110,25 @@ struct Cli {
                      filtered set — and scan them all, rather than choosing interactively."
     )]
     whole: bool,
+    #[arg(
+        long,
+        help = "Also list playlists shorter than 20s",
+        long_help = "Include playlists shorter than 20 seconds in the selection table. They are \
+                     hidden by default — a disc's menu, logo and transition playlists are \
+                     usually short — so this widens what --list prints, what the interactive \
+                     picker offers, and what --whole scans."
+    )]
+    show_short_playlists: bool,
+    #[arg(
+        long,
+        help = "Also list looping playlists",
+        long_help = "Include looping playlists — those repeating a play item — in the selection \
+                     table. They are hidden by default as authoring artefacts, so this widens \
+                     what --list prints, what the interactive picker offers, and what --whole \
+                     scans. A disc that disguises its main feature as a loop needs this flag to \
+                     make that playlist selectable."
+    )]
+    show_looping_playlists: bool,
     #[arg(
         short = 'v',
         long,
