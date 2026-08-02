@@ -720,21 +720,58 @@ struct PlaylistRow {
     estimated_bytes: Option<u64>,
     /// Whether the playlist hides any stream (the CLI's `(*)` note).
     has_hidden_streams: bool,
+    /// The filter rules that classify this playlist as withheld (see
+    /// [`hidden_by`]) — empty for a row the standard filters keep.
+    hidden_by: Vec<&'static str>,
 }
 
 /// The playlist table rows as `(group number, playlist index)` pairs in table
-/// order: the standard filtered set (short and looping playlists dropped),
-/// grouped by shared clips, each group longest-first. Mirrors the CLI's
-/// `table_rows`.
+/// order: the playlists `filter` keeps, grouped by shared clips, each group
+/// longest-first. Mirrors the CLI's `table_rows`.
 #[cfg(any(target_arch = "wasm32", test))]
-fn table_rows(playlists: &[PlaylistSummary]) -> Vec<(usize, usize)> {
-    presentation_groups(playlists, &PlaylistFilter::default())
+fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(usize, usize)> {
+    presentation_groups(playlists, filter)
         .into_iter()
         .enumerate()
         .flat_map(|(group, members)| {
             members.into_iter().map(move |index| (group.saturating_add(1), index))
         })
         .collect()
+}
+
+/// The listing exports' filter: the standard filtered set with each rule
+/// switched off by its option. An absent option (`None`) means `false` — the
+/// rule stays on — so a call that passes neither option lists exactly the set
+/// the CLI's plain `--list` prints.
+#[cfg(any(target_arch = "wasm32", test))]
+fn listing_filter(show_short: Option<bool>, show_looping: Option<bool>) -> PlaylistFilter {
+    PlaylistFilter {
+        filter_short_playlists: !show_short.unwrap_or(false),
+        filter_looping_playlists: !show_looping.unwrap_or(false),
+        ..PlaylistFilter::default()
+    }
+}
+
+/// Which filter rules classify `playlist` as withheld — `"short"`, `"looping"`,
+/// both, or neither. Each rule is judged on its own against the whole disc, the
+/// same classification the CLI's `Hidden by filters (…)` hint lines make: a
+/// playlist that is both short and looping names both rules and is only listed
+/// when both options are passed.
+///
+/// The judgement deliberately ignores `filter`'s two switches and reads only its
+/// threshold, so it is the same whether the caller listed the standard set or a
+/// widened one. That is what lets a caller list once with both options on and
+/// re-apply either rule to the rows itself.
+#[cfg(any(target_arch = "wasm32", test))]
+fn hidden_by(playlist: &PlaylistSummary, filter: &PlaylistFilter) -> Vec<&'static str> {
+    let mut rules = Vec::new();
+    if playlist.total_length < filter.short_playlist_seconds {
+        rules.push("short");
+    }
+    if playlist.has_loops {
+        rules.push("looping");
+    }
+    rules
 }
 
 /// `hh:mm:ss` from playlist seconds, truncated to the tick like the CLI table
@@ -761,10 +798,10 @@ const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
     }
 }
 
-/// Builds the selection-table rows over the standard filtered set.
+/// Builds the selection-table rows over the set `filter` keeps.
 #[cfg(any(target_arch = "wasm32", test))]
-fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
-    table_rows(playlists)
+fn playlist_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<PlaylistRow> {
+    table_rows(playlists, filter)
         .into_iter()
         .enumerate()
         .filter_map(|(position, (group, index))| {
@@ -775,6 +812,7 @@ fn playlist_rows(playlists: &[PlaylistSummary]) -> Vec<PlaylistRow> {
                 length: table_length(playlist.total_length),
                 estimated_bytes: estimated_bytes(playlist),
                 has_hidden_streams: playlist.has_hidden_streams(),
+                hidden_by: hidden_by(playlist, filter),
             })
         })
         .collect()
@@ -823,7 +861,16 @@ fn rows_to_json(rows: &[PlaylistRow]) -> String {
         }
         out.push_str(",\"hasHidden\":");
         out.push_str(if row.has_hidden_streams { "true" } else { "false" });
-        out.push('}');
+        // The rule names are fixed ASCII literals (see `hidden_by`), so they go
+        // out unescaped where every other string field is escaped.
+        out.push_str(",\"hiddenBy\":[");
+        for (rule_index, rule) in row.hidden_by.iter().enumerate() {
+            if rule_index > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "\"{rule}\"");
+        }
+        out.push_str("]}");
     }
     out.push(']');
     out
@@ -1133,19 +1180,34 @@ pub fn scan_iso(
 ///
 /// Runs only the **structural** scan — no packet demux — so it is fast: it reads
 /// the playlist/clip metadata, not the multi-GB stream files. Each element is
-/// `{ position, group, name, length, estimatedBytes, hasHidden }`; pass the
-/// chosen `name`s back to [`scan_files`] to measure just those playlists.
+/// `{ position, group, name, length, estimatedBytes, hasHidden, hiddenBy }`;
+/// pass the chosen `name`s back to [`scan_files`] to measure just those
+/// playlists.
+///
+/// The listing drops short and looping playlists like the CLI's `--list`.
+/// `show_short_playlists` / `show_looping_playlists` switch off one rule each
+/// (the CLI's `--show-short-playlists` / `--show-looping-playlists`); omitting
+/// them, or passing `false`, keeps the standard set. Every row carries the rules
+/// that classify it as withheld in `hiddenBy` — empty for a row the standard
+/// filters keep — so a caller can list once with both options on and re-apply
+/// either rule to the rows without re-scanning.
 ///
 /// # Errors
 /// As [`scan_files`]: `paths`/`files` length mismatch, a non-`File` entry, an
 /// incoherent selection, or no readable Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String, JsValue> {
+pub fn list_playlists(
+    paths: Vec<String>,
+    files: js_sys::Array,
+    show_short_playlists: Option<bool>,
+    show_looping_playlists: Option<bool>,
+) -> Result<String, JsValue> {
     let root = build_web_tree(&paths, &files)?;
     let report = BdRom::open_resilient(&root, ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
+    let filter = listing_filter(show_short_playlists, show_looping_playlists);
+    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists, &filter)))
 }
 
 /// The structural-scan `.iso` entry point: the playlist selection table as JSON.
@@ -1155,19 +1217,26 @@ pub fn list_playlists(paths: Vec<String>, files: js_sys::Array) -> Result<String
 /// ([`UdfSource`]) instead of a `(relativePath, File)` list. Runs only the
 /// **structural** scan (no packet demux), so it is fast; pass the chosen
 /// `name`s back to [`scan_iso`] to measure just those playlists.
+/// `show_short_playlists` / `show_looping_playlists` and the rows' `hiddenBy`
+/// behave exactly as in [`list_playlists`].
 ///
 /// # Errors
 /// Returns a `JsValue` if the image is not a readable UDF `.iso`, or holds no
 /// readable Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn list_iso_playlists(file: web_sys::File) -> Result<String, JsValue> {
+pub fn list_iso_playlists(
+    file: web_sys::File,
+    show_short_playlists: Option<bool>,
+    show_looping_playlists: Option<bool>,
+) -> Result<String, JsValue> {
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
     let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists)))
+    let filter = listing_filter(show_short_playlists, show_looping_playlists);
+    Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists, &filter)))
 }
 
 #[cfg(test)]
@@ -1618,11 +1687,12 @@ mod tests {
     /// by-name measured scan, native-tested.
     mod selection {
         use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
+        use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 
         use crate::{
-            PlaylistRow, estimated_bytes, json_escape, named_selection, normalize_playlist_name,
-            playlist_rows, rows_to_json, selection_order, selection_stream_files, table_length,
-            table_rows,
+            PlaylistRow, estimated_bytes, hidden_by, json_escape, listing_filter, named_selection,
+            normalize_playlist_name, playlist_rows, rows_to_json, selection_order,
+            selection_stream_files, table_length, table_rows,
         };
 
         /// A `ClipSummary` carrying just a name + length (the fields the
@@ -1668,6 +1738,12 @@ mod tests {
             }
         }
 
+        /// [`sample_playlist`] marked as looping — the input of the second
+        /// filter rule, which reads only `has_loops`.
+        fn looping_playlist(name: &str, total_length: f64, clips: &[&str]) -> PlaylistSummary {
+            PlaylistSummary { has_loops: true, ..sample_playlist(name, total_length, 0, 0, clips) }
+        }
+
         /// A four-playlist disc: 00000 (100 s) shares clip A with 00001 (50 s) →
         /// group 1; 00002 (70 s, clip B) → group 2; 00003 (5 s) is dropped by
         /// the short filter.
@@ -1680,15 +1756,114 @@ mod tests {
             ]
         }
 
+        /// A disc holding one playlist per filter classification, each over its
+        /// own clip (so every kept playlist is its own group): 00000 (100 s) is
+        /// listed by every filter, 00001 (200 s) is looping, 00002 (5 s) is
+        /// short, and 00003 (5 s) is both.
+        fn mixed_disc() -> [PlaylistSummary; 4] {
+            [
+                sample_playlist("00000.MPLS", 100.0, 1000, 0, &["A.M2TS"]),
+                looping_playlist("00001.MPLS", 200.0, &["B.M2TS"]),
+                sample_playlist("00002.MPLS", 5.0, 100, 0, &["C.M2TS"]),
+                looping_playlist("00003.MPLS", 5.0, &["D.M2TS"]),
+            ]
+        }
+
+        /// The listed names under `filter`, in table order.
+        fn listed(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<String> {
+            playlist_rows(playlists, filter).into_iter().map(|row| row.name).collect()
+        }
+
         #[test]
         fn table_rows_groups_and_filters_like_the_cli() {
             // Sorted by length desc, grouped by shared clip, the short row dropped.
-            assert_eq!(table_rows(&disc()), [(1, 0), (1, 1), (2, 2)]);
+            assert_eq!(table_rows(&disc(), &PlaylistFilter::default()), [(1, 0), (1, 1), (2, 2)]);
+        }
+
+        #[test]
+        fn listing_filter_switches_off_one_rule_per_option() {
+            // An absent option reads as `false`, so the plain call is the
+            // standard filtered set; each option switches off only its own rule.
+            // Comparing whole filters also pins what neither option touches: the
+            // short threshold stays at the default 20 s.
+            for (show_short, show_looping, short_on, looping_on) in [
+                (None, None, true, true),
+                (Some(false), Some(false), true, true),
+                (Some(true), None, false, true),
+                (None, Some(true), true, false),
+                (Some(true), Some(true), false, false),
+            ] {
+                assert_eq!(
+                    listing_filter(show_short, show_looping),
+                    PlaylistFilter {
+                        filter_short_playlists: short_on,
+                        filter_looping_playlists: looping_on,
+                        ..PlaylistFilter::default()
+                    },
+                    "{show_short:?} / {show_looping:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn hidden_by_names_each_rule_independently() {
+            let filter = PlaylistFilter::default();
+            let names: Vec<Vec<&str>> =
+                mixed_disc().iter().map(|playlist| hidden_by(playlist, &filter)).collect();
+            assert_eq!(names, [vec![], vec!["looping"], vec!["short"], vec!["short", "looping"]]);
+            // A playlist of exactly the threshold length is kept, so it names no
+            // rule — the same boundary `PlaylistFilter::keeps` draws.
+            assert!(
+                hidden_by(&sample_playlist("X", 20.0, 0, 0, &[]), &filter).is_empty(),
+                "20 s is not short"
+            );
+        }
+
+        #[test]
+        fn hidden_by_is_the_same_whatever_the_options_are() {
+            // The classification reads the rules, not the switches: a row listed
+            // only because its option was passed still names the rule that would
+            // have withheld it — the field a client re-filters on.
+            let widened = listing_filter(Some(true), Some(true));
+            let rows = playlist_rows(&mixed_disc(), &widened);
+            let view: Vec<(&str, &[&str])> =
+                rows.iter().map(|row| (row.name.as_str(), row.hidden_by.as_slice())).collect();
+            assert_eq!(
+                view,
+                [
+                    ("00001.MPLS", ["looping"].as_slice()),
+                    ("00000.MPLS", [].as_slice()),
+                    ("00002.MPLS", ["short"].as_slice()),
+                    ("00003.MPLS", ["short", "looping"].as_slice()),
+                ]
+            );
+        }
+
+        #[test]
+        fn each_option_widens_the_listing_by_its_own_rule() {
+            let playlists = mixed_disc();
+            // The standard set lists neither the looping nor the short playlist.
+            assert_eq!(listed(&playlists, &listing_filter(None, None)), ["00000.MPLS"]);
+            // Showing short playlists reveals the short one but NOT the playlist
+            // that is short *and* looping — the rules are independent.
+            assert_eq!(
+                listed(&playlists, &listing_filter(Some(true), None)),
+                ["00000.MPLS", "00002.MPLS"]
+            );
+            assert_eq!(
+                listed(&playlists, &listing_filter(None, Some(true))),
+                ["00001.MPLS", "00000.MPLS"]
+            );
+            // Both options list the whole disc, longest first.
+            assert_eq!(
+                listed(&playlists, &listing_filter(Some(true), Some(true))),
+                ["00001.MPLS", "00000.MPLS", "00002.MPLS", "00003.MPLS"]
+            );
         }
 
         #[test]
         fn playlist_rows_carry_the_table_columns() {
-            let rows = playlist_rows(&disc());
+            let rows = playlist_rows(&disc(), &PlaylistFilter::default());
             let view: Vec<_> = rows
                 .iter()
                 .map(|row| {
@@ -1699,16 +1874,17 @@ mod tests {
                         row.length.as_str(),
                         row.estimated_bytes,
                         row.has_hidden_streams,
+                        row.hidden_by.clone(),
                     )
                 })
                 .collect();
             assert_eq!(
                 view,
                 [
-                    (1, 1, "00000.MPLS", "00:01:40", Some(1000), false),
-                    (2, 1, "00001.MPLS", "00:00:50", Some(500), false),
+                    (1, 1, "00000.MPLS", "00:01:40", Some(1000), false, vec![]),
+                    (2, 1, "00001.MPLS", "00:00:50", Some(500), false, vec![]),
                     // group 2; the interleaved size is preferred over the m2ts size.
-                    (3, 2, "00002.MPLS", "00:01:10", Some(2000), false),
+                    (3, 2, "00002.MPLS", "00:01:10", Some(2000), false, vec![]),
                 ]
             );
         }
@@ -1801,6 +1977,7 @@ mod tests {
                     length: "00:01:40".to_owned(),
                     estimated_bytes: Some(1000),
                     has_hidden_streams: false,
+                    hidden_by: Vec::new(),
                 },
                 PlaylistRow {
                     position: 2,
@@ -1809,12 +1986,13 @@ mod tests {
                     length: "00:00:50".to_owned(),
                     estimated_bytes: None,
                     has_hidden_streams: true,
+                    hidden_by: vec!["short", "looping"],
                 },
             ];
             assert_eq!(
                 rows_to_json(&rows),
-                "[{\"position\":1,\"group\":1,\"name\":\"00000.MPLS\",\"length\":\"00:01:40\",\"estimatedBytes\":1000,\"hasHidden\":false},\
-                 {\"position\":2,\"group\":2,\"name\":\"00001.MPLS\",\"length\":\"00:00:50\",\"estimatedBytes\":null,\"hasHidden\":true}]"
+                "[{\"position\":1,\"group\":1,\"name\":\"00000.MPLS\",\"length\":\"00:01:40\",\"estimatedBytes\":1000,\"hasHidden\":false,\"hiddenBy\":[]},\
+                 {\"position\":2,\"group\":2,\"name\":\"00001.MPLS\",\"length\":\"00:00:50\",\"estimatedBytes\":null,\"hasHidden\":true,\"hiddenBy\":[\"short\",\"looping\"]}]"
             );
             assert_eq!(rows_to_json(&[]), "[]");
         }

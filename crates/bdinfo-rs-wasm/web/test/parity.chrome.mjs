@@ -96,6 +96,7 @@ async function main() {
 
   let report;
   let isoReport;
+  let listings;
   try {
     const page = await browser.newPage();
     page.on("console", (msg) => console.log(`  [page] ${msg.text()}`));
@@ -104,9 +105,9 @@ async function main() {
     await page.goto(`${base}/test/harness.html`);
     await page.waitForFunction(() => window.__ready === true, { timeout: 30000 });
 
-    // The folder path: the fixture handed in as a `(relativePath, File)` list.
-    report = await page.evaluate(async (items) => {
-      const files = items.map((item) => {
+    // The in-page `(relativePath, File)` list the folder calls take.
+    await page.evaluate((items) => {
+      window.__files = items.map((item) => {
         const binary = atob(item.b64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) {
@@ -115,8 +116,34 @@ async function main() {
         const name = item.path.split("/").pop();
         return { path: item.path, file: new File([bytes], name) };
       });
-      return await window.__analyze(files);
     }, entries);
+
+    // The folder path: the fixture handed in as a `(relativePath, File)` list.
+    report = await page.evaluate(async () => await window.__analyze(window.__files));
+
+    // The listing's filter options, driven through the real Worker: the same
+    // disc plus a second playlist over the same clip patched to ~10 s (the first
+    // PlayItem's OUT_time is a u32-BE at file offset 86, 45_000 ticks a second),
+    // which the short-playlist rule withholds unless the option is passed.
+    listings = await page.evaluate(async () => {
+      const source = window.__files.find((entry) => entry.path.endsWith("00000.mpls"));
+      const bytes = new Uint8Array(await source.file.arrayBuffer());
+      new DataView(bytes.buffer).setUint32(86, 27_000_000 + 45_000 * 10);
+      const files = [
+        ...window.__files,
+        {
+          path: "WASMDISC/BDMV/PLAYLIST/00001.mpls",
+          file: new File([bytes], "00001.mpls"),
+        },
+      ];
+      const names = async (options) =>
+        (await window.__listPlaylists(files, options)).map((row) => `${row.name}:${row.hiddenBy}`);
+      return {
+        standard: await names(),
+        widened: await names({ showShortPlaylists: true }),
+        looping: await names({ showLoopingPlaylists: true }),
+      };
+    });
 
     // The `.iso` path: the same disc fetched as one `File` and opened through the
     // UDF reader — the real-browser Worker + FileReaderSync `scan_iso` seam.
@@ -155,7 +182,21 @@ async function main() {
 
   const folderOk = compare("measured scan", report, golden);
   const isoOk = compare(".iso scan", isoReport, isoGolden);
-  process.exit(folderOk && isoOk ? 0 : 1);
+
+  // Each listing is `name:hiddenBy` per row: the short playlist is listed only
+  // with its own option, and always names the rule that withholds it.
+  const want = {
+    standard: ["00000.MPLS:"],
+    widened: ["00000.MPLS:", "00001.MPLS:short"],
+    looping: ["00000.MPLS:"],
+  };
+  const listOk = JSON.stringify(listings) === JSON.stringify(want);
+  if (listOk) {
+    console.log("PASS — Worker listing options widen the table by their own rule.");
+  } else {
+    console.error(`FAIL — listing options: got ${JSON.stringify(listings)}`);
+  }
+  process.exit(folderOk && isoOk && listOk ? 0 : 1);
 }
 
 main().catch((err) => {

@@ -59,9 +59,26 @@ console.log(report); // the classic BDInfo-style disc report
 ```
 
 `listPlaylists` resolves with the selection-table rows (`position`, `group`,
-`name`, `length`, `estimatedBytes`, `hasHidden`); `analyze` spawns the scan
-Worker, relays demux progress, and resolves with the report string. Omit both
-`onProgress` and `selection` for the simplest whole-disc scan. See `index.html`
+`name`, `length`, `estimatedBytes`, `hasHidden`, `hiddenBy`); `analyze` spawns
+the scan Worker, relays demux progress, and resolves with the report string.
+Omit both `onProgress` and `selection` for the simplest whole-disc scan.
+
+Like the classic report, the listing hides playlists shorter than 20 seconds and
+looping ones. Pass `showShortPlaylists` / `showLoopingPlaylists` to list them
+too; each row's `hiddenBy` names the rules that classify it as withheld
+(`"short"`, `"looping"`, both, or none), whichever options were passed — so one
+widened listing can be re-filtered in your UI without re-scanning:
+
+```ts
+const all = await listPlaylists(picked, {
+  showShortPlaylists: true,
+  showLoopingPlaylists: true,
+});
+const standard = all.filter((row) => row.hiddenBy.length === 0);
+```
+
+The options only widen what `listPlaylists` returns. `analyze` measures its
+`selection` unfiltered either way, and the report is unchanged. See `index.html`
 in the source repository for a complete vanilla example (the demo is not shipped
 in the npm package).
 
