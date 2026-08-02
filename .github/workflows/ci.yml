@@ -49,6 +49,24 @@ env:
   # The nightly that backs the `fmt` step (rustfmt.toml has nightly-only options).
   # Keep in lockstep with $script:Nightly in scripts/_common.ps1.
   NIGHTLY: nightly-2026-07-06
+  # Two knobs that exist to keep the SAVED target/ small, set here rather than
+  # in a tracked Cargo profile so local dev loops keep both. A hosted job builds
+  # from a restored cache, near enough from scratch that incremental
+  # compilation buys no rebuild it can amortise — it only writes
+  # dependency-tracking metadata into the tree rust-cache then archives.
+  # Debuginfo is the other bulk contributor; `line-tables-only` rather than `0`
+  # so a failing test still prints file:line backtraces.
+  #
+  # Why size is the thing being optimised: a repository's Actions cache store
+  # is capped (10 GB at the time of writing) and evicted least-recently-used
+  # across ALL entries, so oversized Rust archives push out the few-MB
+  # compiled-tool caches, whose miss costs minutes of `cargo install` on the
+  # pull-request path. Smaller archives also restore faster, on every job.
+  #
+  # Jobs running cargo-mutants override CARGO_INCREMENTAL back to 1 — see the
+  # `mutants` job.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 concurrency:
   # Namespaced by event so that, should a workflow_call invocation from
@@ -442,6 +460,13 @@ jobs:
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.core == 'true'
     runs-on: ubuntu-latest
+    env:
+      # cargo-mutants rebuilds the tree once per mutant, each rebuild differing
+      # from the last by one function body — exactly the case incremental
+      # compilation is built for, and the reason a mutation run is affordable
+      # at all. So every job that runs cargo-mutants overrides the
+      # workflow-level 0, trading a larger target/ for the rebuild time.
+      CARGO_INCREMENTAL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -491,6 +516,7 @@ jobs:
       # deterministic software backend is what makes them run on a GPU-less
       # runner at all (same as gui.yml).
       ICED_TEST_BACKEND: tiny-skia
+      CARGO_INCREMENTAL: "1"   # cargo-mutants' rebuild model — see the `mutants` job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -544,6 +570,8 @@ jobs:
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.wasm == 'true'
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "1"   # cargo-mutants' rebuild model — see the `mutants` job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
