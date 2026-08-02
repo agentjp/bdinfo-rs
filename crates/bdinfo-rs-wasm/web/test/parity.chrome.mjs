@@ -7,6 +7,12 @@
 // asserts the returned report is BYTE-IDENTICAL to the pinned native golden
 // (`tests/golden_report.txt`) — the same golden the native ⇄ wasm parity test pins.
 //
+// It drives the package's own entry (`dist/analyze.js`), so it is also what
+// proves the TypeScript surface: the disc model reaches the page as a real
+// object over `postMessage`, and handing it back to `renderReport` renders the
+// golden bytes again — the round trip through structured clone in both
+// directions, which the Node test (raw wasm exports, no Worker) cannot see.
+//
 // Prereq: `npm run build` (emits `pkg/` + `dist/`). Run with `npm run test:chrome`.
 
 import { readFile } from "node:fs/promises";
@@ -97,6 +103,8 @@ async function main() {
   let report;
   let isoReport;
   let listings;
+  let structured;
+  let isoStructured;
   try {
     const page = await browser.newPage();
     page.on("console", (msg) => console.log(`  [page] ${msg.text()}`));
@@ -138,10 +146,38 @@ async function main() {
       ];
       const names = async (options) =>
         (await window.__listPlaylists(files, options)).map((row) => `${row.name}:${row.hiddenBy}`);
+      // The threshold only `inspect` takes: at 5 s the ~10 s playlist is no
+      // longer short, where the default 20 s withholds it.
+      const inspected = async (options) =>
+        (await window.__inspect(files, options)).playlists.map((playlist) => playlist.name);
       return {
         standard: await names(),
         widened: await names({ showShortPlaylists: true }),
         looping: await names({ showLoopingPlaylists: true }),
+        inspectStandard: await inspected(),
+        inspectLowered: await inspected({ shortPlaylistSeconds: 5 }),
+      };
+    });
+
+    // The structured API over the folder pick: the model out of a structural
+    // scan, then a measured scan that returns the report and the model together,
+    // then that model handed back for a render with and without a section.
+    structured = await page.evaluate(async () => {
+      const disc = await window.__inspect(window.__files);
+      const scanned = await window.__scan(window.__files);
+      return {
+        inspected: {
+          measured: disc.measured,
+          volumeLabel: disc.volumeLabel,
+          playlists: disc.playlists.map((playlist) => playlist.name),
+          streams: disc.playlists[0].streams.length,
+          rates: disc.playlists[0].streams.map((stream) => stream.bitrateBps),
+        },
+        measured: scanned.disc.measured,
+        rate: scanned.disc.playlists[0].streams[0].bitrateBps,
+        report: scanned.report,
+        reRendered: await window.__renderReport(scanned.disc),
+        trimmed: await window.__renderReport(scanned.disc, { streamDiagnostics: false }),
       };
     });
 
@@ -151,6 +187,25 @@ async function main() {
       const buf = await (await fetch("/__fixture.iso")).arrayBuffer();
       const file = new File([new Uint8Array(buf)], "BigBuckBunny.iso");
       return await window.__analyzeIso(file);
+    });
+
+    // The same image through the structured API. One `File` rather than a list
+    // is what tells `inspect` and `scan` to open it as an `.iso`, so this is the
+    // check that the two sources are told apart; the volume label is the genuine
+    // one recorded in the filesystem, where a folder pick can only use the
+    // picked folder's name.
+    isoStructured = await page.evaluate(async () => {
+      const buf = await (await fetch("/__fixture.iso")).arrayBuffer();
+      const file = new File([new Uint8Array(buf)], "BigBuckBunny.iso");
+      const disc = await window.__inspect(file);
+      const scanned = await window.__scan(file);
+      return {
+        label: disc.volumeLabel,
+        playlists: disc.playlists.map((playlist) => playlist.name),
+        measured: scanned.disc.measured,
+        report: scanned.report,
+        reRendered: await window.__renderReport(scanned.disc),
+      };
     });
   } finally {
     await browser.close();
@@ -184,11 +239,14 @@ async function main() {
   const isoOk = compare(".iso scan", isoReport, isoGolden);
 
   // Each listing is `name:hiddenBy` per row: the short playlist is listed only
-  // with its own option, and always names the rule that withholds it.
+  // with its own option, and always names the rule that withholds it. The two
+  // `inspect` entries are playlist names, filtered by the threshold instead.
   const want = {
     standard: ["00000.MPLS:"],
     widened: ["00000.MPLS:", "00001.MPLS:short"],
     looping: ["00000.MPLS:"],
+    inspectStandard: ["00000.MPLS"],
+    inspectLowered: ["00000.MPLS", "00001.MPLS"],
   };
   const listOk = JSON.stringify(listings) === JSON.stringify(want);
   if (listOk) {
@@ -196,7 +254,63 @@ async function main() {
   } else {
     console.error(`FAIL — listing options: got ${JSON.stringify(listings)}`);
   }
-  process.exit(folderOk && isoOk && listOk ? 0 : 1);
+
+  // The structural model: no demux ran, so `measured` is false and every rate is
+  // zero because nothing measured it.
+  const inspectOk =
+    JSON.stringify(structured.inspected) ===
+    JSON.stringify({
+      measured: false,
+      volumeLabel: "WASMDISC",
+      playlists: ["00000.MPLS"],
+      streams: 2,
+      rates: [0, 0],
+    });
+  if (inspectOk) {
+    console.log("PASS — Worker inspect returns the unmeasured disc model.");
+  } else {
+    console.error(`FAIL — inspect model: got ${JSON.stringify(structured.inspected)}`);
+  }
+
+  // One measured scan, both outputs, and the model round-tripped back into the
+  // report: `scan`'s report and a `renderReport` of the disc it returned must
+  // both be the golden bytes, and switching a section off must drop it alone.
+  const scanReportOk = compare("scan report", structured.report, golden);
+  const roundTripOk = compare("renderReport round trip", structured.reRendered, golden);
+  const scanOk =
+    scanReportOk &&
+    roundTripOk &&
+    structured.measured === true &&
+    structured.rate > 0 &&
+    !structured.trimmed.includes("STREAM DIAGNOSTICS:") &&
+    structured.trimmed.includes("QUICK SUMMARY:");
+  if (!scanOk) {
+    console.error(
+      `FAIL — scan/renderReport: measured ${structured.measured}, first stream rate ${structured.rate}, trimmed ${structured.trimmed.length} B.`,
+    );
+  }
+
+  // The same two calls handed a single `File` instead of a list, which is what
+  // selects the `.iso` path.
+  const isoScanOk = compare(".iso scan report", isoStructured.report, isoGolden);
+  const isoRoundTripOk = compare(
+    ".iso renderReport round trip",
+    isoStructured.reRendered,
+    isoGolden,
+  );
+  const isoStructuredOk =
+    isoScanOk &&
+    isoRoundTripOk &&
+    isoStructured.label === "Blu-Ray" &&
+    isoStructured.measured === true &&
+    JSON.stringify(isoStructured.playlists) === '["00000.MPLS"]';
+  if (!isoStructuredOk) {
+    console.error(
+      `FAIL — .iso structured API: label ${isoStructured.label}, playlists ${JSON.stringify(isoStructured.playlists)}, measured ${isoStructured.measured}.`,
+    );
+  }
+
+  process.exit(folderOk && isoOk && listOk && inspectOk && scanOk && isoStructuredOk ? 0 : 1);
 }
 
 main().catch((err) => {

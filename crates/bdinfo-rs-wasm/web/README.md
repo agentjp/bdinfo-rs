@@ -21,66 +21,138 @@ Firefox.
 npm i @bdinfo-rs/wasm
 ```
 
-The published payload is **~360 KB of WebAssembly + ~22 KB of JS**. Only the
-main-thread entry you import (~4 KB) loads up front; the scan Worker (~2 KB) and
-the wasm-bindgen glue (~17 KB) that hosts the `.wasm` are fetched lazily inside
-the Worker, and nothing past the entry loads at all until you call `analyze` or
-`listPlaylists`.
+The published payload is **~500 KB of WebAssembly + ~62 KB of JS**. Only the
+main-thread entry you import (~18 KB) loads up front; the scan Worker (~4 KB)
+and the wasm-bindgen glue (~40 KB) that hosts the `.wasm` are fetched lazily
+inside the Worker, and nothing past the entry loads at all until the first scan.
 
 ## Usage
 
-The two calls mirror the CLI flow — list the playlists, pick some, then measure
-them (all in the browser, off the main thread):
+Three calls mirror the CLI flow — inspect the disc, measure the playlists you
+want, re-render the report as you like. Each takes either a picked BDMV folder
+(as `(relativePath, File)` pairs) or a single Blu-ray `.iso` `File`, and each
+runs in the browser, off the main thread:
 
 ```ts
-import { analyze, listPlaylists } from "@bdinfo-rs/wasm";
+import { inspect, renderReport, scan } from "@bdinfo-rs/wasm";
 
-// `files`: the (relativePath, File) pairs from a <input type="file" webkitdirectory>.
+// `picked`: the (relativePath, File) pairs from a <input type="file" webkitdirectory>.
 const picked = [...input.files].map((file) => ({
   path: file.webkitRelativePath,
   file,
 }));
 
-// 1. Fast STRUCTURAL scan → the playlist selection table (like `--list`).
-const playlists = await listPlaylists(picked);
-for (const row of playlists) {
-  console.log(`${row.position}. ${row.name}  ${row.length}  ${row.estimatedBytes ?? "-"} bytes`);
+// 1. Fast STRUCTURAL scan (like `--list`) → the whole disc model, no demux.
+const disc = await inspect(picked);
+for (const playlist of disc.playlists) {
+  console.log(`${playlist.name}  ${playlist.totalLengthSeconds}s  ${playlist.chapterCount} ch`);
 }
 
-// 2. FULL measured scan. Pass `selection` (playlist names, like `--mpls`) to
-//    measure only chosen playlists; omit it to measure the `--whole` set.
-const report = await analyze(
+// 2. FULL measured scan → the classic report AND the same scan as data, from
+//    one demux. Pass `selection` (playlist names, like `--mpls`) to measure only
+//    chosen playlists; omit it to measure the `--whole` set.
+const measured = await scan(
   picked,
   ({ file, done, total }) => console.log(`${file}: ${done}/${total}`),
-  { selection: [playlists[0].name] },
+  { selection: [disc.playlists[0].name] },
 );
 
-console.log(report); // the classic BDInfo-style disc report
+console.log(measured.report); // the classic BDInfo-style disc report
+
+// 3. Re-render that report with different sections — no media, no rescan.
+const brief = await renderReport(measured.disc, { quickSummary: false });
 ```
 
-`listPlaylists` resolves with the selection-table rows (`position`, `group`,
-`name`, `length`, `estimatedBytes`, `hasHidden`, `hiddenBy`); `analyze` spawns
-the scan Worker, relays demux progress, and resolves with the report string.
-Omit both `onProgress` and `selection` for the simplest whole-disc scan.
-
-Like the classic report, the listing hides playlists shorter than 20 seconds and
-looping ones. Pass `showShortPlaylists` / `showLoopingPlaylists` to list them
-too; each row's `hiddenBy` names the rules that classify it as withheld
-(`"short"`, `"looping"`, both, or none), whichever options were passed — so one
-widened listing can be re-filtered in your UI without re-scanning:
+An `.iso` goes through the same three calls; pass the `File` instead of the
+list, and the image is opened through the read-only UDF reader:
 
 ```ts
-const all = await listPlaylists(picked, {
+const disc = await inspect(isoInput.files[0]);
+const { report } = await scan(isoInput.files[0]);
+```
+
+### The disc model
+
+`inspect` and `scan` both give you a `Disc`: the disc-level properties
+(`volumeLabel`, `discTitle`, `sizeBytes`, `is3d`, `isUhd`, …) and every
+`Playlist` on it, each carrying its `Stream`s, `Clip`s and `Chapter`s. Values
+cross as raw numbers with unit-bearing names — `bitrateBps`, `sampleRateHz`,
+`heightPixels`, `lengthSeconds` — so your UI can sort, filter and chart them
+rather than parse report text. The types (`Disc`, `Playlist`, `Stream`, `Clip`,
+`ClipStream`, `Chapter`, `ScanError`, `ScanResult`) are exported from the
+package entry and generated from the Rust definitions.
+
+`disc.measured` tells the two scans apart: `false` after `inspect`, where every
+measured value — bitrates, packet counts, chapter rates — is zero because
+nothing measured it; `true` after `scan`, where a zero is a genuine zero.
+
+### Re-rendering the report
+
+The model carries **every value the report prints**, so `renderReport(disc)`
+reproduces the report that `scan` returned byte for byte — a render, not an
+approximation, pinned against the same golden the scan itself is pinned to. The
+`Disc` is therefore the thing worth keeping: store it and every rendering of the
+report stays one call away, with no media and no rescan.
+
+```ts
+const { report, disc } = await scan(picked);
+// later, from the held disc alone — the same bytes, minus one section:
+const trimmed = await renderReport(disc, { streamDiagnostics: false });
+```
+
+`streamDiagnostics` and `quickSummary` both default to on, which is the report
+the CLI writes. A `disc` from a `scan` with a `selection` holds every playlist
+but measured values only for the ones that scan named, so re-rendering it prints
+the rest at zero — scan again to measure them.
+
+### Playlist filtering
+
+Like the classic report, `inspect` withholds playlists shorter than 20 seconds
+and looping ones. Pass `showShortPlaylists` / `showLoopingPlaylists` to include
+them, and `shortPlaylistSeconds` to move the length threshold:
+
+```ts
+const everything = await inspect(picked, {
   showShortPlaylists: true,
   showLoopingPlaylists: true,
 });
-const standard = all.filter((row) => row.hiddenBy.length === 0);
 ```
 
-The options only widen what `listPlaylists` returns. `analyze` measures its
-`selection` unfiltered either way, and the report is unchanged. See `index.html`
-in the source repository for a complete vanilla example (the demo is not shipped
-in the npm package).
+The options only widen `disc.playlists`; the disc-level properties and
+`disc.errors` always describe the whole disc. A measured `scan` measures its
+`selection` unfiltered either way, and the report is unchanged.
+
+### Cancelling
+
+Pass an `AbortSignal`. Aborting it terminates the scan Worker and rejects the
+promise with an `AbortError`, so a user cancel is distinguishable from a real
+failure by the rejection's `name`:
+
+```ts
+const controller = new AbortController();
+const { report } = await scan(picked, undefined, { signal: controller.signal });
+```
+
+### Deprecated calls
+
+`analyze`, `analyzeIso`, `listPlaylists` and `listPlaylistsIso` are the 2.0
+surface. They keep working exactly as before, and 3.0.0 removes them:
+
+| Deprecated | Replacement |
+| --- | --- |
+| `analyze(files, onProgress?, options?)` | `scan(files, onProgress?, options?)` |
+| `analyzeIso(file, onProgress?, options?)` | `scan(file, onProgress?, options?)` |
+| `listPlaylists(files, options?)` | `inspect(files, options?)` |
+| `listPlaylistsIso(file, options?)` | `inspect(file, options?)` |
+
+`listPlaylists` resolves with selection-table rows (`position`, `group`, `name`,
+`length`, `estimatedBytes`, `hasHidden`, `hiddenBy`). Of those, `position`,
+`group` and `hiddenBy` describe the table rather than the disc and are not on
+the `Disc`, so a UI that renders a selection table derives them from
+`disc.playlists` itself.
+
+See `index.html` in the source repository for a complete vanilla example (the
+demo is not shipped in the npm package).
 
 ## Bundler support
 
@@ -90,7 +162,7 @@ runtime**: the Web Worker (`dist/worker.js`) and the WebAssembly module
 (`pkg/bdinfo_rs_wasm_bg.wasm`, fetched by the Worker). Your toolchain must emit
 both as addressable assets.
 
-`analyze` spawns the Worker with the standard
+Every call spawns the Worker with the standard
 
 ```ts
 new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -116,7 +188,7 @@ bundler produces for the copied worker:
 ```ts
 import workerUrl from "./worker.js?worker&url"; // however your bundler exposes it
 
-await analyze(picked, onProgress, {
+await scan(picked, onProgress, {
   createWorker: () => new Worker(workerUrl, { type: "module" }),
 });
 ```
@@ -135,8 +207,8 @@ inside a Worker. Both are available on **desktop Chrome / Edge, desktop Firefox,
 and Android Chrome**. The package's parity suite runs on **headless Chrome and
 Firefox** (plus Node), so those are the verified engines; desktop **Safari**
 exposes the same APIs but is **untested**. `FileReaderSync` is Worker-only by
-design, which is why `analyze` always runs the scan in a Web Worker and never on
-the main thread.
+design, which is why every call runs in a Web Worker and never on the main
+thread.
 
 **iOS is the one known gap:** iOS WebKit could not pick a folder on iOS ≤ 18.3
 (the `webkitdirectory` bit was unimplemented; it shipped in iOS 18.4). Treat the
@@ -151,7 +223,7 @@ A `--target web` wasm module is compiled and instantiated at runtime, so a page
 that sets a `script-src` (or `default-src`) CSP must allow WebAssembly with
 **`'wasm-unsafe-eval'`** (the broader `'unsafe-eval'` also works); otherwise the
 module is blocked. With no CSP, wasm runs freely. The scan itself must run in a
-Web Worker — `analyze` handles that for you.
+Web Worker — the package handles that for you.
 
 ## License
 
