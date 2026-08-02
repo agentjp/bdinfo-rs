@@ -410,6 +410,113 @@ pub(crate) fn any_hidden(rows: &[PlaylistRow]) -> bool {
     rows.iter().any(|row| row.has_hidden_streams)
 }
 
+/// What a [`PlaylistFilter`] withholds from the playlist table — the count,
+/// the rules that withheld it, and the withheld names.
+///
+/// The two rules are judged **independently**, each against the whole disc,
+/// mirroring the CLI's `Hidden by filters (…)` hint block: a playlist that is
+/// both short and looping is counted once and names both rules, and revealing
+/// it takes switching both off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HiddenPlaylists {
+    /// The withheld playlists' names, in the order the table would have listed
+    /// them (length descending, then name ascending).
+    names: Vec<String>,
+    /// Whether the short rule withheld at least one of them.
+    short: bool,
+    /// Whether the looping rule withheld at least one of them.
+    looping: bool,
+}
+
+impl HiddenPlaylists {
+    /// The withheld playlists' names, table order.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    /// How many playlists are withheld — one per playlist, however many rules
+    /// withheld it.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.names.len()
+    }
+
+    /// The rules that withheld something, as the line's parenthesised list:
+    /// `short`, `looping`, or `short, looping`. Never empty — a withheld
+    /// playlist failed at least one rule.
+    #[must_use]
+    pub fn reasons(&self) -> String {
+        let mut reasons = Vec::new();
+        if self.short {
+            reasons.push("short");
+        }
+        if self.looping {
+            reasons.push("looping");
+        }
+        reasons.join(", ")
+    }
+
+    /// The transient filter that reveals exactly these playlists: `filter` with
+    /// the rules that withheld something switched off, the rest untouched — so
+    /// a reveal adds these rows and no others.
+    #[must_use]
+    pub const fn revealing(&self, filter: &PlaylistFilter) -> PlaylistFilter {
+        PlaylistFilter {
+            filter_short_playlists: filter.filter_short_playlists && !self.short,
+            short_playlist_seconds: filter.short_playlist_seconds,
+            filter_looping_playlists: filter.filter_looping_playlists && !self.looping,
+        }
+    }
+
+    /// The hidden-count line under the table: what the filters withhold, or —
+    /// while the transient reveal is on (`revealed`) — what they would.
+    #[must_use]
+    pub fn line(&self, revealed: bool) -> String {
+        let count = self.count();
+        let plural = if count == 1 { "" } else { "s" };
+        let reasons = self.reasons();
+        if revealed {
+            format!("Showing {count} filtered playlist{plural} ({reasons})")
+        } else {
+            format!("{count} playlist{plural} hidden by filters ({reasons})")
+        }
+    }
+}
+
+/// The playlists `filter` withholds from `playlists` — `None` when it
+/// withholds none (there is then no line to draw).
+///
+/// A rule that is switched OFF never names itself: the short threshold keeps
+/// its configured value while its switch is off, so a looping playlist under
+/// that threshold must not be reported as short.
+#[must_use]
+pub fn hidden_playlists(
+    playlists: &[PlaylistSummary],
+    filter: &PlaylistFilter,
+) -> Option<HiddenPlaylists> {
+    let mut hidden: Vec<&PlaylistSummary> =
+        playlists.iter().filter(|playlist| !filter.keeps(playlist)).collect();
+    if hidden.is_empty() {
+        return None;
+    }
+    hidden.sort_by(|a, b| {
+        b.total_length
+            .partial_cmp(&a.total_length)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let short = filter.filter_short_playlists
+        && hidden.iter().any(|playlist| playlist.total_length < filter.short_playlist_seconds);
+    let looping =
+        filter.filter_looping_playlists && hidden.iter().any(|playlist| playlist.has_loops);
+    Some(HiddenPlaylists {
+        names: hidden.iter().map(|playlist| playlist.name.clone()).collect(),
+        short,
+        looping,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
@@ -418,7 +525,8 @@ mod tests {
     use super::{
         PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, compare,
         display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
-        playlist_display_name, playlist_rows, sort_rows, table_length, table_rows,
+        hidden_playlists, playlist_display_name, playlist_rows, sort_rows, table_length,
+        table_rows,
     };
     use crate::settings::Settings;
 
@@ -828,6 +936,111 @@ mod tests {
         assert_eq!(playlist_display_name("00002.MPLS", 5, true), "00002.MPLS [05 Chapters]");
         // The DisplayChapterCount toggle gates the suffix off entirely.
         assert_eq!(playlist_display_name("00002.MPLS", 12, false), "00002.MPLS");
+    }
+
+    /// The four-playlist disc with a looping row added: 00004 (80 s) loops,
+    /// so the default filter withholds it AND the 5 s 00003 — one row per
+    /// rule, plus 00005 (3 s) which loops and is short, failing both.
+    fn filtered_disc() -> Vec<PlaylistSummary> {
+        let mut looping = sample_playlist("00004.MPLS", 80.0, 400, 0, &["D.M2TS"]);
+        looping.has_loops = true;
+        let mut both = sample_playlist("00005.MPLS", 3.0, 90, 0, &["E.M2TS"]);
+        both.has_loops = true;
+        let mut playlists = disc().to_vec();
+        playlists.push(looping);
+        playlists.push(both);
+        playlists
+    }
+
+    #[test]
+    fn nothing_is_hidden_when_the_filters_withhold_nothing() {
+        // Every playlist passes: no line to draw.
+        assert!(hidden_playlists(&disc(), &PlaylistFilter::everything()).is_none());
+        // …and a disc whose every playlist passes the DEFAULT filter likewise.
+        let long: Vec<_> = disc().into_iter().filter(|p| p.total_length > 20.0).collect();
+        assert!(hidden_playlists(&long, &PlaylistFilter::default()).is_none());
+    }
+
+    #[test]
+    fn each_rule_names_itself_and_a_playlist_failing_both_counts_once() {
+        let hidden = hidden_playlists(&filtered_disc(), &PlaylistFilter::default())
+            .expect("the default filter withholds three rows");
+        // 00003 (short), 00004 (looping), 00005 (both) — counted once each,
+        // ordered as the table would list them: length desc, then name asc.
+        assert_eq!(hidden.count(), 3);
+        assert_eq!(hidden.names(), ["00004.MPLS", "00003.MPLS", "00005.MPLS"]);
+        assert_eq!(hidden.reasons(), "short, looping");
+    }
+
+    #[test]
+    fn a_playlist_exactly_at_the_threshold_is_not_short() {
+        // The filter keeps a playlist of exactly the threshold length, so a
+        // 20 s looping one is withheld for looping ALONE.
+        let mut edge = sample_playlist("00006.MPLS", 20.0, 200, 0, &["F.M2TS"]);
+        edge.has_loops = true;
+        let hidden =
+            hidden_playlists(&[edge], &PlaylistFilter::default()).expect("the loop is withheld");
+        assert_eq!(hidden.reasons(), "looping");
+    }
+
+    #[test]
+    fn withheld_playlists_of_equal_length_order_by_name() {
+        // Three 5 s rows: length descending leaves them tied, so the name
+        // decides — ascending, like the table's own presentation order.
+        let mut playlists = disc().to_vec();
+        playlists.push(sample_playlist("00009.MPLS", 5.0, 60, 0, &["F.M2TS"]));
+        playlists.push(sample_playlist("00007.MPLS", 5.0, 60, 0, &["G.M2TS"]));
+        let hidden = hidden_playlists(&playlists, &PlaylistFilter::default())
+            .expect("three short rows withheld");
+        assert_eq!(hidden.names(), ["00003.MPLS", "00007.MPLS", "00009.MPLS"]);
+    }
+
+    #[test]
+    fn a_switched_off_rule_never_names_itself() {
+        // Looping only: 00004 and 00005 are withheld — 00005 is ALSO under the
+        // (retained) 20 s threshold, but the short switch is off, so `short`
+        // must not appear.
+        let looping_only =
+            PlaylistFilter { filter_short_playlists: false, ..PlaylistFilter::default() };
+        let hidden = hidden_playlists(&filtered_disc(), &looping_only).expect("two loops withheld");
+        assert_eq!(hidden.names(), ["00004.MPLS", "00005.MPLS"]);
+        assert_eq!(hidden.reasons(), "looping");
+        // Short only: 00003 and 00005 — 00005 loops, but that switch is off.
+        let short_only =
+            PlaylistFilter { filter_looping_playlists: false, ..PlaylistFilter::default() };
+        let hidden = hidden_playlists(&filtered_disc(), &short_only).expect("two shorts withheld");
+        assert_eq!(hidden.names(), ["00003.MPLS", "00005.MPLS"]);
+        assert_eq!(hidden.reasons(), "short");
+    }
+
+    #[test]
+    fn the_reveal_filter_drops_only_the_withholding_rules() {
+        // Both rules withheld something: both switch off, the threshold stays.
+        let filter = PlaylistFilter::default();
+        let both = hidden_playlists(&filtered_disc(), &filter).expect("three rows withheld");
+        let revealed = both.revealing(&filter);
+        assert!(!revealed.filter_short_playlists);
+        assert!(!revealed.filter_looping_playlists);
+        assert!(
+            (revealed.short_playlist_seconds - filter.short_playlist_seconds).abs() < f64::EPSILON
+        );
+        // Only the short rule withheld anything: the looping switch stays ON,
+        // so the reveal adds the short rows and nothing else.
+        let shorts_only = hidden_playlists(&disc(), &filter).expect("the 5 s row is withheld");
+        let revealed = shorts_only.revealing(&filter);
+        assert!(!revealed.filter_short_playlists);
+        assert!(revealed.filter_looping_playlists);
+    }
+
+    #[test]
+    fn the_line_counts_pluralizes_and_flips_to_showing_when_revealed() {
+        let one = hidden_playlists(&disc(), &PlaylistFilter::default()).expect("one row withheld");
+        assert_eq!(one.line(false), "1 playlist hidden by filters (short)");
+        assert_eq!(one.line(true), "Showing 1 filtered playlist (short)");
+        let three = hidden_playlists(&filtered_disc(), &PlaylistFilter::default())
+            .expect("three rows withheld");
+        assert_eq!(three.line(false), "3 playlists hidden by filters (short, looping)");
+        assert_eq!(three.line(true), "Showing 3 filtered playlists (short, looping)");
     }
 
     // The cell formatting is panic-safety-critical (it formats hostile disc
