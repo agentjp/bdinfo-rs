@@ -1,5 +1,6 @@
 #!/usr/bin/env pwsh
-# Strategy (a) of the GUI drive gate (gui.yml, drive-inject), Windows leg:
+# Strategy (a) of the GUI drive gate (gui.yml, the drive job's "Inject the
+# walk" steps), Windows leg:
 # OS-LEVEL INPUT INJECTION — real SendInput cursor/keyboard events through the
 # real windowing stack, the truest end-to-end test of the input path. The
 # window is launched at its default pinned geometry (880x960 logical, dark

@@ -1,5 +1,6 @@
 #!/usr/bin/env pwsh
-# Strategy (b) of the GUI drive gate (gui.yml, drive-assisted): APP-ASSISTED
+# Strategy (b) of the GUI drive gate (gui.yml, the drive job's "Drive the
+# walk" steps): APP-ASSISTED
 # driving. The debug-only BDINFO_GUI_DRIVE seam walks the real window through a
 # fixed click-everything sequence (sort → splitter → rows → Settings → scan →
 # cancel → rescan → report → copy → save), dropping an `NN-name.marker` file

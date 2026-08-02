@@ -35,9 +35,9 @@ name: gui
 # HARD everywhere — byte-exactness lives on the report, not the pixels.
 #
 # Check contexts: these jobs render as `gui / gui build + test (…)` etc. and
-# were never individually required; they gate merges through ci.yml's `ci-ok`
-# fan-in (a red here reddens ci-ok). The staged plan to add 10 gui contexts to
-# branch protection at merge time is superseded by the ci-ok swap.
+# none of them is individually required; they gate merges through ci.yml's
+# `ci-ok` fan-in (a red here reddens ci-ok), which is the single required
+# context. Renaming a job here is therefore safe for branch protection.
 
 on:
   workflow_call:
@@ -62,10 +62,17 @@ env:
 jobs:
   # Build + the full test suite on every shipped arch — where per-platform bugs
   # actually live. The snapshot ties run as their own BLOCKING per-arch step
-  # below (excluded from the plain test step so their verdict reports alone).
+  # below (excluded from the plain test step so their verdict reports alone),
+  # and the real-window launch smoke closes the job: it drives the very debug
+  # binary the Build step here produced, so it costs a launch rather than a
+  # second job's checkout, cache restore and rebuild.
+  # timeout-minutes caps a launch that never exits (the smoke steps open real
+  # windows) at well above the ~9 min this job's slowest arch takes; without it
+  # a hung window would burn the 6-hour default.
   test:
     name: gui build + test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -188,6 +195,81 @@ jobs:
           path: crates/bdinfo-rs-gui/target/snapshot-failures/
           if-no-files-found: ignore
 
+      # The real-window launch smoke: the app opens, renders, and exits 0,
+      # driven by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks
+      # over the committed fixture disc — the same debug binary the Build step
+      # above produced, since both are a plain `cargo build --locked` of this
+      # crate under this workflow's env. Proven display recipes: xvfb + Mesa's
+      # lavapipe software Vulkan on Linux, the in-box DX12 WARP software
+      # rasterizer on Windows (Bevy's CI runs real winit+wgpu windows with
+      # both). HARD on all five arches that reach the launch steps: macOS is a
+      # crucial supported platform, and a gate that ignores its own signal is
+      # not a gate — a red macos-15 leg means something actually broke. Its
+      # known failure mode: the runner's paravirtual Metal is the one render
+      # path with no software fallback. If a leg ever flakes for environment
+      # reasons, fix the harness or deliberately re-soften — never a silent
+      # retry loop.
+      # macos-15-intel is deliberately excluded from the launch step, which
+      # keys on `matrix.os == 'macos-15'` and not on runner.os: that image's
+      # hosted VMs expose no Metal at all, so there is no real window stack to
+      # smoke — its compile/logic verdict is everything above this block. The
+      # Linux and Windows conditions below can key on runner.os, since every
+      # Linux and Windows entry of this matrix does have a window stack.
+      - name: Install the virtual display + software Vulkan (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+
+      - name: Launch smoke (xvfb + lavapipe)
+        if: runner.os == 'Linux'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: xvfb-run -a cargo run --locked
+
+      # The portable marker end to end, one leg: an empty file named
+      # `bdinfo-rs-gui.portable` beside the executable must switch the config
+      # write to `gui.conf` beside the executable and leave the per-user
+      # location untouched (src/settings.rs owns the path choice and
+      # unit-tests it; this asserts the built binary actually consults it).
+      # The marker-less smoke above already proved the other half — a
+      # successful listing persists the config to the per-user location —
+      # which the first assertion reads back before clearing it.
+      - name: Portable-marker smoke (config lands beside the executable)
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: |
+          conf="${XDG_CONFIG_HOME:-$HOME/.config}/bdinfo-rs/gui.conf"
+          test -f "$conf" || { echo "the marker-less smoke left no per-user config at $conf"; exit 1; }
+          rm -rf "$(dirname "$conf")"
+          touch target/debug/bdinfo-rs-gui.portable
+          xvfb-run -a ./target/debug/bdinfo-rs-gui
+          test -f target/debug/gui.conf || { echo "portable mode wrote no gui.conf beside the executable"; exit 1; }
+          test ! -e "$conf" || { echo "portable mode still wrote the per-user config at $conf"; exit 1; }
+          rm -f target/debug/bdinfo-rs-gui.portable target/debug/gui.conf
+
+      - name: Launch smoke (DX12 WARP)
+        if: runner.os == 'Windows'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+          WGPU_BACKEND: dx12
+        run: cargo run --locked
+
+      - name: Launch smoke (paravirtual Metal)
+        if: matrix.os == 'macos-15'
+        working-directory: crates/bdinfo-rs-gui
+        env:
+          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
+          BDINFO_GUI_SMOKE_MS: "8000"
+        run: cargo run --locked
+
   # The once-is-the-signal tier: the tripwires and lints, the crate-local
   # supply-chain audit, and Tier-A coverage at the 100% floor —
   # platform-independent measurements, run on one runner. (Tier-A mutation
@@ -255,7 +337,8 @@ jobs:
 
       # Tier-A coverage at the 100% floor. main.rs + ui.rs are Tier B (the iced
       # shell and the style vocabulary, verified by the interaction suite +
-      # snapshot hashes + the smoke below) and excluded from the denominator —
+      # snapshot hashes + the launch smoke that closes `gui build + test`) and
+      # excluded from the denominator —
       # the same shape as the wasm gate, whose cfg'd-out Tier B never enters
       # its native build. Branch coverage is deliberately not enforced
       # (Posture C, like B).
@@ -461,110 +544,6 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # The real-window launch smoke: the app opens, renders, and exits 0, driven
-  # by the debug-only BDINFO_GUI_SMOKE_MS/BDINFO_GUI_OPEN env hooks over the
-  # committed fixture disc. Proven recipes: xvfb + Mesa's lavapipe software
-  # Vulkan on Linux, the in-box DX12 WARP software rasterizer on Windows
-  # (Bevy's CI runs real winit+wgpu windows with both). All five legs are
-  # HARD (the arm legs and finally macos-15 were each promoted after sustained
-  # green streaks, PR #128 and its follow-up): macOS is a crucial supported
-  # platform, and a gate that ignores its own signal is not a gate — a red
-  # macos-15 leg now means something actually broke. Its known failure mode:
-  # the runner's paravirtual Metal is the one render path with no software
-  # fallback. If a leg ever flakes for environment reasons, fix the harness
-  # or deliberately re-soften — never a silent retry loop.
-  # macos-15-intel is deliberately ABSENT: its hosted VMs expose no Metal at
-  # all, so there is no real window stack to smoke — that arch's compile/logic
-  # coverage lives in `gui build + test (macos-15-intel)`. The per-OS
-  # install/launch steps below key on runner.os.
-  smoke:
-    name: gui smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-2025
-          - ubuntu-24.04-arm
-          - windows-11-arm
-          - macos-15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: crates/bdinfo-rs-gui
-          # smoke + drive-assisted + drive-inject run the IDENTICAL plain
-          # debug build per OS, so the three share ONE cache lineage instead
-          # of rust-cache's default per-job keys — three byte-duplicate
-          # multi-hundred-MB caches per OS family otherwise crowd the repo's
-          # 10 GB Actions-cache budget and LRU-evict the sweep markers.
-          shared-key: gui-drive
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Install the virtual display + software Vulkan (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0
-
-      - name: Build (debug — the env hooks are debug-only)
-        working-directory: crates/bdinfo-rs-gui
-        run: cargo build --locked
-
-      - name: Launch smoke (xvfb + lavapipe)
-        if: runner.os == 'Linux'
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
-          BDINFO_GUI_SMOKE_MS: "8000"
-        run: xvfb-run -a cargo run --locked
-
-      # The portable marker end to end, one leg: an empty file named
-      # `bdinfo-rs-gui.portable` beside the executable must switch the config
-      # write to `gui.conf` beside the executable and leave the per-user
-      # location untouched (src/settings.rs owns the path choice and
-      # unit-tests it; this asserts the built binary actually consults it).
-      # The marker-less smoke above already proved the other half — a
-      # successful listing persists the config to the per-user location —
-      # which the first assertion reads back before clearing it.
-      - name: Portable-marker smoke (config lands beside the executable)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
-          BDINFO_GUI_SMOKE_MS: "8000"
-        run: |
-          conf="${XDG_CONFIG_HOME:-$HOME/.config}/bdinfo-rs/gui.conf"
-          test -f "$conf" || { echo "the marker-less smoke left no per-user config at $conf"; exit 1; }
-          rm -rf "$(dirname "$conf")"
-          touch target/debug/bdinfo-rs-gui.portable
-          xvfb-run -a ./target/debug/bdinfo-rs-gui
-          test -f target/debug/gui.conf || { echo "portable mode wrote no gui.conf beside the executable"; exit 1; }
-          test ! -e "$conf" || { echo "portable mode still wrote the per-user config at $conf"; exit 1; }
-          rm -f target/debug/bdinfo-rs-gui.portable target/debug/gui.conf
-
-      - name: Launch smoke (DX12 WARP)
-        if: runner.os == 'Windows'
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
-          BDINFO_GUI_SMOKE_MS: "8000"
-          WGPU_BACKEND: dx12
-        run: cargo run --locked
-
-      - name: Launch smoke (paravirtual Metal)
-        if: runner.os == 'macOS'
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          BDINFO_GUI_OPEN: ../bdinfo-rs/tests/fixtures/BigBuckBunny
-          BDINFO_GUI_SMOKE_MS: "8000"
-        run: cargo run --locked
-
   # The real-window DRIVE gates: the app driven end to end on a real desktop
   # session, a screenshot per step uploaded as a gallery either way. The gui
   # release lane inherits these as part of its bar. Two complementary proofs:
@@ -585,24 +564,35 @@ jobs:
   #             change must update it in the same PR, snapshot-test semantics.
   #
   # Blocking on ALL FIVE legs — Linux/Windows x86 AND arm plus macos-15, hard
-  # like the smoke above: macOS is a crucial supported platform, and a gate
-  # that ignores its own signal is not a gate. Known macos-15 failure modes
-  # (residual risks, not reasons to soften): the paravirtual Metal path has no software
-  # fallback, and drive-inject carries the Sequoia screen-capture re-approval
-  # residual. If a leg ever flakes for environment reasons, fix the harness
-  # (the scripts already handle window polling and capture pre-authorization)
-  # or deliberately re-soften — never a silent retry loop. macos-15-intel is
-  # absent for the smoke's no-Metal reason. The x86 legs ride the proven
-  # display recipes (xvfb + lavapipe, DX12 WARP); every leg runs at a
-  # 1920x1080 desktop with shots cropped to the 880x960 window, so the
-  # galleries are comparable across OSes. Scheduled coverage comes from the
-  # daily sweep, which re-runs this whole workflow ungated and files the
-  # rolling issue on a scheduled red; a red leg here reddens the `gui` caller
-  # job and therefore ci-ok.
-  drive-assisted:
-    name: gui drive assisted (${{ matrix.os }})
+  # like the launch smoke in build + test: macOS is a crucial supported
+  # platform, and a gate that ignores its own signal is not a gate. Known
+  # macos-15 failure modes (residual risks, not reasons to soften): the
+  # paravirtual Metal path has no software fallback, and the injected walk
+  # carries the Sequoia screen-capture re-approval residual. If a leg ever
+  # flakes for environment reasons, fix the harness (the scripts already handle
+  # window polling and capture pre-authorization) or deliberately re-soften —
+  # never a silent retry loop. macos-15-intel is absent because its hosted VMs
+  # expose no Metal at all. The x86 legs ride the proven display recipes (xvfb
+  # + lavapipe, DX12 WARP); every leg runs at a 1920x1080 desktop with shots
+  # cropped to the 880x960 window, so the galleries are comparable across
+  # OSes. Scheduled coverage comes from the daily sweep, which re-runs this
+  # whole workflow ungated and files the rolling issue on a scheduled red; a
+  # red leg here reddens the `gui` caller job and therefore ci-ok.
+  #
+  # Both walks share one job per arch because they need the byte-identical
+  # debug binary: building it once and walking it twice removes a second
+  # checkout, cache restore and build per arch. They stay independent verdicts
+  # — the injected walk runs under `!cancelled()`, so an assisted failure never
+  # hides it, and each walk keeps its own gallery directory and artifact.
+  drive:
+    name: gui drive (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Two walks plus the build, against per-arch p90s (2026-08-02, 20 runs per
+    # leg): the slowest arch, windows-2025, spends ~200 s assisted + ~175 s
+    # injected + ~130 s on a cold build, and the assisted harness self-aborts
+    # at its own 900 s deadline. 45 min caps a hung window well above all of
+    # that.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -620,11 +610,19 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
-          # One lineage with smoke/drive-inject — see the smoke job's note.
+          # An explicit lineage name rather than rust-cache's default per-job
+          # key: this job's debug build is the same one `gui build + test`
+          # produces, and a stable name keeps the archive addressable if the
+          # job is ever renamed again (the default key folds in the job id, so
+          # a rename orphans the archive and every PR builds cold until the
+          # next master push re-seeds it).
           shared-key: gui-drive
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: Install the virtual display + software Vulkan + capture (Linux)
+      # imagemagick and xdotool serve both walks: `import` captures for the
+      # assisted walk, xdotool both locates the window for cropping and
+      # injects the events.
+      - name: Install the virtual display + software Vulkan + xdotool + capture (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -632,18 +630,19 @@ jobs:
 
       # displayplacer raises the mac desktop to 1920x1080 (best-effort; the
       # paravirtual display may reject a mode — the harness then works at
-      # whatever it gets and crops to the window regardless).
+      # whatever it gets and crops to the window regardless); cliclick injects
+      # the events for the second walk.
       # The runner image ships aws/tap pre-tapped; Homebrew's tap-trust ignores
       # the untrusted tap and warns on every brew command. Untap it (brew's own
       # first remedy — we never use it) instead of trusting it or disabling
       # trust checks; both formulae come from homebrew/core.
-      - name: Install displayplacer (macOS resolution control)
+      - name: Install cliclick + displayplacer (macOS clicks + resolution)
         if: runner.os == 'macOS'
         run: |
           brew untap aws/tap
-          brew install displayplacer
+          brew install cliclick displayplacer
 
-      - name: Build (debug — the drive seam is debug-only)
+      - name: Build (debug — the drive seam and the env hooks are debug-only)
         working-directory: crates/bdinfo-rs-gui
         run: cargo build --locked
 
@@ -657,7 +656,7 @@ jobs:
           xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-assisted.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-assisted
 
       - name: Drive the walk (DX12 WARP)
         if: runner.os == 'Windows'
@@ -667,7 +666,7 @@ jobs:
           pwsh .github/scripts/gui-drive-assisted.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-assisted
 
       - name: Drive the walk (paravirtual Metal)
         if: runner.os == 'macOS'
@@ -675,93 +674,55 @@ jobs:
           pwsh .github/scripts/gui-drive-assisted.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-assisted
 
-      - name: Upload the gallery (evidence either way)
+      - name: Upload the assisted gallery (evidence either way)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gui-drive-assisted-${{ matrix.os }}
-          path: gallery/
+          path: gallery-assisted/
           retention-days: 7
           if-no-files-found: warn
 
-  drive-inject:
-    name: gui drive inject (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-2025
-          - ubuntu-24.04-arm
-          - windows-11-arm
-          - macos-15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: crates/bdinfo-rs-gui
-          # One lineage with smoke/drive-assisted — see the smoke job's note.
-          shared-key: gui-drive
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Install the virtual display + software Vulkan + xdotool + capture (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb mesa-vulkan-drivers libxkbcommon-x11-0 imagemagick xdotool
-
-      # aws/tap untapped for the assisted step's reason: unused, untrusted,
-      # warns on every brew command.
-      - name: Install cliclick + displayplacer (macOS clicks + resolution)
-        if: runner.os == 'macOS'
-        run: |
-          brew untap aws/tap
-          brew install cliclick displayplacer
-
-      - name: Build (debug — the env hooks are debug-only)
-        working-directory: crates/bdinfo-rs-gui
-        run: cargo build --locked
-
+      # `!cancelled()` on all three: a failed assisted walk must not suppress
+      # the injected one, which is a different proof and was a separate job's
+      # verdict before the merge. The assisted harness kills its own app
+      # process on the way out, so the window this walk finds is always its
+      # own.
       # 1920x1080 virtual display, window-cropped capture — see the assisted note.
       - name: Inject the walk (xdotool under xvfb)
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: >
           xvfb-run -a --server-args="-screen 0 1920x1080x24" pwsh .github/scripts/gui-drive-inject-linux.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-inject
 
       - name: Inject the walk (SendInput)
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         env:
           WGPU_BACKEND: dx12
         run: >
           pwsh .github/scripts/gui-drive-inject-windows.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui.exe
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-inject
 
       - name: Inject the walk (cliclick)
-        if: runner.os == 'macOS'
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
         run: >
           pwsh .github/scripts/gui-drive-inject-macos.ps1
           -Exe crates/bdinfo-rs-gui/target/debug/bdinfo-rs-gui
           -Disc crates/bdinfo-rs/tests/fixtures/BigBuckBunny
-          -Gallery gallery
+          -Gallery gallery-inject
 
-      - name: Upload the gallery (evidence either way)
+      - name: Upload the inject gallery (evidence either way)
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: gui-drive-inject-${{ matrix.os }}
-          path: gallery/
+          path: gallery-inject/
           retention-days: 7
           if-no-files-found: warn
 
@@ -775,7 +736,7 @@ jobs:
   # System.Drawing (GDI+) with the true Segoe UI / Consolas faces.
   drive-mosaic:
     name: gui drive mosaic
-    needs: [drive-assisted, drive-inject]
+    needs: [drive]
     if: ${{ !cancelled() }}
     runs-on: windows-2025
     steps:
