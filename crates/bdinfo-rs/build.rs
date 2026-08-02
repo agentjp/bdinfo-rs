@@ -3,7 +3,7 @@
 //!
 //! WHERE THE ARTIFACTS LAND (the contract `.github/build-setup.yml` — the
 //! cargo-dist build-setup step wired in by `dist-workspace.toml`'s
-//! `github-build-setup` — and `.github/workflows/ci.yml`'s packaging step both
+//! `github-build-setup` — and `.github/workflows/core.yml`'s packaging step both
 //! rely on; do not change without updating them):
 //!
 //! Every generated file is written into a single `assets/` directory rooted at

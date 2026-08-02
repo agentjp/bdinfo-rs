@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # Source-rule guard for the bdinfo-rs-core LIBRARY — two house rules that no clippy
 # lint covers, enforced IDENTICALLY by the local gate (scripts/compliance.ps1) and
-# CI (the `lint` job in ci.yml). This script is the single source of truth for both,
+# CI (the `lint` job in core.yml). This script is the single source of truth for both,
 # exactly like .github/scripts/check-banned-words.ps1.
 #
 #   (1) Big-endian only. Disc structures are big-endian, so from_ne_bytes /

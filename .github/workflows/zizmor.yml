@@ -6,8 +6,8 @@ name: zizmor
 # persistence, and more), daily — zizmor floats at latest and the audits are
 # partly ONLINE (impostor-commit / known-vulnerable-actions via the GitHub
 # API), so a newly-disclosed vulnerable action surfaces between pushes. The
-# PR/push leg is the identically-named job in ci.yml, plan-gated on the `meta`
-# area; the daily sweep re-runs that leg ungated too. The only accepted
+# PR/push leg is the identically-named job in repo.yml, plan-gated on the
+# `workflows` area; the daily sweep re-runs that leg ungated too. The only accepted
 # residuals live in .github/zizmor.yml (the cargo-dist-generated v-release.yml,
 # which cannot be hand-edited) and inline (the two architecturally-required
 # workflow_run triggers); every hand-maintained workflow is fixed in place, not
@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
 
       # `fallback: none`: install only from install-action's checksummed manifest,
-      # never its runtime-resolved cargo-binstall fallback (rationale in ci.yml).
+      # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install zizmor (prebuilt, no from-source compile)
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:

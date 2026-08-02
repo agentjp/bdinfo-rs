@@ -27,7 +27,7 @@ name: gui
 # instead.
 #
 # Job shape — the repo's standing pattern (same reasoning as the core/CLI in
-# ci.yml): arch bugs live in build + test, which runs on all six shipped
+# core.yml): arch bugs live in build + test, which runs on all six shipped
 # arches; coverage measures test quality of platform-independent logic, so
 # once (ubuntu) is the signal. The snapshot-hash ties are a hard per-arch
 # gate: the first 6-arch runs proved tiny-skia renders byte-identically per OS
@@ -46,7 +46,7 @@ permissions:
   contents: read
 
 env:
-  NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + ci.yml (cross-checked by version-freshness.yml)
+  NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + core.yml (cross-checked by version-freshness.yml)
   # Every iced_test renderer (interaction, snapshots, and the same tests under
   # coverage/mutants) must be the deterministic tiny-skia software backend —
   # never a GPU whose pixels vary by driver. Also what makes the suites run on
@@ -91,7 +91,7 @@ jobs:
 
       # `fallback: none` on every install-action step here: install only from the
       # action's checksummed manifest, never its runtime-resolved cargo-binstall
-      # fallback (rationale in ci.yml).
+      # fallback (rationale in core.yml).
       - name: Install cargo-nextest
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
@@ -328,7 +328,7 @@ jobs:
   # tag, .app/dmg structure + ad-hoc signature, AppImage root entries, deb/rpm
   # payloads + weak deps, desktop-file/AppStream validation) — the PR-time
   # proof that keeps the release lane's tag-only surface thin, the same
-  # pattern ci.yml's pkg job uses for the CLI's .deb/.rpm. One leg per OS
+  # pattern core.yml's pkg job uses for the CLI's .deb/.rpm. One leg per OS
   # family: the packaging logic is arch-independent (the release lane's
   # native arm legs run the identical scripts; its check script asserts the
   # arm64 MSI's platform tag there). The cargo-deb/cargo-generate-rpm pins
@@ -380,7 +380,7 @@ jobs:
 
       # cargo-generate-rpm is absent from taiki-e/install-action's manifest, so
       # with the binstall fallback disabled it is compiled from crates.io once and
-      # cached, the lane ci.yml's cargo-fuzz and cargo-vet use.
+      # cached, the lane core.yml's cargo-fuzz and cargo-vet use.
       - name: Cache the pinned cargo-generate-rpm binary
         if: runner.os == 'Linux'
         id: rpm-bin

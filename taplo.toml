@@ -1,5 +1,5 @@
 # taplo configuration — TOML formatter + linter, enforced by the orchestrator's
-# `taplo` job (ci.yml, `toml` area) and the local gate (scripts/compliance.ps1 `tp`
+# `taplo` job (repo.yml, `toml` area) and the local gate (scripts/compliance.ps1 `tp`
 # step). The formatting options below
 # are tuned to match the repo's existing hand-formatting, so the one-time baseline
 # reformat normalizes only spacing/commas and never re-flows the author's chosen

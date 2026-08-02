@@ -14,7 +14,7 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 
 # Tag-only, like the hand-rolled workflow: do not spin a release run on every PR
-# (the `dist generate --check` guard in ci.yml already covers config/workflow
+# (the `dist generate --check` guard in core.yml already covers config/workflow
 # drift on PRs).
 pr-run-mode = "skip"
 
@@ -26,7 +26,7 @@ pr-run-mode = "skip"
 # existing vX.Y.Z release flow is unchanged. Side effect (dist hardcodes it, "to
 # co-exist with other release workflows"): the generated workflow is written to
 # v-release.yml, not the unprefixed default name — .github/zizmor.yml's
-# whole-file ignores and ci.yml's pin-drift grep are keyed to the new filename.
+# whole-file ignores and core.yml's pin-drift grep are keyed to the new filename.
 tag-namespace = "v"
 
 # The six shipped targets, every one a single static binary. musl is fully
@@ -172,7 +172,7 @@ host = "aarch64-pc-windows-msvc"
 
 # Pin every action dist emits to a full-length commit SHA so the GENERATED
 # v-release.yml satisfies Scorecard's pinned-dependencies check — without detaching
-# from dist (the `dist generate --check` drift guard in ci.yml stays green because
+# from dist (the `dist generate --check` drift guard in core.yml stays green because
 # this IS what dist now generates). The trailing comment names the EXACT immutable
 # tag the SHA resolves to (`# vX.Y.Z`, not the moving major `# vN`): it rides along
 # in the value (dist renders `{name}@{value}` verbatim) so v-release.yml satisfies

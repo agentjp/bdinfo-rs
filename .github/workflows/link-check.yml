@@ -5,8 +5,8 @@ name: link-check
 # CONTRIBUTING, the issue templates, the Cargo/audit metadata, and the
 # doc-comment URLs in src), daily — external pages move without touching our
 # code, so links rot after merge. The PR/push leg is the identically-named job
-# in ci.yml, plan-gated on the `docs` area (any .md or .rs). Cheap: lychee
-# caches its results and only re-checks day-old links; a residual rate-limit
+# in repo.yml, plan-gated on the `links` area. Cheap: lychee caches its results
+# and only re-checks day-old links; a residual rate-limit
 # (429) is accepted rather than failed, so an external host can't red-X an
 # unrelated run.
 

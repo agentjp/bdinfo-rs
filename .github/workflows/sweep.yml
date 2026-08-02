@@ -159,7 +159,7 @@ jobs:
 
       # `fallback: none` on every install-action step here: install only from the
       # action's checksummed manifest, never its runtime-resolved cargo-binstall
-      # fallback (rationale in ci.yml).
+      # fallback (rationale in core.yml).
       - name: Install mutation tools
         if: steps.marker.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4

@@ -1,0 +1,703 @@
+name: core
+
+# The ROOT-WORKSPACE half of the PR/master gate: build + test on every shipped
+# arch, the quality gate (clippy/fmt/doc/deps/semver), coverage, the real-world
+# install + scan, the zero-deps scan FROM scratch, the .deb/.rpm packaging
+# smoke, the two dependency audits, the release-workflow drift guard and the
+# fuzz-corpus replay.
+#
+# A workflow_call REUSABLE, the shape gui.yml and wasm.yml already use: ci.yml's
+# plan job classifies the event's diff into areas and passes each one through as
+# an input, so every job below keeps the per-area `if:` it carries when the plan
+# sits beside it. The caller invokes this file when ANY of those areas fired; a
+# job whose own area did not fire reports `skipped`, which counts as success in
+# the caller's `ci-ok` fan-in. Check runs render prefixed (`core / build + test
+# (…)`). This file carries no triggers and no concurrency of its own — both are
+# the caller's — so it can never fire on its own and never needs a paths filter.
+#
+# Build and test on every supported OS. The pinned stable toolchain installs
+# itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
+# compile time, so a green build is also the memory-safety guarantee. Every
+# dependency-resolving cargo call is --locked for reproducible builds (the one
+# exception is cargo-semver-checks, which builds its own baseline + current
+# checkouts and takes no --locked flag).
+
+on:
+  workflow_call:
+    inputs:
+      core:
+        description: The root workspace's sources, manifests or lockfile changed.
+        required: true
+        type: string
+      deps:
+        description: The dependency graph or the audit policy changed.
+        required: true
+        type: string
+      dist:
+        description: The release configuration or its generated workflow changed.
+        required: true
+        type: string
+      fuzz:
+        description: The fuzz workspace, its targets or its seed corpus changed.
+        required: true
+        type: string
+      pkg:
+        description: The Linux packaging inputs or their build script changed.
+        required: true
+        type: string
+      test:
+        description: Whether build + test runs at all — true when `core` or `canary` fired.
+        required: true
+        type: string
+      test-os:
+        description: The build + test matrix as a JSON array — six legs for `core`, two for `canary`.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The nightly that backs the `fmt` step (rustfmt.toml has nightly-only options).
+  # Keep in lockstep with $script:Nightly in scripts/_common.ps1.
+  NIGHTLY: nightly-2026-07-06
+  # Keep the cached target/ small: no incremental-compilation metadata, and line
+  # tables instead of full DWARF (still enough for file:line in a test
+  # backtrace). A called workflow inherits none of its caller's env, so these are
+  # declared here as well as in ci.yml — which carries the rationale.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  test:
+    name: build + test (${{ matrix.os }})
+    if: inputs.test == 'true'
+    runs-on: ${{ matrix.os }}
+    # One native runner per RELEASED binary — x86_64 AND aarch64 across Linux,
+    # Windows and macOS — so `cargo test` (including the real-disc end-to-end scan
+    # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
+    # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
+    # runners, free for public repos. The OS list arrives as an input — the full
+    # six for `core`, one leg per shell family for `canary`; keep the list in
+    # classify-diff.ps1 in lockstep with the six dist-workspace.toml targets.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJson(inputs.test-os) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Cache write-discipline (wgpu): PR-branch saves are invisible to
+          # every other PR, so only master runs (pushes + the daily sweep)
+          # save; PRs restore the master-seeded cache.
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Clippy on EVERY build+test leg: the ubuntu-only lint job never clips
+      # the #[cfg(windows)] arms (e.g. the vfs/fs.rs raw-volume reader), so a
+      # per-arch lint bug reaches master unless every leg lints.
+      # Cheap: shares this leg's dep build. The alias is the tracked `lt`
+      # (clippy --workspace --all-targets --locked -- -D warnings).
+      - name: Clippy (-D warnings, pedantic/nursery/restriction)
+        run: cargo lt
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # Drift guard: the committed v-release.yml is generated from dist-workspace.toml by
+  # dist. This regenerates it in-memory and fails if it differs from the on-disk
+  # file, so v-release.yml can never silently fall out of sync with the dist config.
+  release-yaml:
+    name: release workflow in sync (dist generate --check)
+    if: inputs.dist == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # MUST equal `cargo-dist-version` in dist-workspace.toml — the version that
+      # generated the committed v-release.yml, so anything else makes the check
+      # below compare against the wrong generator. version-freshness.yml enforces
+      # the equality and nags when a newer dist ships.
+      DIST_VERSION: 0.32.0
+      # sha256 of the release asset named in the install step, copied once from
+      # the `.sha256` file axodotdev publishes beside it. Committing the digest is
+      # what makes the download verifiable: the archive is checked against this
+      # value before anything inside it runs. Re-take it on every DIST_VERSION bump.
+      DIST_SHA256: 0d9dc001b0e937e9cc18e0dc11784aa7a3fd566656b07828d5e1d10ce1c1c48c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The upstream `.sh` installer is an unhashed curl|sh (Scorecard
+      # pinned-dependencies / downloadThenRun), but the release it installs from
+      # also carries plain archives with published checksums — so fetch the archive
+      # at a version-pinned URL and verify it here instead, which is both faster
+      # than a from-source compile and pinned end to end. musl: the binary is
+      # statically linked, so it is independent of the runner image's glibc.
+      - name: Install pinned dist (checksum-verified prebuilt)
+        run: |
+          set -euo pipefail
+          dir="cargo-dist-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "$dir.tar.xz" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/$dir.tar.xz"
+          echo "$DIST_SHA256  $dir.tar.xz" | sha256sum --check --strict -
+          tar -xJf "$dir.tar.xz" "$dir/dist"
+          sudo install -m755 "$dir/dist" /usr/local/bin/dist
+          rm -rf "$dir" "$dir.tar.xz"
+          dist --version
+
+      - name: Check v-release.yml is in sync with dist-workspace.toml
+        run: dist generate --check
+
+      # Make the drift self-explanatory (no token / no extra permission — just an
+      # annotation). The usual cause is a Dependabot bump of an action that appears
+      # in the GENERATED v-release.yml (checkout, upload-/download-artifact, attest):
+      # it edits v-release.yml but cannot edit dist-workspace.toml, so the pins drift.
+      - name: Explain the drift if the check failed
+        if: failure()
+        run: |
+          echo "::group::v-release.yml is out of sync with dist-workspace.toml"
+          drift=0
+          for a in actions/checkout actions/upload-artifact actions/download-artifact actions/attest; do
+            rel=$(grep -oP "uses:\s*${a}@\K[0-9a-f]{40}\s*#\s*\S+" .github/workflows/v-release.yml | head -1)
+            cfg=$(grep -oP "\"${a}\"\s*=\s*\"\K[^\"]+" dist-workspace.toml | head -1)
+            if [ -n "$rel" ] && [ "$rel" != "$cfg" ]; then
+              echo "::error::dist-workspace.toml pin stale for ${a} — set:  \"${a}\" = \"${rel}\""
+              drift=1
+            fi
+          done
+          if [ "$drift" -eq 0 ]; then
+            echo "::error::v-release.yml differs from dist generate output, but not via a tracked action pin — run 'dist generate' locally and inspect the diff."
+          fi
+          echo "Fix: run 'pwsh scripts/dist-sync.ps1 -Pr <this-PR> -Push' (cockpit helper), or paste the line(s) above into dist-workspace.toml and run 'dist generate', then commit on this branch."
+          echo "::endgroup::"
+
+  # The quality gate mirrored from the local runner. The gate commands are the
+  # tracked cargo aliases in .cargo/config.toml (ck/lt/mc/dc + cov); clippy.toml +
+  # typos.toml are tracked so clippy/typos behave identically. Format uses the
+  # pinned nightly (rustfmt.toml has nightly-only options). Public repo = free
+  # minutes, so the heavy quality checks run here too — incremental mutants run
+  # per-PR (the `mutants` job in ci.yml), the fuzz corpus replays per-PR (the
+  # `replay` job below), and the full mutants sweeps for every crate live in
+  # sweep.yml; only the Windows-via-Docker fuzz runner stays local.
+  lint:
+    name: lint (clippy, fmt, doc, deps, semver)
+    if: inputs.core == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # semver-checks needs the v* baseline tag
+          persist-credentials: false
+
+      - name: Install pinned nightly rustfmt
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # `fallback: none` on EVERY taiki-e/install-action step in this repo. The
+      # action's manifest path is the only channel that inherits the pinned action
+      # revision's guarantees: it resolves a fixed upstream release asset and
+      # verifies its committed checksum. The default fallback instead resolves at
+      # run time through crates.io metadata to a GitHub release asset or the
+      # third-party quickinstall build farm (cargo-binstall) — neither pinned by
+      # this repo nor checksum-verified against anything committed here. Disabling
+      # it turns a tool the manifest lacks into a loud failure rather than a silent
+      # downgrade to that path, and does the same for a pinned `tool@version` the
+      # manifest stops carrying.
+      - name: Install gate tools
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        with:
+          tool: cargo-machete,cargo-shear,cargo-semver-checks
+          fallback: none
+
+      # House rules with no clippy equivalent (big-endian-only + no HashMap/HashSet
+      # in the deterministic output path), mirrored from the local gate via the
+      # shared script so local and CI enforce the SAME rule. pwsh ships on the
+      # ubuntu runner.
+      - name: Source rules (big-endian + determinism)
+        shell: pwsh
+        run: ./.github/scripts/source-rules.ps1
+
+      - name: Format (nightly rustfmt)
+        run: cargo +${{ env.NIGHTLY }} fmt --all --check
+
+      - name: Clippy (-D warnings, pedantic/nursery/restriction)
+        run: cargo lt
+
+      - name: Unused deps (machete)
+        run: cargo mc
+
+      - name: Docs (warnings = errors)
+        run: cargo dc
+
+      - name: Unused deps (shear)
+        run: cargo sh
+
+      - name: API stability (semver-checks vs latest v* tag)
+        run: |
+          base="$(git tag -l 'v*' --sort=-version:refname | head -1)"
+          if [ -n "$base" ]; then
+            echo "baseline: $base"
+            cargo semver-checks check-release -p bdinfo-rs-core --baseline-rev "$base"
+          else
+            echo "no v* tag yet; skipping"
+          fi
+
+  # 100% line/region/function coverage. Runs on the pinned NIGHTLY rather than
+  # the stable `cov` alias: the CLI excludes a couple of environment/platform-
+  # bound functions with `#[cfg_attr(coverage_nightly, coverage(off))]`, and that
+  # cfg is only set by cargo-llvm-cov on a nightly toolchain. On stable those
+  # exclusions are inert, so the off-Windows platform arms count as uncovered and
+  # the floor can't be met on Linux. The 97%/91% branch floors stay in the LOCAL
+  # gate (scripts/compliance.ps1) — NOT because they need nightly (this job is
+  # already on nightly) but because branch coverage is platform-VARIANT: the
+  # library carries #[cfg(windows)] arms (e.g. vfs/fs.rs) whose branch count
+  # differs by OS, so one CI floor calibrated on a single platform would misfire
+  # on another. CI gates the platform-INVARIANT 100% line/region/function floor;
+  # the contributor's local gate enforces the branch floors on their own platform.
+  coverage:
+    name: coverage (100% lines/regions/functions)
+    if: inputs.core == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly with llvm-tools
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install coverage tools
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+          fallback: none
+
+      - name: Coverage (100% lines/regions/functions)
+        run: cargo +${{ env.NIGHTLY }} llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+
+  # The ultimate real-world gate: do exactly what a user does — install bdinfo-rs
+  # the traditional way (build it from source; no package managers), scan the
+  # committed fixture disc, and confirm the report is byte-identical to the golden.
+  # One native runner per SHIPPED binary (x86_64 AND aarch64 × Linux/Windows/macOS),
+  # so this exercises the actual RELEASE/static artifact (not the debug test binary)
+  # on hardware we don't own — Linux builds the static musl target it ships.
+  # Deliberately NOT `needs:`-chained behind test/lint/coverage: such a chain is
+  # pure scheduling — ci-ok requires e2e green either way, so running it in
+  # parallel costs nothing but wall-clock. (Running the binary in TOTAL
+  # isolation — FROM scratch, zero runtime deps — is the separate `isolation`
+  # job below; docker.yml ships that same scratch image on release.)
+  e2e:
+    name: real-world install + scan (${{ matrix.os }})
+    if: inputs.core == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
+          - {os: windows-2025, target: ""}
+          - {os: windows-11-arm, target: ""}
+          - {os: macos-15-intel, target: ""}
+          - {os: macos-15, target: ""}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # "Install" the way a user would: build from source and drop the binary in a
+      # bin dir — exactly what `cargo install bdinfo-rs` does off crates.io. On Linux
+      # we target static musl so it matches the shipped artifact byte-for-byte.
+      - name: Install bdinfo-rs from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.target }}" ]; then
+            rustup target add "${{ matrix.target }}"
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst" --target "${{ matrix.target }}"
+          else
+            cargo install --path crates/bdinfo-rs --locked --root "$RUNNER_TEMP/inst"
+          fi
+
+      # Scan both fixture discs with the installed binary and assert each report is
+      # byte-identical to its golden — the eyeball check a person does, made exact.
+      - name: Scan the fixture disc and diff against the golden
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/inst/bin/bdinfo-rs"
+          fix="crates/bdinfo-rs/tests/fixtures"
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          "$bin" --version
+          "$bin" -m 00000 "$fix/BigBuckBunny"     "$out"
+          "$bin" -m 00000 "$fix/BigBuckBunny.iso" "$out"
+          cmp "$out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          # The 30 s playlist clears the default filter, so the default
+          # selection path is real-disc-testable: `--whole` (no `-m`) must
+          # produce the very bytes `-m 00000` does.
+          whole="$RUNNER_TEMP/out-whole"; mkdir -p "$whole"
+          "$bin" -w "$fix/BigBuckBunny" "$whole"
+          cmp "$whole/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          echo "OK — both reports byte-identical to the golden (incl. --whole)"
+
+  # The "drop one file, it runs" proof, as its OWN job (not a step wedged into the
+  # e2e matrix): build the shipped static musl binary, bake it into an EMPTY `FROM
+  # scratch` image — no libc, no shell, no /tmp, nothing — and scan the fixture disc
+  # from inside it, byte-checked against the golden. A binary with any runtime dep
+  # could not even start in scratch, so green = the zero-deps guarantee, functional.
+  # Linux x86_64 + aarch64 (the two static-musl targets we ship; Windows/macOS have
+  # no empty-container equivalent). docker.yml ships this same image on release.
+  isolation:
+    name: zero-deps scan FROM scratch (${{ matrix.target }})
+    if: inputs.core == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Build the actual shipped artifact: the fully static musl release binary.
+      # Pure-Rust (no C deps), so the musl target needs no C toolchain.
+      - name: Build the static musl binary
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked -p bdinfo-rs --target ${{ matrix.target }}
+
+      - name: Scan the fixture disc FROM scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/ctx"
+          mkdir -p "$ctx/out"
+          install -D "target/${{ matrix.target }}/release/bdinfo-rs" "$ctx/bdinfo-rs"
+          printf 'FROM scratch\nCOPY bdinfo-rs /bdinfo-rs\nENTRYPOINT ["/bdinfo-rs"]\n' > "$ctx/Dockerfile"
+          docker build -t bdinfo-scratch "$ctx"
+          fix="$PWD/crates/bdinfo-rs/tests/fixtures"
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny     /out
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out:/out" bdinfo-scratch -m 00000 /fix/BigBuckBunny.iso /out
+          cmp "$ctx/out/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          cmp "$ctx/out/BDINFO.Blu-Ray.txt"      "$fix/golden/iso.txt"
+          # The 30 s playlist clears the default filter, so the default `--whole`
+          # selection is testable too — FROM scratch, into a fresh out dir.
+          mkdir -p "$ctx/out-whole"
+          docker run --rm -v "$fix:/fix:ro" -v "$ctx/out-whole:/out" bdinfo-scratch -w /fix/BigBuckBunny /out
+          cmp "$ctx/out-whole/BDINFO.BigBuckBunny.txt" "$fix/golden/folder.txt"
+          echo "OK — scanned both discs FROM scratch, byte-identical to golden (incl. --whole)"
+
+  # The DETERMINISTIC half of the supply-chain audit (the wgpu split): bans —
+  # including the no-C-dependencies guard behind the static binary — plus the
+  # license allowlist and crates.io-only sources, all functions of the committed
+  # manifests/lockfile alone, so a red here is always caused by the PR under
+  # test. The VOLATILE half (RustSec advisories: a CVE can publish any time)
+  # deliberately does NOT run on the PR path — an unrelated disclosure must not
+  # redden a PR — and lives in audit.yml's daily cron, with dependency-review
+  # catching advisories a PR's own dependency changes would introduce. The job
+  # name predates the split.
+  deny:
+    name: cargo deny check
+    if: inputs.deps == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny (prebuilt, no from-source compile)
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        with:
+          tool: cargo-deny
+          fallback: none
+
+      - name: Audit bans + licenses + sources (deterministic on the lockfile)
+        run: cargo deny check bans licenses sources
+
+  # Supply-chain audit: every dependency must be covered by a trusted third-party
+  # audit, a recorded publisher-trust, or an explicit exemption in supply-chain/.
+  # --locked uses the committed imports.lock (no network refetch) so the result is
+  # deterministic; a newly-introduced unvetted dep fails here. (Folded in from
+  # audit.yml, which keeps the daily advisory cron.)
+  vet:
+    name: cargo vet
+    if: inputs.deps == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The committed imports.lock omits the `user-id` publisher field that
+      # cargo-vet 0.10.0 still rejects; 0.10.1+ relaxed it. Only 0.10.0 ships a
+      # prebuilt binary anywhere (mozilla's release page and the install-action
+      # manifest both stop there), so 0.10.2 is compiled from crates.io once and
+      # cached — keep the cache key in lockstep with the install pin below,
+      # which version-freshness.yml watches. Keep both in lockstep with the
+      # version that writes supply-chain/.
+      - name: Cache the pinned cargo-vet binary
+        id: vet-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-vet
+          key: cargo-vet-${{ runner.os }}-0.10.2
+
+      - name: Install cargo-vet 0.10.2 (cache miss)
+        if: steps.vet-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-vet --version 0.10.2 --locked
+
+      - name: Vet the dependency tree against the committed store
+        run: cargo vet --locked
+
+  # Adversarial regression gate over the untrusted-input parsers (Blu-ray bytes
+  # are attacker-controlled): replay the committed seed corpus with zero fresh
+  # iterations — a deterministic check that the parsers still handle every
+  # recorded boundary/garbage input without panicking, hanging, or blowing up
+  # memory. cargo-fuzz / libFuzzer need a nightly toolchain and have no Windows
+  # MSVC support, so this runs on Linux only; the local mirror is
+  # scripts/fuzz-docker.{ps1,sh}. The tag-triggered extended fresh-fuzz pass
+  # stays in fuzz.yml.
+  replay:
+    name: corpus replay (regression gate)
+    if: inputs.fuzz == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
+      # with scripts/fuzz-docker.sh + fuzz.yml.
+      TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report
+      # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
+      # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
+      # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
+      # with a statically linked musl libc and need a musl C++ cross-compiler the runner
+      # lacks. The gnu host has the dynamic libc + system C++ that libFuzzer needs.
+      FUZZ_TARGET: x86_64-unknown-linux-gnu
+      # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
+      # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
+      # (allocation-amplification guard).
+      GUARDS: -timeout=25 -rss_limit_mb=2048
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned nightly
+        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fuzz
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # cargo-fuzz is absent from taiki-e/install-action's manifest (101 tools at
+      # the revision pinned in this file), so with the binstall fallback disabled
+      # it has no prebuilt channel here. Compile the pinned version from crates.io
+      # once and cache the binary, the same lane cargo-vet uses; keep the pin equal
+      # to fuzz.yml's, which version-freshness.yml enforces and watches.
+      - name: Cache the pinned cargo-fuzz binary
+        id: fuzz-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-0.13.2
+
+      - name: Install cargo-fuzz 0.13.2 (cache miss)
+        if: steps.fuzz-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Verify the committed fuzz lockfile is in sync
+        # cargo-fuzz's `run` has no --locked flag (it forwards everything after
+        # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
+        # cargo command up front; this also pre-fetches the deps for the build.
+        run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
+
+      - name: Replay the committed corpus through every target
+        run: |
+          fail=0
+          for t in $TARGETS; do
+            echo "::group::replay $t"
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+  # PR-time smoke test for the .deb / .rpm packaging. The packages are built INSIDE
+  # the release (dist `extra-artifacts` -> .github/build-linux-packages.sh), and a
+  # failure there ABORTS the whole release (dist fail-fast) — so a broken packaging
+  # change must be caught BEFORE a tag, not at release time.
+  #
+  # This job runs the REAL build-linux-packages.sh end to end, exercising the two paths
+  # that otherwise first execute only at a tag: the archive-EXTRACTION glue (it unpacks
+  # each dist `bdinfo-rs-<triple>.tar.gz` and stages the binary + man + completions) and
+  # the AARCH64 packaging (cross-arch `cargo deb/generate-rpm --target aarch64-...` on an
+  # x86_64 host). We can't produce real dist archives on a PR (no `dist build`), so we
+  # synthesize them in dist's exact `<pkg>-<triple>/` layout from a host build — using a
+  # host binary as a stand-in, which is fine because packaging is arch/libc-agnostic (the
+  # package's arch label comes from --target, not the binary; the static musl binaries
+  # themselves are e2e-tested elsewhere in this workflow). cargo-deb / cargo-generate-rpm
+  # are installed prebuilt at the SAME versions build-linux-packages.sh pins, so the
+  # script's "already on PATH" check skips its source compile and the test uses the
+  # release tools.
+  #
+  # Residual it does NOT catch: dist itself CHANGING its archive layout out from under
+  # the script (that needs a real tag) — but it does catch us breaking the script, the
+  # real risk. The x86_64 package (native arch, runnable stand-in binary) is
+  # install-verified; the aarch64 package is contents-verified (its binary is an x86_64
+  # stand-in, unrunnable here — but the packaging, metadata, and file layout are what
+  # this asserts). (Folded in from the former linux-packages.yml, whose `on.paths`
+  # filter became the `pkg` area; landing under ci-ok promotes it from
+  # deliberately-not-required to gating, which its determinism supports.)
+  pkg:
+    name: build + install .deb/.rpm (x64 + arm64)
+    if: inputs.pkg == 'true'
+    runs-on: ubuntu-latest
+    # Build the HOST gnu triple: this verifies the PACKAGING (extraction, metadata, the
+    # --target path rewrite, install + contents), for which the binary's libc/arch is
+    # irrelevant. gnu is the runner's native target, so there is no musl-linker friction.
+    env:
+      HOST: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # build.rs writes the shell completions + man page into OUT_DIR during the build;
+      # the host triple nests output under target/<triple>/ (mirroring what the release
+      # archives carry). --locked keeps the smoke build honest against the lockfile.
+      - name: Build the binary (generates completions + man page)
+        run: cargo build --release --locked --target "$HOST" -p bdinfo-rs
+
+      # Both at the SAME versions build-linux-packages.sh pins — so the script's
+      # `command -v cargo-deb` guard finds them and skips its (slower) source compile,
+      # and the smoke test packages with the exact release tools.
+      - name: Install cargo-deb (release pin, prebuilt)
+        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+        with:
+          tool: cargo-deb@3.7.0
+          fallback: none
+
+      # cargo-generate-rpm is absent from taiki-e/install-action's manifest (101
+      # tools at the revision pinned in this file), so with the binstall fallback
+      # disabled it gets the same compile-once-and-cache lane as cargo-fuzz and
+      # cargo-vet. The `@0.21.0` pin is the one build-linux-packages.sh and gui.yml
+      # carry; version-freshness.yml cross-checks all three.
+      - name: Cache the pinned cargo-generate-rpm binary
+        id: rpm-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-generate-rpm
+          key: cargo-generate-rpm-${{ runner.os }}-0.21.0
+
+      - name: Install cargo-generate-rpm (cache miss)
+        if: steps.rpm-bin.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-generate-rpm@0.21.0
+
+      # Synthesize the two dist archives the script consumes, in dist's exact
+      # `<pkg>-<triple>/` layout, from the host build (binary stand-in + real assets).
+      - name: Synthesize the dist release archives (both musl arches)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/$HOST/release/bdinfo-rs"
+          assets="$(dirname "$(ls target/"$HOST"/release/build/bdinfo-rs-*/out/assets/bdinfo-rs.1 | head -n1)")"
+          mkdir -p target/distrib
+          for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            d="target/distrib/bdinfo-rs-${triple}"
+            mkdir -p "$d"
+            cp "$bin" "$d/bdinfo-rs"
+            for f in bdinfo-rs.1 bdinfo-rs.bash _bdinfo-rs bdinfo-rs.fish; do cp "$assets/$f" "$d/"; done
+            tar czf "target/distrib/bdinfo-rs-${triple}.tar.gz" -C target/distrib "bdinfo-rs-${triple}"
+            rm -rf "$d" # the script re-extracts from the tarball, so this truly tests extraction
+          done
+          ls -l target/distrib
+
+      - name: Run build-linux-packages.sh (the real release packaging path)
+        shell: bash
+        run: bash .github/build-linux-packages.sh
+
+      - name: Verify the x86_64 .deb + .rpm (install + run + man/completions/copyright)
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="dist-extra/bdinfo-rs-x86_64-unknown-linux-musl.deb"
+          echo "== $deb =="; dpkg-deb --contents "$deb"
+          sudo dpkg -i "$deb"
+          bdinfo-rs --version
+          # cargo-deb gzips the man page (.1.gz); cargo-generate-rpm keeps it (.1) — accept either.
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+          done
+          grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
+          sudo dpkg -r bdinfo-rs
+          echo "x86_64 .deb OK"
+
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          sudo rpm --initdb 2>/dev/null || true
+          rpmf="dist-extra/bdinfo-rs-x86_64-unknown-linux-musl.rpm"
+          echo "== $rpmf =="; rpm -qpl "$rpmf"
+          sudo rpm -i --nodeps --ignorearch --force "$rpmf"
+          bdinfo-rs --version
+          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
+          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
+          done
+          echo "x86_64 .rpm OK"
+
+      - name: Verify the aarch64 .deb + .rpm (packaging + contents)
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="dist-extra/bdinfo-rs-aarch64-unknown-linux-musl.deb"
+          rpmf="dist-extra/bdinfo-rs-aarch64-unknown-linux-musl.rpm"
+          test -f "$deb" || { echo "MISSING: $deb"; exit 1; }
+          test -f "$rpmf" || { echo "MISSING: $rpmf"; exit 1; }
+          # The arm64 binary here is an x86_64 stand-in, so don't run it — assert the
+          # packaging produced the right arch label and shipped the binary + man +
+          # completions (the metadata/layout that a broken aarch64 package would drop).
+          echo "== $deb =="
+          arch=$(dpkg-deb -f "$deb" Architecture)
+          [ "$arch" = "arm64" ] || { echo "wrong deb arch label: $arch (expected arm64)"; exit 1; }
+          debc=$(dpkg-deb --contents "$deb")
+          echo "$debc"
+          for p in ./usr/bin/bdinfo-rs ./usr/share/bash-completion/completions/bdinfo-rs ./usr/share/zsh/site-functions/_bdinfo-rs ./usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            echo "$debc" | grep -q " $p\$" || { echo "MISSING in .deb: $p"; exit 1; }
+          done
+          echo "$debc" | grep -qE ' \./usr/share/man/man1/bdinfo-rs\.1' || { echo "MISSING in .deb: man page"; exit 1; }
+          echo "aarch64 .deb OK"
+
+          echo "== $rpmf =="
+          rarch=$(rpm -qp --qf '%{ARCH}' "$rpmf")
+          case "$rarch" in aarch64|arm64) ;; *) echo "wrong rpm arch label: $rarch (expected aarch64)"; exit 1;; esac
+          rpmc=$(rpm -qpl "$rpmf")
+          echo "$rpmc"
+          for p in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
+            echo "$rpmc" | grep -qx "$p" || { echo "MISSING in .rpm: $p"; exit 1; }
+          done
+          echo "$rpmc" | grep -qE '/usr/share/man/man1/bdinfo-rs\.1' || { echo "MISSING in .rpm: man page"; exit 1; }
+          echo "aarch64 .rpm OK"

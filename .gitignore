@@ -18,8 +18,8 @@
 # Local development plumbing (kept on disk, not published).
 # NOTE: deny.toml, supply-chain/, clippy.toml, typos.toml, .config/nextest.toml,
 # .cargo/mutants.toml, and fuzz/ ARE tracked — CI reads them (cargo deny + vet +
-# clippy + typos + nextest, plus the incremental-mutants and corpus-replay jobs
-# in ci.yml and the tag-time extended fuzz in fuzz.yml).
+# clippy + typos + nextest, plus the incremental-mutants job in ci.yml, the
+# corpus-replay job in core.yml and the tag-time extended fuzz in fuzz.yml).
 /scripts/
 /CLAUDE.md
 /.claude/

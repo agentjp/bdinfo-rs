@@ -1,4 +1,4 @@
-# ryl (a Rust yamllint) config — enforced by the `yaml` job in ci.yml and the
+# ryl (a Rust yamllint) config — enforced by the `yaml` job in repo.yml and the
 # local gate (scripts/compliance.ps1). Starts from yamllint's `default` ruleset.
 # Only THREE rules are relaxed, and each is forced by the dist-GENERATED
 # v-release.yml (which must pass unmodified — `dist generate --check` forbids
