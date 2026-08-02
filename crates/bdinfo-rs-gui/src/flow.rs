@@ -21,10 +21,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
+use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
-use crate::model::{self, PlaylistRow, SelectableRow, Sort, SortColumn, ViewSettings};
+use crate::model::{
+    self, HiddenPlaylists, PlaylistRow, SelectableRow, Sort, SortColumn, ViewSettings,
+};
 use crate::panes::{self, CodecRow, StreamFileRow};
 use crate::progress::ProgressModel;
 use crate::scan::{Input, Structural};
@@ -63,10 +66,17 @@ struct Listing {
     bdrom: BdRom,
     /// The detected-feature labels, in the core's fixed order.
     features: Vec<String>,
-    /// The table's presentation settings — the filter the rows were derived
-    /// under and the display toggles the cells render with. Retained so a
-    /// settings change re-derives the rows from `bdrom` without a rescan.
+    /// The table's presentation settings — the persisted playlist filter (the
+    /// rows derive under it unless `reveal` overrides it) and the display
+    /// toggles the cells render with. Retained so a settings change re-derives
+    /// the rows from `bdrom` without a rescan.
     view: ViewSettings,
+    /// The transient "Show" reveal over `view`'s filter: the same filter with
+    /// the rules that are withholding a playlist switched off, or `None` for
+    /// the plain settings view. Session-only — it never reaches the persisted
+    /// settings, and an explicit settings apply
+    /// ([`set_view`](Self::set_view)) drops it.
+    reveal: Option<PlaylistFilter>,
     /// The filtered table rows; the selection parallels this list.
     rows: Vec<PlaylistRow>,
     /// One checkbox flag per row.
@@ -104,6 +114,7 @@ impl Listing {
             bdrom: structural.bdrom,
             features: structural.features,
             view,
+            reveal: None,
             rows,
             selection,
             active: 0,
@@ -128,27 +139,72 @@ impl Listing {
         self.structural_report = self.render_structural();
     }
 
+    /// The filter the table rows are derived under: the transient reveal when
+    /// one is on, else the settings' own filter.
+    fn active_filter(&self) -> PlaylistFilter {
+        self.reveal.clone().unwrap_or_else(|| self.view.filter())
+    }
+
+    /// Re-derives the table rows from the retained disc under the active
+    /// filter — no disk IO, mirroring `BDInfo`'s `LoadPlaylists()` re-run.
+    /// The row set changed, so the selection resets (as `BDInfo`'s does) and
+    /// the active row clamps into the new range; the active column sort is
+    /// re-applied over the new rows.
+    fn rederive_rows(&mut self) {
+        let mut rows = model::playlist_rows(&self.bdrom.playlists, &self.active_filter());
+        if let Some(sort) = self.sort {
+            let _ = model::sort_rows(&mut rows, sort);
+        }
+        self.selection = Selection::new(rows.len());
+        self.active = self.active.min(rows.len().saturating_sub(1));
+        self.show_hidden = model::any_hidden(&rows);
+        self.rows = rows;
+    }
+
+    /// The playlists the **settings'** filter withholds — what the
+    /// hidden-count line reports whether or not the transient reveal is on
+    /// (with it on, the line names what restoring the settings view would
+    /// withhold again).
+    fn hidden(&self) -> Option<HiddenPlaylists> {
+        model::hidden_playlists(&self.bdrom.playlists, &self.view.filter())
+    }
+
     /// Applies a changed view configuration (the Settings dialog's OK). A
     /// display-only change (sizes / chapter suffix) just re-renders; a
-    /// **filter** change re-derives the rows from the retained disc — no disk
-    /// IO, mirroring `BDInfo`'s `LoadPlaylists()` re-run — resetting the
-    /// selection (the row set changed, as `BDInfo`'s does) and clamping the
-    /// active row into the new range.
+    /// **filter** change re-derives the rows ([`rederive_rows`](Self::rederive_rows)).
+    /// An explicit settings apply is the global preference, so it also drops
+    /// the transient reveal — which is itself a filter change when one was on.
     fn set_view(&mut self, view: ViewSettings) {
-        let filter_changed = self.view.filter() != view.filter();
+        let previous = self.active_filter();
         self.view = view;
-        if filter_changed {
-            let mut rows = model::playlist_rows(&self.bdrom.playlists, &self.view.filter());
-            if let Some(sort) = self.sort {
-                let _ = model::sort_rows(&mut rows, sort);
-            }
-            self.selection = Selection::new(rows.len());
-            self.active = self.active.min(rows.len().saturating_sub(1));
-            self.show_hidden = model::any_hidden(&rows);
-            self.rows = rows;
+        self.reveal = None;
+        if previous != self.active_filter() {
+            self.rederive_rows();
         }
         // Display-only changes alter the render options too, so the retained
         // report refreshes on EVERY view change, filtered or not.
+        self.refresh_report();
+    }
+
+    /// Flips the transient "Show" reveal: on, the rows are re-derived under a
+    /// filter with exactly the withholding rules switched off, so the withheld
+    /// playlists join the table as ordinary rows; off, the settings' view
+    /// returns. Both directions take [`rederive_rows`](Self::rederive_rows), so
+    /// a reveal costs the selection exactly what a settings filter change does.
+    ///
+    /// A no-op when nothing is withheld and no reveal is on — there is then no
+    /// row set to change.
+    fn toggle_reveal(&mut self) {
+        let next = if self.reveal.is_some() {
+            None
+        } else {
+            self.hidden().map(|hidden| hidden.revealing(&self.view.filter()))
+        };
+        if next.is_none() && self.reveal.is_none() {
+            return;
+        }
+        self.reveal = next;
+        self.rederive_rows();
         self.refresh_report();
     }
 
@@ -197,7 +253,7 @@ impl Listing {
     fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
         let checked: BTreeSet<String> = self.selected_names().into_iter().collect();
         let active_name = self.rows.get(self.active).map(|row| row.name.clone());
-        let mut rows = model::playlist_rows(&playlists, &self.view.filter());
+        let mut rows = model::playlist_rows(&playlists, &self.active_filter());
         if let Some(sort) = self.sort {
             let _ = model::sort_rows(&mut rows, sort);
         }
@@ -383,6 +439,21 @@ impl Flow {
             }
             Inner::Listed(listing) => listing.set_view(view),
             _ => {}
+        }
+    }
+
+    /// Flips the transient "Show" / "Hide" reveal on the hidden-count line:
+    /// the withheld playlists join the table as ordinary rows (selectable and
+    /// scannable), or leave it again. Session-only — the persisted settings
+    /// are untouched, and the next settings apply drops the reveal
+    /// ([`Flow::set_view`]).
+    ///
+    /// Only while the table is editable ([`Stage::Listed`] /
+    /// [`Stage::Reported`]): the row set must not change under an in-flight
+    /// scan, the same rule the selection edits follow.
+    pub fn toggle_reveal(&mut self) {
+        if let Some(listing) = self.editable_listing_mut() {
+            listing.toggle_reveal();
         }
     }
 
@@ -686,6 +757,22 @@ impl Flow {
         self.any_listing().is_some_and(|listing| listing.show_hidden)
     }
 
+    /// The playlists the settings' filters withhold from the table — the
+    /// hidden-count line drawn under it, `None` when they withhold none (no
+    /// line, no toggle). Unaffected by the transient reveal, which changes
+    /// only the line's wording ([`Flow::revealing`]), never its subject.
+    #[must_use]
+    pub fn hidden_playlists(&self) -> Option<HiddenPlaylists> {
+        self.any_listing().and_then(Listing::hidden)
+    }
+
+    /// Whether the transient reveal is on — the withheld playlists are in the
+    /// table, and the line's toggle restores the settings view.
+    #[must_use]
+    pub fn revealing(&self) -> bool {
+        self.any_listing().is_some_and(|listing| listing.reveal.is_some())
+    }
+
     /// Whether the table checkboxes + selection controls are live (the table is
     /// frozen while a scan is in flight).
     #[must_use]
@@ -933,6 +1020,49 @@ mod tests {
     /// A flow listed from the three-playlist disc.
     fn listed3() -> Flow {
         Flow::start_listing(input()).listed(&input(), Ok(structural3()), ViewSettings::default())
+    }
+
+    /// A disc the default filter withholds two playlists from — one per rule:
+    /// 00000 (100 s) and 00003 (70 s) list, 00001 (80 s) LOOPS, and 00002
+    /// (10 s) is short. Distinct clips, so every listed row is its own group.
+    fn structural_filtered() -> Structural {
+        let mut looping = playlist("00001.MPLS", 80.0, &["B.M2TS"]);
+        looping.has_loops = true;
+        Structural {
+            bdrom: bdrom(vec![
+                playlist("00000.MPLS", 100.0, &["A.M2TS"]),
+                looping,
+                playlist("00002.MPLS", 10.0, &["C.M2TS"]),
+                playlist("00003.MPLS", 70.0, &["D.M2TS"]),
+            ]),
+            features: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A flow listed from the two-withheld-playlist disc.
+    fn listed_filtered() -> Flow {
+        Flow::start_listing(input()).listed(
+            &input(),
+            Ok(structural_filtered()),
+            ViewSettings::default(),
+        )
+    }
+
+    /// The settings both filter switches off — the persisted equivalent of the
+    /// transient reveal.
+    fn no_filters() -> ViewSettings {
+        ViewSettings {
+            filter_short_playlists: false,
+            filter_looping_playlists: false,
+            ..ViewSettings::default()
+        }
+    }
+
+    /// The hidden-count line's text for the flow's current state, `None` when
+    /// nothing is withheld.
+    fn hidden_line(flow: &Flow) -> Option<String> {
+        flow.hidden_playlists().map(|hidden| hidden.line(flow.revealing()))
     }
 
     /// The table's row names in display order.
@@ -1619,6 +1749,171 @@ mod tests {
         assert_eq!(listed().start_scanning(1).stage(), Stage::Scanning);
     }
 
+    #[test]
+    fn the_hidden_line_reports_only_what_the_active_filters_withhold() {
+        // Nothing withheld — no line at all.
+        assert_eq!(hidden_line(&listed3()), None);
+        // Two withheld, one per rule: the count is playlists, the parenthesis
+        // is rules, and the names come in table order (length desc).
+        let flow = listed_filtered();
+        assert_eq!(
+            hidden_line(&flow).as_deref(),
+            Some("2 playlists hidden by filters (short, looping)")
+        );
+        let hidden = flow.hidden_playlists().expect("two withheld");
+        assert_eq!(hidden.names(), ["00001.MPLS", "00002.MPLS"]);
+        // Switching both rules off in the SETTINGS retires the line entirely.
+        let mut flow = flow;
+        flow.set_view(no_filters());
+        assert_eq!(hidden_line(&flow), None);
+        // Stages with no disc have nothing to report.
+        assert_eq!(hidden_line(&Flow::idle()), None);
+        assert!(!Flow::idle().revealing());
+    }
+
+    #[test]
+    fn show_reveals_the_withheld_rows_and_hide_restores_them() {
+        let mut flow = listed_filtered();
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00003.MPLS"]);
+        flow.toggle_reveal();
+        // Both withheld playlists join the table, in the ordinary presentation
+        // order (length descending), and the line flips to "Showing".
+        assert!(flow.revealing());
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00003.MPLS", "00002.MPLS"]);
+        assert_eq!(
+            hidden_line(&flow).as_deref(),
+            Some("Showing 2 filtered playlists (short, looping)")
+        );
+        // The reveal is transient: the persisted view settings are untouched,
+        // so the Settings dialog still opens on both filters ON.
+        assert_eq!(flow.any_listing().map(|listing| listing.view), Some(ViewSettings::default()));
+        // Hide restores the settings' own view.
+        flow.toggle_reveal();
+        assert!(!flow.revealing());
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00003.MPLS"]);
+        assert_eq!(
+            hidden_line(&flow).as_deref(),
+            Some("2 playlists hidden by filters (short, looping)")
+        );
+    }
+
+    #[test]
+    fn a_reveal_switches_off_only_the_withholding_rules() {
+        // Only the looping rule withholds anything here (00002 is 10 s but
+        // the short switch is off already), so the reveal must leave the
+        // short rule alone rather than widening the table further.
+        let looping_only =
+            ViewSettings { filter_short_playlists: false, ..ViewSettings::default() };
+        let mut flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural_filtered()), looping_only);
+        assert_eq!(hidden_line(&flow).as_deref(), Some("1 playlist hidden by filters (looping)"));
+        flow.toggle_reveal();
+        let filter =
+            flow.any_listing().and_then(|listing| listing.reveal.clone()).expect("a reveal filter");
+        assert!(!filter.filter_looping_playlists);
+        assert!(!filter.filter_short_playlists, "the settings' own switch was already off");
+        // Conversely, with only the short rule withholding, the looping switch
+        // stays ON through the reveal.
+        let mut flow = listed3();
+        flow.set_view(ViewSettings { short_playlist_seconds: 60, ..ViewSettings::default() });
+        flow.toggle_reveal();
+        let filter =
+            flow.any_listing().and_then(|listing| listing.reveal.clone()).expect("a reveal filter");
+        assert!(!filter.filter_short_playlists);
+        assert!(filter.filter_looping_playlists);
+    }
+
+    #[test]
+    fn a_settings_apply_clears_the_transient_reveal() {
+        let mut flow = listed_filtered();
+        flow.toggle_reveal();
+        assert_eq!(flow.row_count(), 4);
+        // A DISPLAY-only apply still wins over the reveal: explicit settings
+        // are the global preference, so the withheld rows leave again.
+        flow.set_view(ViewSettings { human_readable_sizes: true, ..ViewSettings::default() });
+        assert!(!flow.revealing());
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00003.MPLS"]);
+        // And an apply that switches the filters off itself leaves no reveal
+        // to clear — the rows are listed by the settings, not the toggle.
+        flow.set_view(no_filters());
+        assert!(!flow.revealing());
+        assert_eq!(flow.row_count(), 4);
+        assert_eq!(hidden_line(&flow), None);
+    }
+
+    #[test]
+    fn a_reveal_costs_the_selection_exactly_what_a_filter_change_does() {
+        let mut flow = listed_filtered();
+        // File descending (the names already read ascending): 00003, 00000.
+        flow.sort_by(SortColumn::File);
+        flow.toggle(0);
+        flow.set_active(1);
+        assert_eq!(flow.selected_count(), 1);
+        flow.toggle_reveal();
+        // The row set changed, so — exactly as on a settings filter change —
+        // the selection resets and the active row clamps, while the active
+        // column sort is re-applied over the wider set.
+        assert_eq!(flow.selected_count(), 0);
+        assert_eq!(flow.active_index(), Some(1));
+        assert_eq!(row_names(&flow), ["00003.MPLS", "00002.MPLS", "00001.MPLS", "00000.MPLS"]);
+        assert_eq!(flow.sort(), Some(Sort { column: SortColumn::File, ascending: false }));
+    }
+
+    #[test]
+    fn revealed_rows_are_ordinary_rows_the_scan_covers() {
+        let mut flow = listed_filtered();
+        flow.toggle_reveal();
+        // A revealed row checks like any other and reaches the scan request…
+        flow.toggle(1); // 00001.MPLS, the looping playlist
+        let request = flow.scan_request().expect("a revealed row can scan");
+        assert_eq!(request.selection, ["00001.MPLS"]);
+        assert!(request.scan_files.contains("B.M2TS"));
+        // …and it survives the measured rebuild, which re-derives the rows
+        // under the same reveal.
+        let flow = flow.start_scanning(1).finished(
+            1,
+            "R".to_owned(),
+            Arc::new(Vec::new()),
+            structural_filtered().bdrom.playlists,
+        );
+        assert_eq!(flow.stage(), Stage::Reported);
+        assert!(row_names(&flow).contains(&"00001.MPLS".to_owned()));
+        assert!(flow.revealing());
+    }
+
+    #[test]
+    fn a_revealed_table_renders_the_same_report_as_the_settings_road() {
+        // The reveal is a filter, not a second code path: the report over a
+        // revealed table is byte-identical to the same table reached by
+        // switching both filters off in the settings.
+        let mut revealed = listed_filtered();
+        revealed.toggle_reveal();
+        let mut configured = listed_filtered();
+        configured.set_view(no_filters());
+        assert_eq!(row_names(&revealed), row_names(&configured));
+        assert_eq!(revealed.report(), configured.report());
+    }
+
+    #[test]
+    fn the_reveal_is_refused_where_the_row_set_must_not_move() {
+        // Mid-scan: the table is frozen, so the toggle changes nothing.
+        let mut scanning = listed_filtered().start_scanning(1);
+        scanning.toggle_reveal();
+        assert!(!scanning.revealing());
+        assert_eq!(row_names(&scanning), ["00000.MPLS", "00003.MPLS"]);
+        // With nothing withheld there is no row set to change: the toggle is a
+        // no-op down to the selection it would otherwise have reset.
+        let mut nothing_hidden = listed3();
+        nothing_hidden.toggle(0);
+        nothing_hidden.toggle_reveal();
+        assert!(!nothing_hidden.revealing());
+        assert_eq!(nothing_hidden.selected_count(), 1);
+        // And a stage with no listing is untouched.
+        let mut idle = Flow::idle();
+        idle.toggle_reveal();
+        assert_eq!(idle.stage(), Stage::Idle);
+    }
+
     // The async message ordering is the crate's trickiest seam, so amplify the
     // unit cases: NO sequence of (possibly stale, possibly reordered) scan
     // messages may drive the flow into an inconsistent state.
@@ -1629,7 +1924,8 @@ mod tests {
 
         use super::super::{Flow, Stage};
         use super::{
-            SortColumn, ViewSettings, checked_set, input, listed, listed3, row_names, structural,
+            SortColumn, ViewSettings, checked_set, input, listed, listed_filtered, listed3,
+            row_names, structural,
         };
 
         /// One driver event — the messages `update` would feed the flow.
@@ -1862,6 +2158,67 @@ mod tests {
                     prop_assert_eq!(scan, want);
                 }
             }
+
+            // The reveal invariant: the transient toggle and the Settings
+            // dialog are the only two things that move the row set, and the
+            // reveal is exactly "the withheld playlists, all of them, or none
+            // of them" — under any interleaving of the two, plus the sorts and
+            // toggles that run alongside them.
+            #[test]
+            fn the_reveal_shows_all_or_none_of_the_withheld_playlists(
+                events in proptest::collection::vec(
+                    prop_oneof![
+                        Just(RevealEvent::ToggleReveal),
+                        (0_u8..4).prop_map(RevealEvent::SetView),
+                        sort_column().prop_map(RevealEvent::Sort),
+                        (0_usize..5).prop_map(RevealEvent::Toggle),
+                    ],
+                    0..48,
+                ),
+            ) {
+                let mut flow = listed_filtered();
+                for event in events {
+                    match event {
+                        RevealEvent::ToggleReveal => flow.toggle_reveal(),
+                        // An explicit settings apply always wins: no reveal
+                        // may survive one, whatever it changed.
+                        RevealEvent::SetView(pick) => {
+                            flow.set_view(view_variant(pick));
+                            prop_assert!(!flow.revealing());
+                        }
+                        RevealEvent::Sort(column) => flow.sort_by(column),
+                        RevealEvent::Toggle(index) => flow.toggle(index),
+                    }
+                    let listed: std::collections::BTreeSet<String> =
+                        row_names(&flow).into_iter().collect();
+                    let withheld = flow.hidden_playlists();
+                    // The line reports what the SETTINGS withhold, so it is
+                    // present exactly when the table under those settings
+                    // would be short of a playlist — reveal or no reveal.
+                    match &withheld {
+                        Some(hidden) => {
+                            prop_assert!(hidden.count() > 0);
+                            // Revealed: every withheld playlist is a row.
+                            // Hidden: not one of them is.
+                            for name in hidden.names() {
+                                prop_assert_eq!(listed.contains(name), flow.revealing());
+                            }
+                        }
+                        // Nothing withheld ⇒ nothing to reveal.
+                        None => prop_assert!(!flow.revealing()),
+                    }
+                }
+            }
+        }
+
+        /// One driver event for the reveal property — the two roads that move
+        /// the row set, plus the table edits that ride alongside them.
+        #[derive(Debug, Clone)]
+        enum RevealEvent {
+            ToggleReveal,
+            SetView(u8),
+            Sort(SortColumn),
+            Toggle(usize),
         }
     }
 }

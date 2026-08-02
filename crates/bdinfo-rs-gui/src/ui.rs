@@ -215,6 +215,22 @@ pub fn hero_card(p: Palette) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A tooltip bubble — a raised, shadowed panel that reads clearly over the
+/// table rows it covers.
+pub fn tooltip(p: Palette) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        text_color: Some(p.text),
+        background: Some(p.panel_high.into()),
+        border: border::rounded(RADIUS_SM).color(p.line_strong).width(1.0),
+        shadow: Shadow {
+            color: with_alpha(Color::BLACK, if p.is_dark { 0.45 } else { 0.18 }),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A non-blocking banner tinted by `kind` (warning or danger): a faint wash and a
 /// matching hairline, the message drawn in the normal text colour.
 pub fn banner(p: Palette, kind: Color) -> impl Fn(&Theme) -> container::Style {

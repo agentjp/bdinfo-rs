@@ -48,7 +48,7 @@ use bdinfo_rs_gui::{args, clipboard, columns, icon, paths, settings};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{
     Column, PaneGrid, Row, Space, Stack, button, container, mouse_area, pane_grid, progress_bar,
-    responsive, scrollable, text, text_input,
+    responsive, scrollable, text, text_input, tooltip,
 };
 use iced::{Element, Length, Task};
 
@@ -1004,6 +1004,9 @@ enum Message {
     HeaderUnhovered(SortColumn),
     /// Ctrl+C (Cmd+C on macOS) — copy the highlighted row's file path.
     CopyPath,
+    /// The hidden-count line's "Show" / "Hide" pressed — flip the transient
+    /// reveal of the playlists the settings' filters withhold.
+    ToggleReveal,
     /// "Select all" pressed.
     SelectAll,
     /// "Select none" pressed.
@@ -1216,12 +1219,8 @@ impl App {
             Message::HeaderHovered(column) => self.on_header_hovered(column),
             Message::HeaderUnhovered(column) => self.on_header_unhovered(column),
             Message::CopyPath => self.copy_path(),
-            Message::SelectAll => {
-                self.flow.select_all();
-                Task::none()
-            }
-            Message::SelectNone => {
-                self.flow.select_none();
+            message @ (Message::SelectAll | Message::SelectNone | Message::ToggleReveal) => {
+                self.on_table_command(&message);
                 Task::none()
             }
             Message::ScanSelected => self.start_scan(),
@@ -1294,6 +1293,19 @@ impl App {
             Message::SaveAndClose { id, position, size, maximized } => {
                 self.save_and_close(id, position, size, maximized)
             }
+        }
+    }
+
+    /// Handles the table-wide commands, each a pure flow transition with no
+    /// side effect to run: check every row, uncheck every row, and the
+    /// hidden-count line's Show / Hide reveal.
+    fn on_table_command(&mut self, message: &Message) {
+        match *message {
+            Message::SelectAll => self.flow.select_all(),
+            Message::SelectNone => self.flow.select_none(),
+            Message::ToggleReveal => self.flow.toggle_reveal(),
+            // Not a table command — update() never routes one here.
+            _ => {}
         }
     }
 
@@ -2277,7 +2289,7 @@ impl App {
         }
         let body = scrollable(rows).width(Length::Fill).height(Length::Fill);
 
-        container(
+        let frame = container(
             Column::new()
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -2287,8 +2299,60 @@ impl App {
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(ui::table_frame(p))
-        .into()
+        .style(ui::table_frame(p));
+
+        // With nothing withheld the pane is the bare frame — the note's own
+        // absence, not an empty row, so the table keeps the full pane height.
+        match self.hidden_line(p) {
+            None => frame.into(),
+            Some(line) => Column::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .spacing(ui::GAP_2)
+                .push(frame)
+                .push(line)
+                .into(),
+        }
+    }
+
+    /// The hidden-count line under the playlist table: what the settings'
+    /// filters withheld — their names in a tooltip on it — and the Show / Hide
+    /// button that flips the transient reveal. `None` when they withheld
+    /// nothing.
+    ///
+    /// The button is live only while the table is editable, like the selection
+    /// controls: revealing rows under an in-flight scan would change the set it
+    /// is measuring.
+    fn hidden_line(&self, p: Palette) -> Option<Element<'_, Message>> {
+        let hidden = self.flow.hidden_playlists()?;
+        let revealed = self.flow.revealing();
+        let note = text(hidden.line(revealed)).size(ui::TEXT_XS).color(p.text_muted);
+        let names = container(
+            // Playlist file names come off the disc, so they are CJK-able.
+            text(hidden.names().join(", "))
+                .size(ui::TEXT_XS)
+                .color(p.text)
+                .shaping(text::Shaping::Advanced),
+        )
+        .max_width(360.0)
+        .padding([ui::GAP_1, ui::GAP_2])
+        .style(ui::tooltip(p));
+        let toggle = button(
+            text(if revealed { "Hide" } else { "Show" }).size(ui::TEXT_XS).font(ui::UI_MEDIUM),
+        )
+        .padding([ui::GAP_1, ui::GAP_3])
+        .style(ui::secondary_button(p))
+        .on_press_maybe(self.flow.editable().then_some(Message::ToggleReveal));
+        Some(
+            Row::new()
+                .width(Length::Fill)
+                .align_y(Vertical::Center)
+                .spacing(ui::GAP_2)
+                .push(tooltip(note, names, tooltip::Position::Top))
+                .push(Space::new().width(Length::Fill))
+                .push(toggle)
+                .into(),
+        )
     }
 
     /// The "detected disc" info box beneath the panes — the footer block `BDInfo`
@@ -3387,6 +3451,25 @@ mod harness {
         App { flow, ..App::default() }
     }
 
+    /// An app listed from a disc the default filters withhold two playlists
+    /// from — one per rule: 00002 (80 s) loops and 00003 (5 s) is short,
+    /// alongside the listed 00000 (100 s) and 00001 (70 s). The state the
+    /// hidden-count line under the table renders in.
+    pub fn filtered_app() -> App {
+        let mut looping = playlist("00002.MPLS", 80.0, 800, &["C.M2TS"]);
+        looping.has_loops = true;
+        let mut structural = structural();
+        structural.bdrom.playlists.push(looping);
+        structural.bdrom.playlists.push(playlist("00003.MPLS", 5.0, 100, &["D.M2TS"]));
+        let input = Input::Folder("disc".into());
+        let flow = Flow::start_listing(input.clone()).listed(
+            &input,
+            Ok(structural),
+            ViewSettings::default(),
+        );
+        App { flow, ..App::default() }
+    }
+
     /// The simulator settings: the bundled fonts, loaded exactly as `main`
     /// loads them, and the same default face.
     fn settings() -> iced::Settings {
@@ -3496,7 +3579,7 @@ mod interaction {
     use bdinfo_rs_gui::model::{Sort, SortColumn};
     use bdinfo_rs_gui::theme::ThemePref;
 
-    use super::harness::{click, listed_app, sees, structural};
+    use super::harness::{click, filtered_app, listed_app, sees, structural};
     use super::{App, Message};
 
     #[test]
@@ -3577,6 +3660,40 @@ mod interaction {
         assert_eq!(app.flow.selected_count(), 1);
         let _ = app.update(Message::RowToggled(0));
         assert_eq!(app.flow.selected_count(), 0);
+    }
+
+    #[test]
+    fn the_hidden_count_line_reveals_and_re_hides_the_withheld_playlists() {
+        let mut app = filtered_app();
+        // The table is short of two playlists, and says so under itself.
+        assert_eq!(app.flow.row_count(), 2);
+        assert!(sees(&app, "2 playlists hidden by filters (short, looping)"));
+        assert!(!sees(&app, "00002.MPLS"), "the looping playlist is not a row");
+        // Show puts them in the table as ordinary rows.
+        click(&mut app, "Show");
+        assert_eq!(app.flow.row_count(), 4);
+        assert!(sees(&app, "Showing 2 filtered playlists (short, looping)"));
+        assert!(sees(&app, "00002.MPLS"));
+        // Hide takes them back out.
+        click(&mut app, "Hide");
+        assert_eq!(app.flow.row_count(), 2);
+        assert!(sees(&app, "2 playlists hidden by filters (short, looping)"));
+        // A disc the filters withhold nothing from draws no line at all.
+        assert!(!sees(&listed_app(), "Show"));
+    }
+
+    #[test]
+    fn applying_the_settings_dialog_drops_the_transient_reveal() {
+        // The reveal is session-only: the dialog's OK — even one that changed
+        // nothing — restores the persisted settings' own view of the table.
+        let mut app = filtered_app();
+        click(&mut app, "Show");
+        assert!(app.flow.revealing());
+        let _ = app.update(Message::OpenSettings);
+        let _ = app.update(Message::SettingsOk);
+        assert!(!app.flow.revealing());
+        assert_eq!(app.flow.row_count(), 2);
+        assert!(app.persisted.filter_looping_playlists, "the reveal never touched the settings");
     }
 
     #[test]
