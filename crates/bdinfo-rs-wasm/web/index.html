@@ -172,6 +172,9 @@
         padding: 0.35rem 0.6rem;
         font-size: 0.8rem;
       }
+      .icon-only {
+        padding: 0.45rem;
+      }
       svg {
         flex: none;
       }
@@ -394,6 +397,54 @@
         border-top: 1px solid var(--border);
       }
 
+      /* the filter hint under the playlist table: one line per filter rule
+         that is on and withheld a playlist. */
+      .hint {
+        margin: 0;
+        padding: 0.7rem 1.1rem;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.82rem;
+        white-space: pre-line;
+      }
+
+      /* ── settings dialog ─────────────────────────────────────── */
+      .settings {
+        width: min(26rem, calc(100vw - 2rem));
+        padding: 1.1rem 1.25rem 1rem;
+        color: var(--text);
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+      }
+      .settings::backdrop {
+        background: rgba(4, 6, 9, 0.62);
+      }
+      .settings h2 {
+        margin: 0 0 0.9rem;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      .setting {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.4rem 0;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      .setting-note {
+        margin: 0.7rem 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .dialog-foot {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 1.1rem;
+      }
+
       /* ── progress ────────────────────────────────────────────── */
       .progress-card .body {
         padding: 1.1rem;
@@ -532,6 +583,12 @@
           </div>
         </div>
         <nav class="links">
+          <button class="iconlink icon-only" id="settings-btn" type="button" aria-label="Settings" title="Settings">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
           <a class="iconlink" href="https://github.com/agentjp/bdinfo-rs" target="_blank" rel="noopener">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
@@ -613,6 +670,7 @@
               <tbody id="playlist-body"></tbody>
             </table>
           </div>
+          <p class="hint" id="hidden-hint" hidden></p>
           <div class="card-foot">
             <span class="muted" id="sel-count">0 selected</span>
             <button class="btn primary" id="scan-btn" type="button" disabled>
@@ -661,6 +719,26 @@
           <pre class="report" id="report"></pre>
         </section>
       </main>
+
+      <!-- settings: a native modal dialog (Esc closes, the backdrop dims) -->
+      <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
+        <h2 id="settings-title">Settings</h2>
+        <label class="setting">
+          <input type="checkbox" id="opt-short" />
+          <span>Show short playlists</span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-looping" />
+          <span>Show looping playlists</span>
+        </label>
+        <p class="setting-note">
+          The playlist table hides playlists shorter than 20 seconds and looping ones, like the
+          classic report. Showing them never changes the report a scan produces.
+        </p>
+        <div class="dialog-foot">
+          <button class="btn primary" id="settings-close" type="button">Done</button>
+        </div>
+      </dialog>
 
       <footer class="footer">
         <span>bdinfo-rs · memory-safe Rust → WebAssembly</span>

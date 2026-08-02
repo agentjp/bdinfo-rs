@@ -75,6 +75,17 @@ const LAYOUT = [
   { path: "WASMDISC/BDMV/META/DL/bdmt_eng.xml", file: null },
 ];
 
+/**
+ * The fixture playlist patched to a ~10 s duration, so the short-playlist filter
+ * withholds it. The first PlayItem's OUT_time is a u32-BE at file offset 86
+ * (IN_time is 27_000_000 at 82) and a second is 45_000 ticks.
+ */
+function shortPlaylist(mpls) {
+  const bytes = new Uint8Array(mpls);
+  new DataView(bytes.buffer).setUint32(86, 27_000_000 + 45_000 * 10);
+  return bytes;
+}
+
 async function main() {
   const golden = await readFile(goldenPath);
 
@@ -105,10 +116,34 @@ async function main() {
     Array.isArray(rows) &&
     rows.length === 1 &&
     rows[0].name === "00000.MPLS" &&
-    rows[0].position === 1;
+    rows[0].position === 1 &&
+    Array.isArray(rows[0].hiddenBy) &&
+    rows[0].hiddenBy.length === 0;
   const selOk = selReport.equals(golden);
   if (!listOk) {
     console.error(`FAIL — list_playlists rows unexpected: ${JSON.stringify(rows)}`);
+  }
+
+  // The filter options: the same disc plus a second playlist over the same clip,
+  // patched to ~10 s so the short rule withholds it. Omitting the options (and
+  // passing `false`) must list only the feature; passing `show_short_playlists`
+  // must add the short playlist, tagged `hiddenBy: ["short"]`.
+  const mpls = new Uint8Array(await readFile(join(fixtures, "PLAYLIST/00000.mpls")));
+  const shortPaths = [...paths, "WASMDISC/BDMV/PLAYLIST/00001.mpls"];
+  const shortFiles = [...files, new ShimFile(shortPlaylist(mpls), "00001.mpls")];
+  const listNames = (...options) =>
+    JSON.parse(list_playlists(shortPaths, shortFiles, ...options)).map((row) => row.name);
+  const widened = JSON.parse(list_playlists(shortPaths, shortFiles, true));
+  const optionsOk =
+    JSON.stringify(listNames()) === '["00000.MPLS"]' &&
+    JSON.stringify(listNames(false, false)) === '["00000.MPLS"]' &&
+    JSON.stringify(listNames(false, true)) === '["00000.MPLS"]' &&
+    JSON.stringify(widened.map((row) => row.name)) === '["00000.MPLS","00001.MPLS"]' &&
+    JSON.stringify(widened.map((row) => row.hiddenBy)) === '[[],["short"]]';
+  if (!optionsOk) {
+    console.error(
+      `FAIL — filter options unexpected: ${JSON.stringify(listNames())} / ${JSON.stringify(widened)}`,
+    );
   }
   if (!selOk) {
     console.error(
@@ -130,7 +165,9 @@ async function main() {
     Array.isArray(isoRows) &&
     isoRows.length === 1 &&
     isoRows[0].name === "00000.MPLS" &&
-    isoRows[0].position === 1;
+    isoRows[0].position === 1 &&
+    Array.isArray(isoRows[0].hiddenBy) &&
+    isoRows[0].hiddenBy.length === 0;
   const isoSelOk = isoSelReport.equals(isoGolden);
   if (!isoListOk) {
     console.error(`FAIL — list_iso_playlists rows unexpected: ${JSON.stringify(isoRows)}`);
@@ -157,9 +194,9 @@ async function main() {
     }
   }
 
-  if (got.equals(golden) && listOk && selOk && isoOk && isoListOk && isoSelOk) {
+  if (got.equals(golden) && listOk && selOk && optionsOk && isoOk && isoListOk && isoSelOk) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + selection + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + options + selection + .iso OK.`,
     );
     process.exit(0);
   }

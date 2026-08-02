@@ -16,8 +16,14 @@ import init, {
   scan_iso,
 } from "../pkg/bdinfo_rs_wasm.js";
 
+/** The two playlist-filter opt-outs a listing request carries (see `analyze.ts`). */
+interface ListOptions {
+  showShortPlaylists: boolean;
+  showLoopingPlaylists: boolean;
+}
+
 /** List the playlists (structural scan) of the picked BDMV folder. */
-interface ListRequest {
+interface ListRequest extends ListOptions {
   kind: "list";
   paths: string[];
   files: File[];
@@ -32,7 +38,7 @@ interface ScanRequest {
 }
 
 /** List the playlists (structural scan) of a single picked `.iso`. */
-interface ListIsoRequest {
+interface ListIsoRequest extends ListOptions {
   kind: "list-iso";
   file: File;
 }
@@ -64,11 +70,23 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       case "list":
         self.postMessage({
           type: "rows",
-          rows: JSON.parse(list_playlists(data.paths, data.files)),
+          rows: JSON.parse(
+            list_playlists(
+              data.paths,
+              data.files,
+              data.showShortPlaylists,
+              data.showLoopingPlaylists,
+            ),
+          ),
         });
         break;
       case "list-iso":
-        self.postMessage({ type: "rows", rows: JSON.parse(list_iso_playlists(data.file)) });
+        self.postMessage({
+          type: "rows",
+          rows: JSON.parse(
+            list_iso_playlists(data.file, data.showShortPlaylists, data.showLoopingPlaylists),
+          ),
+        });
         break;
       case "scan":
         self.postMessage({

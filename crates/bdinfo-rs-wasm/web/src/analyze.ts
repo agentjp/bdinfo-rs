@@ -50,6 +50,16 @@ export interface PlaylistRow {
   estimatedBytes: number | null;
   /** Whether the playlist hides any stream (the CLI's `(*)` note). */
   hasHidden: boolean;
+  /**
+   * The filter rules that classify this playlist as withheld: `"short"` (under
+   * 20 s), `"looping"`, both, or none. {@link listPlaylists} drops such
+   * playlists unless the matching option ({@link AnalyzeOptions.showShortPlaylists}
+   * / {@link AnalyzeOptions.showLoopingPlaylists}) was passed, so a row with a
+   * non-empty `hiddenBy` only appears when it was — but the rules it names are
+   * the same either way, so you can list once with both options on and re-apply
+   * either rule to the rows without re-scanning.
+   */
+  hiddenBy: ("short" | "looping")[];
 }
 
 /** Optional overrides for {@link analyze} and {@link listPlaylists}. */
@@ -71,6 +81,20 @@ export interface AnalyzeOptions {
    * {@link listPlaylists}.
    */
   selection?: string[];
+  /**
+   * List playlists shorter than 20 seconds too — the CLI's
+   * `--show-short-playlists`. Used by {@link listPlaylists} /
+   * {@link listPlaylistsIso}, which drop them by default; ignored by
+   * {@link analyze} / {@link analyzeIso}, which measure `selection` unfiltered.
+   */
+  showShortPlaylists?: boolean;
+  /**
+   * List looping playlists too — the CLI's `--show-looping-playlists`. Used by
+   * {@link listPlaylists} / {@link listPlaylistsIso}, which drop them by
+   * default; ignored by {@link analyze} / {@link analyzeIso}, which measure
+   * `selection` unfiltered.
+   */
+  showLoopingPlaylists?: boolean;
   /**
    * An optional {@link AbortSignal} that cancels an in-progress measured scan
    * ({@link analyze} / {@link analyzeIso}): when it aborts, the scan Worker is
@@ -110,6 +134,17 @@ function payload(files: BdmvFile[]): { paths: string[]; files: File[] } {
   };
 }
 
+/** The two playlist-filter opt-outs a listing request carries, defaulted off. */
+function listingOptions(options?: AnalyzeOptions): {
+  showShortPlaylists: boolean;
+  showLoopingPlaylists: boolean;
+} {
+  return {
+    showShortPlaylists: options?.showShortPlaylists ?? false,
+    showLoopingPlaylists: options?.showLoopingPlaylists ?? false,
+  };
+}
+
 /**
  * The reject reason for a cancelled scan. Always an `AbortError` (the signal's
  * own reason when present, else a fresh one), so callers can tell a user cancel
@@ -127,6 +162,10 @@ function cancelledError(signal?: AbortSignal): DOMException {
  * selection-table rows (see {@link PlaylistRow}). No stream files are demuxed,
  * so it returns quickly; show the rows as a checklist, then hand the chosen
  * names to {@link analyze}'s `options.selection`.
+ *
+ * Short and looping playlists are dropped like the CLI's `--list`; pass
+ * `options.showShortPlaylists` / `options.showLoopingPlaylists` to list them
+ * too, and read each row's {@link PlaylistRow.hiddenBy} to tell them apart.
  *
  * Everything runs locally: no bytes leave the page.
  */
@@ -150,7 +189,7 @@ export function listPlaylists(files: BdmvFile[], options?: AnalyzeOptions): Prom
       reject(new Error(event.message || "scan worker failed"));
     };
 
-    worker.postMessage({ kind: "list", ...payload(files) });
+    worker.postMessage({ kind: "list", ...payload(files), ...listingOptions(options) });
   });
 }
 
@@ -160,6 +199,10 @@ export function listPlaylists(files: BdmvFile[], options?: AnalyzeOptions): Prom
  * counterpart of {@link listPlaylists}. The image is opened through the UDF
  * reader; no stream data is demuxed, so it returns quickly. Hand the chosen
  * names to {@link analyzeIso}'s `options.selection`.
+ *
+ * Short and looping playlists are dropped like the CLI's `--list`; pass
+ * `options.showShortPlaylists` / `options.showLoopingPlaylists` to list them
+ * too, and read each row's {@link PlaylistRow.hiddenBy} to tell them apart.
  *
  * Everything runs locally: no bytes leave the page.
  */
@@ -183,7 +226,7 @@ export function listPlaylistsIso(file: File, options?: AnalyzeOptions): Promise<
       reject(new Error(event.message || "scan worker failed"));
     };
 
-    worker.postMessage({ kind: "list-iso", file });
+    worker.postMessage({ kind: "list-iso", file, ...listingOptions(options) });
   });
 }
 

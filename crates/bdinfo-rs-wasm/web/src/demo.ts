@@ -1,7 +1,9 @@
 // The vanilla (no-framework) demo driving the package's public API: pick or drop
 // a BDMV folder, list its playlists (structural scan), let the user select some,
 // run the measured scan in a Worker, and show the rendered report with copy +
-// download. No upload — everything stays in the browser.
+// download. No upload — everything stays in the browser. The settings dialog
+// holds the two playlist-filter opt-outs; they only widen what the table lists,
+// never what a scan measures or what the report says.
 import {
   analyze,
   analyzeIso,
@@ -46,6 +48,12 @@ const errorBox = el("error");
 const errorText = el("error-text");
 const mainEl = el("main");
 const listingBox = el("listing");
+const settingsBtn = el<HTMLButtonElement>("settings-btn");
+const settingsDialog = el<HTMLDialogElement>("settings-dialog");
+const settingsClose = el<HTMLButtonElement>("settings-close");
+const optShort = el<HTMLInputElement>("opt-short");
+const optLooping = el<HTMLInputElement>("opt-looping");
+const hiddenHint = el("hidden-hint");
 
 /** The picked disc — a `webkitdirectory` BDMV folder, or a single `.iso`. */
 type Source =
@@ -57,6 +65,57 @@ let reportText = "";
 let discName = "disc";
 /** Aborts the in-progress measured scan; null when no scan is running. */
 let scanController: AbortController | null = null;
+/**
+ * Every playlist of the picked disc: the listing is always made with BOTH
+ * filter options on, and the settings are applied to these rows in the page. So
+ * toggling a setting redraws the table instantly instead of re-scanning.
+ */
+let allRows: PlaylistRow[] = [];
+/** The playlists the user has unticked, by name — persists across a redraw. */
+const unchecked = new Set<string>();
+
+// ── settings ─────────────────────────────────────────────────────────────────
+
+/** The two playlist-filter opt-outs, mirroring the CLI's two switches. */
+interface Settings {
+  showShortPlaylists: boolean;
+  showLoopingPlaylists: boolean;
+}
+
+/** Where the settings persist between visits. */
+const SETTINGS_KEY = "bdinfo-rs.settings";
+
+/**
+ * Reads the stored settings, defaulting both off (the standard filtered set).
+ * `localStorage` throws outright when the page is sandboxed or site data is
+ * blocked, so every access is guarded — the demo then runs with the defaults
+ * and the choice simply does not survive a reload.
+ */
+function loadSettings(): Settings {
+  let stored: Partial<Settings> = {};
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    if (raw !== null) {
+      stored = JSON.parse(raw);
+    }
+  } catch {
+    stored = {};
+  }
+  return {
+    showShortPlaylists: stored.showShortPlaylists === true,
+    showLoopingPlaylists: stored.showLoopingPlaylists === true,
+  };
+}
+
+const settings = loadSettings();
+
+function saveSettings(): void {
+  try {
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    return;
+  }
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -165,8 +224,12 @@ async function loadSource(src: Source): Promise<void> {
   hide(playlistsCard);
   show(listingBox);
   try {
+    // Always the widened set: the settings are applied to `allRows` in the page.
+    const options = { showShortPlaylists: true, showLoopingPlaylists: true };
     const rows =
-      src.kind === "folder" ? await listPlaylists(src.files) : await listPlaylistsIso(src.file);
+      src.kind === "folder"
+        ? await listPlaylists(src.files, options)
+        : await listPlaylistsIso(src.file, options);
     if (rows.length === 0) {
       showError(
         src.kind === "folder"
@@ -184,14 +247,72 @@ async function loadSource(src: Source): Promise<void> {
 }
 
 function renderPlaylists(rows: PlaylistRow[]): void {
-  playlistBody.replaceChildren();
-  for (const row of rows) {
-    playlistBody.appendChild(playlistRow(row));
-  }
+  allRows = rows;
+  unchecked.clear();
+  renderRows();
   discLabel.textContent = discName;
-  updateSelection();
   show(playlistsCard);
   playlistsCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/**
+ * Whether the settings list `row`: every rule that classifies it as withheld
+ * must be switched on.
+ */
+function isShown(row: PlaylistRow): boolean {
+  return row.hiddenBy.every((rule) =>
+    rule === "short" ? settings.showShortPlaylists : settings.showLoopingPlaylists,
+  );
+}
+
+/** Draws the rows the settings show, and the hint for the ones they do not. */
+function renderRows(): void {
+  const shown = allRows.filter(isShown);
+  // Both numbered columns are renumbered over the shown rows, so the table
+  // reads like a scan made with these settings rather than like the widened
+  // listing it is sliced from. Group numbers keep their identity because the
+  // rows arrive grouped: the distinct values, in order, are the new 1, 2, 3.
+  const groups = [...new Set(shown.map((row) => row.group))];
+  playlistBody.replaceChildren(
+    ...shown.map((row, index) => playlistRow(row, index + 1, groups.indexOf(row.group) + 1)),
+  );
+  renderHint();
+  updateSelection();
+}
+
+/** How many playlist names a hint line spells out before it counts the rest. */
+const HINT_NAMES = 3;
+
+/**
+ * The hint under the table: one line per filter rule that is on *and* withheld
+ * a playlist, looping first. Each rule is judged on its own against the whole
+ * disc, mirroring the CLI's `Hidden by filters (…)` block — a playlist that is
+ * both short and looping is named on both lines and takes both settings to
+ * reveal.
+ */
+function renderHint(): void {
+  const lines: string[] = [];
+  if (!settings.showLoopingPlaylists) {
+    lines.push(...hintLine("looping"));
+  }
+  if (!settings.showShortPlaylists) {
+    lines.push(...hintLine("short"));
+  }
+  hiddenHint.textContent = lines.join("\n");
+  hiddenHint.hidden = lines.length === 0;
+}
+
+/** The hint line for `rule`, or nothing when the rule withheld no playlist. */
+function hintLine(rule: "short" | "looping"): string[] {
+  const names = allRows.filter((row) => row.hiddenBy.includes(rule)).map((row) => row.name);
+  if (names.length === 0) {
+    return [];
+  }
+  const rest = names.length - HINT_NAMES;
+  const more = rest > 0 ? ` and ${rest} more` : "";
+  return [
+    `Hidden by filters (${rule}): ${names.slice(0, HINT_NAMES).join(", ")}${more} - enable in settings`,
+  ];
 }
 
 function cell(className?: string): HTMLTableCellElement {
@@ -207,18 +328,18 @@ function textCell(text: string, className?: string): HTMLTableCellElement {
   return td;
 }
 
-function playlistRow(row: PlaylistRow): HTMLTableRowElement {
+function playlistRow(row: PlaylistRow, position: number, group: number): HTMLTableRowElement {
   const tr = document.createElement("tr");
   tr.dataset.name = row.name;
 
   const check = document.createElement("input");
   check.type = "checkbox";
-  check.checked = true;
+  check.checked = !unchecked.has(row.name);
   const checkCell = cell("col-check");
   checkCell.appendChild(check);
   tr.appendChild(checkCell);
 
-  tr.appendChild(textCell(String(row.position)));
+  tr.appendChild(textCell(String(position)));
 
   const nameCell = cell("name");
   nameCell.textContent = row.name;
@@ -231,7 +352,7 @@ function playlistRow(row: PlaylistRow): HTMLTableRowElement {
   }
   tr.appendChild(nameCell);
 
-  tr.appendChild(textCell(String(row.group)));
+  tr.appendChild(textCell(String(group)));
   tr.appendChild(textCell(row.length));
   tr.appendChild(textCell(humanBytes(row.estimatedBytes), "num"));
 
@@ -255,6 +376,16 @@ function updateSelection(): void {
   for (const box of rowBoxes()) {
     const tr = box.closest("tr");
     tr?.classList.toggle("sel", box.checked);
+    const name = tr?.dataset.name;
+    if (name !== undefined) {
+      // Remembered by name, so a row the settings hide and later show again
+      // comes back with the tick the user left it with.
+      if (box.checked) {
+        unchecked.delete(name);
+      } else {
+        unchecked.add(name);
+      }
+    }
     if (box.checked) {
       count += 1;
     }
@@ -409,6 +540,24 @@ dropzone.addEventListener("drop", (event) => {
   }
   void collectAndLoad(roots);
 });
+
+optShort.checked = settings.showShortPlaylists;
+optLooping.checked = settings.showLoopingPlaylists;
+
+settingsBtn.addEventListener("click", () => {
+  settingsDialog.showModal();
+});
+settingsClose.addEventListener("click", () => {
+  settingsDialog.close();
+});
+for (const box of [optShort, optLooping]) {
+  box.addEventListener("change", () => {
+    settings.showShortPlaylists = optShort.checked;
+    settings.showLoopingPlaylists = optLooping.checked;
+    saveSettings();
+    renderRows();
+  });
+}
 
 selectAllBtn.addEventListener("click", () => {
   setAll(true);
