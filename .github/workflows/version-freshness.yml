@@ -3,11 +3,11 @@ name: version-freshness
 # Several versions in this repo are pinned for reproducibility but rot SILENTLY —
 # nothing else watches them:
 #   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY pin, which is
-#     hardcoded in ci.yml + fuzz.yml + wasm.yml + gui.yml + publish-npm.yml and
+#     hardcoded in core.yml + fuzz.yml + wasm.yml + gui.yml + publish-npm.yml and
 #     cross-checked for agreement here so a bump to one can't silently drift the
 #     rest),
 #   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `DIST_VERSION`
-#     env in ci.yml's release-yaml job, which downloads that release's prebuilt
+#     env in core.yml's release-yaml job, which downloads that release's prebuilt
 #     archive — the two must stay equal; the `DIST_SHA256` committed beside it is
 #     the archive's published digest, so it is re-checked against upstream here
 #     because a version bump that forgets it only fails on the next dist-area PR),
@@ -17,12 +17,12 @@ name: version-freshness
 #     which then fails `dist generate --check`) — cross-checked against the
 #     hand-maintained workflows' pins for the same actions so the drift becomes
 #     a scheduled nag instead of a red X on an unrelated Dependabot PR,
-#   - cargo-vet (the `--version` pin in ci.yml's vet job),
-#   - cargo-fuzz (the `--version` pins in ci.yml's replay job and fuzz.yml — absent
+#   - cargo-vet (the `--version` pin in core.yml's vet job),
+#   - cargo-fuzz (the `--version` pins in core.yml's replay job and fuzz.yml — absent
 #     from taiki-e/install-action's manifest, so both compile it from crates.io and
 #     the two pins must stay equal),
-#   - ryl (the `cargo install ryl --version` pin in ci.yml's YAML-lint job),
-#   - taplo (the `tool: taplo-cli@X` pin in ci.yml's TOML job — a formatter, pinned like
+#   - ryl (the `cargo install ryl --version` pin in repo.yml's YAML-lint job),
+#   - taplo (the `tool: taplo-cli@X` pin in repo.yml's TOML job — a formatter, pinned like
 #     rustfmt so a new release can't reformat/relint the tree out from under a PR),
 #   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
 #     output drives a reproducible changelog/version format, like taplo/rustfmt),
@@ -49,7 +49,7 @@ name: version-freshness
 #     in build-linux-packages.sh — the .deb/.rpm packagers are compiled from source
 #     INSIDE dist's fail-fast release, so they are version-pinned there so a broken
 #     upstream release can't abort the whole release; both checked vs crates.io, and
-#     both cross-checked against every other copy — ci.yml's pkg job, the GUI
+#     both cross-checked against every other copy — core.yml's pkg job, the GUI
 #     packaging script (.github/scripts/gui-package-linux.ps1), and gui.yml's
 #     packaging smoke — which must all stay EQUAL so the PR smoke tests package
 #     with the exact release tools),
@@ -227,14 +227,14 @@ jobs:
             Add-Problem "Rust stable $stablePin->$stableLatest" "- stable Rust pin ``$stablePin`` (rust-toolchain.toml) is behind the latest release ``$stableLatest``"
           }
 
-          # --- Rust nightly: age of the ci.yml NIGHTLY pin ---------------------
-          $nightlyPin = Read-Pin '.github/workflows/ci.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
-          if (-not $nightlyPin) { throw 'No NIGHTLY pin in ci.yml' }
+          # --- Rust nightly: age of the core.yml NIGHTLY pin -------------------
+          $nightlyPin = Read-Pin '.github/workflows/core.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
+          if (-not $nightlyPin) { throw 'No NIGHTLY pin in core.yml' }
           $nightlyAgeDays = [int]((Get-Date) - [datetime]::ParseExact($nightlyPin, 'yyyy-MM-dd', $null)).TotalDays
           if ($nightlyAgeDays -gt 30) {
-            Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` (ci.yml NIGHTLY) is $nightlyAgeDays days old"
+            Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` (core.yml NIGHTLY) is $nightlyAgeDays days old"
           }
-          # The nightly is hardcoded in FIVE places (ci.yml/fuzz.yml/wasm.yml/gui.yml
+          # The nightly is hardcoded in FIVE places (core.yml/fuzz.yml/wasm.yml/gui.yml
           # NIGHTLY env + publish-npm.yml's rustup install) that Dependabot can't see,
           # so a bump to one silently drifts the rest. Cross-check they AGREE (like
           # the cargo-dist / wasm-bindgen-cli / Node pin agreements).
@@ -247,31 +247,31 @@ jobs:
           if (-not $nightlyGui)  { throw 'No NIGHTLY pin in gui.yml' }
           if (-not $nightlyNpm)  { throw 'No nightly install pin in publish-npm.yml' }
           if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyGui) -or ($nightlyPin -ne $nightlyNpm)) {
-            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: ci.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / gui.yml ``$nightlyGui`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
+            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: core.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / gui.yml ``$nightlyGui`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
           }
 
           # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
           $distCfg = Read-Pin 'dist-workspace.toml' '^\s*cargo-dist-version\s*=\s*"([0-9.]+)"'
-          $distCi  = Read-Pin '.github/workflows/ci.yml' 'DIST_VERSION:\s*([0-9.]+)'
+          $distCi  = Read-Pin '.github/workflows/core.yml' 'DIST_VERSION:\s*([0-9.]+)'
           if (-not $distCfg) { throw 'No cargo-dist-version in dist-workspace.toml' }
-          if (-not $distCi)  { throw 'No DIST_VERSION pin in ci.yml' }
+          if (-not $distCi)  { throw 'No DIST_VERSION pin in core.yml' }
           if ($distCfg -ne $distCi) {
-            Add-Problem 'cargo-dist pins disagree' "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but ci.yml installs ``$distCi`` — they must be identical"
+            Add-Problem 'cargo-dist pins disagree' "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but core.yml installs ``$distCi`` — they must be identical"
           }
           $distLatest = Latest-Semver 'axodotdev/cargo-dist'
           if (-not $distLatest) {
             Add-Problem 'cargo-dist (query failed)' '- could not query the latest cargo-dist release (axodotdev/cargo-dist)'
           } elseif ([version]$distLatest -gt [version]$distCfg) {
-            Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + ci.yml) is behind the latest release ``$distLatest`` — bump both pins, re-take DIST_SHA256 from the release's ``.sha256`` asset, then re-run ``dist generate``"
+            Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + core.yml) is behind the latest release ``$distLatest`` — bump both pins, re-take DIST_SHA256 from the release's ``.sha256`` asset, then re-run ``dist generate``"
           }
 
-          # --- DIST_SHA256: ci.yml's committed digest vs the published .sha256 ---
-          # ci.yml verifies the downloaded dist archive against this digest before
+          # --- DIST_SHA256: core.yml's committed digest vs the published .sha256 -
+          # core.yml verifies the downloaded dist archive against this digest before
           # running it, so a DIST_VERSION bump that leaves the old digest behind
           # breaks that job — but only once a dist-area diff makes it fire. Compare
           # the two here so the mismatch surfaces the next morning instead.
-          $distSha = Read-Pin '.github/workflows/ci.yml' 'DIST_SHA256:\s*([0-9a-f]{64})'
-          if (-not $distSha) { throw 'No DIST_SHA256 pin in ci.yml' }
+          $distSha = Read-Pin '.github/workflows/core.yml' 'DIST_SHA256:\s*([0-9a-f]{64})'
+          if (-not $distSha) { throw 'No DIST_SHA256 pin in core.yml' }
           $distShaUpstream = $null
           try {
             $distShaUpstream = (Invoke-RestMethod -ErrorAction Stop `
@@ -282,7 +282,7 @@ jobs:
           if (-not $distShaUpstream) {
             Add-Problem 'cargo-dist digest (query failed)' "- could not fetch the published sha256 for cargo-dist ``v$distCi``'s x86_64-unknown-linux-musl archive"
           } elseif ($distSha -ne $distShaUpstream) {
-            Add-Problem 'cargo-dist digest mismatch' "- ci.yml pins ``DIST_SHA256: $distSha`` but cargo-dist ``v$distCi`` publishes ``$distShaUpstream`` for its x86_64-unknown-linux-musl archive — set the committed digest to the published value"
+            Add-Problem 'cargo-dist digest mismatch' "- core.yml pins ``DIST_SHA256: $distSha`` but cargo-dist ``v$distCi`` publishes ``$distShaUpstream`` for its x86_64-unknown-linux-musl archive — set the committed digest to the published value"
           }
 
           # --- dist [dist.github-action-commits]: TOML pins vs the workflows -----
@@ -315,58 +315,58 @@ jobs:
             }
           }
 
-          # --- cargo-vet: ci.yml vs mozilla/cargo-vet --------------------------
-          $vetPin = Read-Pin '.github/workflows/ci.yml' 'cargo-vet --version ([0-9.]+)'
-          if (-not $vetPin) { throw 'No cargo-vet --version pin in ci.yml' }
+          # --- cargo-vet: core.yml vs mozilla/cargo-vet ------------------------
+          $vetPin = Read-Pin '.github/workflows/core.yml' 'cargo-vet --version ([0-9.]+)'
+          if (-not $vetPin) { throw 'No cargo-vet --version pin in core.yml' }
           $vetLatest = Latest-Semver 'mozilla/cargo-vet'
           if (-not $vetLatest) {
             Add-Problem 'cargo-vet (query failed)' '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
           } elseif ([version]$vetLatest -gt [version]$vetPin) {
-            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (ci.yml) is behind the latest release ``$vetLatest``"
+            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (core.yml) is behind the latest release ``$vetLatest``"
           }
 
-          # --- cargo-fuzz: ci.yml + fuzz.yml pins vs crates.io -----------------
+          # --- cargo-fuzz: core.yml + fuzz.yml pins vs crates.io ---------------
           # taiki-e/install-action's manifest has no cargo-fuzz entry, so both the
-          # per-PR corpus replay (ci.yml) and the tag-time fresh-fuzz pass
+          # per-PR corpus replay (core.yml) and the tag-time fresh-fuzz pass
           # (fuzz.yml) compile a pinned version from crates.io. The two must agree
           # — a one-sided bump would fuzz the release tag with a different tool
           # than the gate proved green.
-          $fuzzCi   = Read-Pin '.github/workflows/ci.yml' 'cargo install cargo-fuzz --version ([0-9.]+)'
+          $fuzzCi   = Read-Pin '.github/workflows/core.yml' 'cargo install cargo-fuzz --version ([0-9.]+)'
           $fuzzTag  = Read-Pin '.github/workflows/fuzz.yml' 'cargo install cargo-fuzz --version ([0-9.]+)'
-          if (-not $fuzzCi)  { throw 'No `cargo install cargo-fuzz --version` pin in ci.yml' }
+          if (-not $fuzzCi)  { throw 'No `cargo install cargo-fuzz --version` pin in core.yml' }
           if (-not $fuzzTag) { throw 'No `cargo install cargo-fuzz --version` pin in fuzz.yml' }
           if ($fuzzCi -ne $fuzzTag) {
-            Add-Problem 'cargo-fuzz pins disagree' "- cargo-fuzz pin mismatch: ci.yml ``$fuzzCi`` / fuzz.yml ``$fuzzTag`` — both must be identical"
+            Add-Problem 'cargo-fuzz pins disagree' "- cargo-fuzz pin mismatch: core.yml ``$fuzzCi`` / fuzz.yml ``$fuzzTag`` — both must be identical"
           }
           $fuzzLatest = Latest-CratesIo 'cargo-fuzz'
           if (-not $fuzzLatest) {
             Add-Problem 'cargo-fuzz (query failed)' '- could not query the latest cargo-fuzz release (crates.io)'
           } elseif ([version]$fuzzLatest -gt [version]$fuzzCi) {
-            Add-Problem "cargo-fuzz $fuzzCi->$fuzzLatest" "- cargo-fuzz pin ``$fuzzCi`` (ci.yml + fuzz.yml) is behind the latest release ``$fuzzLatest`` — bump both pins together"
+            Add-Problem "cargo-fuzz $fuzzCi->$fuzzLatest" "- cargo-fuzz pin ``$fuzzCi`` (core.yml + fuzz.yml) is behind the latest release ``$fuzzLatest`` — bump both pins together"
           }
 
-          # --- ryl: ci.yml YAML-lint pin vs crates.io --------------------------
+          # --- ryl: repo.yml YAML-lint pin vs crates.io ------------------------
           # ryl is pinned (`cargo install ryl --version X`) so the YAML lint stays
           # reproducible; nothing else watches it, so check it here like cargo-vet.
-          $rylPin = Read-Pin '.github/workflows/ci.yml' 'cargo install ryl --version ([0-9.]+)'
-          if (-not $rylPin) { throw 'No `cargo install ryl --version` pin in ci.yml' }
+          $rylPin = Read-Pin '.github/workflows/repo.yml' 'cargo install ryl --version ([0-9.]+)'
+          if (-not $rylPin) { throw 'No `cargo install ryl --version` pin in repo.yml' }
           $rylLatest = Latest-CratesIo 'ryl'
           if (-not $rylLatest) {
             Add-Problem 'ryl (query failed)' '- could not query the latest ryl release (crates.io)'
           } elseif ([version]$rylLatest -gt [version]$rylPin) {
-            Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (ci.yml) is behind the latest release ``$rylLatest``"
+            Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (repo.yml) is behind the latest release ``$rylLatest``"
           }
 
-          # --- taplo: ci.yml `tool: taplo-cli@X` pin vs crates.io ---------------
+          # --- taplo: repo.yml `tool: taplo-cli@X` pin vs crates.io -------------
           # Pinned like ryl so the TOML format/lint stays reproducible; nothing
           # else watches it.
-          $taploPin = Read-Pin '.github/workflows/ci.yml' 'tool:\s*taplo-cli@([0-9.]+)'
-          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in ci.yml' }
+          $taploPin = Read-Pin '.github/workflows/repo.yml' 'tool:\s*taplo-cli@([0-9.]+)'
+          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in repo.yml' }
           $taploLatest = Latest-CratesIo 'taplo-cli'
           if (-not $taploLatest) {
             Add-Problem 'taplo (query failed)' '- could not query the latest taplo release (crates.io taplo-cli)'
           } elseif ([version]$taploLatest -gt [version]$taploPin) {
-            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (ci.yml) is behind the latest release ``$taploLatest``"
+            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (repo.yml) is behind the latest release ``$taploLatest``"
           }
 
           # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
@@ -403,22 +403,22 @@ jobs:
           } elseif ([version]$cargoRpmLatest -gt [version]$cargoRpmPin) {
             Add-Problem "cargo-generate-rpm $cargoRpmPin->$cargoRpmLatest" "- cargo-generate-rpm pin ``$cargoRpmPin`` (build-linux-packages.sh) is behind the latest release ``$cargoRpmLatest``"
           }
-          # Both pins exist a SECOND time in ci.yml's pkg job (`tool:
+          # Both pins exist a SECOND time in core.yml's pkg job (`tool:
           # cargo-deb@…,cargo-generate-rpm@…`) — deliberately equal so the PR
           # smoke test packages with the exact release tools (the script's
           # already-on-PATH guard then skips its source compile). A one-sided
           # bump silently de-syncs the smoke test from the release path, so
           # cross-check agreement like the NIGHTLY pins; freshness of the value
           # itself is already covered above.
-          $cargoDebCi = Read-Pin '.github/workflows/ci.yml' 'cargo-deb@([0-9.]+)'
-          $cargoRpmCi = Read-Pin '.github/workflows/ci.yml' 'cargo-generate-rpm@([0-9.]+)'
-          if (-not $cargoDebCi) { throw 'No cargo-deb@<version> pin in ci.yml (pkg job)' }
-          if (-not $cargoRpmCi) { throw 'No cargo-generate-rpm@<version> pin in ci.yml (pkg job)' }
+          $cargoDebCi = Read-Pin '.github/workflows/core.yml' 'cargo-deb@([0-9.]+)'
+          $cargoRpmCi = Read-Pin '.github/workflows/core.yml' 'cargo-generate-rpm@([0-9.]+)'
+          if (-not $cargoDebCi) { throw 'No cargo-deb@<version> pin in core.yml (pkg job)' }
+          if (-not $cargoRpmCi) { throw 'No cargo-generate-rpm@<version> pin in core.yml (pkg job)' }
           if ($cargoDebCi -ne $cargoDebPin) {
-            Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but ci.yml's pkg job installs ``$cargoDebCi`` — they must be identical (the smoke test must use the exact release tools)"
+            Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but core.yml's pkg job installs ``$cargoDebCi`` — they must be identical (the smoke test must use the exact release tools)"
           }
           if ($cargoRpmCi -ne $cargoRpmPin) {
-            Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but ci.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
+            Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but core.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
           }
           # The GUI lane carries two MORE copies of the same two pins: the
           # packaging script's source-compile pins (what the release legs run
@@ -662,7 +662,7 @@ jobs:
             ''
             $bodyLines
             ''
-            'Bump deliberately: update the pin(s) in the file(s) named above, keep the five NIGHTLY pins (ci.yml / fuzz.yml / wasm.yml / gui.yml / publish-npm.yml) identical, and after any cargo-dist bump re-take `DIST_SHA256` from the release''s `.sha256` asset and re-run `dist generate`. CI re-validates on the next push.'
+            'Bump deliberately: update the pin(s) in the file(s) named above, keep the five NIGHTLY pins (core.yml / fuzz.yml / wasm.yml / gui.yml / publish-npm.yml) identical, and after any cargo-dist bump re-take `DIST_SHA256` from the release''s `.sha256` asset and re-run `dist generate`. CI re-validates on the next push.'
           ) -join "`n"
 
           # One rolling issue, tracked by a stable label — the title varies with the

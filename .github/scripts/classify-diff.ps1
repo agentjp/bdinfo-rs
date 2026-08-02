@@ -235,8 +235,22 @@ begin {
             Name       = 'orchestrator workflow'
             Areas      = @('yaml', 'workflows', 'canary')
             Structural = $true
-            Why        = 'Editing the file that defines the checkout, cache and tool-install steps must exercise them; one leg per shell family is enough to do that.'
+            Why        = 'Editing the file that routes every gate job must exercise that routing end to end; one build and test leg per shell family runs the plan, a caller and an inner job.'
             Match      = { param($f) $f -eq '.github/workflows/ci.yml' }
+        },
+        @{
+            Name       = 'root-workspace reusable workflow'
+            Areas      = @('yaml', 'workflows', 'core', 'deps', 'dist', 'fuzz', 'pkg')
+            Structural = $true
+            Why        = 'The file is the root-workspace gate: an edit to it, including a pinned action digest, changes what its build, lint, coverage, install, packaging, audit, drift-guard and corpus-replay jobs do. Each of those keeps its own area gate inside the file, so every area they consume has to fire for the edit to reach them.'
+            Match      = { param($f) $f -eq '.github/workflows/core.yml' }
+        },
+        @{
+            Name       = 'whole-tree scanner reusable workflow'
+            Areas      = @('yaml', 'workflows', 'toml', 'typos', 'links')
+            Structural = $true
+            Why        = 'The file is the gate for the scanners that read the whole repository; see the root-workspace reusable workflow.'
+            Match      = { param($f) $f -eq '.github/workflows/repo.yml' }
         },
         @{
             Name       = 'gui reusable workflow'
@@ -470,6 +484,8 @@ end {
             @{ Path = 'scorecard.yml'; Areas = 'links typos yaml' }
             @{ Path = '.github/dependabot.yml'; Areas = 'links typos yaml' }
             @{ Path = '.github/workflows/ci.yml'; Areas = 'canary links typos workflows yaml' }
+            @{ Path = '.github/workflows/core.yml'; Areas = 'core deps dist fuzz links pkg typos workflows yaml' }
+            @{ Path = '.github/workflows/repo.yml'; Areas = 'links toml typos workflows yaml' }
             @{ Path = '.github/workflows/gui.yml'; Areas = 'gui links typos workflows yaml' }
             @{ Path = '.github/workflows/docker.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
