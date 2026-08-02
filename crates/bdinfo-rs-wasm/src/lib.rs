@@ -71,6 +71,11 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
+// The structured disc model handed to JavaScript. `pub` because its types are
+// the published API surface: `tsify` emits their TypeScript declarations into
+// the generated `.d.ts`, which the npm package exposes at its `/wasm` subpath.
+pub mod mirror;
+
 /// The read-ahead window each [`WebReader`] fill pulls from `FileReaderSync` in
 /// one go, so a front-to-back demux crosses the JS boundary once per MiB rather
 /// than once per small parser read.

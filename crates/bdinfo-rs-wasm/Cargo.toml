@@ -25,6 +25,14 @@ bdinfo-rs-core = { path = "../bdinfo-rs-core" }
 # All-target: `#[wasm_bindgen]` on `scan_report` expands on every target (the
 # native rlib parity test links it), so the macro crate must be present natively.
 wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+# Pinned EXACT: tsify's generated TypeScript text is part of the published
+# package's type surface (`@bdinfo-rs/wasm/wasm` maps to the .d.ts wasm-bindgen
+# assembles from it), so a patch-level change in its emitter is a change to
+# published types. `default-features = false, features = ["js"]` selects the
+# serde-wasm-bindgen backend: mirror values cross the boundary as real
+# JavaScript objects rather than a JSON string the consumer must parse.
+tsify = { version = "=0.5.6", default-features = false, features = ["js"] }
 
 # js-sys / web-sys are referenced ONLY under #[cfg(target_arch = "wasm32")] (the
 # WebReader/WebFile FileReaderSync seam + scan_files/build_web_tree), so they are
@@ -37,6 +45,10 @@ web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# The native stand-in for the browser serializer: the mirror wire-format tests
+# assert property names and value shapes, which are the same whichever
+# `Serializer` produces them, and serde_json runs on both targets.
+serde_json = "1"
 
 # The reader-math proptests run only on the native (Tier-A) build: proptest's
 # fork/timeout backend does not build for wasm32, where the parity tests use
