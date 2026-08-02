@@ -168,22 +168,7 @@ jobs:
       - name: Snapshot hashes (tiny-skia — per-OS-family pins)
         id: snapshots
         working-directory: crates/bdinfo-rs-gui
-        env:
-          BDINFO_GUI_SNAPSHOT_DUMP: ${{ github.workspace }}/snapshot-renders
         run: cargo nextest run --locked --no-tests=fail --no-fail-fast -E 'test(/^snapshots::/)'
-
-      # TEMPORARY (harvest): publishes the pins this run generated and the
-      # renders behind them, so a new tie can be pinned and eyeballed per
-      # OS/arch. Removed once the new hashes are committed.
-      - name: Upload the generated pins + renders (harvest)
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: gui-snapshot-harvest-${{ matrix.os }}
-          path: |
-            crates/bdinfo-rs-gui/snapshots/
-            snapshot-renders/
-          if-no-files-found: ignore
 
       - name: Upload mismatched snapshot renders
         if: failure() && steps.snapshots.outcome == 'failure'
