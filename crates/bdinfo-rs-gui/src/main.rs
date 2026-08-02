@@ -3548,6 +3548,14 @@ mod harness {
         }
         let mut ui = ui(app);
         let snapshot = ui.snapshot(&app.theme()).expect("the snapshot renders");
+        // With BDINFO_GUI_SNAPSHOT_DUMP set to a directory, every tie also
+        // writes its rendered PNG there — how a pin is inspected by eye
+        // (per OS/arch) without having to break it first.
+        if let Some(dir) = std::env::var_os("BDINFO_GUI_SNAPSHOT_DUMP") {
+            let dir = PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = snapshot.matches_image(dir.join(name));
+        }
         let family = if cfg!(windows) { "windows" } else { "unix" };
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots").join(family);
         let matches = snapshot.matches_hash(dir.join(name)).expect("the hash file is readable");
@@ -3991,7 +3999,7 @@ mod snapshots {
     use bdinfo_rs_gui::settings;
     use bdinfo_rs_gui::theme::ThemePref;
 
-    use super::harness::{assert_snapshot, listed_app, structural};
+    use super::harness::{assert_snapshot, filtered_app, listed_app, structural};
     use super::{App, Message};
 
     #[test]
@@ -4029,5 +4037,26 @@ mod snapshots {
         app.theme_pref = ThemePref::Dark;
         app.settings_draft = Some(settings::Draft::from_settings(&app.persisted));
         assert_snapshot(&app, "settings-dark");
+    }
+
+    /// The hidden-count line as drawn: the note, its Show button, and the two
+    /// withheld playlists absent from the table above it. The other pinned
+    /// states use a disc the filters withhold nothing from, so this is the only
+    /// tie that renders the line at all.
+    #[test]
+    fn filtered_hidden_dark() {
+        let mut app = filtered_app();
+        app.theme_pref = ThemePref::Dark;
+        assert_snapshot(&app, "filtered-hidden-dark");
+    }
+
+    /// The same disc after Show: the withheld playlists sit in the table as
+    /// ordinary rows and the line reads "Showing …" over a Hide button.
+    #[test]
+    fn filtered_shown_dark() {
+        let mut app = filtered_app();
+        app.theme_pref = ThemePref::Dark;
+        let _ = app.update(Message::ToggleReveal);
+        assert_snapshot(&app, "filtered-shown-dark");
     }
 }
