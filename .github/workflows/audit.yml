@@ -36,10 +36,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # `fallback: none`: install only from install-action's checksummed manifest,
+      # never its runtime-resolved cargo-binstall fallback (rationale in ci.yml).
       - name: Install cargo-deny (prebuilt, no from-source compile)
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-deny
+          fallback: none
 
       - name: Audit advisories (root workspace)
         run: cargo deny check advisories

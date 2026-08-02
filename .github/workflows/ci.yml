@@ -284,33 +284,44 @@ jobs:
   # Drift guard: the committed v-release.yml is generated from dist-workspace.toml by
   # dist. This regenerates it in-memory and fails if it differs from the on-disk
   # file, so v-release.yml can never silently fall out of sync with the dist config.
-  # Pinned to the same dist version (cargo-dist-version) that v-release.yml installs.
   release-yaml:
     name: release workflow in sync (dist generate --check)
     needs: plan
     if: needs.plan.outputs.dist == 'true'
     runs-on: ubuntu-latest
+    env:
+      # MUST equal `cargo-dist-version` in dist-workspace.toml — the version that
+      # generated the committed v-release.yml, so anything else makes the check
+      # below compare against the wrong generator. version-freshness.yml enforces
+      # the equality and nags when a newer dist ships.
+      DIST_VERSION: 0.32.0
+      # sha256 of the release asset named in the install step, copied once from
+      # the `.sha256` file axodotdev publishes beside it. Committing the digest is
+      # what makes the download verifiable: the archive is checked against this
+      # value before anything inside it runs. Re-take it on every DIST_VERSION bump.
+      DIST_SHA256: 0d9dc001b0e937e9cc18e0dc11784aa7a3fd566656b07828d5e1d10ce1c1c48c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # No prebuilt channel passes the pinning bar (the upstream installer is
-      # an unhashed curl|sh — Scorecard pinned-dependencies / downloadThenRun),
-      # so the version-pinned binary is compiled from crates.io once and
-      # cached. Keying on dist-workspace.toml couples the cache to
-      # cargo-dist-version, which version-freshness.yml keeps equal to the
-      # install pin below.
-      - name: Cache the pinned dist binary
-        id: dist-bin
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/dist
-          key: cargo-dist-${{ runner.os }}-${{ hashFiles('dist-workspace.toml') }}
-
-      - name: Install pinned dist (cache miss)
-        if: steps.dist-bin.outputs.cache-hit != 'true'
-        run: cargo install cargo-dist@0.32.0 --locked
+      # The upstream `.sh` installer is an unhashed curl|sh (Scorecard
+      # pinned-dependencies / downloadThenRun), but the release it installs from
+      # also carries plain archives with published checksums — so fetch the archive
+      # at a version-pinned URL and verify it here instead, which is both faster
+      # than a from-source compile and pinned end to end. musl: the binary is
+      # statically linked, so it is independent of the runner image's glibc.
+      - name: Install pinned dist (checksum-verified prebuilt)
+        run: |
+          set -euo pipefail
+          dir="cargo-dist-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "$dir.tar.xz" \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/$dir.tar.xz"
+          echo "$DIST_SHA256  $dir.tar.xz" | sha256sum --check --strict -
+          tar -xJf "$dir.tar.xz" "$dir/dist"
+          sudo install -m755 "$dir/dist" /usr/local/bin/dist
+          rm -rf "$dir" "$dir.tar.xz"
+          dist --version
 
       - name: Check v-release.yml is in sync with dist-workspace.toml
         run: dist generate --check
@@ -364,10 +375,21 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
+      # `fallback: none` on EVERY taiki-e/install-action step in this repo. The
+      # action's manifest path is the only channel that inherits the pinned action
+      # revision's guarantees: it resolves a fixed upstream release asset and
+      # verifies its committed checksum. The default fallback instead resolves at
+      # run time through crates.io metadata to a GitHub release asset or the
+      # third-party quickinstall build farm (cargo-binstall) — neither pinned by
+      # this repo nor checksum-verified against anything committed here. Disabling
+      # it turns a tool the manifest lacks into a loud failure rather than a silent
+      # downgrade to that path, and does the same for a pinned `tool@version` the
+      # manifest stops carrying.
       - name: Install gate tools
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks
+          fallback: none
 
       # House rules with no clippy equivalent (big-endian-only + no HashMap/HashSet
       # in the deterministic output path), mirrored from the local gate via the
@@ -435,6 +457,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-llvm-cov,cargo-nextest
+          fallback: none
 
       - name: Coverage (100% lines/regions/functions)
         run: cargo +${{ env.NIGHTLY }} llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
@@ -482,6 +505,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-mutants,cargo-nextest
+          fallback: none
 
       - name: Mutate the PR diff
         run: |
@@ -546,6 +570,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-mutants,cargo-nextest
+          fallback: none
 
       - name: Mutate the crate's PR diff
         if: steps.marker.outputs.cache-hit != 'true'
@@ -600,6 +625,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-mutants,cargo-nextest
+          fallback: none
 
       - name: Mutate the crate's PR diff
         if: steps.marker.outputs.cache-hit != 'true'
@@ -761,6 +787,7 @@ jobs:
           # red-X an unrelated PR; version-freshness watches it against crates.io
           # and the bump stays deliberate, like rustfmt's nightly pin.
           tool: taplo-cli@0.10.0
+          fallback: none
 
       # taplo auto-discovers taplo.toml (include/exclude + formatting). --check
       # fails on any unformatted file; --diff prints exactly what differs.
@@ -795,6 +822,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: zizmor
+          fallback: none
 
       - name: Audit the workflows
         run: zizmor .github/workflows
@@ -827,6 +855,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: typos
+          fallback: none
 
       - name: Typos
         run: typos
@@ -897,6 +926,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-deny
+          fallback: none
 
       - name: Audit bans + licenses + sources (deterministic on the lockfile)
         run: cargo deny check bans licenses sources
@@ -978,10 +1008,21 @@ jobs:
           workspaces: fuzz
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
+      # cargo-fuzz is absent from taiki-e/install-action's manifest (101 tools at
+      # the revision pinned in this file), so with the binstall fallback disabled
+      # it has no prebuilt channel here. Compile the pinned version from crates.io
+      # once and cache the binary, the same lane cargo-vet uses; keep the pin equal
+      # to fuzz.yml's, which version-freshness.yml enforces and watches.
+      - name: Cache the pinned cargo-fuzz binary
+        id: fuzz-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          tool: cargo-fuzz
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-0.13.2
+
+      - name: Install cargo-fuzz 0.13.2 (cache miss)
+        if: steps.fuzz-bin.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Verify the committed fuzz lockfile is in sync
         # cargo-fuzz's `run` has no --locked flag (it forwards everything after
@@ -1046,13 +1087,30 @@ jobs:
       - name: Build the binary (generates completions + man page)
         run: cargo build --release --locked --target "$HOST" -p bdinfo-rs
 
-      # Prebuilt, at the SAME versions build-linux-packages.sh pins — so the script's
+      # Both at the SAME versions build-linux-packages.sh pins — so the script's
       # `command -v cargo-deb` guard finds them and skips its (slower) source compile,
       # and the smoke test packages with the exact release tools.
-      - name: Install cargo-deb + cargo-generate-rpm (release pins)
+      - name: Install cargo-deb (release pin, prebuilt)
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
-          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+          tool: cargo-deb@3.7.0
+          fallback: none
+
+      # cargo-generate-rpm is absent from taiki-e/install-action's manifest (101
+      # tools at the revision pinned in this file), so with the binstall fallback
+      # disabled it gets the same compile-once-and-cache lane as cargo-fuzz and
+      # cargo-vet. The `@0.21.0` pin is the one build-linux-packages.sh and gui.yml
+      # carry; version-freshness.yml cross-checks all three.
+      - name: Cache the pinned cargo-generate-rpm binary
+        id: rpm-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-generate-rpm
+          key: cargo-generate-rpm-${{ runner.os }}-0.21.0
+
+      - name: Install cargo-generate-rpm (cache miss)
+        if: steps.rpm-bin.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-generate-rpm@0.21.0
 
       # Synthesize the two dist archives the script consumes, in dist's exact
       # `<pkg>-<triple>/` layout, from the host build (binary stand-in + real assets).

@@ -34,10 +34,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # `fallback: none`: install only from install-action's checksummed manifest,
+      # never its runtime-resolved cargo-binstall fallback (rationale in ci.yml).
       - name: Install zizmor (prebuilt, no from-source compile)
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: zizmor
+          fallback: none
 
       # Audit every workflow at full strength. The token enables the online audits
       # (impostor-commit, known-vulnerable-actions); .github/zizmor.yml is
