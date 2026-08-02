@@ -41,11 +41,17 @@
 //! * The doc comment of an **enum variant** is dropped. What a consumer must know to use
 //!   [`ScanStage`] or [`ScanErrorReason`] therefore belongs on the enum itself.
 //!
-//! ## Building one
+//! ## Building one, and taking it apart again
 //!
 //! [`Disc::from_scan`] mirrors a whole scanned disc and [`Disc::from_listing`] mirrors one as a
 //! filtered playlist listing; every other type here is reached through a [`From`] impl those two
-//! walk.
+//! walk. [`Disc::into_scan`] goes back the other way, rebuilding the [`BdRom`] and the recorded
+//! failures so the report can be rendered from a mirror alone.
+//!
+//! [`ScanResult`] is the one type here with no counterpart in the model: it pairs a rendered
+//! report with the [`Disc`] it was rendered beside, for a scan that returns both.
+
+use std::io;
 
 use bdinfo_rs_core::bdrom::chapters::ChapterSummary;
 use bdinfo_rs_core::bdrom::disc::{
@@ -53,16 +59,37 @@ use bdinfo_rs_core::bdrom::disc::{
 };
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 use bdinfo_rs_core::error;
+use bdinfo_rs_core::primitives::Pid;
+use bdinfo_rs_core::stream::TsStreamType;
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
+
+/// What one measured scan produced: the classic report, and the same scan as
+/// structured data.
+///
+/// Both come from a single pass over the media, so a consumer that wants the
+/// report and the model never has to read the disc twice. Neither is derived
+/// from the other: the report is rendered straight from the scan, and the disc
+/// mirrors that same scan.
+#[derive(Tsify, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult {
+    /// The classic disc report, rendered with the sections the scan was asked
+    /// for.
+    pub report: String,
+    /// The scanned disc, with `measured` true.
+    pub disc: Disc,
+}
 
 /// A scanned Blu-ray disc: the disc-level properties and every playlist on it.
 // `into_wasm_abi` is what lets an export return a `Disc` by value: it implements
 // wasm-bindgen's `IntoWasmAbi` over `serde_wasm_bindgen`, so the value crosses as a real
-// JavaScript object. Only the type an export names needs it; the types below are reached
+// JavaScript object. `from_wasm_abi` is its inverse, letting an export take one back as a
+// parameter. Only the type an export names needs them; the types below are reached
 // through this one.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[tsify(into_wasm_abi)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
@@ -412,8 +439,10 @@ pub enum ScanErrorReason {
     /// whole-scan abort rather than a per-file failure, so it reaches a
     /// recorded failure only if one is fabricated. And any failure kind added
     /// to the scanner after this mirror was written, since the set of kinds is
-    /// open. This is the one member a rebuilt disc cannot render back exactly,
-    /// so a kind that starts occurring in earnest wants a member of its own.
+    /// open. This is the one member whose message a rebuilt disc does not carry
+    /// back: it rebuilds as the cancelled-scan failure, the only kind that
+    /// reaches it today, so a kind that starts occurring in earnest wants a
+    /// member of its own.
     #[serde(rename_all = "camelCase")]
     Other {
         /// What the failure reported.
@@ -632,6 +661,234 @@ impl From<&error::BdError> for ScanErrorReason {
     }
 }
 
+// ── the reverse mapping: the mirror back into a scanned disc ────────────────
+//
+// The inverse of the forward mapping above, one `From` impl per type, so a disc
+// that crossed to JavaScript as data can be handed back to the report renderer.
+// Every core summary type is a struct of public fields with no
+// `#[non_exhaustive]`, so all but three kinds of field invert by plain
+// assignment. The exceptions are the packet identifier and the
+// elementary-stream type, both rebuilt from the raw number the disc records,
+// and the alternate codec name, matched back to the borrowed label the scan
+// hands out (see `borrowed_codec_alt_name`).
+//
+// The impls consume the mirror rather than borrowing it: every string moves
+// straight into the summary it belongs to, so rebuilding a disc copies none of
+// its text.
+
+/// Every alternate codec label a scan hands out, so an owned copy of one can be
+/// matched back to the borrowed original. Kept in the order
+/// [`codec_alt_name`](bdinfo_rs_core::stream::TsStream::codec_alt_name) spells
+/// them: by stream type, with the three Dolby/DTS labels that upgrade when the
+/// audio stream carries its extensions listed beside the plain form.
+const CODEC_ALT_NAMES: &[&str] = &[
+    "MPEG-1",
+    "MPEG-2",
+    "AVC",
+    "MVC",
+    "HEVC",
+    "VC-1",
+    "MP1",
+    "MP2",
+    "MPEG-2 AAC",
+    "MPEG-4 AAC",
+    "LPCM",
+    "DD AC3",
+    "DD AC3+",
+    "Dolby TrueHD",
+    "Dolby Atmos",
+    "DTS",
+    "DTS-HD Hi-Res",
+    "DTS:X Hi-Res",
+    "DTS Express",
+    "DTS-HD Master",
+    "DTS:X Master",
+    "PGS",
+    "IGS",
+    "SUB",
+    "UNKNOWN",
+];
+
+/// The borrowed alternate codec label equal to `name`, or the empty label when
+/// no scan hands that name out.
+///
+/// [`Stream`] mirrors the label as an owned string and a [`StreamSummary`]
+/// needs the borrowed form back, which no runtime string can become. The labels
+/// are a closed set, so the way back is to match `name` against it. A name
+/// outside the set can only reach here from a mirror a consumer edited, and
+/// rebuilds as the empty label — which the report prints as an empty cell,
+/// rather than as some name a scan never emits.
+fn borrowed_codec_alt_name(name: &str) -> &'static str {
+    CODEC_ALT_NAMES.iter().copied().find(|known| *known == name).unwrap_or("")
+}
+
+impl Disc {
+    /// Rebuilds the disc this mirror describes: the [`BdRom`] and the per-file
+    /// failures, the two halves a report is rendered from.
+    ///
+    /// The inverse of [`from_scan`](Self::from_scan) but for `measured`, which
+    /// describes how the values were obtained rather than being one of them —
+    /// a disc carries no such flag, so it is dropped here.
+    #[must_use]
+    pub fn into_scan(self) -> (BdRom, Vec<error::ScanError>) {
+        let bdrom = BdRom {
+            volume_label: self.volume_label,
+            disc_title: self.disc_title,
+            size: self.size_bytes,
+            interleaved_size: self.interleaved_size_bytes,
+            is_3d: self.is_3d,
+            is_50hz: self.is_50hz,
+            is_uhd: self.is_uhd,
+            is_bd_plus: self.is_bd_plus,
+            is_bd_java: self.is_bd_java,
+            is_dbox: self.is_dbox,
+            is_psp: self.is_psp,
+            playlists: self.playlists.into_iter().map(PlaylistSummary::from).collect(),
+        };
+        (bdrom, self.errors.into_iter().map(error::ScanError::from).collect())
+    }
+}
+
+impl From<Playlist> for PlaylistSummary {
+    fn from(playlist: Playlist) -> Self {
+        Self {
+            name: playlist.name,
+            total_length: playlist.total_length_seconds,
+            file_size: playlist.file_size_bytes,
+            interleaved_file_size: playlist.interleaved_file_size_bytes,
+            chapter_count: playlist.chapter_count,
+            stream_count: playlist.stream_count,
+            angle_count: playlist.angle_count,
+            has_loops: playlist.has_loops,
+            streams: playlist.streams.into_iter().map(StreamSummary::from).collect(),
+            clips: playlist.clips.into_iter().map(ClipSummary::from).collect(),
+            chapters: playlist.chapters.into_iter().map(ChapterSummary::from).collect(),
+        }
+    }
+}
+
+impl From<Clip> for ClipSummary {
+    fn from(clip: Clip) -> Self {
+        Self {
+            name: clip.name,
+            display_name: clip.display_name,
+            file_size: clip.file_size_bytes,
+            interleaved_file_size: clip.interleaved_file_size_bytes,
+            angle_index: clip.angle_index,
+            relative_time_in: clip.relative_time_in_seconds,
+            length: clip.length_seconds,
+            payload_bytes: clip.payload_bytes,
+            packet_count: clip.packet_count,
+            packet_seconds: clip.packet_seconds,
+            file_seconds: clip.file_seconds,
+            streams: clip.streams.into_iter().map(ClipStreamTally::from).collect(),
+        }
+    }
+}
+
+impl From<ClipStream> for ClipStreamTally {
+    fn from(tally: ClipStream) -> Self {
+        Self {
+            pid: Pid::new(tally.pid),
+            stream_type: TsStreamType::from_u8(tally.stream_type),
+            codec_short_name: tally.codec_short_name,
+            payload_bytes: tally.payload_bytes,
+            packet_count: tally.packet_count,
+        }
+    }
+}
+
+impl From<Stream> for StreamSummary {
+    fn from(stream: Stream) -> Self {
+        Self {
+            pid: Pid::new(stream.pid),
+            // The inverse of the discriminant cast the forward mapping makes:
+            // `from_u8` reads the same on-disc `stream_coding_type` byte back,
+            // and a byte no stream type claims reads as `Unknown`.
+            stream_type: TsStreamType::from_u8(stream.stream_type),
+            codec_short_name: stream.codec_short_name,
+            codec_name: stream.codec_name,
+            codec_alt_name: borrowed_codec_alt_name(&stream.codec_alt_name),
+            bitrate: stream.bitrate_bps,
+            active_bitrate: stream.active_bitrate_bps,
+            language_name: stream.language_name,
+            language_code: stream.language_code,
+            description: stream.description,
+            full_description: stream.full_description,
+            channel_description: stream.channel_description,
+            sample_rate: stream.sample_rate_hz,
+            bit_depth: stream.bit_depth,
+            channel_count: stream.channel_count,
+            height: stream.height_pixels,
+            angle_index: stream.angle_index,
+            is_hidden: stream.is_hidden,
+            ssif_only: stream.ssif_only,
+        }
+    }
+}
+
+impl From<Chapter> for ChapterSummary {
+    fn from(chapter: Chapter) -> Self {
+        Self {
+            time_in: chapter.time_in_seconds,
+            length: chapter.length_seconds,
+            avg_rate: chapter.avg_rate_bps,
+            max_1sec_rate: chapter.max_1sec_rate_bps,
+            max_1sec_time: chapter.max_1sec_time_seconds,
+            max_5sec_rate: chapter.max_5sec_rate_bps,
+            max_5sec_time: chapter.max_5sec_time_seconds,
+            max_10sec_rate: chapter.max_10sec_rate_bps,
+            max_10sec_time: chapter.max_10sec_time_seconds,
+            avg_frame_size: chapter.avg_frame_size_bytes,
+            max_frame_size: chapter.max_frame_size_bytes,
+            max_frame_time: chapter.max_frame_time_seconds,
+        }
+    }
+}
+
+impl From<ScanError> for error::ScanError {
+    fn from(failure: ScanError) -> Self {
+        Self { file: failure.file, stage: failure.stage.into(), reason: failure.reason.into() }
+    }
+}
+
+impl From<ScanStage> for error::ScanStage {
+    fn from(stage: ScanStage) -> Self {
+        match stage {
+            ScanStage::Discovery => Self::Discovery,
+            ScanStage::ClipInfo => Self::ClipInfo,
+            ScanStage::Playlist => Self::Playlist,
+            ScanStage::StreamFile => Self::StreamFile,
+            ScanStage::SectorRead => Self::SectorRead,
+        }
+    }
+}
+
+impl From<ScanErrorReason> for error::BdError {
+    fn from(reason: ScanErrorReason) -> Self {
+        match reason {
+            ScanErrorReason::UnknownFileType { magic } => Self::UnknownFileType(magic),
+            ScanErrorReason::UnexpectedEof => Self::UnexpectedEof,
+            ScanErrorReason::StructureNotFound => Self::StructureNotFound,
+            ScanErrorReason::MissingClipFile { file } => Self::MissingClipFile(file),
+            // The message is the wrapped `io::Error`'s, so it goes back inside a
+            // fresh one: the `io error: ` framing the report prints comes from
+            // the `BdError` around it, and the original `io::ErrorKind` is not
+            // mirrored because nothing prints it.
+            ScanErrorReason::Io { message } => Self::Io(io::Error::other(message)),
+            ScanErrorReason::MetadataTooLarge { file, limit_bytes } => {
+                Self::MetadataTooLarge { file, limit: limit_bytes }
+            }
+            // The catch-all mirrors a cancelled scan and nothing else today, and
+            // that is the failure it rebuilds as — carrying its own message back
+            // exactly. Another kind mirrored here would arrive with the
+            // cancelled-scan message instead, which is why one that starts
+            // occurring wants a member of its own.
+            ScanErrorReason::Other { .. } => Self::ScanCancelled,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io;
@@ -643,11 +900,13 @@ mod tests {
     use bdinfo_rs_core::bdrom::order::PlaylistFilter;
     use bdinfo_rs_core::error;
     use bdinfo_rs_core::primitives::Pid;
-    use bdinfo_rs_core::stream::TsStreamType;
+    use bdinfo_rs_core::report::text::{self, RenderOptions};
+    use bdinfo_rs_core::stream::{TsAudioStream, TsStream, TsStreamType};
     use serde_json::{Value, json};
 
     use super::{
         Chapter, Clip, ClipStream, Disc, Playlist, ScanError, ScanErrorReason, ScanStage, Stream,
+        borrowed_codec_alt_name,
     };
 
     // One fixture value and one hand-written wire form per mirror type, composed
@@ -1265,5 +1524,247 @@ mod tests {
         assert_eq!(playlist.clips.iter().map(|clip| clip.packet_count).sum::<u64>(), 0);
         assert!(playlist.streams.iter().all(|stream| stream.bitrate_bps == 0));
         assert!(playlist.chapters.iter().all(|chapter| chapter.max_1sec_rate_bps == 0.0));
+    }
+
+    // ── the reverse mapping ─────────────────────────────────────────────────
+    //
+    // Asserted against the same paired fixtures, in the other direction: a
+    // mirror rebuilds into the core value it was written to mirror. The two
+    // failure types core uses carry no `PartialEq`, so those are asserted on
+    // the text the report prints from them, which is all a report reads.
+
+    #[test]
+    fn every_field_of_a_mirror_rebuilds_into_the_disc_it_mirrors() {
+        assert_eq!(a_disc().into_scan().0, a_core_bdrom());
+    }
+
+    #[test]
+    fn a_rebuilt_failure_names_the_same_file_stage_and_reason() {
+        let (_, errors) = a_disc().into_scan();
+        assert_eq!(errors.len(), 1);
+        let failure = errors.first().expect("the mirrored failure");
+        assert_eq!(failure.file, "00002.CLPI");
+        assert_eq!(failure.stage, error::ScanStage::ClipInfo);
+        assert_eq!(failure.reason.to_string(), "unknown file type: HDMV9999");
+    }
+
+    #[test]
+    fn every_scan_stage_survives_the_round_trip() {
+        for stage in [
+            error::ScanStage::Discovery,
+            error::ScanStage::ClipInfo,
+            error::ScanStage::Playlist,
+            error::ScanStage::StreamFile,
+            error::ScanStage::SectorRead,
+        ] {
+            assert_eq!(error::ScanStage::from(ScanStage::from(stage)), stage, "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn every_failure_kind_round_trips_to_the_message_the_report_prints() {
+        // The report prints a failure as its file and the text of its reason,
+        // so carrying that text across and back unchanged is what losslessness
+        // means here. The cancelled scan is the kind the mirror has no member
+        // for: it crosses as the catch-all and comes back as itself.
+        for reason in [
+            error::BdError::UnknownFileType("MPLSXXXX".to_owned()),
+            error::BdError::UnexpectedEof,
+            error::BdError::StructureNotFound,
+            error::BdError::MissingClipFile("00003.CLPI".to_owned()),
+            error::BdError::Io(io::Error::other("denied")),
+            error::BdError::MetadataTooLarge { file: "00000.MPLS".to_owned(), limit: 67_108_864 },
+            error::BdError::ScanCancelled,
+        ] {
+            let printed = reason.to_string();
+            let rebuilt = error::BdError::from(ScanErrorReason::from(&reason));
+            assert_eq!(rebuilt.to_string(), printed, "{reason}");
+        }
+    }
+
+    #[test]
+    fn every_alternate_codec_name_a_scan_hands_out_is_matched_back() {
+        // Every stream type a disc can record, each with and without the codec
+        // extensions that upgrade three of the labels — the whole set
+        // `TsStream::codec_alt_name` returns. The stream is built as audio
+        // because only audio carries extensions; the label is keyed by the
+        // stream type either way. A label `bdinfo_rs_core` adds later fails
+        // here, rather than silently rebuilding as the empty cell.
+        for byte in 0..=u8::MAX {
+            for has_extensions in [false, true] {
+                // The stream type is assigned rather than named in the literal:
+                // `TsStreamBase` keeps one private field, so it cannot be built
+                // by struct literal from outside `bdinfo_rs_core`.
+                let mut audio = TsAudioStream { has_extensions, ..TsAudioStream::default() };
+                audio.base.stream_type = TsStreamType::from_u8(byte);
+                let name = TsStream::Audio(audio).codec_alt_name();
+                assert_eq!(borrowed_codec_alt_name(name), name, "byte {byte:#04X}");
+            }
+        }
+        // A name no scan hands out — only a hand-edited mirror can carry one —
+        // rebuilds as the empty label rather than as something plausible.
+        assert_eq!(borrowed_codec_alt_name("Nonesuch"), "");
+    }
+
+    // ── the round trip ──────────────────────────────────────────────────────
+    //
+    // The mirror claims to carry every fact the report prints. These prove it:
+    // the fixture disc is scanned, mirrored, rebuilt from the mirror alone, and
+    // rendered — and the bytes must be the pinned report. A field the mirror
+    // stops carrying shows up here as a byte mismatch on the day it lands.
+
+    /// The pinned report for the fixture disc — the same bytes the whole-disc
+    /// scan renders, kept verbatim by the `-text` `.gitattributes` rule.
+    const GOLDEN: &[u8] = include_bytes!("../tests/golden_report.txt");
+
+    /// The whole line byte `offset` falls on, as lossy text — the context for a
+    /// byte-level difference.
+    fn line_at(bytes: &[u8], offset: usize) -> String {
+        let offset = offset.min(bytes.len());
+        let start = bytes
+            .iter()
+            .take(offset)
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index.saturating_add(1));
+        let end = bytes
+            .iter()
+            .skip(offset)
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |index| offset.saturating_add(index));
+        String::from_utf8_lossy(bytes.get(start..end).unwrap_or_default()).into_owned()
+    }
+
+    /// Where `actual` first differs from `expected` — the byte offset, the line
+    /// that byte falls on, and the whole of that line from each side. The empty
+    /// string when the two are identical.
+    ///
+    /// A report is scores of lines of fixed-width columns; told only that two
+    /// walls of text differ, the reader has to diff them by eye. Told the
+    /// offset and the one line from each side, they can see which value went
+    /// missing.
+    fn difference(actual: &[u8], expected: &[u8]) -> String {
+        if actual == expected {
+            return String::new();
+        }
+        // Equal as far as both run means the difference is the length: the
+        // first byte only one of them has.
+        let offset = actual
+            .iter()
+            .zip(expected)
+            .position(|(left, right)| left != right)
+            .unwrap_or_else(|| actual.len().min(expected.len()));
+        let line =
+            expected.iter().take(offset).filter(|byte| **byte == b'\n').count().saturating_add(1);
+        format!(
+            "first difference at byte {offset}, line {line}\n  actual:   {:?}\n  expected: {:?}",
+            line_at(actual, offset),
+            line_at(expected, offset)
+        )
+    }
+
+    /// The lines of `whole` that `reduced` leaves out, or `None` when `reduced`
+    /// is not a subsequence of it — that is, when a line was changed or added
+    /// rather than only dropped. Every line `reduced` keeps is therefore
+    /// byte-identical to the one it matched, and in the same order.
+    fn dropped_lines<'a>(whole: &'a str, reduced: &str) -> Option<Vec<&'a str>> {
+        let mut dropped = Vec::new();
+        let mut kept = reduced.lines();
+        let mut next = kept.next();
+        for line in whole.lines() {
+            if next == Some(line) {
+                next = kept.next();
+            } else {
+                dropped.push(line);
+            }
+        }
+        next.is_none().then_some(dropped)
+    }
+
+    #[test]
+    fn difference_locates_the_first_differing_byte_and_its_line() {
+        assert!(difference(b"same", b"same").is_empty());
+        // A differing byte on the second line names that byte and both lines.
+        let report = difference(b"one\ntwo\n", b"one\nTWO\n");
+        assert!(report.starts_with("first difference at byte 4, line 2\n"), "{report}");
+        assert!(report.contains("\"two\""), "{report}");
+        assert!(report.contains("\"TWO\""), "{report}");
+        // Identical as far as the shorter runs: the difference is the first
+        // byte only the longer one has.
+        assert!(difference(b"ab", b"abc").starts_with("first difference at byte 2, line 1\n"));
+    }
+
+    #[test]
+    fn line_at_takes_the_whole_line_around_an_offset() {
+        assert_eq!(line_at(b"only", 2), "only"); // no newline either side
+        assert_eq!(line_at(b"one\ntwo\nthree", 5), "two"); // a newline both sides
+        assert_eq!(line_at(b"one\ntwo", 7), "two"); // an offset at the very end
+        assert_eq!(line_at(b"one", 99), "one"); // ...or past it
+    }
+
+    #[test]
+    fn dropped_lines_reports_removals_and_rejects_a_changed_line() {
+        assert_eq!(dropped_lines("a\nb\nc", "a\nc"), Some(vec!["b"]));
+        assert_eq!(dropped_lines("a\nb", "a\nb"), Some(Vec::new()));
+        // A line that changed, or one that was never there, is not a removal.
+        assert_eq!(dropped_lines("a\nb", "a\nB"), None);
+        assert_eq!(dropped_lines("a", "a\nb"), None);
+    }
+
+    /// The fixture disc scanned, mirrored, and rebuilt from that mirror alone —
+    /// the two halves a report is rendered from.
+    fn a_rebuilt_fixture_disc() -> (BdRom, Vec<error::ScanError>) {
+        a_fixture_disc(ScanMode::Full).into_scan()
+    }
+
+    #[test]
+    fn a_disc_rebuilt_from_its_mirror_renders_the_pinned_report() {
+        let (bdrom, errors) = a_rebuilt_fixture_disc();
+        let order = bdrom.presentation_order(&PlaylistFilter::default());
+        let rendered = text::render_with(&bdrom, &order, &errors, RenderOptions::default());
+        let mismatch = difference(rendered.as_bytes(), GOLDEN);
+        assert!(
+            mismatch.is_empty(),
+            "the mirror lost something the report prints — a field it stopped \
+             carrying, or one it rebuilds wrongly:\n{mismatch}"
+        );
+    }
+
+    #[test]
+    fn switching_off_a_report_section_removes_that_section_and_nothing_else() {
+        let (bdrom, errors) = a_rebuilt_fixture_disc();
+        let order = bdrom.presentation_order(&PlaylistFilter::default());
+        let render = |options| text::render_with(&bdrom, &order, &errors, options);
+
+        let whole = render(RenderOptions::default());
+        for (options, dropped_section, kept_section) in [
+            (
+                RenderOptions { stream_diagnostics: false, quick_summary: true },
+                "STREAM DIAGNOSTICS:",
+                "QUICK SUMMARY:",
+            ),
+            (
+                RenderOptions { stream_diagnostics: true, quick_summary: false },
+                "QUICK SUMMARY:",
+                "STREAM DIAGNOSTICS:",
+            ),
+        ] {
+            let reduced = render(options);
+            // A subsequence at all means every surviving line is byte-identical
+            // and in order: nothing was rewritten, only removed.
+            let dropped = dropped_lines(&whole, &reduced)
+                .expect("switching a section off must only remove lines");
+            assert!(
+                dropped.iter().any(|line| line.contains(dropped_section)),
+                "{dropped_section} must be among the removed lines"
+            );
+            assert!(!reduced.contains(dropped_section), "{dropped_section} must be gone");
+            assert!(reduced.contains(kept_section), "{kept_section} must survive");
+        }
+
+        // Both off removes both sections and still nothing else.
+        let neither = render(RenderOptions { stream_diagnostics: false, quick_summary: false });
+        assert!(dropped_lines(&whole, &neither).is_some(), "both off must only remove lines");
+        assert!(!neither.contains("STREAM DIAGNOSTICS:"));
+        assert!(!neither.contains("QUICK SUMMARY:"));
     }
 }
