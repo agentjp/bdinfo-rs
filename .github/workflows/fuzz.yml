@@ -69,10 +69,16 @@ jobs:
           # the fuzz build cache is used and (on master) saved.
           lookup-only: true
 
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
-        with:
-          tool: cargo-fuzz
+      # cargo-fuzz is absent from taiki-e/install-action's manifest, and this repo
+      # runs that action with `fallback: none` so a manifest-missing tool fails
+      # loudly instead of resolving through its unpinned cargo-binstall fallback
+      # (rationale in ci.yml). Compile the pinned version from crates.io; ci.yml's
+      # replay job caches the same pin, but this workflow runs only on release tags
+      # and restores no cache that a non-tag run could have written (see the
+      # rust-cache note above), so it pays the compile. Keep the pin equal to
+      # ci.yml's — version-freshness.yml enforces it.
+      - name: Install cargo-fuzz 0.13.2
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Verify the committed fuzz lockfile is in sync
         # cargo-fuzz's `run` has no --locked flag (it forwards everything after

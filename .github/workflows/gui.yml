@@ -89,10 +89,14 @@ jobs:
           # save; PRs restore the master-seeded cache.
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
+      # `fallback: none` on every install-action step here: install only from the
+      # action's checksummed manifest, never its runtime-resolved cargo-binstall
+      # fallback (rationale in ci.yml).
       - name: Install cargo-nextest
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-nextest
+          fallback: none
 
       - name: Clippy (calibrated, -D warnings)
         working-directory: crates/bdinfo-rs-gui
@@ -208,6 +212,7 @@ jobs:
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
+          fallback: none
 
       # The no-C tripwire (cargo tree over the 6 shipped targets: GTK/C bans,
       # the -sys/-dl allowlist, verified-inert cc/pkg-config wrappers, and the
@@ -364,13 +369,29 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends desktop-file-utils appstream-util rpm
 
-      # Pinned to the exact versions the packaging script would compile from
-      # source if missing — this pre-install just makes the smoke fast.
-      - name: Install cargo-deb + cargo-generate-rpm (release-pinned)
+      # Both packagers at the exact versions the packaging script would compile
+      # from source if missing — this pre-install just makes the smoke fast.
+      - name: Install cargo-deb (release-pinned, prebuilt)
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2.85.4
         with:
-          tool: cargo-deb@3.7.0,cargo-generate-rpm@0.21.0
+          tool: cargo-deb@3.7.0
+          fallback: none
+
+      # cargo-generate-rpm is absent from taiki-e/install-action's manifest, so
+      # with the binstall fallback disabled it is compiled from crates.io once and
+      # cached, the lane ci.yml's cargo-fuzz and cargo-vet use.
+      - name: Cache the pinned cargo-generate-rpm binary
+        if: runner.os == 'Linux'
+        id: rpm-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-generate-rpm
+          key: cargo-generate-rpm-${{ runner.os }}-0.21.0
+
+      - name: Install cargo-generate-rpm (cache miss)
+        if: runner.os == 'Linux' && steps.rpm-bin.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-generate-rpm@0.21.0
 
       - name: Build (release profile)
         working-directory: crates/bdinfo-rs-gui
