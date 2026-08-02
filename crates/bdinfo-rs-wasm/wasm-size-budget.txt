@@ -4,10 +4,20 @@
 # A RATCHET: the gate (scripts/wasm-compliance.ps1) and CI (wasm.yml) fail if the
 # optimized .wasm exceeds this. Lower it deliberately when the figure drops;
 # NEVER raise it without a written reason in the commit. Current optimized size
-# is ~402,504 B (rustc 1.96.0 + wasm-bindgen 0.2.126 + binaryen 131.0.0). The
-# bulk of the growth over the ~362,471 B this crate started at came from linking
-# the read-only UDF 2.50 reader for `.iso` input (the scan_iso /
-# list_iso_playlists exports + WebIso); the core was previously dead-code-
-# eliminated out because nothing called it. The ceiling (400 KiB) carries a
-# small headroom for patch-level toolchain drift (binaryen is ^131.x).
-409600
+# is ~511,231 B (rustc 1.96.0 + wasm-bindgen 0.2.126 + binaryen 131.0.0).
+#
+# Three steps account for the growth over the ~362,471 B this crate started at.
+# Linking the read-only UDF 2.50 reader for `.iso` input (the scan_iso /
+# list_iso_playlists exports + WebIso) took it to ~402,504 B; the reader had
+# been dead-code-eliminated out before, because nothing called it. The
+# structural disc-model exports (inspect_files / inspect_iso) then added
+# ~22,290 B by giving the serde `Serialize` tree over the mirror types its
+# first caller, which is what pulls serde-wasm-bindgen into the payload. Taking
+# a disc model back IN (render_report / scan_files_full / scan_iso_full) then
+# added ~86,440 B: `Deserialize` over that same tree is the larger half of
+# serde, since reading a value needs a name-matching visitor per field where
+# writing one needs only a write.
+#
+# The ceiling (512 KiB) carries a small headroom for patch-level toolchain
+# drift (binaryen is ^131.x).
+524288

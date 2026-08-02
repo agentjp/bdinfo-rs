@@ -6,13 +6,23 @@
     <title>bdinfo-rs wasm parity harness</title>
   </head>
   <body>
-    <!-- Headless-Chrome parity harness: exposes the package's `analyze`,
-         `analyzeIso` and `listPlaylists` on the window so the Playwright test can
-         hand them File objects (a folder pick, and a single `.iso`) built from
-         the committed Big Buck Bunny fixture, compare each report to its golden,
-         and drive the listing's filter options through the real Worker. -->
+    <!-- Headless-Chrome parity harness: exposes the package's public calls on the
+         window so the Playwright test can hand them File objects (a folder pick,
+         and a single `.iso`) built from the committed Big Buck Bunny fixture,
+         compare each report to its golden, drive the filter options through the
+         real Worker, and round-trip a disc model back into a report. -->
     <script type="module">
-      import { analyze, analyzeIso, listPlaylists } from "/dist/analyze.js";
+      import {
+        analyze,
+        analyzeIso,
+        inspect,
+        listPlaylists,
+        renderReport,
+        scan,
+      } from "/dist/analyze.js";
+      window.__inspect = inspect;
+      window.__scan = scan;
+      window.__renderReport = renderReport;
       window.__analyze = analyze;
       window.__analyzeIso = analyzeIso;
       window.__listPlaylists = listPlaylists;

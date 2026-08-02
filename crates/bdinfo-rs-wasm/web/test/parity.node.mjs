@@ -11,6 +11,11 @@
 // native and in-browser parity tests alike. So this ties the wasm channel to the
 // locked-output contract on every gate run, with only Node + the built wasm.
 //
+// The same golden also pins the round trip through the structured disc model:
+// the `disc` that `scan_files_full` returns beside the report, handed straight
+// back to `render_report`, must render those bytes again — so the model reaches
+// JavaScript and comes back carrying every value the report prints.
+//
 // Prereq: `npm run build` (emits pkg/). Run with `npm run test:node`.
 
 import { readFile } from "node:fs/promises";
@@ -89,9 +94,18 @@ function shortPlaylist(mpls) {
 async function main() {
   const golden = await readFile(goldenPath);
 
-  const { initSync, scan_files, list_playlists, scan_iso, list_iso_playlists } = await import(
-    "../pkg/bdinfo_rs_wasm.js"
-  );
+  const {
+    initSync,
+    scan_files,
+    list_playlists,
+    scan_iso,
+    list_iso_playlists,
+    inspect_files,
+    inspect_iso,
+    scan_files_full,
+    scan_iso_full,
+    render_report,
+  } = await import("../pkg/bdinfo_rs_wasm.js");
   initSync({ module: await readFile(wasmPath) });
 
   const paths = [];
@@ -145,9 +159,71 @@ async function main() {
       `FAIL — filter options unexpected: ${JSON.stringify(listNames())} / ${JSON.stringify(widened)}`,
     );
   }
+
+  // The structural disc model. `inspect_files` returns the whole scanned model
+  // as a real JavaScript object — properties read directly, no JSON.parse — so
+  // this is also what proves the mirror crosses the boundary at all. `measured`
+  // is false because no packet demux ran, and every value that only a demux
+  // could fill is therefore zero.
+  const inspected = inspect_files(paths, files);
+  const inspectedPlaylist = inspected.playlists[0];
+  const inspectOk =
+    inspected.measured === false &&
+    inspected.volumeLabel === "WASMDISC" &&
+    inspected.sizeBytes === 11146324 &&
+    inspected.errors.length === 0 &&
+    inspected.playlists.length === 1 &&
+    inspectedPlaylist.name === "00000.MPLS" &&
+    inspectedPlaylist.streams.length === 2 &&
+    inspectedPlaylist.streams[0].codecName === "MPEG-4 AVC Video" &&
+    inspectedPlaylist.clips.length === 1 &&
+    inspectedPlaylist.clips[0].name === "00000.M2TS" &&
+    inspectedPlaylist.streams.every((stream) => stream.bitrateBps === 0);
+  if (!inspectOk) {
+    console.error(`FAIL — inspect_files disc unexpected: ${JSON.stringify(inspected)}`);
+  }
+
+  // The short-playlist threshold, which only the inspect exports take: the
+  // ~10 s playlist the default 20 s rule withholds is listed once the threshold
+  // drops below its length, and a zero threshold means the default.
+  const inspectNames = (...options) =>
+    inspect_files(shortPaths, shortFiles, ...options).playlists.map((playlist) => playlist.name);
+  const thresholdOk =
+    JSON.stringify(inspectNames()) === '["00000.MPLS"]' &&
+    JSON.stringify(inspectNames(false, false, 0)) === '["00000.MPLS"]' &&
+    JSON.stringify(inspectNames(false, false, 5)) === '["00000.MPLS","00001.MPLS"]';
+  if (!thresholdOk) {
+    console.error(
+      `FAIL — short-playlist threshold unexpected: ${JSON.stringify(inspectNames(false, false, 5))}`,
+    );
+  }
   if (!selOk) {
     console.error(
       `FAIL — selective scan (${selReport.length} bytes) diverged from golden (${golden.length} bytes).`,
+    );
+  }
+
+  // The measured scan that returns both outputs, and the round trip back. One
+  // scan produces the report and the disc; feeding that disc straight back to
+  // `render_report` must reproduce the same bytes — which is what proves the
+  // model crossed to JavaScript and back without losing a value the report
+  // prints. Switching a section off must then drop it and nothing else.
+  const full = scan_files_full(paths, files, []);
+  const reRendered = Buffer.from(render_report(full.disc), "utf8");
+  const noDiagnostics = render_report(full.disc, false);
+  const noSummary = render_report(full.disc, true, false);
+  const fullOk =
+    Buffer.from(full.report, "utf8").equals(golden) &&
+    full.disc.measured === true &&
+    full.disc.playlists[0].streams[0].bitrateBps > 0 &&
+    reRendered.equals(golden) &&
+    !noDiagnostics.includes("STREAM DIAGNOSTICS:") &&
+    noDiagnostics.includes("QUICK SUMMARY:") &&
+    noSummary.includes("STREAM DIAGNOSTICS:") &&
+    !noSummary.includes("QUICK SUMMARY:");
+  if (!fullOk) {
+    console.error(
+      `FAIL — scan_files_full/render_report round trip: report ${full.report.length} B, re-rendered ${reRendered.length} B, golden ${golden.length} B, measured ${full.disc.measured}.`,
     );
   }
 
@@ -172,6 +248,31 @@ async function main() {
   if (!isoListOk) {
     console.error(`FAIL — list_iso_playlists rows unexpected: ${JSON.stringify(isoRows)}`);
   }
+  // The disc model over the same image: the UDF volume label is the genuine
+  // one recorded in the filesystem, where the folder pick above can only use
+  // the picked folder name.
+  const isoInspected = inspect_iso(isoFile);
+  const isoInspectOk =
+    isoInspected.measured === false &&
+    isoInspected.volumeLabel === "Blu-Ray" &&
+    isoInspected.playlists.length === 1 &&
+    isoInspected.playlists[0].name === "00000.MPLS" &&
+    isoInspected.playlists[0].clips.length === 1;
+  if (!isoInspectOk) {
+    console.error(`FAIL — inspect_iso disc unexpected: ${JSON.stringify(isoInspected)}`);
+  }
+  // The same both-outputs scan over the image, round-tripped the same way.
+  const isoFull = scan_iso_full(isoFile, []);
+  const isoFullOk =
+    Buffer.from(isoFull.report, "utf8").equals(isoGolden) &&
+    isoFull.disc.measured === true &&
+    isoFull.disc.volumeLabel === "Blu-Ray" &&
+    Buffer.from(render_report(isoFull.disc), "utf8").equals(isoGolden);
+  if (!isoFullOk) {
+    console.error(
+      `FAIL — scan_iso_full/render_report round trip: report ${isoFull.report.length} B, iso golden ${isoGolden.length} B.`,
+    );
+  }
   if (!isoSelOk) {
     console.error(
       `FAIL — selective .iso scan (${isoSelReport.length} bytes) diverged from the iso golden (${isoGolden.length} bytes).`,
@@ -194,9 +295,22 @@ async function main() {
     }
   }
 
-  if (got.equals(golden) && listOk && selOk && optionsOk && isoOk && isoListOk && isoSelOk) {
+  if (
+    got.equals(golden) &&
+    listOk &&
+    selOk &&
+    optionsOk &&
+    inspectOk &&
+    thresholdOk &&
+    fullOk &&
+    isoOk &&
+    isoListOk &&
+    isoSelOk &&
+    isoInspectOk &&
+    isoFullOk
+  ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + options + selection + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + options + inspect + selection + round trip + .iso OK.`,
     );
     process.exit(0);
   }

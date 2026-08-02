@@ -20,11 +20,16 @@ exclude_re = [
     "WebIso", # impl IsoReader for WebIso (the .iso FileReaderSync factory)
     "for JsValue", # impl From<TreeError> for JsValue
     "build_web_tree", # &js_sys::Array -> Node<WebFile>
-    "render_root", # the wasm32 scan_files/scan_iso render dispatch -> JsValue
-    "scan_files", # the #[wasm_bindgen] streaming export
-    "scan_iso", # the #[wasm_bindgen] .iso streaming export
+    "notify", # the wasm32 progress-callback shim -> js_sys::Function
+    "scan_root", # the wasm32 whole-disc/by-name scan dispatch -> JsValue
+    "render_root", # the wasm32 scan dispatch rendered -> JsValue
+    "scan_files", # the #[wasm_bindgen] streaming exports (scan_files + scan_files_full)
+    "scan_iso", # the #[wasm_bindgen] .iso streaming exports (scan_iso + scan_iso_full)
     "list_playlists", # the #[wasm_bindgen] structural-listing export
     "list_iso_playlists", # the #[wasm_bindgen] .iso structural-listing export
+    "inspect_files", # the #[wasm_bindgen] structural disc-model export
+    "inspect_iso", # the #[wasm_bindgen] .iso structural disc-model export
+    "render_report", # the #[wasm_bindgen] re-render-from-a-disc export
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).
