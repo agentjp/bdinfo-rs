@@ -61,6 +61,20 @@ on:
 permissions:
   contents: read
 
+env:
+  # Line tables instead of full DWARF, to hold down the target/ this workflow's
+  # legs archive through rust-cache — cache entries compete for one
+  # least-recently-used store across the whole repository, so a fat archive
+  # here evicts a cache a pull request needs. Enough debuginfo remains for
+  # file:line in a backtrace. Declared here because a called workflow inherits
+  # none of its caller's env; ci.yml carries the full rationale.
+  #
+  # CARGO_INCREMENTAL is deliberately absent: every job here that builds Rust
+  # is a cargo-mutants leg, and incremental rebuilds are what make mutation
+  # affordable (ci.yml sets 0 workflow-wide and overrides it back on exactly
+  # those jobs).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 concurrency:
   group: sweep-${{ github.ref }}
   # Never cancel a running sweep: a half-finished mutants pass saves no marker,

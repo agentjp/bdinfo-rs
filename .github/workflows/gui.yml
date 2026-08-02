@@ -52,6 +52,12 @@ env:
   # never a GPU whose pixels vary by driver. Also what makes the suites run on
   # GPU-less runners at all.
   ICED_TEST_BACKEND: tiny-skia
+  # Keep the cached target/ small: no incremental-compilation metadata, and
+  # line tables instead of full DWARF (still enough for file:line in a test
+  # backtrace). A called workflow inherits none of its caller's env, so these
+  # are declared here as well as in ci.yml — which carries the rationale.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # Build + the full test suite on every shipped arch — where per-platform bugs
