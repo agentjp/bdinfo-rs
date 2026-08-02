@@ -275,14 +275,14 @@ jobs:
           $distShaUpstream = $null
           try {
             $distShaUpstream = (Invoke-RestMethod -ErrorAction Stop `
-                -Uri "https://github.com/axodotdev/cargo-dist/releases/download/v$distCi/cargo-dist-x86_64-unknown-linux-musl.tar.xz.sha256" `
+                -Uri "https://github.com/axodotdev/cargo-dist/releases/download/v$distCi/cargo-dist-aarch64-unknown-linux-musl.tar.xz.sha256" `
                 -Headers @{ 'User-Agent' = 'bdinfo-rs-version-freshness (github actions)' }).Trim().Split(' ')[0]
           }
           catch { }
           if (-not $distShaUpstream) {
-            Add-Problem 'cargo-dist digest (query failed)' "- could not fetch the published sha256 for cargo-dist ``v$distCi``'s x86_64-unknown-linux-musl archive"
+            Add-Problem 'cargo-dist digest (query failed)' "- could not fetch the published sha256 for cargo-dist ``v$distCi``'s aarch64-unknown-linux-musl archive"
           } elseif ($distSha -ne $distShaUpstream) {
-            Add-Problem 'cargo-dist digest mismatch' "- core.yml pins ``DIST_SHA256: $distSha`` but cargo-dist ``v$distCi`` publishes ``$distShaUpstream`` for its x86_64-unknown-linux-musl archive — set the committed digest to the published value"
+            Add-Problem 'cargo-dist digest mismatch' "- core.yml pins ``DIST_SHA256: $distSha`` but cargo-dist ``v$distCi`` publishes ``$distShaUpstream`` for its aarch64-unknown-linux-musl archive — set the committed digest to the published value"
           }
 
           # --- dist [dist.github-action-commits]: TOML pins vs the workflows -----

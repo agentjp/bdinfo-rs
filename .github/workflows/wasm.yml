@@ -44,6 +44,10 @@ env:
 jobs:
   gate:
     name: wasm gate (build + size + parity)
+    # x64: two steps below need Google Chrome and chromedriver, and the arm64
+    # Ubuntu runner image ships neither (its browser set is Firefox +
+    # geckodriver; CHROMEWEBDRIVER is empty there). `msrv` below stays beside
+    # this job so both legs of this gate share one arch and one cache lineage.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

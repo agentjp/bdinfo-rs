@@ -203,6 +203,10 @@ jobs:
     name: mutation testing (PR diff)
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.core == 'true'
+    # x64: taiki-e/install-action's cargo-mutants manifest carries no aarch64
+    # Linux asset (x86_64-unknown-linux-gnu, x86_64 macOS and x86_64 Windows
+    # only), and `fallback: none` turns a missing prebuilt into a hard failure.
+    # Same for gui-mutants and wasm-mutants below.
     runs-on: ubuntu-latest
     env:
       # cargo-mutants rebuilds the tree once per mutant, each rebuild differing
@@ -259,7 +263,7 @@ jobs:
     name: gui mutation testing (PR diff)
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.gui == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
     env:
       # The suite the mutants face includes the iced_test snapshot ties; the
       # deterministic software backend is what makes them run on a GPU-less
@@ -320,7 +324,7 @@ jobs:
     name: wasm mutation testing (PR diff)
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.wasm == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
     env:
       CARGO_INCREMENTAL: "1"   # cargo-mutants' rebuild model — see the `mutants` job
     steps:

@@ -276,7 +276,11 @@ jobs:
   # moved to sweep.yml + the release-tag leg; see the header.)
   checks:
     name: gui checks (lint + coverage + deny)
-    runs-on: ubuntu-latest
+    # One Linux runner, arch-invariant verdict — arm64 (rationale in core.yml).
+    # The snapshot ties this job's coverage step runs are pinned per OS FAMILY
+    # and hold across arches within one, which is what `gui build + test`
+    # asserts on its ubuntu-latest and ubuntu-24.04-arm legs.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -375,7 +379,8 @@ jobs:
   # (iced_test may float its own MSRV).
   msrv:
     name: gui msrv
-    runs-on: ubuntu-latest
+    # One Linux runner, arch-invariant verdict — arm64 (rationale in core.yml).
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
