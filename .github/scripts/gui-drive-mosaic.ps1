@@ -16,7 +16,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-# Keep both axes in lockstep with the drive matrices in gui.yml.
+# Keep the column axis in lockstep with the drive job's matrix in gui.yml, and
+# the row axis with the halves of its two gallery artifact names.
 $arches = 'ubuntu-latest', 'ubuntu-24.04-arm', 'windows-2025', 'windows-11-arm', 'macos-15'
 $rows = 'assisted', 'inject'
 
