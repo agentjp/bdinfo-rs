@@ -4,12 +4,12 @@
 //!
 //! | Mirror | Core |
 //! |---|---|
-//! | [`Disc`] | [`BdRom`](bdinfo_rs_core::bdrom::disc::BdRom) plus the scan mode and the recorded failures |
-//! | [`Playlist`] | [`PlaylistSummary`](bdinfo_rs_core::bdrom::disc::PlaylistSummary) |
-//! | [`Clip`] | [`ClipSummary`](bdinfo_rs_core::bdrom::disc::ClipSummary) |
-//! | [`Stream`] | [`StreamSummary`](bdinfo_rs_core::bdrom::disc::StreamSummary) |
-//! | [`ClipStream`] | [`ClipStreamTally`](bdinfo_rs_core::bdrom::disc::ClipStreamTally) |
-//! | [`Chapter`] | [`ChapterSummary`](bdinfo_rs_core::bdrom::chapters::ChapterSummary) |
+//! | [`Disc`] | [`BdRom`] plus the scan mode and the recorded failures |
+//! | [`Playlist`] | [`PlaylistSummary`] |
+//! | [`Clip`] | [`ClipSummary`] |
+//! | [`Stream`] | [`StreamSummary`] |
+//! | [`ClipStream`] | [`ClipStreamTally`] |
+//! | [`Chapter`] | [`ChapterSummary`] |
 //! | [`ScanError`] | [`ScanError`](bdinfo_rs_core::error::ScanError) |
 //! | [`ScanStage`] | [`ScanStage`](bdinfo_rs_core::error::ScanStage) |
 //! | [`ScanErrorReason`] | [`BdError`](bdinfo_rs_core::error::BdError) |
@@ -40,12 +40,29 @@
 //!   camelCase name.
 //! * The doc comment of an **enum variant** is dropped. What a consumer must know to use
 //!   [`ScanStage`] or [`ScanErrorReason`] therefore belongs on the enum itself.
+//!
+//! ## Building one
+//!
+//! [`Disc::from_scan`] mirrors a whole scanned disc and [`Disc::from_listing`] mirrors one as a
+//! filtered playlist listing; every other type here is reached through a [`From`] impl those two
+//! walk.
 
+use bdinfo_rs_core::bdrom::chapters::ChapterSummary;
+use bdinfo_rs_core::bdrom::disc::{
+    BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary,
+};
+use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+use bdinfo_rs_core::error;
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 
 /// A scanned Blu-ray disc: the disc-level properties and every playlist on it.
+// `into_wasm_abi` is what lets an export return a `Disc` by value: it implements
+// wasm-bindgen's `IntoWasmAbi` over `serde_wasm_bindgen`, so the value crosses as a real
+// JavaScript object. Only the type an export names needs it; the types below are reached
+// through this one.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
@@ -84,9 +101,13 @@ pub struct Disc {
     /// Whether the disc carries PSP or mobile content: a `*.mnv` file under
     /// `SNP`.
     pub is_psp: bool,
-    /// Every playlist on the disc, sorted by file name. Nothing is filtered
-    /// out here: the short and looping playlists a selection table would
-    /// withhold are present too.
+    /// The playlists, sorted by file name.
+    ///
+    /// A scan puts every playlist on the disc here, the short and looping ones
+    /// a selection table would withhold included. A listing narrows it to the
+    /// playlists its filter keeps, which is what the two options on the
+    /// structural calls select; the disc-level values above and `errors` below
+    /// always describe the whole disc.
     pub playlists: Vec<Playlist>,
     /// Whether the packet scan ran. When false the scan read only the disc
     /// metadata, and every measured value below — bitrates, packet counts,
@@ -385,15 +406,14 @@ pub enum ScanErrorReason {
         /// The cap the file exceeded, in bytes.
         limit_bytes: u64,
     },
-    /// The scan was cancelled by the caller.
-    ScanCancelled,
     /// A failure this mirror does not name, carrying the message it reported.
     ///
-    /// Nothing lands here today: every failure kind the scan can report has a
-    /// member of its own above. It exists because the set of kinds is open and
-    /// can grow, and a value that lands here is the one kind a rebuilt disc
-    /// cannot render back exactly. Give a new kind its own member and this
-    /// stays empty.
+    /// Two things land here. A scan the caller cancelled — which is a
+    /// whole-scan abort rather than a per-file failure, so it reaches a
+    /// recorded failure only if one is fabricated. And any failure kind added
+    /// to the scanner after this mirror was written, since the set of kinds is
+    /// open. This is the one member a rebuilt disc cannot render back exactly,
+    /// so a kind that starts occurring in earnest wants a member of its own.
     #[serde(rename_all = "camelCase")]
     Other {
         /// What the failure reported.
@@ -401,8 +421,229 @@ pub enum ScanErrorReason {
     },
 }
 
+// ── the forward mapping: a scanned disc into the mirror ─────────────────────
+//
+// One `From` impl per mirrored type, nesting the way the model does. The
+// elementary-stream type and the packet identifier are the only fields that
+// change representation on the way across: both are newtypes over the byte and
+// the 16-bit word the disc records, and both cross as that raw number.
+
+impl Disc {
+    /// Mirrors a scanned disc: `bdrom` with the per-file failures `errors` the
+    /// scan recorded, and every playlist the scan produced.
+    ///
+    /// `measured` states whether the packet scan ran. Derive it from the scan
+    /// mode rather than from the values: a measured scan can legitimately
+    /// report a zero, and only the scan mode tells that apart from a value
+    /// nothing ever measured.
+    #[must_use]
+    pub fn from_scan(bdrom: &BdRom, errors: &[error::ScanError], measured: bool) -> Self {
+        Self::from_scan_filtered(bdrom, errors, measured, &PlaylistFilter::everything())
+    }
+
+    /// Mirrors a metadata-only scan as a playlist listing: as
+    /// [`from_scan`](Self::from_scan), except that `playlists` holds only the
+    /// playlists `filter` keeps and `measured` is false.
+    #[must_use]
+    pub fn from_listing(
+        bdrom: &BdRom,
+        errors: &[error::ScanError],
+        filter: &PlaylistFilter,
+    ) -> Self {
+        Self::from_scan_filtered(bdrom, errors, false, filter)
+    }
+
+    /// The body both constructors share; `from_scan` passes the filter that
+    /// keeps every playlist.
+    fn from_scan_filtered(
+        bdrom: &BdRom,
+        errors: &[error::ScanError],
+        measured: bool,
+        filter: &PlaylistFilter,
+    ) -> Self {
+        Self {
+            volume_label: bdrom.volume_label.clone(),
+            disc_title: bdrom.disc_title.clone(),
+            size_bytes: bdrom.size,
+            interleaved_size_bytes: bdrom.interleaved_size,
+            is_3d: bdrom.is_3d,
+            is_50hz: bdrom.is_50hz,
+            is_uhd: bdrom.is_uhd,
+            is_bd_plus: bdrom.is_bd_plus,
+            is_bd_java: bdrom.is_bd_java,
+            is_dbox: bdrom.is_dbox,
+            is_psp: bdrom.is_psp,
+            playlists: bdrom
+                .playlists
+                .iter()
+                .filter(|playlist| filter.keeps(playlist))
+                .map(Playlist::from)
+                .collect(),
+            measured,
+            errors: errors.iter().map(ScanError::from).collect(),
+        }
+    }
+}
+
+impl From<&PlaylistSummary> for Playlist {
+    fn from(playlist: &PlaylistSummary) -> Self {
+        Self {
+            name: playlist.name.clone(),
+            total_length_seconds: playlist.total_length,
+            file_size_bytes: playlist.file_size,
+            interleaved_file_size_bytes: playlist.interleaved_file_size,
+            chapter_count: playlist.chapter_count,
+            stream_count: playlist.stream_count,
+            angle_count: playlist.angle_count,
+            has_loops: playlist.has_loops,
+            streams: playlist.streams.iter().map(Stream::from).collect(),
+            clips: playlist.clips.iter().map(Clip::from).collect(),
+            chapters: playlist.chapters.iter().map(Chapter::from).collect(),
+        }
+    }
+}
+
+impl From<&ClipSummary> for Clip {
+    fn from(clip: &ClipSummary) -> Self {
+        Self {
+            name: clip.name.clone(),
+            display_name: clip.display_name.clone(),
+            file_size_bytes: clip.file_size,
+            interleaved_file_size_bytes: clip.interleaved_file_size,
+            angle_index: clip.angle_index,
+            relative_time_in_seconds: clip.relative_time_in,
+            length_seconds: clip.length,
+            payload_bytes: clip.payload_bytes,
+            packet_count: clip.packet_count,
+            packet_seconds: clip.packet_seconds,
+            file_seconds: clip.file_seconds,
+            streams: clip.streams.iter().map(ClipStream::from).collect(),
+        }
+    }
+}
+
+impl From<&ClipStreamTally> for ClipStream {
+    fn from(tally: &ClipStreamTally) -> Self {
+        Self {
+            pid: tally.pid.get(),
+            stream_type: tally.stream_type as u8,
+            codec_short_name: tally.codec_short_name.clone(),
+            payload_bytes: tally.payload_bytes,
+            packet_count: tally.packet_count,
+        }
+    }
+}
+
+impl From<&StreamSummary> for Stream {
+    fn from(stream: &StreamSummary) -> Self {
+        Self {
+            pid: stream.pid.get(),
+            // `TsStreamType` is `#[repr(u8)]` over the on-disc
+            // `stream_coding_type` codes, so the discriminant IS the byte the
+            // disc records.
+            stream_type: stream.stream_type as u8,
+            codec_short_name: stream.codec_short_name.clone(),
+            codec_name: stream.codec_name.clone(),
+            codec_alt_name: stream.codec_alt_name.to_owned(),
+            bitrate_bps: stream.bitrate,
+            active_bitrate_bps: stream.active_bitrate,
+            language_name: stream.language_name.clone(),
+            language_code: stream.language_code.clone(),
+            description: stream.description.clone(),
+            full_description: stream.full_description.clone(),
+            channel_description: stream.channel_description.clone(),
+            sample_rate_hz: stream.sample_rate,
+            bit_depth: stream.bit_depth,
+            channel_count: stream.channel_count,
+            height_pixels: stream.height,
+            angle_index: stream.angle_index,
+            is_hidden: stream.is_hidden,
+            ssif_only: stream.ssif_only,
+        }
+    }
+}
+
+impl From<&ChapterSummary> for Chapter {
+    fn from(chapter: &ChapterSummary) -> Self {
+        Self {
+            time_in_seconds: chapter.time_in,
+            length_seconds: chapter.length,
+            avg_rate_bps: chapter.avg_rate,
+            max_1sec_rate_bps: chapter.max_1sec_rate,
+            max_1sec_time_seconds: chapter.max_1sec_time,
+            max_5sec_rate_bps: chapter.max_5sec_rate,
+            max_5sec_time_seconds: chapter.max_5sec_time,
+            max_10sec_rate_bps: chapter.max_10sec_rate,
+            max_10sec_time_seconds: chapter.max_10sec_time,
+            avg_frame_size_bytes: chapter.avg_frame_size,
+            max_frame_size_bytes: chapter.max_frame_size,
+            max_frame_time_seconds: chapter.max_frame_time,
+        }
+    }
+}
+
+impl From<&error::ScanError> for ScanError {
+    fn from(failure: &error::ScanError) -> Self {
+        Self {
+            file: failure.file.clone(),
+            stage: failure.stage.into(),
+            reason: (&failure.reason).into(),
+        }
+    }
+}
+
+impl From<error::ScanStage> for ScanStage {
+    fn from(stage: error::ScanStage) -> Self {
+        match stage {
+            error::ScanStage::ClipInfo => Self::ClipInfo,
+            error::ScanStage::Playlist => Self::Playlist,
+            error::ScanStage::StreamFile => Self::StreamFile,
+            error::ScanStage::SectorRead => Self::SectorRead,
+            // `Discovery`, and — `ScanStage` being `#[non_exhaustive]` — any
+            // stage added to it later. Reading an unnamed stage as the
+            // disc-level one is safe to a consumer: a failure is presented by
+            // its file and its reason, and the report never prints the stage.
+            _ => Self::Discovery,
+        }
+    }
+}
+
+impl From<&error::BdError> for ScanErrorReason {
+    fn from(reason: &error::BdError) -> Self {
+        match reason {
+            error::BdError::UnknownFileType(magic) => {
+                Self::UnknownFileType { magic: magic.clone() }
+            }
+            error::BdError::UnexpectedEof => Self::UnexpectedEof,
+            error::BdError::StructureNotFound => Self::StructureNotFound,
+            error::BdError::MissingClipFile(file) => Self::MissingClipFile { file: file.clone() },
+            // The wrapped `io::Error`, not the `BdError` around it: the mirror
+            // supplies the `io error: ` framing itself when it names the kind.
+            error::BdError::Io(err) => Self::Io { message: err.to_string() },
+            error::BdError::MetadataTooLarge { file, limit } => {
+                Self::MetadataTooLarge { file: file.clone(), limit_bytes: *limit }
+            }
+            // A cancelled scan, which aborts the whole open rather than being
+            // recorded against a file, and — `BdError` being
+            // `#[non_exhaustive]` — any kind added to it later. Both cross as
+            // the message they reported.
+            unmirrored => Self::Other { message: unmirrored.to_string() },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use bdinfo_rs_core::bdrom::chapters::ChapterSummary;
+    use bdinfo_rs_core::bdrom::disc::{
+        BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, ScanMode, StreamSummary,
+    };
+    use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+    use bdinfo_rs_core::error;
+    use bdinfo_rs_core::primitives::Pid;
+    use bdinfo_rs_core::stream::TsStreamType;
     use serde_json::{Value, json};
 
     use super::{
@@ -718,7 +959,6 @@ mod tests {
                     "limitBytes": 67_108_864,
                 }),
             ),
-            (ScanErrorReason::ScanCancelled, json!({ "kind": "scanCancelled" })),
             (
                 ScanErrorReason::Other { message: "unmirrored".to_owned() },
                 json!({ "kind": "other", "message": "unmirrored" }),
@@ -730,5 +970,300 @@ mod tests {
                 serde_json::from_value(wire).expect("deserialize a failure reason");
             assert_eq!(back, reason);
         }
+    }
+
+    // ── the forward mapping ─────────────────────────────────────────────────
+    //
+    // One core-model value per mirror fixture above, built to mirror it exactly.
+    // Pairing them means the mapping is asserted against values written for a
+    // different purpose: a field wired to the wrong source shows up as a
+    // mismatch on the one field, named.
+
+    /// The [`StreamSummary`] whose mirror is [`a_stream`].
+    fn a_core_stream() -> StreamSummary {
+        StreamSummary {
+            pid: Pid::new(4113),
+            stream_type: TsStreamType::AvcVideo,
+            codec_short_name: "AVC".to_owned(),
+            codec_name: "MPEG-4 AVC Video".to_owned(),
+            codec_alt_name: "AVC",
+            bitrate: 9,
+            active_bitrate: 10,
+            language_name: "English".to_owned(),
+            language_code: "eng".to_owned(),
+            description: "1080p / 23.976 fps".to_owned(),
+            full_description: "1080p / 23.976 fps / 16:9".to_owned(),
+            channel_description: "5.1".to_owned(),
+            sample_rate: 48_000,
+            bit_depth: 24,
+            channel_count: 5,
+            height: 1080,
+            angle_index: 11,
+            is_hidden: true,
+            ssif_only: false,
+        }
+    }
+
+    /// The [`ClipStreamTally`] whose mirror is [`a_clip_stream`].
+    fn a_core_clip_stream() -> ClipStreamTally {
+        ClipStreamTally {
+            pid: Pid::new(4352),
+            stream_type: TsStreamType::DtsHdMasterAudio,
+            codec_short_name: "DTS-HD MA".to_owned(),
+            payload_bytes: 21,
+            packet_count: 22,
+        }
+    }
+
+    /// The [`ClipSummary`] whose mirror is [`a_clip`].
+    fn a_core_clip() -> ClipSummary {
+        ClipSummary {
+            name: "00001.M2TS".to_owned(),
+            display_name: "00001.SSIF".to_owned(),
+            file_size: 12,
+            interleaved_file_size: 13,
+            angle_index: 14,
+            relative_time_in: 15.5,
+            length: 16.25,
+            payload_bytes: 17,
+            packet_count: 18,
+            packet_seconds: 19.5,
+            file_seconds: 20.5,
+            streams: vec![a_core_clip_stream()],
+        }
+    }
+
+    /// The [`ChapterSummary`] whose mirror is [`a_chapter`].
+    fn a_core_chapter() -> ChapterSummary {
+        ChapterSummary {
+            time_in: 23.5,
+            length: 24.5,
+            avg_rate: 25.5,
+            max_1sec_rate: 26.5,
+            max_1sec_time: 27.5,
+            max_5sec_rate: 28.5,
+            max_5sec_time: 29.5,
+            max_10sec_rate: 30.5,
+            max_10sec_time: 31.5,
+            avg_frame_size: 32.5,
+            max_frame_size: 33.5,
+            max_frame_time: 34.5,
+        }
+    }
+
+    /// The [`PlaylistSummary`] whose mirror is [`a_playlist`].
+    fn a_core_playlist() -> PlaylistSummary {
+        PlaylistSummary {
+            name: "00000.MPLS".to_owned(),
+            total_length: 3.5,
+            file_size: 4,
+            interleaved_file_size: 5,
+            chapter_count: 6,
+            stream_count: 7,
+            angle_count: 8,
+            has_loops: true,
+            streams: vec![a_core_stream()],
+            clips: vec![a_core_clip()],
+            chapters: vec![a_core_chapter()],
+        }
+    }
+
+    /// The recorded failure whose mirror is [`a_scan_error`].
+    fn a_core_scan_error() -> error::ScanError {
+        error::ScanError {
+            file: "00002.CLPI".to_owned(),
+            stage: error::ScanStage::ClipInfo,
+            reason: error::BdError::UnknownFileType("HDMV9999".to_owned()),
+        }
+    }
+
+    /// The [`BdRom`] whose mirror is [`a_disc`] — bar `measured` and `errors`,
+    /// which the scan supplies rather than the disc.
+    fn a_core_bdrom() -> BdRom {
+        BdRom {
+            volume_label: "MIRROR_DISC".to_owned(),
+            disc_title: Some("Mirror Title".to_owned()),
+            size: 1,
+            interleaved_size: 2,
+            is_3d: true,
+            is_50hz: false,
+            is_uhd: true,
+            is_bd_plus: false,
+            is_bd_java: true,
+            is_dbox: false,
+            is_psp: true,
+            playlists: vec![a_core_playlist()],
+        }
+    }
+
+    /// A playlist carrying what the presentation filter reads — its length and
+    /// whether it loops — over the whole-fields fixture.
+    fn filtered_playlist(name: &str, total_length: f64, has_loops: bool) -> PlaylistSummary {
+        PlaylistSummary { name: name.to_owned(), total_length, has_loops, ..a_core_playlist() }
+    }
+
+    /// A disc holding one playlist per filter classification: 00000 (100 s) is
+    /// listed by every filter, 00001 (5 s) is short, 00002 (200 s) loops.
+    fn a_mixed_core_bdrom() -> BdRom {
+        BdRom {
+            playlists: vec![
+                filtered_playlist("00000.MPLS", 100.0, false),
+                filtered_playlist("00001.MPLS", 5.0, false),
+                filtered_playlist("00002.MPLS", 200.0, true),
+            ],
+            ..a_core_bdrom()
+        }
+    }
+
+    /// The mirrored playlists' names, in the order the mirror holds them.
+    fn names(disc: &Disc) -> Vec<&str> {
+        disc.playlists.iter().map(|playlist| playlist.name.as_str()).collect()
+    }
+
+    /// The fixture disc scanned through the in-memory tree, mirrored.
+    fn a_fixture_disc(mode: ScanMode) -> Disc {
+        let tree = crate::build_tree(&crate::tests::fixture_blob());
+        let report = BdRom::open_resilient(&tree, mode).expect("the fixture disc opens");
+        Disc::from_scan(&report.bdrom, &report.errors, mode == ScanMode::Full)
+    }
+
+    #[test]
+    fn every_field_of_a_scanned_disc_maps_into_its_mirror() {
+        assert_eq!(Disc::from_scan(&a_core_bdrom(), &[a_core_scan_error()], true), a_disc());
+    }
+
+    #[test]
+    fn the_scan_mode_alone_decides_the_measured_flag() {
+        // Same disc, same values: only the flag differs, and it says whether a
+        // zero below was measured or never looked at.
+        let unmeasured = Disc::from_scan(&a_core_bdrom(), &[], false);
+        assert!(!unmeasured.measured);
+        assert!(unmeasured.errors.is_empty(), "a scan with no failures mirrors none");
+        assert_eq!(Disc { measured: true, ..unmeasured }, Disc { errors: Vec::new(), ..a_disc() });
+    }
+
+    #[test]
+    fn from_scan_keeps_the_playlists_a_listing_would_withhold() {
+        let disc = Disc::from_scan(&a_mixed_core_bdrom(), &[], true);
+        assert_eq!(names(&disc), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
+    fn from_listing_holds_only_the_playlists_the_filter_keeps() {
+        let bdrom = a_mixed_core_bdrom();
+        let listing = |filter: &PlaylistFilter| {
+            let disc = Disc::from_listing(&bdrom, &[a_core_scan_error()], filter);
+            assert!(!disc.measured, "a listing scan never ran the packet scan");
+            assert_eq!(disc.errors, vec![a_scan_error()], "the failures are not filtered");
+            names(&disc).into_iter().map(str::to_owned).collect::<Vec<_>>()
+        };
+        // The standard filter withholds the short and the looping playlist.
+        assert_eq!(listing(&PlaylistFilter::default()), ["00000.MPLS"]);
+        // A threshold the short playlist meets exactly keeps it: the boundary
+        // is the same one `PlaylistFilter::keeps` draws.
+        let lowered = PlaylistFilter { short_playlist_seconds: 5.0, ..PlaylistFilter::default() };
+        assert_eq!(listing(&lowered), ["00000.MPLS", "00001.MPLS"]);
+        assert_eq!(
+            listing(&PlaylistFilter::everything()),
+            ["00000.MPLS", "00001.MPLS", "00002.MPLS"]
+        );
+    }
+
+    #[test]
+    fn every_scan_stage_crosses_as_its_own_mirror_member() {
+        for (stage, mirrored) in [
+            (error::ScanStage::Discovery, ScanStage::Discovery),
+            (error::ScanStage::ClipInfo, ScanStage::ClipInfo),
+            (error::ScanStage::Playlist, ScanStage::Playlist),
+            (error::ScanStage::StreamFile, ScanStage::StreamFile),
+            (error::ScanStage::SectorRead, ScanStage::SectorRead),
+        ] {
+            assert_eq!(ScanStage::from(stage), mirrored, "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn every_failure_kind_crosses_as_its_own_mirror_member() {
+        for (reason, mirrored) in [
+            (
+                error::BdError::UnknownFileType("MPLSXXXX".to_owned()),
+                ScanErrorReason::UnknownFileType { magic: "MPLSXXXX".to_owned() },
+            ),
+            (error::BdError::UnexpectedEof, ScanErrorReason::UnexpectedEof),
+            (error::BdError::StructureNotFound, ScanErrorReason::StructureNotFound),
+            (
+                error::BdError::MissingClipFile("00003.CLPI".to_owned()),
+                ScanErrorReason::MissingClipFile { file: "00003.CLPI".to_owned() },
+            ),
+            (
+                error::BdError::Io(io::Error::other("denied")),
+                ScanErrorReason::Io { message: "denied".to_owned() },
+            ),
+            (
+                error::BdError::MetadataTooLarge {
+                    file: "00000.MPLS".to_owned(),
+                    limit: 67_108_864,
+                },
+                ScanErrorReason::MetadataTooLarge {
+                    file: "00000.MPLS".to_owned(),
+                    limit_bytes: 67_108_864,
+                },
+            ),
+            // The mirror names no cancelled-scan kind: cancelling aborts the
+            // whole open, so it is never recorded against a file. It crosses
+            // as the catch-all, which is also where a kind added to the
+            // scanner later would land.
+            (
+                error::BdError::ScanCancelled,
+                ScanErrorReason::Other { message: "scan cancelled".to_owned() },
+            ),
+        ] {
+            assert_eq!(ScanErrorReason::from(&reason), mirrored, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_measured_scan_of_the_fixture_disc_fills_the_mirror_in() {
+        let disc = a_fixture_disc(ScanMode::Full);
+        assert!(disc.measured);
+        assert_eq!(disc.volume_label, "WASMDISC");
+        assert_eq!(disc.size_bytes, 11_146_324);
+        assert!(disc.errors.is_empty(), "the fixture is healthy media");
+
+        let playlist = disc.playlists.first().expect("the fixture has one playlist");
+        assert_eq!(names(&disc), ["00000.MPLS"]);
+        assert_eq!(playlist.stream_count, 2);
+        // The clip file on disk. The report prints the packet-derived size
+        // (11,064,384 bytes) on its `Size:` line instead, which is why the two
+        // numbers differ.
+        assert_eq!(playlist.file_size_bytes, 11_145_216);
+
+        let clip = playlist.clips.first().expect("the playlist has one clip");
+        assert_eq!(clip.name, "00000.M2TS");
+        assert!(clip.packet_count > 0, "the packet scan tallied the clip");
+        assert_eq!(clip.streams.len(), 2, "both streams are tallied over the whole file");
+
+        let video = playlist.streams.first().expect("the playlist has a video stream");
+        assert_eq!(video.codec_name, "MPEG-4 AVC Video");
+        assert!(video.bitrate_bps > 0, "the packet scan measured the video rate");
+
+        let chapter = playlist.chapters.first().expect("the playlist has a chapter");
+        assert!(chapter.max_1sec_rate_bps > 0.0, "the packet scan measured the chapter rates");
+    }
+
+    #[test]
+    fn a_metadata_scan_of_the_fixture_disc_mirrors_the_structure_unmeasured() {
+        let disc = a_fixture_disc(ScanMode::Metadata);
+        assert!(!disc.measured);
+        // The structure is all there — the same playlist, clip and streams…
+        let measured = a_fixture_disc(ScanMode::Full);
+        assert_eq!(names(&disc), names(&measured));
+        let playlist = disc.playlists.first().expect("the fixture has one playlist");
+        assert_eq!(playlist.clips.len(), 1);
+        assert_eq!(playlist.stream_count, 2);
+        // …and every measured value is the zero `measured: false` explains.
+        assert_eq!(playlist.clips.iter().map(|clip| clip.packet_count).sum::<u64>(), 0);
+        assert!(playlist.streams.iter().all(|stream| stream.bitrate_bps == 0));
+        assert!(playlist.chapters.iter().all(|chapter| chapter.max_1sec_rate_bps == 0.0));
     }
 }

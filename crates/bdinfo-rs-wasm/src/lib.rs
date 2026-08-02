@@ -76,6 +76,10 @@ use wasm_bindgen::{JsCast, JsValue};
 // the generated `.d.ts`, which the npm package exposes at its `/wasm` subpath.
 pub mod mirror;
 
+// Named by the browser exports that return the disc model, and by their docs.
+#[cfg(target_arch = "wasm32")]
+use mirror::Disc;
+
 /// The read-ahead window each [`WebReader`] fill pulls from `FileReaderSync` in
 /// one go, so a front-to-back demux crosses the JS boundary once per MiB rather
 /// than once per small parser read.
@@ -748,12 +752,23 @@ fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(us
 /// switched off by its option. An absent option (`None`) means `false` — the
 /// rule stays on — so a call that passes neither option lists exactly the set
 /// the CLI's plain `--list` prints.
+///
+/// `short_seconds` sets the length under which a playlist counts as short. An
+/// absent or non-positive value means the 20 s default, so a caller that does
+/// not care about the threshold passes `None` and gets the standard behaviour.
 #[cfg(any(target_arch = "wasm32", test))]
-fn listing_filter(show_short: Option<bool>, show_looping: Option<bool>) -> PlaylistFilter {
+fn listing_filter(
+    show_short: Option<bool>,
+    show_looping: Option<bool>,
+    short_seconds: Option<f64>,
+) -> PlaylistFilter {
+    let standard = PlaylistFilter::default();
     PlaylistFilter {
         filter_short_playlists: !show_short.unwrap_or(false),
         filter_looping_playlists: !show_looping.unwrap_or(false),
-        ..PlaylistFilter::default()
+        short_playlist_seconds: short_seconds
+            .filter(|seconds| *seconds > 0.0)
+            .unwrap_or(standard.short_playlist_seconds),
     }
 }
 
@@ -1211,7 +1226,7 @@ pub fn list_playlists(
     let root = build_web_tree(&paths, &files)?;
     let report = BdRom::open_resilient(&root, ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    let filter = listing_filter(show_short_playlists, show_looping_playlists);
+    let filter = listing_filter(show_short_playlists, show_looping_playlists, None);
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists, &filter)))
 }
 
@@ -1240,8 +1255,77 @@ pub fn list_iso_playlists(
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
     let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
         .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    let filter = listing_filter(show_short_playlists, show_looping_playlists);
+    let filter = listing_filter(show_short_playlists, show_looping_playlists, None);
     Ok(rows_to_json(&playlist_rows(&report.bdrom.playlists, &filter)))
+}
+
+/// The structural-scan entry point for the whole disc model: a
+/// `webkitdirectory`-selected BDMV folder in, a [`Disc`] out.
+///
+/// Runs the same **structural** scan [`list_playlists`] runs — no packet demux,
+/// so it reads the playlist and clip metadata rather than the multi-GB stream
+/// files — and returns the whole scanned model rather than the seven columns of
+/// a selection table. Every value a listing row carries is reachable from it,
+/// and so is everything the report prints that a metadata scan can know.
+///
+/// `disc.measured` is false: the bitrates, packet counts and chapter rates are
+/// zero because nothing measured them.
+///
+/// `show_short_playlists` / `show_looping_playlists` select which playlists
+/// `disc.playlists` holds, exactly as they select which rows
+/// [`list_playlists`] returns; the disc-level properties and the recorded
+/// failures are never filtered. `short_playlist_seconds` sets the length under
+/// which a playlist counts as short — absent or non-positive means the 20 s
+/// default. Passing both options widens the result to the whole disc, which is
+/// what lets a caller scan once and apply either rule to the playlists itself.
+///
+/// # Errors
+/// As [`scan_files`]: `paths`/`files` length mismatch, a non-`File` entry, an
+/// incoherent selection, or no readable Blu-ray structure.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn inspect_files(
+    paths: Vec<String>,
+    files: js_sys::Array,
+    show_short_playlists: Option<bool>,
+    show_looping_playlists: Option<bool>,
+    short_playlist_seconds: Option<f64>,
+) -> Result<Disc, JsValue> {
+    let root = build_web_tree(&paths, &files)?;
+    let report = BdRom::open_resilient(&root, ScanMode::Metadata)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    let filter =
+        listing_filter(show_short_playlists, show_looping_playlists, short_playlist_seconds);
+    Ok(Disc::from_listing(&report.bdrom, &report.errors, &filter))
+}
+
+/// The structural-scan `.iso` entry point for the whole disc model: a single
+/// OS-picked Blu-ray `.iso` `File` in, a [`Disc`] out.
+///
+/// Opens the image through the core read-only UDF 2.50 reader ([`UdfSource`])
+/// instead of a `(relativePath, File)` list, then behaves exactly as
+/// [`inspect_files`] — same structural scan, same `measured: false`, same
+/// meaning for the three filter parameters.
+///
+/// # Errors
+/// Returns a `JsValue` if the image is not a readable UDF `.iso`, or holds no
+/// readable Blu-ray structure.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn inspect_iso(
+    file: web_sys::File,
+    show_short_playlists: Option<bool>,
+    show_looping_playlists: Option<bool>,
+    short_playlist_seconds: Option<f64>,
+) -> Result<Disc, JsValue> {
+    let length = file.size() as u64;
+    let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
+        .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
+    let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    let filter =
+        listing_filter(show_short_playlists, show_looping_playlists, short_playlist_seconds);
+    Ok(Disc::from_listing(&report.bdrom, &report.errors, &filter))
 }
 
 #[cfg(test)]
@@ -1261,7 +1345,10 @@ mod tests {
 
     /// The committed Big Buck Bunny fixture framed into the six `u32`-BE sections
     /// the in-memory path expects (the bytes the parity golden is built from).
-    fn fixture_blob() -> Vec<u8> {
+    ///
+    /// Reached from the mirror's mapping tests too, which scan the same
+    /// fixture — hence `pub` inside this private module.
+    pub fn fixture_blob() -> Vec<u8> {
         const INDEX: &[u8] =
             include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
         const MOVIE: &[u8] =
@@ -1799,7 +1886,7 @@ mod tests {
                 (Some(true), Some(true), false, false),
             ] {
                 assert_eq!(
-                    listing_filter(show_short, show_looping),
+                    listing_filter(show_short, show_looping, None),
                     PlaylistFilter {
                         filter_short_playlists: short_on,
                         filter_looping_playlists: looping_on,
@@ -1808,6 +1895,56 @@ mod tests {
                     "{show_short:?} / {show_looping:?}"
                 );
             }
+        }
+
+        #[test]
+        fn listing_filter_takes_the_threshold_and_falls_back_to_twenty_seconds() {
+            // A positive threshold is used as given; anything else — absent,
+            // zero, negative, NaN — leaves the default 20 s in force, so the
+            // pre-threshold behaviour stays reachable. Whole filters are
+            // compared so the two switches are pinned as untouched too.
+            for (short_seconds, in_force) in [
+                (Some(5.0), 5.0),
+                (Some(0.5), 0.5),
+                (None, 20.0),
+                (Some(0.0), 20.0),
+                (Some(-1.0), 20.0),
+                (Some(f64::NAN), 20.0),
+            ] {
+                assert_eq!(
+                    listing_filter(None, None, short_seconds),
+                    PlaylistFilter {
+                        filter_short_playlists: true,
+                        filter_looping_playlists: true,
+                        short_playlist_seconds: in_force,
+                    },
+                    "{short_seconds:?}"
+                );
+            }
+            assert_eq!(
+                listing_filter(Some(true), None, Some(5.0)),
+                PlaylistFilter {
+                    filter_short_playlists: false,
+                    filter_looping_playlists: true,
+                    short_playlist_seconds: 5.0,
+                }
+            );
+        }
+
+        #[test]
+        fn a_lowered_threshold_lists_and_reclassifies_the_playlists_between_it_and_the_default() {
+            // 00002 is 5 s: the default 20 s threshold withholds it and names it
+            // short, a 5 s threshold lists it and names no rule.
+            let playlists = mixed_disc();
+            let default = listing_filter(None, None, None);
+            let lowered = listing_filter(None, None, Some(5.0));
+            assert_eq!(listed(&playlists, &default), ["00000.MPLS"]);
+            assert_eq!(listed(&playlists, &lowered), ["00000.MPLS", "00002.MPLS"]);
+            assert_eq!(hidden_by(&playlists[2], &default), ["short"]);
+            assert!(hidden_by(&playlists[2], &lowered).is_empty());
+            // The looping rule is untouched by the threshold: 00003 is 5 s and
+            // looping, so it stays withheld and still names only `looping`.
+            assert_eq!(hidden_by(&playlists[3], &lowered), ["looping"]);
         }
 
         #[test]
@@ -1829,7 +1966,7 @@ mod tests {
             // The classification reads the rules, not the switches: a row listed
             // only because its option was passed still names the rule that would
             // have withheld it — the field a client re-filters on.
-            let widened = listing_filter(Some(true), Some(true));
+            let widened = listing_filter(Some(true), Some(true), None);
             let rows = playlist_rows(&mixed_disc(), &widened);
             let view: Vec<(&str, &[&str])> =
                 rows.iter().map(|row| (row.name.as_str(), row.hidden_by.as_slice())).collect();
@@ -1848,20 +1985,20 @@ mod tests {
         fn each_option_widens_the_listing_by_its_own_rule() {
             let playlists = mixed_disc();
             // The standard set lists neither the looping nor the short playlist.
-            assert_eq!(listed(&playlists, &listing_filter(None, None)), ["00000.MPLS"]);
+            assert_eq!(listed(&playlists, &listing_filter(None, None, None)), ["00000.MPLS"]);
             // Showing short playlists reveals the short one but NOT the playlist
             // that is short *and* looping — the rules are independent.
             assert_eq!(
-                listed(&playlists, &listing_filter(Some(true), None)),
+                listed(&playlists, &listing_filter(Some(true), None, None)),
                 ["00000.MPLS", "00002.MPLS"]
             );
             assert_eq!(
-                listed(&playlists, &listing_filter(None, Some(true))),
+                listed(&playlists, &listing_filter(None, Some(true), None)),
                 ["00001.MPLS", "00000.MPLS"]
             );
             // Both options list the whole disc, longest first.
             assert_eq!(
-                listed(&playlists, &listing_filter(Some(true), Some(true))),
+                listed(&playlists, &listing_filter(Some(true), Some(true), None)),
                 ["00001.MPLS", "00000.MPLS", "00002.MPLS", "00003.MPLS"]
             );
         }

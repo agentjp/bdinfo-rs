@@ -25,6 +25,8 @@ exclude_re = [
     "scan_iso", # the #[wasm_bindgen] .iso streaming export
     "list_playlists", # the #[wasm_bindgen] structural-listing export
     "list_iso_playlists", # the #[wasm_bindgen] .iso structural-listing export
+    "inspect_files", # the #[wasm_bindgen] structural disc-model export
+    "inspect_iso", # the #[wasm_bindgen] .iso structural disc-model export
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).
