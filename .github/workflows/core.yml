@@ -15,6 +15,18 @@ name: core
 # (…)`). This file carries no triggers and no concurrency of its own — both are
 # the caller's — so it can never fire on its own and never needs a paths filter.
 #
+# RUNNER ARCH — a job that runs on exactly ONE Linux runner and whose verdict is
+# arch-INVARIANT runs on `ubuntu-24.04-arm` (here: lint, coverage, msrv, deny,
+# vet, release-yaml). Measured on this repository's runs (2026-08-02), the arm
+# runners built the GUI legs in 208 s average against 301 s on `ubuntu-latest`
+# at comparable queue times, so for such a job the arch buys speed and changes
+# nothing else. Everything else stays on `ubuntu-latest` (x64): the matrices
+# that pin one runner per SHIPPED target (build + test, e2e, isolation), the
+# jobs whose verdict is arch-BOUND or whose tooling has no arm64 build — each
+# states its mechanism where it declares `runs-on` — and the seconds-long glue
+# jobs, where the arch buys nothing measurable. repo.yml, gui.yml, wasm.yml and
+# ci.yml apply the same rule and refer here.
+#
 # Build and test on every supported OS. The pinned stable toolchain installs
 # itself from rust-toolchain.toml on first cargo use; `unsafe` is forbidden at
 # compile time, so a green build is also the memory-safety guarantee. Every
@@ -117,7 +129,7 @@ jobs:
   release-yaml:
     name: release workflow in sync (dist generate --check)
     if: inputs.dist == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     env:
       # MUST equal `cargo-dist-version` in dist-workspace.toml — the version that
       # generated the committed v-release.yml, so anything else makes the check
@@ -128,7 +140,7 @@ jobs:
       # the `.sha256` file axodotdev publishes beside it. Committing the digest is
       # what makes the download verifiable: the archive is checked against this
       # value before anything inside it runs. Re-take it on every DIST_VERSION bump.
-      DIST_SHA256: 0d9dc001b0e937e9cc18e0dc11784aa7a3fd566656b07828d5e1d10ce1c1c48c
+      DIST_SHA256: 16d4394af9b91366ca92cb4601a72dd0a209a49301ef535749e2141039e26ed6
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -143,7 +155,7 @@ jobs:
       - name: Install pinned dist (checksum-verified prebuilt)
         run: |
           set -euo pipefail
-          dir="cargo-dist-x86_64-unknown-linux-musl"
+          dir="cargo-dist-aarch64-unknown-linux-musl"
           curl -fsSL --retry 3 -o "$dir.tar.xz" \
             "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/$dir.tar.xz"
           echo "$DIST_SHA256  $dir.tar.xz" | sha256sum --check --strict -
@@ -189,7 +201,7 @@ jobs:
   lint:
     name: lint (clippy, fmt, doc, deps, semver)
     if: inputs.core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -267,7 +279,7 @@ jobs:
   coverage:
     name: coverage (100% lines/regions/functions)
     if: inputs.core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -303,7 +315,7 @@ jobs:
   msrv:
     name: msrv
     if: inputs.core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -470,7 +482,7 @@ jobs:
   deny:
     name: cargo deny check
     if: inputs.deps == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -493,7 +505,7 @@ jobs:
   vet:
     name: cargo vet
     if: inputs.deps == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -506,12 +518,15 @@ jobs:
       # cached — keep the cache key in lockstep with the install pin below,
       # which version-freshness.yml watches. Keep both in lockstep with the
       # version that writes supply-chain/.
+      # The key carries `runner.arch` because the entry holds an EXECUTABLE and
+      # `runner.os` is `Linux` on both the x64 and the arm64 runners: without it
+      # an x86_64 binary would restore onto an arm64 host and fail to run.
       - name: Cache the pinned cargo-vet binary
         id: vet-bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-vet
-          key: cargo-vet-${{ runner.os }}-0.10.2
+          key: cargo-vet-${{ runner.os }}-${{ runner.arch }}-0.10.2
 
       - name: Install cargo-vet 0.10.2 (cache miss)
         if: steps.vet-bin.outputs.cache-hit != 'true'
@@ -531,6 +546,8 @@ jobs:
   replay:
     name: corpus replay (regression gate)
     if: inputs.fuzz == 'true'
+    # x64: FUZZ_TARGET below pins the libFuzzer binary to x86_64-unknown-linux-gnu,
+    # which an arm64 host cannot execute.
     runs-on: ubuntu-latest
     env:
       # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
@@ -620,6 +637,8 @@ jobs:
   pkg:
     name: build + install .deb/.rpm (x64 + arm64)
     if: inputs.pkg == 'true'
+    # x64: the install-verify step below RUNS the packaged x86_64 stand-in binary
+    # natively, which an arm64 host cannot do.
     runs-on: ubuntu-latest
     # Build the HOST gnu triple: this verifies the PACKAGING (extraction, metadata, the
     # --target path rewrite, install + contents), for which the binary's libc/arch is

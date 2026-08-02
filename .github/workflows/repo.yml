@@ -13,6 +13,10 @@ name: repo
 # (action-validator + ryl)`). No triggers and no concurrency of its own — both
 # are the caller's — so it can never fire on its own and never needs a paths
 # filter.
+#
+# Every job here scans the tree rather than producing an artifact from it, so
+# every verdict is arch-invariant and each job runs on `ubuntu-24.04-arm`
+# (rationale in core.yml).
 
 on:
   workflow_call:
@@ -58,7 +62,7 @@ jobs:
   yaml:
     name: lint YAML (action-validator + ryl)
     if: inputs.yaml == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,6 +83,9 @@ jobs:
           echo "version=${v:-unknown-$GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "latest action-validator: ${v:-unknown (cache bypassed this run)}"
 
+      # The key carries `runner.arch` because the entry holds EXECUTABLES and
+      # `runner.os` is `Linux` on both the x64 and the arm64 runners: without it
+      # x86_64 binaries would restore onto an arm64 host and fail to run.
       - name: Cache the YAML lint binaries
         id: yaml-tools
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -86,7 +93,7 @@ jobs:
           path: |
             ~/.cargo/bin/action-validator
             ~/.cargo/bin/ryl
-          key: yaml-tools-${{ runner.os }}-av-${{ steps.av.outputs.version }}-ryl-0.21.0
+          key: yaml-tools-${{ runner.os }}-${{ runner.arch }}-av-${{ steps.av.outputs.version }}-ryl-0.21.0
 
       - name: Install action-validator + ryl (cache miss)
         if: steps.yaml-tools.outputs.cache-hit != 'true'
@@ -113,7 +120,7 @@ jobs:
   taplo:
     name: lint TOML (taplo)
     if: inputs.toml == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -150,7 +157,7 @@ jobs:
   zizmor:
     name: zizmor (workflow security)
     if: inputs.workflows == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,7 +189,7 @@ jobs:
   typos:
     name: spell-check (typos)
     if: inputs.typos == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -200,7 +207,7 @@ jobs:
   links:
     name: Check links
     if: inputs.links == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
