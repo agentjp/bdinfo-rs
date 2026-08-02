@@ -198,7 +198,7 @@ struct MemFile {
 
 impl BdFile for MemFile {
     fn name(&self) -> &str {
-        "xyzzy" /* ~ changed by cargo-mutants ~ */
+        &self.name
     }
 
     fn full_name(&self) -> &str {
