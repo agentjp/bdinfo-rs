@@ -91,6 +91,16 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
+          # The ONE archive every GUI leg on this workspace restores from, and
+          # the only job that writes it. This job builds both profiles (debug
+          # for the tests, release for the shipped configuration), so its
+          # target dir is a superset of what `gui drive` and `gui packaging
+          # smoke` need — those two share this lineage read-only rather than
+          # storing a second and third copy of the same wgpu/iced tree.
+          # Explicit rather than rust-cache's default per-job key, which folds
+          # in the job id: a rename would orphan the archive and every PR
+          # would build cold until the next master push re-seeded it.
+          shared-key: gui-build
           # Cache write-discipline (wgpu): PR-branch saves are invisible to
           # every other PR, so only master runs (pushes + the daily sweep)
           # save; PRs restore the master-seeded cache.
@@ -447,9 +457,13 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
-          # Release-profile artifacts, distinct from the debug legs' lineages.
-          shared-key: gui-package
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          # Read-only on `gui build + test`'s archive: that job builds the same
+          # release profile this one packages, on the same runners, so a
+          # separate lineage stored a second copy of an identical tree. Never
+          # saves — one writer keeps the two jobs from racing to author the
+          # archive under a shared key.
+          shared-key: gui-build
+          save-if: false
 
       - name: Install the Linux packagers + validators
         if: runner.os == 'Linux'
@@ -615,14 +629,13 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: crates/bdinfo-rs-gui
-          # An explicit lineage name rather than rust-cache's default per-job
-          # key: this job's debug build is the same one `gui build + test`
-          # produces, and a stable name keeps the archive addressable if the
-          # job is ever renamed again (the default key folds in the job id, so
-          # a rename orphans the archive and every PR builds cold until the
-          # next master push re-seeds it).
-          shared-key: gui-drive
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          # Read-only on `gui build + test`'s archive: this job's debug build is
+          # the one that job already produces, on the same runners, so a
+          # separate lineage stored a second copy of an identical tree. Never
+          # saves — one writer keeps the two jobs from racing to author the
+          # archive under a shared key.
+          shared-key: gui-build
+          save-if: false
 
       # imagemagick and xdotool serve both walks: `import` captures for the
       # assisted walk, xdotool both locates the window for cropping and
