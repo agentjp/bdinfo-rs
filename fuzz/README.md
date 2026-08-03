@@ -38,8 +38,10 @@ of byte fuzzing).
 ## Per-target discovery flags
 
 `targets.txt` is the one place the per-target flags live — one row per target, a
-dictionary column and a `-max_len` column. It documents its own format; read it from a
-shell loop with:
+dictionary column and a `-max_len` column. It is also the one place the **target list**
+lives: the replay gate, the discovery workflow and `scripts/fuzz-docker.sh` all read it,
+so adding a target means adding its `[[bin]]` in `Cargo.toml` and a row here. It
+documents its own format; read it from a shell loop with:
 
 ```sh
 awk '!/^[[:space:]]*#/ && NF { print $1, $2, $3 }' targets.txt
@@ -138,6 +140,40 @@ It never gained a counter outside `m2ts`, where a shorter `max_len` beats it and
 `source`, 61% on `clpi` and 78% on `udf`. Since the length ramp advances with execution
 count, that throughput cost is also a reach cost: `parse_report`'s `lim` after 300 s
 falls from 1915 to 615 with it on.
+
+## How the tier runs in CI
+
+Three legs, two of them adversarial and one of them a gate:
+
+| leg | when | what it does |
+|---|---|---|
+| corpus replay (`core.yml`) | every pull request and push touching the `fuzz` area, and daily through the sweep | `-runs=0` over the committed seeds — a deterministic regression check, and a **required status check** |
+| nightly discovery (`fuzz.yml`) | 21:11 UTC daily, one job per target, 300 s each | fresh fuzzing that **starts where last night stopped** |
+| release-tag pass (`fuzz.yml`) | every `v*` tag, 600 s per target | a release checkpoint; runs alongside the publish workflows and blocks none of them |
+
+**Discovery compounds through a per-target Actions cache.** A nightly leg restores
+everything earlier runs found, fuzzes from the seeds plus that, minimises the union, and
+saves back only the units the committed seeds do not already cover. Before the cache
+existed, every run began from the same seeds and threw away what it learned — measured
+2026-08-03, one 120 s pass over all ten targets grew the corpus from 6,254 to 14,178
+units and discarded every one of them. The tag pass restores the same cache read-only:
+it starts from accumulated knowledge but never writes back, because a release-adjacent
+run must not promote anything into a shared scope.
+
+**Corpus growth is human-gated.** A leg that ends with more units than it restored
+uploads them as the artifact `fuzz-corpus-<target>` and the run refreshes one rolling
+issue (label `fuzz-corpus`) naming the counts. Nothing is committed by CI. To grow the
+regression set, download the artifacts, drop each target's units into
+`corpus/<target>/`, and open a pull request; the issue closes itself the next night,
+when those units stop counting as new.
+
+**A crash files an issue, one per distinct crash signature** (label `fuzz-crash`) — the
+panic's source location and message with digit runs folded, so one out-of-bounds bug does
+not file an issue per index; a guard kill with no panic (`-timeout`, `-rss_limit_mb`)
+keys on the target and the guard that fired. The reproducer is minimised with `tmin`,
+uploaded as an artifact, and inlined base64 in the issue so the evidence outlives the
+90-day artifact retention. **A human closes a crash issue with the fix**: a later green
+run is not evidence, because the fuzzer need not have replayed that input.
 
 ## Running (Linux / WSL / CI, nightly)
 

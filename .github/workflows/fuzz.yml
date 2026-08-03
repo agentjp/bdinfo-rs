@@ -1,15 +1,38 @@
 name: fuzz
 
-# The TAG leg of the adversarial tier: a longer fresh-fuzz pass per libFuzzer
-# target on every v* release tag. cargo-fuzz / libFuzzer need a nightly
-# toolchain and have no Windows MSVC support, so this runs on Linux only; the
-# local mirror is scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the
-# guards here match it. The fast per-PR/push leg — replaying the committed
-# seed corpus with -runs=0 (the required `corpus replay (regression gate)`
-# check) — moved to core.yml as a plan-gated job on the `fuzz` area; the daily
-# sweep re-runs it ungated.
+# The DISCOVERY half of the adversarial tier: fresh (mutating) fuzz runs over
+# every libFuzzer target — nightly on a 10-way matrix, and again on every v*
+# release tag. cargo-fuzz / libFuzzer need a nightly toolchain and have no
+# Windows MSVC support, so this runs on Linux only; the local mirror is
+# scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the guards and the
+# per-target discovery flags here match it, both sides reading fuzz/targets.txt.
+# The fast per-PR/push leg — replaying the committed seed corpus with -runs=0
+# (the required `corpus replay (regression gate)` check) — lives in core.yml as
+# a plan-gated job on the `fuzz` area; the daily sweep re-runs it ungated.
 #
-# This pass runs ALONGSIDE the publish workflows the same tag triggers
+# What makes discovery COMPOUND is the per-target corpus cache: a leg starts
+# from the committed seeds PLUS everything earlier runs found, and saves the
+# minimised difference back. Before that cache existed, every run restarted from
+# the same seeds and re-explored the same shallow neighbourhood — measured
+# 2026-08-03, a 120 s pass over all ten targets grew the corpus from 6,254 to
+# 14,178 units and discarded every one of them, so run N+1 learned roughly what
+# run N learned.
+#
+# NIGHTLY rather than weekly, deliberately: GitHub evicts a cache unused for 7
+# days, so a weekly schedule rides the eviction boundary and would silently
+# reset discovery to the seeds — and this repository's cron fires 2-4 h late
+# every day (sweep.yml's header carries the measurement), which is exactly the
+# jitter that turns "rides the boundary" into "crossed it". Fuzzing has
+# diminishing returns within a run and compounding returns across runs, so
+# frequent short runs beat rare long ones once the corpus persists.
+#
+# CORPUS GROWTH IS HUMAN-GATED: a leg that ends with more units than it
+# restored uploads them as an artifact and the report job names the count in one
+# rolling issue. Nothing is committed by CI — signed-commit branch protection
+# and a 735 MB .git are both reasons the regression set grows only through a
+# reviewed pull request.
+#
+# The tag pass runs ALONGSIDE the publish workflows the same tag triggers
 # (v-release/publish-crates/publish-npm) and does NOT block them — a crash
 # surfaces a regression to fix in a follow-up patch; it is a post-tag
 # adversarial sweep, not a gate.
@@ -17,21 +40,39 @@ name: fuzz
 on:
   push:
     tags: ['v*']
+  schedule:
+    # Nightly, and set EARLY on purpose to compensate for a delay this
+    # repository does not control: measured over n=11 days, every cron here
+    # fired 2 h 17 m to 4 h 00 m late (sweep.yml's header carries the
+    # measurement and the evidence that it tracks the day, not the workflow).
+    # Asking for 21:11 UTC therefore lands the run at roughly 23:30-01:10 UTC —
+    # clear of the 05:37 sweep, whose ~20-job mutation fleet is the account's
+    # concurrent-job ceiling, and clear of it even when both slip.
+    - cron: "11 21 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Per-target fresh-fuzz budget in seconds
+        default: "300"
+      file_issues:
+        description: File crash / corpus-growth issues from this run (schedule and tag runs always do)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a running pass: a cancelled leg saves no corpus cache, so
+  # cancellation throws away everything the run had discovered (sweep.yml's
+  # marker legs are cancel-proof for the same reason).
+  cancel-in-progress: false
 
 env:
   # cargo-fuzz needs nightly. Keep in lockstep with core.yml NIGHTLY and
   # $script:Nightly in scripts/_common.ps1.
   NIGHTLY: nightly-2026-07-06
-  # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
-  # with scripts/fuzz-docker.sh + core.yml's replay job.
-  TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report
   # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
   # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
   # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
@@ -40,20 +81,59 @@ env:
   FUZZ_TARGET: x86_64-unknown-linux-gnu
   # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
   # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
-  # (allocation-amplification guard).
+  # (allocation-amplification guard). Both turn a hang or an allocation blow-up
+  # into a libFuzzer crash, which is what makes them reportable below.
   GUARDS: -timeout=25 -rss_limit_mb=2048
 
 jobs:
-  # Release tag: a longer fresh-fuzz budget per target. Crash artifacts are
-  # uploaded, and only when the job fails; the corpus grown during the run is
-  # never uploaded and dies with the runner, so every tag run restarts from the
-  # committed seeds. A crash fails THIS fuzz run and surfaces the regression; the
-  # publish workflows triggered by the same tag run independently (this job does
-  # not `needs:`-gate them), so treat a crash as a fast-follow patch trigger, not
-  # a release blocker.
-  extended:
-    name: extended fuzz (release tag)
+  # The target list comes from fuzz/targets.txt — the same file that carries the
+  # per-target discovery flags and that scripts/fuzz-docker.sh and core.yml's
+  # replay job read. Adding a target is then two edits (its [[bin]] in
+  # fuzz/Cargo.toml and a row there), not four.
+  targets:
+    name: read the target list
     runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read fuzz/targets.txt
+        id: read
+        run: |
+          list=$(awk '!/^[[:space:]]*#/ && NF { printf "%s\"%s\"", (n++ ? "," : ""), $1 }' fuzz/targets.txt)
+          [ -n "$list" ] || { echo "no targets in fuzz/targets.txt"; exit 1; }
+          echo "list=[$list]" >> "$GITHUB_OUTPUT"
+          echo "matrix: [$list]"
+
+  # One leg per target, so a slow target no longer eats the others' budget and
+  # the wall time of the pass is one target rather than ten. Throughput spans
+  # 1,695x across the tier (990,019 exec/s on `discovery` against 584 on
+  # `m2ts`, measured 2026-08-03), which is also why an equal per-target time
+  # budget is deliberately an unequal experiment rather than an accident.
+  deep:
+    name: fuzz ${{ matrix.target }}
+    needs: [targets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    env:
+      # Every value a run step needs, routed through env rather than an
+      # expression inside the script (template injection).
+      TARGET: ${{ matrix.target }}
+      # 600 s on a release tag, 300 s nightly. The tag budget is the one place a
+      # long run pays: measured 2026-08-03, six of ten targets stop learning
+      # inside 250 s, but `m2ts` is still gaining at 843 s and `parse_report`
+      # climbs linearly through 900 s with no knee. The old flat 120 s was never
+      # justified by a measurement.
+      # The `inputs` context is read only under the event that populates it, so
+      # a scheduled run never depends on how an absent context resolves.
+      FUZZ_SECONDS: ${{ github.event_name == 'push' && '600' || github.event_name == 'workflow_dispatch' && inputs.seconds || '300' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,21 +145,37 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
-          # Lookup-only: this workflow runs exclusively on release tags, and
-          # a cache poisoned elsewhere must not taint a release-adjacent run
-          # (zizmor cache-poisoning); the per-PR replay leg in core.yml is where
-          # the fuzz build cache is used and (on master) saved.
-          lookup-only: true
+          # One cache lineage for all ten legs, not ten: they build the same
+          # dependency graph and differ only in which target binary they link,
+          # and ten multi-hundred-MB archives would churn the repository's 10 GB
+          # Actions-cache budget (sweep.yml's shards share a key for the same
+          # reason). First finisher saves; the rest skip gracefully.
+          shared-key: fuzz-deep
+          # Tag runs build fresh: this pass is release-adjacent and must not
+          # consume a build cache poisoned elsewhere (zizmor cache-poisoning).
+          # Scheduled runs execute on master, where only master-scoped runs can
+          # have written the cache they restore.
+          lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # cargo-fuzz is absent from taiki-e/install-action's manifest, and this repo
       # runs that action with `fallback: none` so a manifest-missing tool fails
       # loudly instead of resolving through its unpinned cargo-binstall fallback
-      # (rationale in core.yml). Compile the pinned version from crates.io;
-      # core.yml's replay job caches the same pin, but this workflow runs only on
-      # release tags and restores no cache that a non-tag run could have written
-      # (see the rust-cache note above), so it pays the compile. Keep the pin
-      # equal to core.yml's — version-freshness.yml enforces it.
+      # (rationale in core.yml). core.yml's replay job compiles the pinned version
+      # and OWNS the save of this cache entry on master; both keys must stay
+      # identical, as must the pin — version-freshness.yml enforces the pin.
+      # Restoring an EXECUTABLE is the one place cache poisoning would matter, so
+      # tag runs skip the restore and compile it, exactly as before.
+      - name: Restore the pinned cargo-fuzz binary (non-tag runs)
+        id: fuzz-bin
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-0.13.2
+
       - name: Install cargo-fuzz 0.13.2
+        if: ${{ steps.fuzz-bin.outputs.cache-hit != 'true' }}
         run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - name: Verify the committed fuzz lockfile is in sync
@@ -88,20 +184,469 @@ jobs:
         # cargo command up front; this also pre-fetches the deps for the build.
         run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
 
-      - name: Fresh-fuzz every target (120s each)
-        run: |
-          fail=0
-          for t in $TARGETS; do
-            echo "::group::fuzz $t"
-            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -max_total_time=120 $GUARDS -print_final_stats=1 || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+      # The accumulated corpus: everything earlier runs found that the committed
+      # seeds do not already cover. The key carries the run id so every save is a
+      # fresh entry (cache entries are immutable), and restore-keys picks the
+      # newest entry for this target — the standard rolling-cache shape. Per
+      # target, so ten legs cannot clobber each other.
+      #
+      # TRUST MODEL. This entry holds fuzzer INPUT BYTES, never anything
+      # executed: libFuzzer feeds each unit to the harness and the harness parses
+      # it, which is precisely the operation the whole tier exists to attack. A
+      # poisoned unit can therefore only cost time or fail the run — it cannot
+      # alter a build. That is why the tag leg may restore it while still
+      # refusing the build cache and the cargo-fuzz binary above. The tag leg
+      # never SAVES, so a release-adjacent run cannot promote whatever it
+      # accumulated into the shared scope; and only master-scoped runs (schedule
+      # and dispatch on master) write this key at all, since a pull request's
+      # caches are scoped to its own ref and are invisible here.
+      - name: Restore the accumulated corpus
+        id: corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/accumulated/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
 
-      - name: Upload crash artifacts
-        if: failure()
+      # What counts as an accumulated unit is decided by CONTENT, not by
+      # filename: libFuzzer's merge (which `cargo fuzz cmin` runs) writes every
+      # unit it keeps under the sha1 of its bytes, so a committed seed can come
+      # back from minimisation under a different name than the one git tracks.
+      # Hashing the tracked seeds up front — before anything touches the
+      # directory — makes the accounting immune to that.
+      - name: Seed the run with the accumulated corpus
+        id: seed
+        run: |
+          mkdir -p "fuzz/accumulated/$TARGET" "fuzz/corpus/$TARGET"
+          git ls-files -z -- "fuzz/corpus/$TARGET" | xargs -0 -r sha1sum | cut -c1-40 | sort -u > seed-hashes.txt
+          restored=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
+          seeds=$(wc -l < seed-hashes.txt)
+          # -n so a name collision can never overwrite a tracked seed; colliding
+          # names here mean identical bytes anyway, both being sha1-named.
+          find "fuzz/accumulated/$TARGET" -type f -exec cp -n -t "fuzz/corpus/$TARGET/" {} +
+          echo "restored=$restored" >> "$GITHUB_OUTPUT"
+          echo "seeds=$seeds" >> "$GITHUB_OUTPUT"
+          echo "$TARGET: $seeds committed seeds + $restored accumulated units"
+
+      # The per-target discovery flags come from fuzz/targets.txt (it documents
+      # its own columns); an empty cell there is a measured verdict, not an
+      # omission. -dict is resolved to an absolute path because libFuzzer reads
+      # it relative to the fuzz binary's own working directory, not this one.
+      #
+      # A crash must NOT abort the leg here: the steps below still have to
+      # minimise the reproducer, quarantine it, and leave the corpus cache in a
+      # state tomorrow's run can use. The leg is failed at the end instead.
+      - name: Fresh-fuzz ${{ matrix.target }}
+        id: run
+        run: |
+          flags=$(awk -v t="$TARGET" -v dir="$PWD/fuzz" '
+            !/^[[:space:]]*#/ && $1 == t {
+              if ($2 != "-") printf " -dict=%s/%s", dir, $2
+              if ($3 != "-") printf " -max_len=%s", $3
+            }' fuzz/targets.txt)
+          echo "budget ${FUZZ_SECONDS}s, guards $GUARDS, flags:${flags:- (none)}"
+          set +e
+          cargo +"$NIGHTLY" fuzz run "$TARGET" --target "$FUZZ_TARGET" -- \
+            -max_total_time="$FUZZ_SECONDS" $GUARDS $flags -print_final_stats=1 2>&1 | tee fuzz-run.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -eq 0 ]; then echo "$TARGET: clean"; else echo "$TARGET: exit $rc"; fi
+
+      # libFuzzer writes a crashing input to fuzz/artifacts/, never to the
+      # corpus — but a unit ALREADY in the corpus can start crashing after a code
+      # change, and that unit would then abort every future run at INITED and
+      # freeze discovery on this target forever. So drop any corpus unit whose
+      # BYTES match a crash artifact (matching on name would miss a committed
+      # seed, which carries a human-readable one). Dropping a committed seed here
+      # touches only this checkout; the -runs=0 replay gate is what reports that
+      # case, and it reports it on the next pull request either way. The evidence
+      # survives in the artifact and the issue. slow-unit-* files are excluded —
+      # libFuzzer writes those for a unit that merely approached -timeout, which
+      # is not a failure.
+      - name: Quarantine the crashing unit
+        id: crash
+        if: ${{ steps.run.outputs.rc != '0' }}
+        run: |
+          repro=$(find fuzz/artifacts -type f ! -name 'slow-unit-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+          find fuzz/artifacts -type f ! -name 'slow-unit-*' -print0 2>/dev/null | xargs -0 -r sha1sum | cut -c1-40 | sort -u > crash-hashes.txt
+          find "fuzz/corpus/$TARGET" -type f -print0 | xargs -0 -r sha1sum |
+            awk 'NR == FNR { bad[$1] = 1; next } ($1 in bad) { print substr($0, 43) }' crash-hashes.txt - |
+            while IFS= read -r f; do rm -f -- "$f"; echo "quarantined $f"; done
+          if [ -z "$repro" ]; then
+            # No artifact means the run failed before fuzzing (a build break, a
+            # missing toolchain); there is nothing to report but the log.
+            echo "no crash artifact — the run failed before it fuzzed"
+            echo "repro=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "reproducer: $repro"
+          # tmin is bounded: its default 255 attempts each cost up to -timeout
+          # seconds, so a hang would otherwise minimise for over an hour. Five
+          # minutes, then keep whatever it had.
+          timeout 300 cargo +"$NIGHTLY" fuzz tmin "$TARGET" --target "$FUZZ_TARGET" "$repro" -- $GUARDS || echo "tmin did not finish; keeping the raw reproducer"
+          min=$(find "fuzz/artifacts/$TARGET" -maxdepth 1 -type f -name 'minimized-from-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
+          [ -n "$min" ] && repro="$min"
+          echo "repro=$repro" >> "$GITHUB_OUTPUT"
+
+      # Minimisation policy for the ACCUMULATED corpus (D8 left the committed
+      # one alone and handed this one here): minimise the union of the seeds and
+      # everything restored, then keep only what is not already tracked. The
+      # cache therefore holds units that add a feature the committed seeds do
+      # not, which is what bounds its growth; and once a human commits them, the
+      # same units become tracked, drop out of the "new" set, and the growth
+      # issue closes itself. The committed corpus is never rewritten — the
+      # runner's checkout is scratch and nothing is pushed from here.
+      - name: Minimise and collect the new units
+        id: collect
+        if: ${{ !cancelled() }}
+        run: |
+          # Every corpus file whose bytes are not in the committed seed set.
+          new_units() {
+            find "fuzz/corpus/$TARGET" -type f -print0 | xargs -0 -r sha1sum |
+              awk 'NR == FNR { seen[$1] = 1; next } !($1 in seen) { print substr($0, 43) }' seed-hashes.txt -
+          }
+          grown=$(new_units | wc -l)
+          cargo +"$NIGHTLY" fuzz cmin "$TARGET" --target "$FUZZ_TARGET" -- $GUARDS || echo "cmin failed; keeping the corpus un-minimised"
+          rm -rf "fuzz/accumulated/$TARGET"
+          mkdir -p "fuzz/accumulated/$TARGET"
+          new_units | while IFS= read -r f; do cp -- "$f" "fuzz/accumulated/$TARGET/"; done
+          new=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
+          echo "grown=$grown" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "$TARGET: $grown new units before cmin, $new after"
+
+      - name: Record this leg's numbers
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          RESTORED: ${{ steps.seed.outputs.restored }}
+          SEEDS: ${{ steps.seed.outputs.seeds }}
+          GROWN: ${{ steps.collect.outputs.grown }}
+          NEW: ${{ steps.collect.outputs.new }}
+          RC: ${{ steps.run.outputs.rc }}
+          REPRO: ${{ steps.crash.outputs.repro }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          $log = if (Test-Path fuzz-run.log) { Get-Content -Raw fuzz-run.log } else { '' }
+          # libFuzzer's last progress line carries the run's final figures:
+          # `#N DONE cov: 1696 ft: 5719 corp: 402/15Mb ... exec/s: 720 ...`.
+          $cov = if ($log -match '(?s).*\bcov:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+          $ft = if ($log -match '(?s).*\bft:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+          $execs = if ($log -match '(?s).*\bexec/s:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+          $stats = [ordered]@{
+            target = $env:TARGET
+            seconds = [int]$env:FUZZ_SECONDS
+            seeds = [int]$env:SEEDS
+            restored = [int]$env:RESTORED
+            grown = [int]$env:GROWN
+            new = [int]$env:NEW
+            cov = $cov
+            ft = $ft
+            execs_per_sec = $execs
+            rc = [int]$env:RC
+          }
+          $stats | ConvertTo-Json | Set-Content result/stats.json
+          @(
+            "### $($env:TARGET)"
+            ''
+            "$($env:SEEDS) committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
+          ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+          if (-not $env:REPRO) { exit 0 }
+
+          # The crash's SIGNATURE, not the reproducer's hash, is what one issue
+          # is filed per (D3 as amended): tmin is not canonical, so the same bug
+          # minimises to different bytes on different nights and a hash key would
+          # file a duplicate every time. A panic keys on its source location plus
+          # its message with digit runs folded to N — so one out-of-bounds bug
+          # does not file an issue per index value, while two different messages
+          # at one location still separate. A guard kill carries no panic, so it
+          # keys on the target and which guard fired; the reproducer's hash is
+          # then only a tiebreaker in the body, because a hash key here would
+          # file a fresh issue for every input that hangs the same way.
+          $kind = 'unknown'; $where = ''; $message = ''
+          if ($log -match "(?m)^thread '[^']*' panicked at ([^\r\n]+):\r?\n([^\r\n]*)") {
+            $kind = 'panic'; $where = $Matches[1].Trim(); $message = $Matches[2].Trim()
+          }
+          elseif ($log -match 'ERROR: libFuzzer: timeout') { $kind = 'timeout' }
+          elseif ($log -match 'ERROR: libFuzzer: out-of-memory') { $kind = 'out-of-memory' }
+          elseif ($log -match 'ERROR: libFuzzer: deadly signal') { $kind = 'deadly-signal' }
+          $key = if ($kind -eq 'panic') { "panic|$where|$(($message -replace '\d+', 'N'))" } else { "$kind|$($env:TARGET)" }
+          $sha = [System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($key))
+          $signature = -join ($sha[0..7] | ForEach-Object { $_.ToString('x2') })
+
+          $bytes = [IO.File]::ReadAllBytes($env:REPRO)
+          Copy-Item $env:REPRO result/repro.bin
+          $crash = [ordered]@{
+            target = $env:TARGET
+            kind = $kind
+            where = $where
+            message = $message
+            key = $key
+            signature = $signature
+            repro_name = (Split-Path -Leaf $env:REPRO)
+            repro_bytes = $bytes.Length
+            repro_sha1 = (Get-FileHash $env:REPRO -Algorithm SHA1).Hash.ToLower()
+            # Inlined so the evidence outlives the artifact: artifacts expire
+            # after 90 days and a crash issue routinely outlives that wait for
+            # its fix, while a tmin'd unit is small enough to paste. Skipped
+            # above 16 KiB, which no minimised unit has reached.
+            repro_base64 = if ($bytes.Length -le 16384) { [Convert]::ToBase64String($bytes) } else { $null }
+            log_tail = ($log -split "`n" | Select-Object -Last 40) -join "`n"
+            run_url = $env:RUN_URL
+          }
+          $crash | ConvertTo-Json | Set-Content result/crash.json
+          Write-Host "crash signature $signature ($kind)"
+
+      - name: Upload this leg's result
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-crashes
-          path: fuzz/artifacts/
+          name: fuzz-result-${{ matrix.target }}
+          path: result/
           if-no-files-found: ignore
+
+      # The units a human can promote into the committed regression set: unzip
+      # into fuzz/corpus/<target>/ and open a pull request.
+      - name: Upload the new corpus units
+        if: ${{ !cancelled() && steps.collect.outputs.new != '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/accumulated/${{ matrix.target }}/
+          if-no-files-found: ignore
+
+      # Saved even when the leg failed, and deliberately: a crash must not cost
+      # tomorrow's run the corpus (the crashing unit itself was quarantined
+      # above). Not saved from a tag run — see the trust model on the restore.
+      # Skipped when the minimised difference is empty, because cache/save
+      # rejects an empty path; the previous entry then stays, which is correct:
+      # its units are still valid discoveries and the next run re-minimises them.
+      - name: Save the accumulated corpus
+        if: ${{ !cancelled() && github.event_name != 'push' && steps.collect.outputs.new != '0' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/accumulated/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Fail the leg on a crash
+        if: ${{ steps.run.outputs.rc != '0' }}
+        env:
+          RC: ${{ steps.run.outputs.rc }}
+        run: |
+          echo "$TARGET exited $RC — see the crash issue and the fuzz-result-$TARGET artifact"
+          exit 1
+
+  # One issue per distinct crash signature, plus ONE rolling issue for corpus
+  # growth. Modelled on sweep.yml's report job — same `gh label create --force`,
+  # same edit-or-create over `gh issue list --json number` — with a different
+  # policy, and fanned in rather than filed per leg so two targets that hit the
+  # same bug in the same run cannot race each other into two issues.
+  #
+  # FILING happens on schedule and on tags, not on a plain dispatch: sweep.yml's
+  # rule is that a human who pressed the button is already reading the log, and
+  # that reason covers dispatch only — a tag push is as unattended as a cron, and
+  # a crash on a release tag is the last one that should go unfiled. The
+  # file_issues input exists so the filing path itself can be exercised
+  # deliberately; an issue-filing path first executed by a real crash at 3 a.m.
+  # is an untested path.
+  report:
+    name: crash + growth issues
+    needs: [targets, deep]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      # gh cache delete, for pruning this workflow's own superseded corpus
+      # entries (see the prune step).
+      actions: write
+    steps:
+      - name: Download every leg's result
+        # No artifacts at all means every leg died before its stats upload; those
+        # legs are red already and a second red job would only add noise.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fuzz-result-*
+          path: results
+
+      - name: File the crash issues and refresh the growth issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so gh has no git remote to infer the repo
+          # from — name it explicitly.
+          GH_REPO: ${{ github.repository }}
+          FILE_ISSUES: ${{ github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.file_issues) }}
+          SAVES_CORPUS: ${{ github.event_name != 'push' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $stats = @()
+          $crashes = @()
+          if (Test-Path results) {
+            $stats = @(Get-ChildItem results -Recurse -Filter stats.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
+            $crashes = @(Get-ChildItem results -Recurse -Filter crash.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
+          }
+          $rows = @($stats | Sort-Object target | ForEach-Object {
+            "| $($_.target) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.cov) | $($_.ft) | $($_.execs_per_sec) |"
+          })
+          # [int] on purpose: Measure-Object sums an empty set to $null, and
+          # $null is not 0, so an artifact-less run would otherwise file a
+          # growth issue with a blank count.
+          $totalNew = [int](($stats | Measure-Object -Property new -Sum).Sum)
+          $totalRestored = [int](($stats | Measure-Object -Property restored -Sum).Sum)
+          @(
+            '## Discovery pass'
+            ''
+            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target. Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds."
+            ''
+            '| target | seeds | restored | new | cov | ft | exec/s |'
+            '|---|---|---|---|---|---|---|'
+            $rows
+          ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          if ($env:FILE_ISSUES -ne 'true') {
+            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); new units: $totalNew."
+            exit 0
+          }
+
+          # --- one issue per distinct crash signature ------------------------
+          # Only OPEN issues are matched. A human closes a crash issue with the
+          # fix, and a signature that reappears afterwards is a regression that
+          # deserves its own issue rather than a reopened one. Nothing here ever
+          # closes a crash issue: unlike a red sweep, a crash that stops
+          # reproducing is not evidence of a fix — the fuzzer may simply not have
+          # replayed that input.
+          if ($crashes.Count -gt 0) {
+            gh label create fuzz-crash --color b60205 --description 'A fuzz target crashed, hung, or blew its memory guard' --force | Out-Null
+          }
+          foreach ($group in ($crashes | Group-Object signature)) {
+            $c = $group.Group[0]
+            $targets = (@($group.Group | ForEach-Object { "``$($_.target)``" } | Sort-Object -Unique) -join ', ')
+            $marker = "<!-- fuzz-signature: $($c.signature) -->"
+            $headline = if ($c.kind -eq 'panic') { "$($c.message) at $($c.where)" } else { "$($c.kind) in $($c.target)" }
+            $title = "fuzz: $headline"
+            if ($title.Length -gt 120) { $title = $title.Substring(0, 117) + '...' }
+            $repro = if ($c.repro_base64) {
+              @(
+                'Reproducer (base64, inlined so it outlives the 90-day artifact retention):'
+                ''
+                '```'
+                $c.repro_base64
+                '```'
+                ''
+                '```sh'
+                "base64 -d > repro.bin <<'EOF'"
+                $c.repro_base64
+                'EOF'
+                "cargo +nightly fuzz run $($c.target) repro.bin"
+                '```'
+              )
+            }
+            else {
+              @("The reproducer is $($c.repro_bytes) bytes — too large to inline; take it from the artifact below.")
+            }
+            $body = @(
+              $marker
+              "**Target(s):** $targets"
+              "**Kind:** $($c.kind)"
+              $(if ($c.where) { "**Where:** ``$($c.where)``" })
+              $(if ($c.message) { "**Message:** $($c.message)" })
+              "**Reproducer:** ``$($c.repro_name)``, $($c.repro_bytes) bytes, sha1 ``$($c.repro_sha1)`` — artifact ``fuzz-result-$($c.target)`` of $env:RUN_URL"
+              ''
+              $repro
+              ''
+              '<details><summary>Last 40 lines of the run</summary>'
+              ''
+              '```'
+              $c.log_tail
+              '```'
+              ''
+              '</details>'
+              ''
+              'This issue is keyed on the crash signature, so the nightly pass refreshes it rather than filing again. Close it with the fix: a later green run is not evidence, because the fuzzer need not have replayed this input.'
+            ) | Where-Object { $null -ne $_ }
+            $body = ($body -join "`n")
+            $existing = gh issue list --state open --label fuzz-crash --limit 200 --json 'number,body' --jq "map(select(.body | contains(`"$marker`"))) | .[0].number"
+            if ($existing) {
+              gh issue edit $existing --title $title --body $body | Out-Null
+              Write-Host "Refreshed issue #$existing ($($c.signature))"
+            }
+            else {
+              gh issue create --title $title --body $body --label fuzz-crash | Out-Null
+              Write-Host "Filed a crash issue ($($c.signature))"
+            }
+          }
+
+          # --- one rolling issue for corpus growth ---------------------------
+          # Tag runs do not save the corpus cache, so they have nothing to
+          # promote and must not touch this issue.
+          if ($env:SAVES_CORPUS -ne 'true') { exit 0 }
+          gh label create fuzz-corpus --color 0e8a16 --description 'Fuzz corpus growth awaiting review' --force | Out-Null
+          $open = gh issue list --state open --label fuzz-corpus --json number --jq '.[0].number'
+          if ($totalNew -eq 0) {
+            if ($open) {
+              gh issue close $open --comment "The accumulated corpus adds nothing over the committed seeds: $env:RUN_URL" | Out-Null
+              Write-Host "Closed issue #$open"
+            }
+            exit 0
+          }
+          $grownRows = @($stats | Where-Object { $_.new -gt 0 } | Sort-Object target | ForEach-Object {
+            "| ``$($_.target)`` | $($_.new) | ``fuzz-corpus-$($_.target)`` |"
+          })
+          $title = "Fuzz corpus: $totalNew unit(s) beyond the committed seeds"
+          $body = @(
+            "The nightly discovery pass has accumulated $totalNew unit(s) that the committed seed corpus does not cover. They live in this workflow's per-target Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
+            ''
+            '| target | units | artifact |'
+            '|---|---|---|'
+            $grownRows
+            ''
+            "Latest run: $env:RUN_URL"
+            ''
+            'To promote them into the regression set:'
+            ''
+            '```sh'
+            "gh run download $($env:RUN_URL -replace '.*/', '') --pattern 'fuzz-corpus-*' --dir /tmp/grown"
+            '# then copy each /tmp/grown/fuzz-corpus-<target>/* into fuzz/corpus/<target>/ and open a PR'
+            '```'
+            ''
+            'This is one rolling issue, edited after every pass. It closes itself once the accumulated corpus adds nothing over the committed seeds — which is what happens the night after the units above are merged.'
+          ) -join "`n"
+          if ($open) {
+            gh issue edit $open --title $title --body $body | Out-Null
+            Write-Host "Updated issue #$open"
+          }
+          else {
+            gh issue create --title $title --body $body --label fuzz-corpus | Out-Null
+            Write-Host 'Filed the corpus-growth issue'
+          }
+
+      # Every pass writes ten NEW cache entries (the key carries the run id,
+      # because cache entries are immutable), and a superseded entry is never
+      # restored again — restore-keys always picks the newest. Left alone they
+      # would sit in the repository's 10 GB store for the full 7-day retention,
+      # seven passes deep, evicting caches a pull request needs. Delete every
+      # entry but the newest per target.
+      - name: Prune superseded corpus caches
+        if: ${{ github.event_name != 'push' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $caches = @(gh cache list --key fuzz-corpus- --limit 100 --json 'id,key,createdAt,sizeInBytes' | ConvertFrom-Json)
+          $groups = @($caches | Group-Object { $_.key -replace '-\d+$', '' })
+          $kept = 0
+          foreach ($group in $groups) {
+            $ordered = @($group.Group | Sort-Object { [datetime]$_.createdAt } -Descending)
+            $kept += $ordered[0].sizeInBytes
+            foreach ($stale in ($ordered | Select-Object -Skip 1)) {
+              gh cache delete $stale.id | Out-Null
+              Write-Host "deleted $($stale.key)"
+            }
+          }
+          Write-Host "kept $([math]::Round($kept / 1MB, 1)) MB of corpus cache across $($groups.Count) target(s)"
