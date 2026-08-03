@@ -9,9 +9,23 @@
 //! no-hang contract on hostile discs, end to end: discovery → index → MPLS /
 //! CLPI → M2TS demux → measured summaries → `report::text::render`.
 //!
-//! Input framing: a sequence of `u16` big-endian length-prefixed sections,
-//! assigned in fixed order to the six files above; missing sections leave the
-//! file absent (exercising the resilient-open absence paths too).
+//! Input framing: a sequence of `u32` big-endian length-prefixed sections,
+//! assigned in fixed order to the six files above and then to a seventh,
+//! `STREAM/SSIF/00000.ssif`; missing sections leave the file absent (exercising
+//! the resilient-open absence paths too).
+//!
+//! The width is `u32` to match the framing `bdinfo-rs-wasm`'s `scan_report`
+//! export reads, so a seed means the same six files to both harnesses and
+//! neither has to carry its own corpus dialect. It also lifts the 65,535-byte
+//! per-section ceiling a `u16` prefix imposes, which is what a megabyte-scale
+//! `*.m2ts` section needs to be expressible at all.
+//!
+//! The seventh section is this target's own extension: the browser export reads
+//! six and ignores anything past them, so seeds stay portable in both
+//! directions. It exists because a `BDMV/STREAM/SSIF` directory is what makes a
+//! disc 3D, and with no way to express one the interleaved-stream handling and
+//! every `is_3d` branch behind it were unreachable from this harness. Absent
+//! when the seed supplies no seventh section, so the 2D shape is unchanged.
 
 use std::io::{self, BufRead, BufReader, Cursor};
 use std::sync::Arc;
@@ -141,14 +155,14 @@ fn file(dir: &str, name: &str, data: Vec<u8>) -> MemFile {
     MemFile { name: name.to_owned(), full: format!("{dir}/{name}"), data: Arc::new(data) }
 }
 
-/// Splits `data` into up to six `u16`-BE length-prefixed sections and builds
+/// Splits `data` into up to seven `u32`-BE length-prefixed sections and builds
 /// the synthetic disc tree around them.
 fn build_tree(data: &[u8]) -> MemDir {
     let mut sections: Vec<Vec<u8>> = Vec::new();
     let mut rest = data;
-    while sections.len() < 6 {
-        let Some((len_bytes, tail)) = rest.split_first_chunk::<2>() else { break };
-        let want = usize::from(u16::from_be_bytes(*len_bytes));
+    while sections.len() < 7 {
+        let Some((len_bytes, tail)) = rest.split_first_chunk::<4>() else { break };
+        let want = u32::from_be_bytes(*len_bytes) as usize;
         let take = want.min(tail.len());
         sections.push(tail[..take].to_vec());
         rest = &tail[take..];
@@ -165,6 +179,7 @@ fn build_tree(data: &[u8]) -> MemDir {
     let clpi = take();
     let m2ts = take();
     let xml = take();
+    let ssif = next.next();
 
     let playlist = MemDir {
         name: "PLAYLIST".to_owned(),
@@ -178,9 +193,20 @@ fn build_tree(data: &[u8]) -> MemDir {
         files: vec![file("FUZZDISC/BDMV/CLIPINF", "00000.clpi", clpi)],
         ..MemDir::default()
     };
+    // A `STREAM/SSIF` directory holding a file is what marks the disc 3D, so the
+    // directory exists only when the seed supplied a seventh section.
+    let ssif_dirs = ssif.map_or_else(Vec::new, |bytes| {
+        vec![MemDir {
+            name: "SSIF".to_owned(),
+            full: "FUZZDISC/BDMV/STREAM/SSIF".to_owned(),
+            files: vec![file("FUZZDISC/BDMV/STREAM/SSIF", "00000.ssif", bytes)],
+            ..MemDir::default()
+        }]
+    });
     let stream = MemDir {
         name: "STREAM".to_owned(),
         full: "FUZZDISC/BDMV/STREAM".to_owned(),
+        dirs: ssif_dirs,
         files: vec![file("FUZZDISC/BDMV/STREAM", "00000.m2ts", m2ts)],
         ..MemDir::default()
     };
