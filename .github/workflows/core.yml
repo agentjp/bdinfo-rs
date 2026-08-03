@@ -550,9 +550,6 @@ jobs:
     # which an arm64 host cannot execute.
     runs-on: ubuntu-latest
     env:
-      # The 10 libFuzzer targets (fuzz/Cargo.toml). Keep in lockstep with it and
-      # with scripts/fuzz-docker.sh + fuzz.yml.
-      TARGETS: read_be discovery bitstream clpi mpls m2ts codec udf source parse_report
       # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
       # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
       # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
@@ -598,10 +595,19 @@ jobs:
         # cargo command up front; this also pre-fetches the deps for the build.
         run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
 
+      # The target list comes from fuzz/targets.txt — the one place it lives,
+      # read the same way by fuzz.yml and scripts/fuzz-docker.sh, so adding a
+      # target cannot leave this gate silently replaying nine of ten. The
+      # per-target discovery flags in the other columns are deliberately NOT
+      # read here: a dictionary steers mutation and there is none at zero runs,
+      # and -max_len DROPS an over-long seed rather than truncating it, which
+      # would quietly shrink the regression set this job exists to hold.
       - name: Replay the committed corpus through every target
         run: |
+          targets=$(awk '!/^[[:space:]]*#/ && NF { print $1 }' fuzz/targets.txt)
+          [ -n "$targets" ] || { echo "no targets in fuzz/targets.txt"; exit 1; }
           fail=0
-          for t in $TARGETS; do
+          for t in $targets; do
             echo "::group::replay $t"
             cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
             echo "::endgroup::"

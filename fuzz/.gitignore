@@ -1,5 +1,8 @@
 # cargo-fuzz build output + crash artifacts (regenerated). The seed CORPUS under
-# corpus/ IS committed (it's the regression replay set).
+# corpus/ IS committed (it's the regression replay set); accumulated/ is the
+# nightly discovery pass's scratch copy of what it found beyond those seeds,
+# restored from and saved to an Actions cache and never committed by CI.
 /target
 /artifacts
 /coverage
+/accumulated

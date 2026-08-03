@@ -167,7 +167,8 @@ the affected gate jobs run. The full set:
   selected restriction set.
 - **Coverage** — 100% lines, regions, and functions on the library, plus branch-coverage floors.
 - **Mutation testing** on the diff, and a full sweep daily and on every release tag.
-- **Fuzzing** — the committed seed corpus is replayed on every pull request; release tags fresh-fuzz.
+- **Fuzzing** — the committed seed corpus is replayed on every pull request; fresh fuzzing runs
+  nightly over a corpus that persists between runs, and again on every release tag.
 - **typos**, **machete** and **shear** (unused dependencies), and a **doc** build with warnings as
   errors.
 - **cargo-semver-checks** against the last release tag — the library API is SemVer-stable.
