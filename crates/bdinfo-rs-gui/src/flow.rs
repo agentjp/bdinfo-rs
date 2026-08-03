@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
-use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+use bdinfo_rs_core::bdrom::order::{PlaylistFilter, selection_order, selection_stream_files};
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
@@ -31,7 +31,7 @@ use crate::model::{
 use crate::panes::{self, CodecRow, StreamFileRow};
 use crate::progress::ProgressModel;
 use crate::scan::{Input, Structural};
-use crate::selection::{self, Selection};
+use crate::selection::Selection;
 
 /// The coarse stage the window is in — the discriminant the iced `view` branches
 /// on before reading the stage-specific accessors.
@@ -283,7 +283,7 @@ impl Listing {
     /// pre-scan "View Report". (Structural warnings surface in the UI's banner,
     /// so the report's `WARNING` block is left to the measured scan.)
     fn render_structural(&self) -> String {
-        let order = selection::selection_order(&self.bdrom.playlists, &self.scan_names());
+        let order = selection_order(&self.bdrom.playlists, &self.scan_names());
         text::render_with(&self.bdrom, &order, &[], self.view.render_options())
     }
 
@@ -294,7 +294,7 @@ impl Listing {
     /// playlists into `bdrom`, so this reproduces the worker's render — the
     /// road a report-section toggle re-renders on, with no rescan.
     fn render_measured(&self, scanned: &[String], errors: &[ScanError]) -> String {
-        let order = selection::selection_order(&self.bdrom.playlists, scanned);
+        let order = selection_order(&self.bdrom.playlists, scanned);
         text::render_with(&self.bdrom, &order, errors, self.view.render_options())
     }
 }
@@ -815,7 +815,7 @@ impl Flow {
         // listing with at least one row.
         let listing = self.editable_listing().filter(|listing| !listing.rows.is_empty())?;
         let selection = listing.scan_names();
-        let scan_files = selection::selection_stream_files(&listing.bdrom.playlists, &selection);
+        let scan_files = selection_stream_files(&listing.bdrom.playlists, &selection);
         Some(ScanRequest {
             input: listing.input.clone(),
             selection,

@@ -3,18 +3,14 @@
 //! The window lists the standard filtered playlist rows ([`crate::model`]); the
 //! user checks the ones to measure, and the measured scan is narrowed to exactly
 //! those playlists' clips. This module is the pure half of that: a [`Selection`]
-//! of one flag per row (`toggle` / `set_all` / `clear`) plus the two derivations
-//! the measured scan needs — the **selected clip set**
-//! ([`selection_stream_files`]) and the report **order** ([`selection_order`]),
-//! reimplemented over the public core types exactly as the CLI (`main.rs`) and
-//! the wasm crate do (the GUI cannot import the CLI binary's private helpers).
+//! of one flag per row (`toggle` / `set_all` / `clear`). The two derivations the
+//! measured scan needs — the selected clip set and the report order — are
+//! [`bdinfo_rs_core::bdrom::order::selection_stream_files`] and
+//! [`bdinfo_rs_core::bdrom::order::selection_order`] over the checked rows'
+//! names ([`Selection::selected_names`]).
 //!
 //! No widgets, no IO: plain data in, plain data out, so the iced shell is a thin
 //! projection.
-
-use std::collections::BTreeSet;
-
-use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 
 use crate::model::PlaylistRow;
 
@@ -108,38 +104,11 @@ impl Selection {
     }
 }
 
-/// The stream files a selection's packet scan reads: every clip of every selected
-/// playlist. Mirrors the CLI's / wasm crate's `selection_stream_files` — the
-/// `scan_files` set that narrows [`bdinfo_rs_core::bdrom::disc::BdRom::open_resilient_with`]
-/// so an unselected (possibly multi-GB) playlist is never demuxed.
-pub fn selection_stream_files(
-    playlists: &[PlaylistSummary],
-    selection: &[String],
-) -> BTreeSet<String> {
-    let mut files = BTreeSet::new();
-    for name in selection {
-        if let Some(playlist) = playlists.iter().find(|playlist| &playlist.name == name) {
-            files.extend(playlist.clips.iter().map(|clip| clip.name.clone()));
-        }
-    }
-    files
-}
-
-/// The report's playlist order for a selection: each selected name mapped to its
-/// index into the scanned disc's playlists, in selection order (an unknown name
-/// is skipped). Mirrors the CLI's / wasm crate's `selection_order`.
-pub fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<usize> {
-    selection
-        .iter()
-        .filter_map(|name| playlists.iter().position(|playlist| &playlist.name == name))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
 
-    use super::{Selection, selection_order, selection_stream_files};
+    use super::Selection;
     use crate::model::playlist_rows;
 
     /// A `ClipSummary` carrying just a name (the field the selection reads).
@@ -278,38 +247,6 @@ mod tests {
         selection.toggle(2); // 00002
         selection.toggle(0); // 00000
         assert_eq!(selection.selected_names(&rows), ["00000.MPLS", "00002.MPLS"]);
-    }
-
-    #[test]
-    fn stream_files_are_the_selected_playlists_clips() {
-        let files = selection_stream_files(&disc(), &["00002.MPLS".to_owned()]);
-        // A BTreeSet — sorted + deduped, the scan_files contract.
-        assert_eq!(files.into_iter().collect::<Vec<_>>(), ["B.M2TS", "C.M2TS"]);
-    }
-
-    #[test]
-    fn stream_files_dedupe_a_shared_clip() {
-        // 00000 and 00001 share clip A — selecting both yields it once.
-        let files =
-            selection_stream_files(&disc(), &["00000.MPLS".to_owned(), "00001.MPLS".to_owned()]);
-        assert_eq!(files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
-    }
-
-    #[test]
-    fn stream_files_skip_an_unknown_name() {
-        assert!(selection_stream_files(&disc(), &["99999.MPLS".to_owned()]).is_empty());
-    }
-
-    #[test]
-    fn order_maps_names_to_indices_in_selection_order() {
-        let order = selection_order(&disc(), &["00002.MPLS".to_owned(), "00000.MPLS".to_owned()]);
-        assert_eq!(order, [2, 0]);
-    }
-
-    #[test]
-    fn order_skips_an_unknown_name() {
-        let order = selection_order(&disc(), &["99999.MPLS".to_owned(), "00001.MPLS".to_owned()]);
-        assert_eq!(order, [1]);
     }
 
     // The selection model formats hostile-shaped input (any row count, any

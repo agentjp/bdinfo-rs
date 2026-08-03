@@ -16,11 +16,41 @@
 //! The result is a list of indices into the playlist slice, so callers keep
 //! the name-ordered [`crate::bdrom::disc::BdRom::playlists`] untouched and
 //! apply the presentation order on top.
+//!
+//! The projections every surface builds on that order live here too:
+//! [`table_rows`] (the grouped rows a selection table prints),
+//! [`selection_order`] and [`selection_stream_files`] (what a by-name
+//! selection renders and reads), and the [`HiddenRule`] classification behind
+//! the filter switches.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use super::disc::PlaylistSummary;
+
+/// One reason the playlist filter can withhold a playlist from the
+/// presentation order — what a surface names when it reports a hidden
+/// playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenRule {
+    /// Strictly shorter than the threshold in force — a playlist of exactly
+    /// the threshold length matches no rule.
+    Short,
+    /// Repeats a clip ([`PlaylistSummary::has_loops`]).
+    Looping,
+}
+
+impl HiddenRule {
+    /// The rule's user-facing name, `"short"` or `"looping"` — the string
+    /// every surface prints in its hidden-playlist line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Looping => "looping",
+        }
+    }
+}
 
 /// The playlist filter switches for the presentation order. The defaults drop
 /// short and looping playlists — the standard report behaviour;
@@ -58,13 +88,38 @@ impl PlaylistFilter {
         }
     }
 
-    /// Whether `playlist` passes this filter.
+    /// The rules that match `playlist`, in declaration order
+    /// ([`HiddenRule::Short`] first). Judged against
+    /// [`short_playlist_seconds`](Self::short_playlist_seconds) alone — the
+    /// two switches play no part, so the classification is the same whether
+    /// the caller lists the standard set or a widened one, and a caller
+    /// holding it can re-apply either rule itself.
+    #[must_use]
+    pub fn classify(&self, playlist: &PlaylistSummary) -> Vec<HiddenRule> {
+        let mut rules = Vec::new();
+        if playlist.total_length < self.short_playlist_seconds {
+            rules.push(HiddenRule::Short);
+        }
+        if playlist.has_loops {
+            rules.push(HiddenRule::Looping);
+        }
+        rules
+    }
+
+    /// Whether `playlist` passes this filter: true exactly when no rule in
+    /// [`classify`](Self::classify) has its filter switch on.
     #[must_use]
     pub fn keeps(&self, playlist: &PlaylistSummary) -> bool {
-        if self.filter_short_playlists && playlist.total_length < self.short_playlist_seconds {
-            return false;
+        !self.classify(playlist).into_iter().any(|rule| self.drops(rule))
+    }
+
+    /// Whether this filter's switch for `rule` is on — a matching playlist
+    /// is withheld.
+    const fn drops(&self, rule: HiddenRule) -> bool {
+        match rule {
+            HiddenRule::Short => self.filter_short_playlists,
+            HiddenRule::Looping => self.filter_looping_playlists,
         }
-        !(self.filter_looping_playlists && playlist.has_loops)
     }
 }
 
@@ -128,11 +183,60 @@ pub fn presentation_order(playlists: &[PlaylistSummary], filter: &PlaylistFilter
     presentation_groups(playlists, filter).into_iter().flatten().collect()
 }
 
+/// The playlist table rows as `(group number, playlist index)` pairs in table
+/// order.
+///
+/// [`presentation_groups`] flattened, each member paired with its group's
+/// 1-based number — the form a selection table prints.
+#[must_use]
+pub fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(usize, usize)> {
+    presentation_groups(playlists, filter)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(group, members)| {
+            members.into_iter().map(move |index| (group.saturating_add(1), index))
+        })
+        .collect()
+}
+
+/// The stream files a selection's packet scan reads: every clip of every
+/// selected playlist.
+///
+/// Sorted and deduplicated — a clip two selected playlists share is read
+/// once, and an unknown name contributes nothing.
+#[must_use]
+pub fn selection_stream_files(
+    playlists: &[PlaylistSummary],
+    selection: &[String],
+) -> BTreeSet<String> {
+    let mut files = BTreeSet::new();
+    for name in selection {
+        if let Some(playlist) = playlists.iter().find(|playlist| &playlist.name == name) {
+            files.extend(playlist.clips.iter().map(|clip| clip.name.clone()));
+        }
+    }
+    files
+}
+
+/// The report's playlist order for a selection: each selected name mapped to
+/// its index into `playlists`, in selection order — a repeated name renders
+/// its playlist again, an unknown name is skipped.
+#[must_use]
+pub fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> Vec<usize> {
+    selection
+        .iter()
+        .filter_map(|name| playlists.iter().position(|playlist| &playlist.name == name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
-    use super::{PlaylistFilter, presentation_groups, presentation_order};
+    use super::{
+        HiddenRule, PlaylistFilter, presentation_groups, presentation_order, selection_order,
+        selection_stream_files, table_rows,
+    };
     use crate::bdrom::disc::{ClipSummary, PlaylistSummary};
 
     /// A playlist summary carrying only what the presentation order reads:
@@ -259,6 +363,110 @@ mod tests {
     }
 
     #[test]
+    fn table_rows_pair_each_playlist_with_its_group_number() {
+        // A (100 s) and B (50 s) share a clip — group 1; C (70 s) is group 2;
+        // the 5 s D is dropped by the default filter.
+        let playlists = [
+            playlist("A.MPLS", 100.0, false, &["X.M2TS", "Y.M2TS"]),
+            playlist("B.MPLS", 50.0, false, &["Y.M2TS"]),
+            playlist("C.MPLS", 70.0, false, &["Z.M2TS"]),
+            playlist("D.MPLS", 5.0, false, &["W.M2TS"]),
+        ];
+        assert_eq!(table_rows(&playlists, &PlaylistFilter::default()), [(1, 0), (1, 1), (2, 2)]);
+        assert!(table_rows(&[], &PlaylistFilter::default()).is_empty());
+    }
+
+    #[test]
+    fn table_rows_follow_the_given_filter() {
+        let playlists = [
+            playlist("00001.MPLS", 3600.0, true, &["X.M2TS"]),
+            playlist("00002.MPLS", 5.0, false, &["Y.M2TS"]),
+            playlist("00003.MPLS", 60.0, false, &["Z.M2TS"]),
+        ];
+        // The default filter leaves only the plain 60-second playlist…
+        assert_eq!(table_rows(&playlists, &PlaylistFilter::default()), [(1, 2)]);
+        // …turning off one rule admits exactly that rule's playlist, which
+        // shares no clip with the keeper, so it opens its own group…
+        let keep_loops =
+            PlaylistFilter { filter_looping_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(table_rows(&playlists, &keep_loops), [(1, 0), (2, 2)]);
+        let keep_short =
+            PlaylistFilter { filter_short_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(table_rows(&playlists, &keep_short), [(1, 2), (2, 1)]);
+        // …and turning off both lists the whole disc.
+        assert_eq!(table_rows(&playlists, &PlaylistFilter::everything()).len(), 3);
+    }
+
+    /// A three-playlist disc for the selection projections: 00000 and 00001
+    /// share clip A; 00002 reads clips B and C.
+    fn selection_disc() -> [PlaylistSummary; 3] {
+        [
+            playlist("00000.MPLS", 100.0, false, &["A.M2TS"]),
+            playlist("00001.MPLS", 50.0, false, &["A.M2TS"]),
+            playlist("00002.MPLS", 70.0, false, &["B.M2TS", "C.M2TS"]),
+        ]
+    }
+
+    #[test]
+    fn stream_files_union_the_selected_clips_once() {
+        let files = selection_stream_files(&selection_disc(), &["00002.MPLS".to_owned()]);
+        assert_eq!(files.into_iter().collect::<Vec<_>>(), ["B.M2TS", "C.M2TS"]);
+        // A shared clip lands once, and an unknown name contributes nothing.
+        let files = selection_stream_files(
+            &selection_disc(),
+            &["00000.MPLS".to_owned(), "00001.MPLS".to_owned(), "99999.MPLS".to_owned()],
+        );
+        assert_eq!(files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
+        assert!(selection_stream_files(&selection_disc(), &[]).is_empty());
+    }
+
+    #[test]
+    fn selection_order_repeats_a_pick_and_skips_an_unknown_name() {
+        let selection = ["00002.MPLS".to_owned(), "00000.MPLS".to_owned(), "00002.MPLS".to_owned()];
+        assert_eq!(selection_order(&selection_disc(), &selection), [2, 0, 2]);
+        assert_eq!(selection_order(&selection_disc(), &["99999.MPLS".to_owned()]), [0_usize; 0]);
+    }
+
+    #[test]
+    fn classify_names_the_matching_rules_short_first() {
+        let filter = PlaylistFilter::default();
+        assert_eq!(
+            filter.classify(&playlist("A.MPLS", 5.0, true, &[])),
+            [HiddenRule::Short, HiddenRule::Looping]
+        );
+        assert_eq!(filter.classify(&playlist("B.MPLS", 5.0, false, &[])), [HiddenRule::Short]);
+        assert_eq!(filter.classify(&playlist("C.MPLS", 100.0, true, &[])), [HiddenRule::Looping]);
+        assert!(filter.classify(&playlist("D.MPLS", 100.0, false, &[])).is_empty());
+        // Exactly the threshold is not short — the filter drops strictly
+        // shorter playlists, so the classification agrees.
+        assert!(filter.classify(&playlist("E.MPLS", 20.0, false, &[])).is_empty());
+    }
+
+    #[test]
+    fn classify_reads_the_threshold_but_not_the_switches() {
+        // Both switches off: the classification is unchanged…
+        let off = PlaylistFilter {
+            filter_short_playlists: false,
+            filter_looping_playlists: false,
+            ..PlaylistFilter::default()
+        };
+        assert_eq!(
+            off.classify(&playlist("A.MPLS", 5.0, true, &[])),
+            [HiddenRule::Short, HiddenRule::Looping]
+        );
+        // …and the threshold in force decides "short": 50 s is short under a
+        // raised 60 s threshold.
+        let raised = PlaylistFilter { short_playlist_seconds: 60.0, ..PlaylistFilter::default() };
+        assert_eq!(raised.classify(&playlist("B.MPLS", 50.0, false, &[])), [HiddenRule::Short]);
+    }
+
+    #[test]
+    fn labels_are_the_printed_rule_names() {
+        assert_eq!(HiddenRule::Short.label(), "short");
+        assert_eq!(HiddenRule::Looping.label(), "looping");
+    }
+
+    #[test]
     fn presentation_groups_exposes_the_group_boundaries() {
         // Same disc as the first-appearance test: A+B share a clip and form
         // group 1; the unrelated C is group 2 on its own.
@@ -318,6 +526,33 @@ mod tests {
                 })
             });
             prop_assert!(leads);
+        }
+
+        /// `keeps` is true exactly when every rule in `classify` has its
+        /// filter switch off — the filter and the classification never drift.
+        #[test]
+        fn keeps_iff_no_classified_rule_switch_is_on(
+            length in 0.0_f64..40.0,
+            has_loops in proptest::bool::ANY,
+            filter_short in proptest::bool::ANY,
+            filter_looping in proptest::bool::ANY,
+            threshold in 0.0_f64..40.0,
+        ) {
+            let subject = playlist("00000.MPLS", length, has_loops, &[]);
+            let filter = PlaylistFilter {
+                filter_short_playlists: filter_short,
+                short_playlist_seconds: threshold,
+                filter_looping_playlists: filter_looping,
+            };
+            let via_rules = filter.classify(&subject).into_iter().all(|rule| match rule {
+                HiddenRule::Short => !filter.filter_short_playlists,
+                HiddenRule::Looping => !filter.filter_looping_playlists,
+            });
+            prop_assert_eq!(filter.keeps(&subject), via_rules);
+            // The same verdict from the raw fields, pinning both sides.
+            let dropped_short = filter_short && length < threshold;
+            let dropped_looping = filter_looping && has_loops;
+            prop_assert_eq!(filter.keeps(&subject), !(dropped_short || dropped_looping));
         }
 
         /// Deterministic: the same input always yields the same order.
