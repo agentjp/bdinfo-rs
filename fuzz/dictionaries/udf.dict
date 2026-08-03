@@ -1,0 +1,44 @@
+# libFuzzer dictionary — UDF 2.50 / ECMA-167 disc structures. Shared by the
+# `udf` target (each parser fed sector bytes at offset 0) and the `source`
+# target (a whole `.iso` image mapped so the input starts at the anchor sector).
+#
+# Every descriptor parser in `bdinfo_rs_core::vfs::udf` begins with
+# `Tag::parse`, which validates the 8-bit `TagChecksum` at byte 4 — the sum of
+# the other fifteen tag bytes, modulo 256 (ECMA-167 §3/7.2.3). Random bytes pass
+# that gate once in 256 tries, so it, not the tag identifier, is what keeps the
+# fuzzer out of every descriptor body.
+#
+# Each token below is therefore a complete 16-byte descriptor tag: the
+# `TagIdentifier` (`Uint16`, little-endian — UDF is the one little-endian format
+# this crate reads), `DescriptorVersion` 2, the matching checksum, and zeros for
+# the serial number, CRC, CRC length and location, none of which any parser
+# here checks.
+#
+# The OSTA CS0 compression identifiers (8 and 16) are deliberately absent: a
+# single byte is cheaper for the mutator to hit than a dictionary lookup.
+#
+# To extend: add a token when `vfs::udf` compares a new `TagIdentifier`,
+# recomputing byte 4 as the modulo-256 sum of the other fifteen.
+
+# Volume-level descriptors (`vfs::udf::descriptor`).
+tag_primary_volume="\x01\x00\x02\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_anchor_volume_pointer="\x02\x00\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_volume_descriptor_pointer="\x03\x00\x02\x00\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_partition="\x05\x00\x02\x00\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_logical_volume="\x06\x00\x02\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# The terminating descriptor that ends a volume descriptor sequence
+# (`vfs::udf::source`).
+tag_terminating="\x08\x00\x02\x00\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# File-set, directory and file structures (`vfs::udf::descriptor`,
+# `vfs::udf::fid`, `vfs::udf::icb`, `vfs::udf::source`).
+tag_file_set="\x00\x01\x02\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_file_identifier="\x01\x01\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_allocation_extent="\x02\x01\x02\x00\x05\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_file_entry="\x05\x01\x02\x00\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+tag_extended_file_entry="\x0a\x01\x02\x00\x0d\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# The `EntityID` identifier that marks a type-2 partition map as a metadata
+# partition (UDF 2.50 §2.2.10), compared at offset 5 of the map.
+metadata_partition_id="*UDF Metadata Partition"
