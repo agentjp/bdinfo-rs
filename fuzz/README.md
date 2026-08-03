@@ -39,11 +39,38 @@ of byte fuzzing).
 
 ```sh
 cargo install cargo-fuzz                              # once
-cargo +nightly fuzz run read_be   -- -runs=0          # PR: replay committed corpus (fast, regression gate)
-cargo +nightly fuzz run read_be   -- -max_total_time=300   # nightly: time-boxed (5 min)
+cargo +nightly fuzz run read_be   -- -runs=0          # replay the committed corpus (the regression gate)
+cargo +nightly fuzz run read_be   -- -max_total_time=300   # fresh-fuzz this target, time-boxed (5 min)
 cargo +nightly fuzz cmin read_be                      # minimize the corpus
 cargo +nightly fuzz list                              # show targets
 ```
 
 Seed corpora live in `corpus/<target>/` (empty / boundary / valid / garbage inputs) and are
 committed so `-runs=0` is a deterministic replay.
+
+## What a run costs (measured 2026-08-03, x86_64 Linux, cargo-fuzz 0.13.2)
+
+**Replaying the whole corpus takes about 4 seconds for all ten targets** — 0.13 s
+(`discovery`) to 1.03 s (`m2ts`). The `-runs=0` gate costs a build, not a run.
+
+**Fresh-fuzz throughput spans three orders of magnitude**, because a unit means something
+different per target: `discovery` classifies a filename at ~10^6 units/s, while an `m2ts`
+unit is a full transport-stream scan of up to 98,304 bytes at ~600/s. Budget per target
+accordingly — an equal time budget is not an equal experiment.
+
+Where a target stops learning — from fresh runs of 120 s on all ten, and 900 s on `m2ts`,
+`codec`, `parse_report` and `source`:
+
+| target | new edges after its corpus is loaded |
+|---|---|
+| `read_be` | none at all |
+| `bitstream` | none in 120 s (two new feature combinations, no new edge) |
+| `discovery` | stops at ~66 s |
+| `udf` | stops at ~13 s |
+| `source`, `codec` | stop at ~205 s and ~245 s |
+| `m2ts` | slows sharply after ~250 s, still gaining at 843 s |
+| `parse_report` | still gaining linearly at 900 s |
+
+`parse_report` is the one target where a longer budget keeps paying: it is the end-to-end
+harness, and it reaches only 13% of `report::text`'s regions, so most of the renderer has
+never seen a fuzzed disc.

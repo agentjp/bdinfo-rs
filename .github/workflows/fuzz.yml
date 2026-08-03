@@ -44,11 +44,13 @@ env:
   GUARDS: -timeout=25 -rss_limit_mb=2048
 
 jobs:
-  # Release tag: a longer fresh-fuzz budget per target. New corpus growth and any
-  # crash artifacts are uploaded for inspection. A crash fails THIS fuzz run and
-  # surfaces the regression; the publish workflows triggered by the same tag run
-  # independently (this job does not `needs:`-gate them), so treat a crash as a
-  # fast-follow patch trigger, not a release blocker.
+  # Release tag: a longer fresh-fuzz budget per target. Crash artifacts are
+  # uploaded, and only when the job fails; the corpus grown during the run is
+  # never uploaded and dies with the runner, so every tag run restarts from the
+  # committed seeds. A crash fails THIS fuzz run and surfaces the regression; the
+  # publish workflows triggered by the same tag run independently (this job does
+  # not `needs:`-gate them), so treat a crash as a fast-follow patch trigger, not
+  # a release blocker.
   extended:
     name: extended fuzz (release tag)
     runs-on: ubuntu-latest
