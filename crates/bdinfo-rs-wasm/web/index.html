@@ -388,6 +388,81 @@
         accent-color: var(--accent);
         cursor: pointer;
       }
+      /* sortable playlist-table headers: click to sort, arrow shows direction */
+      th[data-sort] {
+        cursor: pointer;
+        user-select: none;
+      }
+      th[data-sort]:hover {
+        color: var(--text);
+      }
+      th .arrow {
+        display: inline-block;
+        min-width: 0.8em;
+        margin-left: 0.15rem;
+        font-size: 0.62rem;
+        color: var(--accent);
+      }
+      /* the active (master-detail) row driving the panes below the table */
+      tbody tr.active {
+        box-shadow: inset 2px 0 0 var(--accent);
+        background: var(--surface-2);
+      }
+      tbody tr.active.sel {
+        background: var(--accent-dim);
+      }
+
+      /* ── detail panes (stream files + codecs of the active playlist) ── */
+      .panes {
+        display: grid;
+        grid-template-columns: 1fr;
+        border-top: 1px solid var(--border);
+      }
+      .pane {
+        min-width: 0;
+      }
+      .pane + .pane {
+        border-top: 1px solid var(--border);
+      }
+      @media (min-width: 62rem) {
+        .panes {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+        }
+        .pane + .pane {
+          border-top: none;
+          border-left: 1px solid var(--border);
+        }
+      }
+      .pane h3 {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        margin: 0;
+        padding: 0.6rem 1.1rem;
+        font-size: 0.74rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+      }
+      .pane-label {
+        font-family: var(--mono);
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: 0;
+        color: var(--text);
+      }
+      .pane .table-wrap {
+        max-height: 16rem;
+      }
+      .pane tbody tr {
+        cursor: default;
+      }
+      .pane tbody tr:hover {
+        background: transparent;
+      }
+
       .card-foot {
         display: flex;
         align-items: center;
@@ -434,10 +509,50 @@
         font-size: 0.9rem;
         cursor: pointer;
       }
+      /* the toggle-plus-threshold row: the label toggles, the number does not,
+         so they are siblings rather than one label. */
+      .setting-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.4rem 0;
+        font-size: 0.9rem;
+      }
+      .setting-row .setting {
+        padding: 0;
+      }
+      .threshold {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .threshold input[type="number"] {
+        width: 4.2rem;
+        font: inherit;
+        font-size: 0.85rem;
+        color: var(--text);
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.25rem 0.4rem;
+      }
+      /* the hairline separating the display settings from the report ones */
+      .settings hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 0.8rem 0 0.4rem;
+      }
       .setting-note {
         margin: 0.7rem 0 0;
         color: var(--muted);
         font-size: 0.8rem;
+      }
+      .setting-note.discard {
+        margin: 0.2rem 0 0;
+        color: var(--accent);
       }
       .dialog-foot {
         display: flex;
@@ -660,15 +775,52 @@
               <thead>
                 <tr>
                   <th class="col-check"></th>
-                  <th>#</th>
-                  <th>Playlist</th>
-                  <th>Group</th>
-                  <th>Length</th>
-                  <th class="num">Est. Size</th>
+                  <th data-sort="position">#<span class="arrow"></span></th>
+                  <th data-sort="name">Playlist<span class="arrow"></span></th>
+                  <th data-sort="group">Group<span class="arrow"></span></th>
+                  <th data-sort="length">Length<span class="arrow"></span></th>
+                  <th class="num" data-sort="size">Est. Size<span class="arrow"></span></th>
                 </tr>
               </thead>
               <tbody id="playlist-body"></tbody>
             </table>
+          </div>
+          <!-- master-detail: the active (highlighted) playlist row fills these
+               two panes, mirroring the desktop app's lower panes. -->
+          <div class="panes" id="detail-panes" hidden>
+            <div class="pane">
+              <h3>Stream Files <span class="pane-label" id="pane-playlist"></span></h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Stream File</th>
+                      <th>#</th>
+                      <th>Length</th>
+                      <th class="num">Est. Size</th>
+                      <th class="num">Meas. Size</th>
+                    </tr>
+                  </thead>
+                  <tbody id="files-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="pane">
+              <h3>Streams</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Codec</th>
+                      <th>Language</th>
+                      <th class="num">Bit Rate</th>
+                      <th>Description</th>
+                    </tr>
+                  </thead>
+                  <tbody id="codecs-body"></tbody>
+                </table>
+              </div>
+            </div>
           </div>
           <p class="hint" id="hidden-hint" hidden></p>
           <div class="card-foot">
@@ -723,17 +875,54 @@
       <!-- settings: a native modal dialog (Esc closes, the backdrop dims) -->
       <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
         <h2 id="settings-title">Settings</h2>
-        <label class="setting">
-          <input type="checkbox" id="opt-short" />
-          <span>Show short playlists</span>
-        </label>
+        <div class="setting-row">
+          <label class="setting">
+            <input type="checkbox" id="opt-short" />
+            <span>Show short playlists</span>
+          </label>
+          <span class="threshold">
+            <span>short&nbsp;=&nbsp;under</span>
+            <input
+              type="number"
+              id="opt-short-seconds"
+              min="1"
+              max="86400"
+              aria-label="Short-playlist threshold in seconds"
+            />
+            <span>s</span>
+          </span>
+        </div>
+        <p class="setting-note discard" id="discard-note" hidden>
+          Measured results cleared — the classification changed. Scan again to measure.
+        </p>
         <label class="setting">
           <input type="checkbox" id="opt-looping" />
           <span>Show looping playlists</span>
         </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-human-sizes" />
+          <span>Human-readable sizes</span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-chapters" />
+          <span>Chapter count in playlist names</span>
+        </label>
         <p class="setting-note">
-          The playlist table hides playlists shorter than 20 seconds and looping ones, like the
+          The playlist table hides playlists shorter than the threshold and looping ones, like the
           classic report. Showing them never changes the report a scan produces.
+        </p>
+        <hr />
+        <label class="setting">
+          <input type="checkbox" id="opt-diagnostics" />
+          <span>Stream diagnostics in the report</span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-summary" />
+          <span>Quick summary in the report</span>
+        </label>
+        <p class="setting-note">
+          The report sections re-render from the disc the scan already returned — instantly, without
+          scanning again.
         </p>
         <div class="dialog-foot">
           <button class="btn primary" id="settings-close" type="button">Done</button>

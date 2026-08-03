@@ -13,6 +13,13 @@
 // golden bytes again — the round trip through structured clone in both
 // directions, which the Node test (raw wasm exports, no Worker) cannot see.
 //
+// It then drives the demo page itself (`index.html` + `dist/demo.js`, served
+// the same static way `dev.mjs` serves it): the fixture goes in through the
+// real folder picker, and the master-detail behaviour — pane population from
+// the active row, header-click sorting, the measured cells filling after a
+// scan — is asserted in the page. That is the demo's only executable check:
+// biome and tsc prove nothing about behaviour.
+//
 // Prereq: `npm run build` (emits `pkg/` + `dist/`). Run with `npm run test:chrome`.
 
 import { readFile } from "node:fs/promises";
@@ -103,6 +110,7 @@ async function main() {
   let listings;
   let structured;
   let isoStructured;
+  let demo;
   try {
     const page = await browser.newPage();
     page.on("console", (msg) => console.log(`  [page] ${msg.text()}`));
@@ -204,6 +212,254 @@ async function main() {
         reRendered: await window.__renderReport(scanned.disc),
       };
     });
+    // The demo page, end to end. A second playlist (the same clip, OUT_time
+    // patched to ~40 s the same way as above, plus a second chapter mark so the
+    // chapter-count suffix has a playlist to appear on) makes the table two
+    // rows, so ordering is observable; a third playlist patched to ~10 s is
+    // withheld by the short rule at the default threshold, so the filter
+    // toggles and the threshold have something to reveal. A constructed `File`
+    // has an empty read-only `webkitRelativePath`; an own property carries the
+    // folder path the demo's picker handler reads.
+    const demoPage = await browser.newPage();
+    demoPage.on("console", (msg) => console.log(`  [demo] ${msg.text()}`));
+    demoPage.on("pageerror", (err) => console.log(`  [demo pageerror] ${err.message}`));
+    await demoPage.goto(`${base}/index.html`);
+    await demoPage.evaluate((items) => {
+      // Record every request the page posts to a scan Worker, so the checks
+      // below can assert which settings cost a wasm call and which cost none.
+      const NativeWorker = window.Worker;
+      window.__calls = [];
+      window.Worker = class extends NativeWorker {
+        postMessage(message, ...rest) {
+          if (typeof message === "object" && message !== null && "kind" in message) {
+            window.__calls.push(message.kind);
+          }
+          super.postMessage(message, ...rest);
+        }
+      };
+      const decode = (b64) => {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      };
+      const toFile = (path, bytes) => {
+        const file = new File([bytes], path.split("/").pop());
+        Object.defineProperty(file, "webkitRelativePath", { value: path });
+        return file;
+      };
+      const withLength = (bytes, seconds) => {
+        const out = bytes.slice();
+        new DataView(out.buffer).setUint32(86, 27_000_000 + 45_000 * seconds);
+        return out;
+      };
+      // Appends a copy of the playlist's single chapter mark, 10 s later: the
+      // PlayListMark block is the file's last section (extension data start is
+      // 0), so growing it needs only its length u32, its mark count u16, and
+      // the appended 14-byte entry (timestamp at entry offset 4).
+      const withSecondChapter = (bytes) => {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const marks = view.getUint32(12);
+        const out = new Uint8Array(bytes.length + 14);
+        out.set(bytes);
+        out.set(bytes.slice(marks + 6, marks + 6 + 14), bytes.length);
+        const outView = new DataView(out.buffer);
+        outView.setUint32(marks, view.getUint32(marks) + 14);
+        outView.setUint16(marks + 4, view.getUint16(marks + 4) + 1);
+        outView.setUint32(bytes.length + 4, view.getUint32(marks + 6 + 4) + 45_000 * 10);
+        return out;
+      };
+      const files = items.map((item) => toFile(item.path, decode(item.b64)));
+      const source = items.find((item) => item.path.endsWith("00000.mpls"));
+      files.push(
+        toFile(
+          "WASMDISC/BDMV/PLAYLIST/00001.mpls",
+          withSecondChapter(withLength(decode(source.b64), 40)),
+        ),
+      );
+      files.push(toFile("WASMDISC/BDMV/PLAYLIST/00002.mpls", withLength(decode(source.b64), 10)));
+      const transfer = new DataTransfer();
+      for (const file of files) {
+        transfer.items.add(file);
+      }
+      const picker = document.getElementById("picker");
+      picker.files = transfer.files;
+      picker.dispatchEvent(new Event("change"));
+    }, entries);
+    await demoPage.waitForFunction(
+      () => document.querySelectorAll("#playlist-body tr").length === 2,
+      { timeout: 30000 },
+    );
+
+    // One structural snapshot of the page: table order and numbers, the active
+    // row, both panes' cell texts, the hint, the cards' visibility, and every
+    // Worker request posted so far.
+    const readDemo = () =>
+      demoPage.evaluate(() => {
+        const texts = (selector) =>
+          [...document.querySelectorAll(selector)].map((node) => node.textContent);
+        const grid = (selector) =>
+          [...document.querySelectorAll(selector)].map((tr) =>
+            [...tr.children].map((td) => td.textContent),
+          );
+        return {
+          names: texts("#playlist-body td.name"),
+          positions: texts("#playlist-body tr td:nth-child(2)"),
+          sizes: texts("#playlist-body tr td:nth-child(6)"),
+          active: document.querySelector("#playlist-body tr.active")?.dataset.name ?? null,
+          panesVisible: !document.getElementById("detail-panes").hidden,
+          paneLabel: document.getElementById("pane-playlist").textContent,
+          files: grid("#files-body tr"),
+          codecs: grid("#codecs-body tr"),
+          hintHidden: document.getElementById("hidden-hint").hidden,
+          hintText: document.getElementById("hidden-hint").textContent,
+          reportHidden: document.getElementById("report-card").hidden,
+          progressHidden: document.getElementById("progress-card").hidden,
+          discardHidden: document.getElementById("discard-note").hidden,
+          calls: window.__calls.slice(),
+        };
+      });
+    const rowCountIs = (count) =>
+      demoPage.waitForFunction(
+        (want) => document.querySelectorAll("#playlist-body tr").length === want,
+        count,
+        { timeout: 30000 },
+      );
+
+    const initial = await readDemo();
+
+    // The table loads ascending by `#`, so the first click on that column must
+    // go straight to descending — a first click never leaves the order as-is.
+    await demoPage.click('th[data-sort="position"]');
+    const positionSorted = await readDemo();
+    // The rows now read ascending by name too, so a first click on the name
+    // column is descending again; the second click flips it.
+    await demoPage.click('th[data-sort="name"]');
+    const nameFirst = await readDemo();
+    await demoPage.click('th[data-sort="name"]');
+    const nameSecond = await readDemo();
+
+    // Activating the other row swaps both panes to its playlist.
+    await demoPage.evaluate(() => {
+      document.querySelector('#playlist-body tr[data-name="00000.MPLS"] td.name').click();
+    });
+    const activated = await readDemo();
+
+    // The display settings: each one re-projects the model the page already
+    // holds, so the request log must not grow while the table changes.
+    await demoPage.click("#settings-btn");
+    await demoPage.click("#opt-short");
+    await rowCountIs(3);
+    const shortShown = await readDemo();
+    await demoPage.click("#opt-short");
+    await rowCountIs(2);
+    await demoPage.click("#opt-human-sizes");
+    const grouped = await readDemo();
+    await demoPage.click("#opt-human-sizes");
+    await demoPage.click("#opt-chapters");
+    const noSuffix = await readDemo();
+    await demoPage.click("#opt-chapters");
+    await demoPage.click("#settings-close");
+    const preScan = await readDemo();
+
+    // Back to the table order before scanning, so the page's selection order is
+    // the disc's presentation order — which is what makes the re-rendered
+    // report below comparable to the scan's own, byte for byte.
+    await demoPage.click('th[data-sort="position"]');
+
+    // The measured scan through the page (both shown rows are ticked): the
+    // report card appears and the panes' measured cells fill in place.
+    await demoPage.click("#scan-btn");
+    await demoPage.waitForFunction(() => !document.getElementById("report-card").hidden, {
+      timeout: 120000,
+    });
+    const scanned = await readDemo();
+    const report = await demoPage.evaluate(() => document.getElementById("report").textContent);
+
+    // The report-section switches: every flip re-renders the held disc through
+    // the package — the displayed text changes while the request log gains only
+    // `render` kinds and the progress card never shows. Both orders of turning
+    // the two sections off are walked, so the switches' composition is pinned.
+    const reportNow = () => demoPage.evaluate(() => document.getElementById("report").textContent);
+    const toggleSection = async (selector) => {
+      const before = await reportNow();
+      await demoPage.click(selector);
+      await demoPage.waitForFunction(
+        (prev) => document.getElementById("report").textContent !== prev,
+        before,
+        { timeout: 60000 },
+      );
+      return reportNow();
+    };
+    await demoPage.click("#settings-btn");
+    const sdOff = await toggleSection("#opt-diagnostics");
+    const bothOff1 = await toggleSection("#opt-summary");
+    const qsOff = await toggleSection("#opt-diagnostics");
+    const restored = await toggleSection("#opt-summary");
+    const qsOff2 = await toggleSection("#opt-summary");
+    const bothOff2 = await toggleSection("#opt-diagnostics");
+    const sdOff2 = await toggleSection("#opt-summary");
+    const restored2 = await toggleSection("#opt-diagnostics");
+    const afterRenders = await readDemo();
+
+    // The threshold: committing the value already in force must send nothing;
+    // committing a new one re-runs `inspect`, re-classifies the table, and
+    // visibly discards the measured results and the held report.
+    await demoPage.fill("#opt-short-seconds", "20");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await demoPage.fill("#opt-short-seconds", "5");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await rowCountIs(3);
+    const thresholdApplied = await readDemo();
+    await demoPage.click("#settings-close");
+
+    // A phone-width viewport must not scroll the page sideways — wide tables
+    // scroll inside their own wrapper instead.
+    await demoPage.setViewportSize({ width: 390, height: 844 });
+    const pageScrolls = await demoPage.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    );
+
+    // The settings survive a reload through `localStorage`; the dialog's
+    // controls are initialized from what was stored.
+    await demoPage.reload();
+    const persisted = await demoPage.evaluate(() => ({
+      seconds: document.getElementById("opt-short-seconds").value,
+      short: document.getElementById("opt-short").checked,
+      looping: document.getElementById("opt-looping").checked,
+      human: document.getElementById("opt-human-sizes").checked,
+      chapters: document.getElementById("opt-chapters").checked,
+      diagnostics: document.getElementById("opt-diagnostics").checked,
+      summary: document.getElementById("opt-summary").checked,
+    }));
+
+    demo = {
+      initial,
+      positionSorted,
+      nameFirst,
+      nameSecond,
+      activated,
+      shortShown,
+      grouped,
+      noSuffix,
+      preScan,
+      scanned,
+      report,
+      sdOff,
+      bothOff1,
+      qsOff,
+      restored,
+      qsOff2,
+      bothOff2,
+      sdOff2,
+      restored2,
+      afterRenders,
+      thresholdApplied,
+      pageScrolls,
+      persisted,
+    };
   } finally {
     await browser.close();
     server.close();
@@ -308,7 +564,201 @@ async function main() {
     );
   }
 
-  process.exit(listOk && inspectOk && scanOk && isoStructuredOk ? 0 : 1);
+  // The demo page. Cell values are pinned where the fixture pins them: the
+  // 40 s patched playlist outranks the 30 s one (longest first in the shared
+  // group), the clip's on-disk 11,145,216 B reads 10.63 MB, its packet-derived
+  // 11,064,384 B reads 10.55 MB, and the two codec rows carry the report's own
+  // codec names and measured rates.
+  const demoEq = (label, got, wantValue) => {
+    if (JSON.stringify(got) === JSON.stringify(wantValue)) {
+      console.log(`PASS — demo ${label}.`);
+      return true;
+    }
+    console.error(
+      `FAIL — demo ${label}: got ${JSON.stringify(got)}, want ${JSON.stringify(wantValue)}`,
+    );
+    return false;
+  };
+  // A report section under the locked format runs from its heading line
+  // through the second blank line below it (heading, blank, body, blank), and
+  // the optional sections repeat once per rendered playlist — so a switch is
+  // checked by stripping EVERY occurrence of its heading's section.
+  const stripSection = (text, heading) => {
+    const lines = text.split("\r\n");
+    if (!lines.includes(heading)) {
+      throw new Error(`section ${heading} not found`);
+    }
+    let start = lines.indexOf(heading);
+    while (start !== -1) {
+      let end = start;
+      let blanks = 0;
+      while (end + 1 < lines.length && blanks < 2) {
+        end += 1;
+        if (lines[end] === "") {
+          blanks += 1;
+        }
+      }
+      lines.splice(start, end - start + 1);
+      start = lines.indexOf(heading);
+    }
+    return lines.join("\r\n");
+  };
+  let demoOk = true;
+  demoOk &= demoEq("initial table order (by position)", demo.initial.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+  ]);
+  demoOk &= demoEq("initial numbering", demo.initial.positions, ["1", "2"]);
+  demoOk &= demoEq("initial active row", demo.initial.active, "00001.MPLS");
+  demoOk &= demoEq("panes visible", demo.initial.panesVisible, true);
+  demoOk &= demoEq("pane label", demo.initial.paneLabel, "00001.MPLS");
+  demoOk &= demoEq(
+    "initial hint names the short playlist",
+    demo.initial.hintText,
+    ["Hidden by filters (short): 00002.MPLS - enable in settings"].join("\n"),
+  );
+  demoOk &= demoEq("load cost one inspect", demo.initial.calls, ["inspect"]);
+  demoOk &= demoEq("stream-file pane (unmeasured)", demo.initial.files, [
+    ["00000.M2TS", "1", "00:00:40", "10.63 MB", "—"],
+  ]);
+  // The LPCM row's language is three NUL bytes: the fixture's playlist declares
+  // that as the language code, and the locked report prints it verbatim (the
+  // golden's Language cell carries the same bytes), so the model and the pane
+  // carry it too.
+  demoOk &= demoEq(
+    "codec pane names + unmeasured rates",
+    demo.initial.codecs.map((row) => [row[0], row[1], row[2]]),
+    [
+      ["MPEG-4 AVC Video", "", "—"],
+      ["LPCM Audio", "\u0000\u0000\u0000", "—"],
+    ],
+  );
+  demoOk &= demoEq(
+    "codec descriptions populate",
+    demo.initial.codecs.every((row) => row[3].length > 0),
+    true,
+  );
+  demoOk &= demoEq("first click on the ascending # column descends", demo.positionSorted.names, [
+    "00000.MPLS",
+    "00001.MPLS [02 Chapters]",
+  ]);
+  demoOk &= demoEq("numbers travel with their rows", demo.positionSorted.positions, ["2", "1"]);
+  demoOk &= demoEq("first click on the ascending name column descends", demo.nameFirst.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+  ]);
+  demoOk &= demoEq("second click flips to ascending", demo.nameSecond.names, [
+    "00000.MPLS",
+    "00001.MPLS [02 Chapters]",
+  ]);
+  demoOk &= demoEq("row click activates", demo.activated.active, "00000.MPLS");
+  demoOk &= demoEq("pane follows the active row", demo.activated.paneLabel, "00000.MPLS");
+  demoOk &= demoEq("active playlist clip length", demo.activated.files[0][2], "00:00:30");
+  demoOk &= demoEq("show-short lists the withheld playlist", demo.shortShown.names, [
+    "00000.MPLS",
+    "00001.MPLS [02 Chapters]",
+    "00002.MPLS",
+  ]);
+  demoOk &= demoEq("show-short retires the hint", demo.shortShown.hintHidden, true);
+  demoOk &= demoEq("grouped bytes in the size cells", demo.grouped.sizes, [
+    "11,145,216",
+    "11,145,216",
+  ]);
+  demoOk &= demoEq("chapter suffix off", demo.noSuffix.names, ["00000.MPLS", "00001.MPLS"]);
+  demoOk &= demoEq("human-readable size cells return", demo.preScan.sizes, [
+    "10.63 MB",
+    "10.63 MB",
+  ]);
+  demoOk &= demoEq("display settings cost no wasm call", demo.preScan.calls, ["inspect"]);
+  demoOk &= demoEq("scan keeps the active row", demo.scanned.active, "00000.MPLS");
+  demoOk &= demoEq("measured size fills after the scan", demo.scanned.files, [
+    ["00000.M2TS", "1", "00:00:30", "10.63 MB", "10.55 MB"],
+  ]);
+  // 973, not the report's 974: the pane integer-divides bits/s to kbps like the
+  // desktop pane, where the report's codec table rounds.
+  demoOk &= demoEq(
+    "measured bit rates fill after the scan",
+    demo.scanned.codecs.map((row) => row[2]),
+    ["973 kbps", "1,536 kbps"],
+  );
+  demoOk &= demoEq("the demo report renders", demo.report.includes("QUICK SUMMARY:"), true);
+  demoOk &= demoEq("the scan cost one scan call", demo.scanned.calls, ["inspect", "scan"]);
+
+  // The section switches: eight flips, eight `render` requests, no scan and no
+  // progress bar; every rendering equals the scan's own report minus exactly
+  // the switched-off sections, whichever order the switches went down in.
+  const strippedSd = stripSection(demo.report, "STREAM DIAGNOSTICS:");
+  const strippedQs = stripSection(demo.report, "QUICK SUMMARY:");
+  const strippedBoth = stripSection(strippedSd, "QUICK SUMMARY:");
+  demoOk &= compare("demo render: diagnostics off", demo.sdOff, Buffer.from(strippedSd));
+  demoOk &= compare(
+    "demo render: both off (diagnostics first)",
+    demo.bothOff1,
+    Buffer.from(strippedBoth),
+  );
+  demoOk &= compare("demo render: summary off", demo.qsOff, Buffer.from(strippedQs));
+  demoOk &= compare("demo render: both back on", demo.restored, Buffer.from(demo.report));
+  demoOk &= compare("demo render: summary off (second pass)", demo.qsOff2, Buffer.from(strippedQs));
+  demoOk &= compare(
+    "demo render: both off (summary first)",
+    demo.bothOff2,
+    Buffer.from(strippedBoth),
+  );
+  demoOk &= compare(
+    "demo render: diagnostics off (second pass)",
+    demo.sdOff2,
+    Buffer.from(strippedSd),
+  );
+  demoOk &= compare("demo render: restored again", demo.restored2, Buffer.from(demo.report));
+  demoOk &= demoEq("section flips cost renders only", demo.afterRenders.calls, [
+    "inspect",
+    "scan",
+    ...Array(8).fill("render"),
+  ]);
+  demoOk &= demoEq("no scan ran while re-rendering", demo.afterRenders.progressHidden, true);
+  demoOk &= demoEq("measured cells survive the re-renders", demo.afterRenders.files, [
+    ["00000.M2TS", "1", "00:00:30", "10.63 MB", "10.55 MB"],
+  ]);
+
+  // The threshold transition: the same value again sent nothing; 5 s re-ran
+  // `inspect` (one request), re-classified the 10 s playlist into the table,
+  // and visibly discarded the measured results and the held report.
+  demoOk &= demoEq("threshold change cost one inspect", demo.thresholdApplied.calls, [
+    "inspect",
+    "scan",
+    ...Array(8).fill("render"),
+    "inspect",
+  ]);
+  demoOk &= demoEq("threshold re-classifies the table", demo.thresholdApplied.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+    "00002.MPLS",
+  ]);
+  demoOk &= demoEq("threshold retires the hint", demo.thresholdApplied.hintHidden, true);
+  demoOk &= demoEq("threshold discards the measured sizes", demo.thresholdApplied.files, [
+    ["00000.M2TS", "1", "00:00:30", "10.63 MB", "—"],
+  ]);
+  demoOk &= demoEq(
+    "threshold discards the measured rates",
+    demo.thresholdApplied.codecs.map((row) => row[2]),
+    ["—", "—"],
+  );
+  demoOk &= demoEq("threshold hides the report", demo.thresholdApplied.reportHidden, true);
+  demoOk &= demoEq("the discard is visible", demo.thresholdApplied.discardHidden, false);
+  demoOk &= demoEq("threshold keeps the active row", demo.thresholdApplied.active, "00000.MPLS");
+  demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
+  demoOk &= demoEq("settings survive a reload", demo.persisted, {
+    seconds: "5",
+    short: false,
+    looping: false,
+    human: true,
+    chapters: true,
+    diagnostics: true,
+    summary: true,
+  });
+  demoOk = Boolean(demoOk);
+
+  process.exit(listOk && inspectOk && scanOk && isoStructuredOk && demoOk ? 0 : 1);
 }
 
 main().catch((err) => {
