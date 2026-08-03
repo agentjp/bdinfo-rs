@@ -509,10 +509,50 @@
         font-size: 0.9rem;
         cursor: pointer;
       }
+      /* the toggle-plus-threshold row: the label toggles, the number does not,
+         so they are siblings rather than one label. */
+      .setting-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.4rem 0;
+        font-size: 0.9rem;
+      }
+      .setting-row .setting {
+        padding: 0;
+      }
+      .threshold {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .threshold input[type="number"] {
+        width: 4.2rem;
+        font: inherit;
+        font-size: 0.85rem;
+        color: var(--text);
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.25rem 0.4rem;
+      }
+      /* the hairline separating the display settings from the report ones */
+      .settings hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 0.8rem 0 0.4rem;
+      }
       .setting-note {
         margin: 0.7rem 0 0;
         color: var(--muted);
         font-size: 0.8rem;
+      }
+      .setting-note.discard {
+        margin: 0.2rem 0 0;
+        color: var(--accent);
       }
       .dialog-foot {
         display: flex;
@@ -835,17 +875,54 @@
       <!-- settings: a native modal dialog (Esc closes, the backdrop dims) -->
       <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
         <h2 id="settings-title">Settings</h2>
-        <label class="setting">
-          <input type="checkbox" id="opt-short" />
-          <span>Show short playlists</span>
-        </label>
+        <div class="setting-row">
+          <label class="setting">
+            <input type="checkbox" id="opt-short" />
+            <span>Show short playlists</span>
+          </label>
+          <span class="threshold">
+            <span>short&nbsp;=&nbsp;under</span>
+            <input
+              type="number"
+              id="opt-short-seconds"
+              min="1"
+              max="86400"
+              aria-label="Short-playlist threshold in seconds"
+            />
+            <span>s</span>
+          </span>
+        </div>
+        <p class="setting-note discard" id="discard-note" hidden>
+          Measured results cleared — the classification changed. Scan again to measure.
+        </p>
         <label class="setting">
           <input type="checkbox" id="opt-looping" />
           <span>Show looping playlists</span>
         </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-human-sizes" />
+          <span>Human-readable sizes</span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-chapters" />
+          <span>Chapter count in playlist names</span>
+        </label>
         <p class="setting-note">
-          The playlist table hides playlists shorter than 20 seconds and looping ones, like the
+          The playlist table hides playlists shorter than the threshold and looping ones, like the
           classic report. Showing them never changes the report a scan produces.
+        </p>
+        <hr />
+        <label class="setting">
+          <input type="checkbox" id="opt-diagnostics" />
+          <span>Stream diagnostics in the report</span>
+        </label>
+        <label class="setting">
+          <input type="checkbox" id="opt-summary" />
+          <span>Quick summary in the report</span>
+        </label>
+        <p class="setting-note">
+          The report sections re-render from the disc the scan already returned — instantly, without
+          scanning again.
         </p>
         <div class="dialog-foot">
           <button class="btn primary" id="settings-close" type="button">Done</button>
