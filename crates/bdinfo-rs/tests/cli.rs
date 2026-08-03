@@ -40,14 +40,17 @@ Arguments:
   [REPORT_DEST]  Report folder (default: BD_PATH; required for .iso)
 
 Options:
-  -l, --list                    List playlists and exit
-  -m, --mpls <NAME,...>         Scan only the named playlists (00800,00801)
-  -w, --whole                   Scan every listed playlist
-      --show-short-playlists    Also list playlists shorter than 20s
-      --show-looping-playlists  Also list looping playlists
-      --no-banner               Never print the banner
-  -v, --version                 Print version
-  -h, --help                    Print help
+  -l, --list                              List playlists and exit
+  -m, --mpls <NAME,...>                   Scan only the named playlists
+  -w, --whole                             Scan every listed playlist
+      --show-short-playlists              Also list short playlists
+      --show-looping-playlists            Also list looping playlists
+      --short-playlist-seconds <SECONDS>  Short-playlist cutoff (default: 20)
+      --no-stream-diagnostics             Omit the STREAM DIAGNOSTICS sections
+      --no-quick-summary                  Omit the QUICK SUMMARY blocks
+      --no-banner                         Never print the banner
+  -v, --version                           Print version
+  -h, --help                              Print help
 ";
 
 #[test]
@@ -471,6 +474,47 @@ fn each_show_switch_reveals_and_silences_only_its_own_category() {
 }
 
 #[test]
+fn the_short_playlist_cutoff_moves_what_the_table_hides_and_what_the_hint_names() {
+    let root = filtered_bd("cutoff");
+    // Below every playlist's length: nothing is short any more, so the 10 s
+    // 00002.MPLS joins the table and the short hint disappears. 00003.MPLS is
+    // 10 s too but still loops, so the looping hint is unchanged.
+    let lowered = listing(&root, &["--short-playlist-seconds", "5"]);
+    // Above every playlist's length: all four are short, so the table empties
+    // and the hint names them longest first.
+    let raised = listing(&root, &["--short-playlist-seconds", "121"]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    assert_eq!(table_row_lines(&lowered).len(), 2, "table: {lowered}");
+    assert!(lowered.contains("2   1      00002.MPLS     00:00:10"), "table: {lowered}");
+    assert!(!lowered.contains("(short)"), "nothing is short at 5 s: {lowered}");
+    assert!(lowered.contains(LOOPING_HINT), "the looping hint is unaffected: {lowered}");
+
+    assert!(table_row_lines(&raised).is_empty(), "table: {raised}");
+    assert!(
+        raised.contains(
+            "Hidden by filters (short): 00001.MPLS, 00000.MPLS, 00002.MPLS and 1 more - rerun \
+             with --show-short-playlists"
+        ),
+        "the hint judges against the given cutoff: {raised}"
+    );
+}
+
+#[test]
+fn showing_short_playlists_overrides_the_cutoff() {
+    let root = filtered_bd("cutoffshow");
+    // The cutoff classifies; the switch decides whether the classification
+    // withholds anything. With both, every playlist is short and every one is
+    // still listed — only the looping rule withholds.
+    let stdout = listing(&root, &["--short-playlist-seconds", "121", "--show-short-playlists"]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    assert_eq!(table_row_lines(&stdout).len(), 2, "table: {stdout}");
+    assert!(!stdout.contains("(short)"), "the short hint is silenced: {stdout}");
+    assert!(stdout.contains(LOOPING_HINT), "the looping hint remains: {stdout}");
+}
+
+#[test]
 fn mpls_mode_prints_no_table_and_no_hint() {
     let root = filtered_bd("mplshint");
     let path = root.to_string_lossy().into_owned();
@@ -621,15 +665,21 @@ fn real_fixture(name: &str) -> PathBuf {
 /// Scan `disc` with `-m 00000` into a fresh temp dest and return the report it
 /// writes as `BDINFO.{label}.txt`. `label` is the disc label the scan derives: a
 /// folder takes its directory name, an `.iso` its UDF volume label.
+fn scan_report(disc: &std::path::Path, label: &str, tag: &str) -> String {
+    scan_report_with(disc, label, tag, &[])
+}
+
+/// [`scan_report`] with `switches` appended to the command line.
 #[expect(
     clippy::expect_used,
     reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
 )]
-fn scan_report(disc: &std::path::Path, label: &str, tag: &str) -> String {
+fn scan_report_with(disc: &std::path::Path, label: &str, tag: &str, switches: &[&str]) -> String {
     let dest = std::env::temp_dir().join(format!("bdinfo-rs-real-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dest).expect("create dest");
     let output = bdinfo_rs()
         .args([disc.as_os_str(), dest.as_os_str(), "-m".as_ref(), "00000".as_ref()])
+        .args(switches)
         .output()
         .expect("spawn bdinfo-rs");
     let report = std::fs::read(dest.join(format!("BDINFO.{label}.txt"))).expect("read the report");
@@ -646,6 +696,45 @@ fn a_real_bdmv_folder_scan_matches_the_golden_byte_for_byte() {
         include_str!("fixtures/golden/folder.txt"),
         "folder report drifted from golden"
     );
+}
+
+// The two report-section switches change the report bytes by design, so each
+// gets a golden of its own beside the full one. Each golden is the full report
+// minus exactly its own section — the pair pins that the switches subtract and
+// never reword.
+
+#[test]
+fn no_stream_diagnostics_omits_exactly_that_section() {
+    let got = scan_report_with(
+        &real_fixture("BigBuckBunny"),
+        "BigBuckBunny",
+        "nodiag",
+        &["--no-stream-diagnostics"],
+    );
+    assert_eq!(
+        got,
+        include_str!("fixtures/golden/folder-no-stream-diagnostics.txt"),
+        "the trimmed report drifted from golden"
+    );
+    assert!(!got.contains("STREAM DIAGNOSTICS:"), "the section is gone: {got}");
+    assert!(got.contains("QUICK SUMMARY:"), "the other section stays: {got}");
+}
+
+#[test]
+fn no_quick_summary_omits_exactly_that_block() {
+    let got = scan_report_with(
+        &real_fixture("BigBuckBunny"),
+        "BigBuckBunny",
+        "nosummary",
+        &["--no-quick-summary"],
+    );
+    assert_eq!(
+        got,
+        include_str!("fixtures/golden/folder-no-quick-summary.txt"),
+        "the trimmed report drifted from golden"
+    );
+    assert!(!got.contains("QUICK SUMMARY:"), "the block is gone: {got}");
+    assert!(got.contains("STREAM DIAGNOSTICS:"), "the other section stays: {got}");
 }
 
 #[test]
