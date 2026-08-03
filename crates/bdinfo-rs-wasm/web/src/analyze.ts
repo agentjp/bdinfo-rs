@@ -13,10 +13,6 @@
 // Each spawns the scan Worker (which hosts the WebAssembly module), hands it the
 // files, and resolves with the result — the rendered classic disc report being
 // the very bytes the native CLI writes to `BDINFO.<label>.txt`.
-//
-// `analyze`, `analyzeIso`, `listPlaylists` and `listPlaylistsIso` are the 2.0
-// surface: each returns one slice of what the three calls above return. They
-// keep working exactly as before and are deprecated for removal in 3.0.0.
 
 import type { Disc, ScanResult } from "../pkg/bdinfo_rs_wasm.js";
 
@@ -29,6 +25,7 @@ export type {
   Clip,
   ClipStream,
   Disc,
+  HiddenRule,
   Playlist,
   ScanError,
   ScanErrorReason,
@@ -62,47 +59,11 @@ export interface ScanProgress {
 /** A progress observer, called repeatedly as the scan demuxes. */
 export type ProgressFn = (progress: ScanProgress) => void;
 
-// Declared here rather than generated with the disc model: the WebAssembly
-// module builds these rows as JSON text through a serializer of its own, so no
-// TypeScript declaration is emitted for them — and `hiddenBy` is typed here as
-// the closed set of rule names that serializer can emit, which a generated
-// declaration would widen to `string[]`.
-/**
- * One playlist of the disc — a row of the selection table {@link listPlaylists}
- * returns, mirroring the CLI's `#`/Group/Playlist File/Length/Estimated Bytes
- * columns. Pass the chosen rows' {@link PlaylistRow.name}s to {@link analyze} as
- * `options.selection` to measure just those playlists.
- */
-export interface PlaylistRow {
-  /** 1-based position in the table — the handle the user picks. */
-  position: number;
-  /** Shared-clip group number (1-based). */
-  group: number;
-  /** The playlist file name, e.g. `00000.MPLS`. */
-  name: string;
-  /** `hh:mm:ss` total length. */
-  length: string;
-  /** Estimated bytes (interleaved `*.ssif` size, else `*.m2ts` size), or `null`. */
-  estimatedBytes: number | null;
-  /** Whether the playlist hides any stream (the CLI's `(*)` note). */
-  hasHidden: boolean;
-  /**
-   * The filter rules that classify this playlist as withheld: `"short"` (under
-   * 20 s), `"looping"`, both, or none. {@link listPlaylists} drops such
-   * playlists unless the matching option ({@link AnalyzeOptions.showShortPlaylists}
-   * / {@link AnalyzeOptions.showLoopingPlaylists}) was passed, so a row with a
-   * non-empty `hiddenBy` only appears when it was — but the rules it names are
-   * the same either way, so you can list once with both options on and re-apply
-   * either rule to the rows without re-scanning.
-   */
-  hiddenBy: ("short" | "looping")[];
-}
-
 /**
  * Optional overrides for every call in this module. Each option documents which
  * calls read it; a call ignores the ones it does not name.
  */
-export interface AnalyzeOptions {
+export interface ScanOptions {
   /**
    * A factory constructing the scan Worker to use. Defaults to
    * `new Worker(new URL("./worker.js", import.meta.url), { type: "module" })`,
@@ -116,47 +77,33 @@ export interface AnalyzeOptions {
    */
   createWorker?: () => Worker;
   /**
-   * The playlists to measure, by {@link PlaylistRow.name} — the browser
+   * The playlists to measure, by {@link Playlist.name} — the browser
    * equivalent of the CLI's `--mpls`, measured unfiltered in the given order.
    * Omitted or empty measures the standard `--whole` set.
    *
-   * Read by {@link scan}, {@link analyze} and {@link analyzeIso}.
+   * Read by {@link scan}.
    */
   selection?: string[];
-  /**
-   * Include playlists shorter than {@link AnalyzeOptions.shortPlaylistSeconds}
-   * — the CLI's `--show-short-playlists`.
-   *
-   * Read by {@link inspect}, {@link listPlaylists} and
-   * {@link listPlaylistsIso}, which withhold them by default. The measured
-   * scans measure their `selection` unfiltered, so it changes nothing there.
-   */
-  showShortPlaylists?: boolean;
-  /**
-   * Include looping playlists — the CLI's `--show-looping-playlists`. Read by
-   * the same calls as {@link AnalyzeOptions.showShortPlaylists}, and with the
-   * same effect on the others: none.
-   */
-  showLoopingPlaylists?: boolean;
   /**
    * The length in seconds under which a playlist counts as short, defaulting to
    * 20. Zero or less means that default.
    *
-   * Read by {@link inspect} only — {@link listPlaylists} and
-   * {@link listPlaylistsIso} always judge against the 20 s default.
+   * Read by {@link inspect} and {@link scan}, both of which classify every
+   * playlist against it and report the outcome in {@link Playlist.hiddenBy}.
+   * It changes no other value: which playlists a `Disc` holds, which ones a
+   * `selection` measures, and the rendered report are all the same either way.
    */
   shortPlaylistSeconds?: number;
   /**
    * Render the report's `STREAM DIAGNOSTICS:` section, defaulting to `true` —
    * the section the CLI's report carries.
    *
-   * Read by {@link scan} and {@link renderReport}. {@link analyze} and
-   * {@link analyzeIso} always render every section.
+   * Read by {@link scan} and {@link renderReport}.
    */
   streamDiagnostics?: boolean;
   /**
    * Render the report's `QUICK SUMMARY:` section, defaulting to `true`. Read by
-   * the same calls as {@link AnalyzeOptions.streamDiagnostics}.
+   * the same calls as {@link ScanOptions.streamDiagnostics}.
    */
   quickSummary?: boolean;
   /**
@@ -165,10 +112,7 @@ export interface AnalyzeOptions {
    * the signal's reason (an `AbortError`), so callers can tell a user cancel
    * from a real failure by the rejection's `name`.
    *
-   * Read by {@link inspect}, {@link scan}, {@link renderReport},
-   * {@link analyze} and {@link analyzeIso}. Ignored by {@link listPlaylists} /
-   * {@link listPlaylistsIso} — the structural scan is fast enough not to need
-   * it.
+   * Read by every call in this module.
    */
   signal?: AbortSignal;
 }
@@ -177,13 +121,12 @@ export interface AnalyzeOptions {
 type WorkerMessage =
   | ({ type: "progress" } & ScanProgress)
   | { type: "done"; report: string }
-  | { type: "rows"; rows: PlaylistRow[] }
   | { type: "disc"; disc: Disc }
   | { type: "result"; result: ScanResult }
   | { type: "error"; message: string };
 
 /** Spawns the scan Worker (a module worker by the bundler-aware convention). */
-function spawnWorker(options?: AnalyzeOptions): Worker {
+function spawnWorker(options?: ScanOptions): Worker {
   // The default path MUST stay a bare `new Worker(new URL("./worker.js",
   // import.meta.url), …)` literal: that exact shape is what Vite and webpack 5
   // statically detect to compile the Worker into a chunk and emit the `.wasm` it
@@ -205,31 +148,12 @@ function payload(files: BdmvFile[]): { paths: string[]; files: File[] } {
   };
 }
 
-/** The two playlist-filter opt-outs a listing request carries, defaulted off. */
-function listingOptions(options?: AnalyzeOptions): {
-  showShortPlaylists: boolean;
-  showLoopingPlaylists: boolean;
-} {
-  return {
-    showShortPlaylists: options?.showShortPlaylists ?? false,
-    showLoopingPlaylists: options?.showLoopingPlaylists ?? false,
-  };
-}
-
 /**
- * The playlist-filter options an {@link inspect} request carries: a listing's
- * two opt-outs plus the short-playlist threshold only this call reads. Zero is
- * how the WebAssembly module spells "use the 20 s default".
+ * The playlist-classification threshold a scanning request carries. Zero is how
+ * the WebAssembly module spells "use the 20 s default".
  */
-function inspectOptions(options?: AnalyzeOptions): {
-  showShortPlaylists: boolean;
-  showLoopingPlaylists: boolean;
-  shortPlaylistSeconds: number;
-} {
-  return {
-    ...listingOptions(options),
-    shortPlaylistSeconds: options?.shortPlaylistSeconds ?? 0,
-  };
+function classifyOptions(options?: ScanOptions): { shortPlaylistSeconds: number } {
+  return { shortPlaylistSeconds: options?.shortPlaylistSeconds ?? 0 };
 }
 
 /**
@@ -237,7 +161,7 @@ function inspectOptions(options?: AnalyzeOptions): {
  * `true` — an omitted option renders its section, so a render with no options
  * reproduces the report the CLI writes.
  */
-function reportOptions(options?: AnalyzeOptions): {
+function reportOptions(options?: ScanOptions): {
   streamDiagnostics: boolean;
   quickSummary: boolean;
 } {
@@ -277,7 +201,7 @@ function cancelledError(signal?: AbortSignal): DOMException {
 function request<T>(
   message: unknown,
   take: (reply: WorkerMessage) => { value: T } | null,
-  options?: AnalyzeOptions,
+  options?: ScanOptions,
   onProgress?: ProgressFn,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -337,17 +261,18 @@ function request<T>(
  * Show the playlists as a checklist, then hand the chosen
  * {@link Playlist.name}s to {@link scan}'s `options.selection`.
  *
- * `disc.playlists` holds the playlists the selection filter keeps, which
- * `options.showShortPlaylists`, `options.showLoopingPlaylists` and
- * `options.shortPlaylistSeconds` widen; the disc-level properties and
- * `disc.errors` always describe the whole disc.
+ * `disc.playlists` holds every playlist on the disc, each carrying its
+ * {@link Playlist.group}, {@link Playlist.position} and
+ * {@link Playlist.hiddenBy}, so the classic selection table is
+ * `disc.playlists.filter((p) => p.hiddenBy.length === 0)` sorted by `position`
+ * — a client-side filter, with no rescan to widen or narrow it.
  *
  * Everything runs locally: no bytes leave the page.
  */
-export function inspect(source: DiscSource, options?: AnalyzeOptions): Promise<Disc> {
+export function inspect(source: DiscSource, options?: ScanOptions): Promise<Disc> {
   const message = Array.isArray(source)
-    ? { kind: "inspect", ...payload(source), ...inspectOptions(options) }
-    : { kind: "inspect-iso", file: source, ...inspectOptions(options) };
+    ? { kind: "inspect", ...payload(source), ...classifyOptions(options) }
+    : { kind: "inspect-iso", file: source, ...classifyOptions(options) };
   return request(
     message,
     (reply) => (reply.type === "disc" ? { value: reply.disc } : null),
@@ -378,12 +303,13 @@ export function inspect(source: DiscSource, options?: AnalyzeOptions): Promise<D
 export function scan(
   source: DiscSource,
   onProgress?: ProgressFn,
-  options?: AnalyzeOptions,
+  options?: ScanOptions,
 ): Promise<ScanResult> {
   const selection = options?.selection ?? [];
+  const shared = { selection, ...reportOptions(options), ...classifyOptions(options) };
   const message = Array.isArray(source)
-    ? { kind: "scan-full", ...payload(source), selection, ...reportOptions(options) }
-    : { kind: "scan-iso-full", file: source, selection, ...reportOptions(options) };
+    ? { kind: "scan", ...payload(source), ...shared }
+    : { kind: "scan-iso", file: source, ...shared };
   return request(
     message,
     (reply) => (reply.type === "result" ? { value: reply.result } : null),
@@ -411,226 +337,10 @@ export function scan(
  * for the ones that scan named, so re-rendering it prints the rest at zero —
  * scan again to measure them.
  */
-export function renderReport(disc: Disc, options?: AnalyzeOptions): Promise<string> {
+export function renderReport(disc: Disc, options?: ScanOptions): Promise<string> {
   return request(
     { kind: "render", disc, ...reportOptions(options) },
     (reply) => (reply.type === "done" ? { value: reply.report } : null),
     options,
   );
-}
-
-/**
- * Lists the disc's playlists via the fast structural scan, resolving with the
- * selection-table rows (see {@link PlaylistRow}). No stream files are demuxed,
- * so it returns quickly; show the rows as a checklist, then hand the chosen
- * names to {@link analyze}'s `options.selection`.
- *
- * Short and looping playlists are dropped like the CLI's `--list`; pass
- * `options.showShortPlaylists` / `options.showLoopingPlaylists` to list them
- * too, and read each row's {@link PlaylistRow.hiddenBy} to tell them apart.
- *
- * Everything runs locally: no bytes leave the page.
- *
- * @deprecated since 2.1.0, removed in 3.0.0. Use {@link inspect}, which runs
- * the same structural scan and resolves with the whole {@link Disc} instead of
- * seven table columns. `position`, `group` and `hiddenBy` describe the table
- * rather than the disc and are not on the model, so a UI that renders a
- * selection table derives them from `disc.playlists` itself.
- */
-export function listPlaylists(files: BdmvFile[], options?: AnalyzeOptions): Promise<PlaylistRow[]> {
-  return new Promise<PlaylistRow[]>((resolve, reject) => {
-    const worker = spawnWorker(options);
-
-    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
-      const message = event.data;
-      if (message.type === "rows") {
-        worker.terminate();
-        resolve(message.rows);
-      } else if (message.type === "error") {
-        worker.terminate();
-        reject(new Error(message.message));
-      }
-    };
-
-    worker.onerror = (event: ErrorEvent) => {
-      worker.terminate();
-      reject(new Error(event.message || "scan worker failed"));
-    };
-
-    worker.postMessage({ kind: "list", ...payload(files), ...listingOptions(options) });
-  });
-}
-
-/**
- * Lists a single Blu-ray `.iso`'s playlists via the fast structural scan,
- * resolving with the selection-table rows (see {@link PlaylistRow}) — the `.iso`
- * counterpart of {@link listPlaylists}. The image is opened through the UDF
- * reader; no stream data is demuxed, so it returns quickly. Hand the chosen
- * names to {@link analyzeIso}'s `options.selection`.
- *
- * Short and looping playlists are dropped like the CLI's `--list`; pass
- * `options.showShortPlaylists` / `options.showLoopingPlaylists` to list them
- * too, and read each row's {@link PlaylistRow.hiddenBy} to tell them apart.
- *
- * Everything runs locally: no bytes leave the page.
- *
- * @deprecated since 2.1.0, removed in 3.0.0. Use {@link inspect}, which takes
- * the `.iso` `File` directly and resolves with the whole {@link Disc}; see the
- * note on {@link listPlaylists} for the three row columns the model leaves to
- * the caller.
- */
-export function listPlaylistsIso(file: File, options?: AnalyzeOptions): Promise<PlaylistRow[]> {
-  return new Promise<PlaylistRow[]>((resolve, reject) => {
-    const worker = spawnWorker(options);
-
-    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
-      const message = event.data;
-      if (message.type === "rows") {
-        worker.terminate();
-        resolve(message.rows);
-      } else if (message.type === "error") {
-        worker.terminate();
-        reject(new Error(message.message));
-      }
-    };
-
-    worker.onerror = (event: ErrorEvent) => {
-      worker.terminate();
-      reject(new Error(event.message || "scan worker failed"));
-    };
-
-    worker.postMessage({ kind: "list-iso", file, ...listingOptions(options) });
-  });
-}
-
-/**
- * Runs the full measured Blu-ray scan in a Worker and resolves with the classic
- * disc report. `onProgress`, if given, is called as the scan demuxes;
- * `options.selection` measures only the named playlists (see
- * {@link AnalyzeOptions}), defaulting to the standard `--whole` set.
- * `options.createWorker` overrides how the scan Worker is constructed.
- *
- * Everything runs locally: no bytes leave the page.
- *
- * @deprecated since 2.1.0, removed in 3.0.0. Use {@link scan}, which runs the
- * same measured scan and resolves with the same report plus the {@link Disc} it
- * was rendered from, takes the folder or the `.iso` through one parameter, and
- * accepts the report-section options.
- */
-export function analyze(
-  files: BdmvFile[],
-  onProgress?: ProgressFn,
-  options?: AnalyzeOptions,
-): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const signal = options?.signal;
-    if (signal?.aborted) {
-      reject(cancelledError(signal));
-      return;
-    }
-    const worker = spawnWorker(options);
-
-    // Cancel = terminate the Worker (its normal teardown path), just earlier.
-    const onAbort = () => {
-      worker.terminate();
-      reject(cancelledError(signal));
-    };
-    const unlisten = () => signal?.removeEventListener("abort", onAbort);
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
-      const message = event.data;
-      switch (message.type) {
-        case "progress":
-          onProgress?.(message);
-          break;
-        case "done":
-          unlisten();
-          worker.terminate();
-          resolve(message.report);
-          break;
-        case "error":
-          unlisten();
-          worker.terminate();
-          reject(new Error(message.message));
-          break;
-        default:
-          break;
-      }
-    };
-
-    worker.onerror = (event: ErrorEvent) => {
-      unlisten();
-      worker.terminate();
-      reject(new Error(event.message || "scan worker failed"));
-    };
-
-    worker.postMessage({ kind: "scan", ...payload(files), selection: options?.selection ?? [] });
-  });
-}
-
-/**
- * Runs the full measured Blu-ray scan of a single `.iso` `File` in a Worker and
- * resolves with the classic disc report — the browser equivalent of
- * `bdinfo-rs <disc>.iso`. The image is opened through the read-only UDF reader
- * and streamed (its bytes are read on demand at byte offsets), never loaded
- * whole, so a multi-GB `.iso` is fine. `onProgress` and `options` behave exactly
- * as in {@link analyze}.
- *
- * Everything runs locally: no bytes leave the page.
- *
- * @deprecated since 2.1.0, removed in 3.0.0. Use {@link scan}, which takes the
- * `.iso` `File` directly and resolves with the report plus the {@link Disc} it
- * was rendered from.
- */
-export function analyzeIso(
-  file: File,
-  onProgress?: ProgressFn,
-  options?: AnalyzeOptions,
-): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const signal = options?.signal;
-    if (signal?.aborted) {
-      reject(cancelledError(signal));
-      return;
-    }
-    const worker = spawnWorker(options);
-
-    // Cancel = terminate the Worker (its normal teardown path), just earlier.
-    const onAbort = () => {
-      worker.terminate();
-      reject(cancelledError(signal));
-    };
-    const unlisten = () => signal?.removeEventListener("abort", onAbort);
-    signal?.addEventListener("abort", onAbort, { once: true });
-
-    worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
-      const message = event.data;
-      switch (message.type) {
-        case "progress":
-          onProgress?.(message);
-          break;
-        case "done":
-          unlisten();
-          worker.terminate();
-          resolve(message.report);
-          break;
-        case "error":
-          unlisten();
-          worker.terminate();
-          reject(new Error(message.message));
-          break;
-        default:
-          break;
-      }
-    };
-
-    worker.onerror = (event: ErrorEvent) => {
-      unlisten();
-      worker.terminate();
-      reject(new Error(event.message || "scan worker failed"));
-    };
-
-    worker.postMessage({ kind: "scan-iso", file, selection: options?.selection ?? [] });
-  });
 }

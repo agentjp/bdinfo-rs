@@ -21,9 +21,9 @@ Firefox.
 npm i @bdinfo-rs/wasm
 ```
 
-The published payload is **~500 KB of WebAssembly + ~62 KB of JS**. Only the
-main-thread entry you import (~18 KB) loads up front; the scan Worker (~4 KB)
-and the wasm-bindgen glue (~40 KB) that hosts the `.wasm` are fetched lazily
+The published payload is **~497 KB of WebAssembly + ~44 KB of JS**. Only the
+main-thread entry you import (~9 KB) loads up front; the scan Worker (~3 KB)
+and the wasm-bindgen glue (~32 KB) that hosts the `.wasm` are fetched lazily
 inside the Worker, and nothing past the entry loads at all until the first scan.
 
 ## Usage
@@ -79,8 +79,24 @@ const { report } = await scan(isoInput.files[0]);
 cross as raw numbers with unit-bearing names — `bitrateBps`, `sampleRateHz`,
 `heightPixels`, `lengthSeconds` — so your UI can sort, filter and chart them
 rather than parse report text. The types (`Disc`, `Playlist`, `Stream`, `Clip`,
-`ClipStream`, `Chapter`, `ScanError`, `ScanResult`) are exported from the
-package entry and generated from the Rust definitions.
+`ClipStream`, `Chapter`, `ScanError`, `HiddenRule`, `ScanResult`) are exported
+from the package entry and generated from the Rust definitions.
+
+`disc.playlists` is in the disc's own file-name order and holds **every**
+playlist. Each one also carries where it sits in the classic selection table —
+`group` (shared-clip group, from 1), `position` (table order, from 1) and
+`hiddenBy` — so you can build that table without reimplementing its grouping:
+
+```ts
+const table = disc.playlists
+  .filter((playlist) => playlist.hiddenBy.length === 0)
+  .sort((a, b) => a.position - b.position);
+```
+
+`totalLengthTicks` is `totalLengthSeconds` in the 100 ns ticks the report
+formats its times from. Integer-divide it by 10,000,000 for the table's
+`hh:mm:ss` cell; computing that from the `f64` seconds can land a tick either
+side.
 
 `disc.measured` tells the two scans apart: `false` after `inspect`, where every
 measured value — bitrates, packet counts, chapter rates — is zero because
@@ -107,20 +123,31 @@ the rest at zero — scan again to measure them.
 
 ### Playlist filtering
 
-Like the classic report, `inspect` withholds playlists shorter than 20 seconds
-and looping ones. Pass `showShortPlaylists` / `showLoopingPlaylists` to include
-them, and `shortPlaylistSeconds` to move the length threshold:
+The classic report withholds playlists shorter than 20 seconds and looping
+ones. This package never withholds anything: every playlist crosses, and each
+carries the rules that classify it as withheld in `hiddenBy` — `"short"`,
+`"looping"`, both, or none. Filtering is therefore a client-side array
+operation, instant and rescan-free:
 
 ```ts
-const everything = await inspect(picked, {
-  showShortPlaylists: true,
-  showLoopingPlaylists: true,
-});
+const disc = await inspect(picked);
+const standard = disc.playlists.filter((playlist) => playlist.hiddenBy.length === 0);
+const withoutShort = disc.playlists.filter(
+  (playlist) => !playlist.hiddenBy.includes("short"),
+);
 ```
 
-The options only widen `disc.playlists`; the disc-level properties and
-`disc.errors` always describe the whole disc. A measured `scan` measures its
-`selection` unfiltered either way, and the report is unchanged.
+`shortPlaylistSeconds` moves the length threshold behind `"short"`. It is the
+one filter setting that has to be passed to the call, because it changes the
+classification rather than the view — pass it to `inspect` or `scan` and every
+playlist is judged against it:
+
+```ts
+const disc = await inspect(picked, { shortPlaylistSeconds: 5 });
+```
+
+Nothing else moves with it: which playlists a `Disc` holds, which ones a
+`selection` measures, and the rendered report are the same either way.
 
 ### Cancelling
 
@@ -132,24 +159,6 @@ failure by the rejection's `name`:
 const controller = new AbortController();
 const { report } = await scan(picked, undefined, { signal: controller.signal });
 ```
-
-### Deprecated calls
-
-`analyze`, `analyzeIso`, `listPlaylists` and `listPlaylistsIso` are the 2.0
-surface. They keep working exactly as before, and 3.0.0 removes them:
-
-| Deprecated | Replacement |
-| --- | --- |
-| `analyze(files, onProgress?, options?)` | `scan(files, onProgress?, options?)` |
-| `analyzeIso(file, onProgress?, options?)` | `scan(file, onProgress?, options?)` |
-| `listPlaylists(files, options?)` | `inspect(files, options?)` |
-| `listPlaylistsIso(file, options?)` | `inspect(file, options?)` |
-
-`listPlaylists` resolves with selection-table rows (`position`, `group`, `name`,
-`length`, `estimatedBytes`, `hasHidden`, `hiddenBy`). Of those, `position`,
-`group` and `hiddenBy` describe the table rather than the disc and are not on
-the `Disc`, so a UI that renders a selection table derives them from
-`disc.playlists` itself.
 
 See `index.html` in the source repository for a complete vanilla example (the
 demo is not shipped in the npm package).
@@ -198,6 +207,17 @@ The raw wasm-bindgen module is also exported directly for advanced use:
 ```ts
 import init, { scan_files } from "@bdinfo-rs/wasm/wasm";
 ```
+
+It exports `inspect_files`, `inspect_iso`, `scan_files`, `scan_iso` and
+`render_report` — what `inspect`, `scan` and `renderReport` call, minus the
+Worker — plus one entry point the package deliberately does not wrap:
+`scan_report(bytes)` takes a whole disc pre-framed into one length-prefixed
+byte buffer and renders it from memory. It exists as the in-memory seam the
+byte-parity tests drive through both the native and the browser build; it is
+not a fourth way to scan a disc, and a real consumer has no such buffer.
+
+Remember that every scanning export reads its bytes through `FileReaderSync`
+and therefore has to run inside a Web Worker.
 
 ## Browser support
 

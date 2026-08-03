@@ -2,12 +2,9 @@
 // The scan Worker: hosts the WebAssembly module OFF the main thread. It serves
 // every request in `analyze.ts` over the same module instance:
 //   - `inspect` / `inspect-iso`: the fast STRUCTURAL scan → the whole disc model.
-//   - `scan-full` / `scan-iso-full`: the FULL measured scan → the rendered report
-//     and the disc model, from one demux.
+//   - `scan` / `scan-iso`: the FULL measured scan → the rendered report and the
+//     disc model, from one demux.
 //   - `render`: re-render the report from a disc model — no media touched.
-//   - `list` / `list-iso` and `scan` / `scan-iso`: what the deprecated 2.0 calls
-//     need — the selection table (parsed here, so the main thread receives
-//     structured rows, not JSON text) and the report alone.
 // The wasm reads each file's bytes synchronously at byte offsets through
 // `FileReaderSync` (the reason this must be a Worker — that API exists only in a
 // Worker scope), so a multi-GB stream never has to fit in memory. Progress is
@@ -21,19 +18,18 @@ import init, {
   type Disc,
   inspect_files,
   inspect_iso,
-  list_iso_playlists,
-  list_playlists,
   render_report,
   scan_files,
-  scan_files_full,
   scan_iso,
-  scan_iso_full,
 } from "../pkg/bdinfo_rs_wasm.js";
 
-/** The two playlist-filter opt-outs a listing request carries (see `analyze.ts`). */
-interface ListOptions {
-  showShortPlaylists: boolean;
-  showLoopingPlaylists: boolean;
+/**
+ * The playlist-classification threshold a scanning request carries: the length
+ * under which a playlist counts as short. Zero means the wasm module's 20 s
+ * default.
+ */
+interface ClassifyOptions {
+  shortPlaylistSeconds: number;
 }
 
 /**
@@ -45,64 +41,33 @@ interface ReportOptions {
   quickSummary: boolean;
 }
 
-/** List the playlists (structural scan) of the picked BDMV folder. */
-interface ListRequest extends ListOptions {
-  kind: "list";
+/** The whole disc model of the picked BDMV folder from a structural scan. */
+interface InspectRequest extends ClassifyOptions {
+  kind: "inspect";
   paths: string[];
   files: File[];
 }
 
-/** Measure `selection` (by playlist name; empty = the `--whole` set). */
-interface ScanRequest {
+/** The whole disc model of a single picked `.iso` from a structural scan. */
+interface InspectIsoRequest extends ClassifyOptions {
+  kind: "inspect-iso";
+  file: File;
+}
+
+/**
+ * Measure the picked BDMV folder, answering with the report AND the model.
+ * `selection` names the playlists to measure; empty is the `--whole` set.
+ */
+interface ScanRequest extends ReportOptions, ClassifyOptions {
   kind: "scan";
   paths: string[];
   files: File[];
   selection: string[];
 }
 
-/** List the playlists (structural scan) of a single picked `.iso`. */
-interface ListIsoRequest extends ListOptions {
-  kind: "list-iso";
-  file: File;
-}
-
-/** Measure a single picked `.iso` (`selection` by name; empty = `--whole`). */
-interface ScanIsoRequest {
-  kind: "scan-iso";
-  file: File;
-  selection: string[];
-}
-
-/**
- * The whole disc model of the picked BDMV folder from a structural scan.
- * `shortPlaylistSeconds` is the length under which a playlist counts as short;
- * zero means the wasm module's 20 s default.
- */
-interface InspectRequest extends ListOptions {
-  kind: "inspect";
-  paths: string[];
-  files: File[];
-  shortPlaylistSeconds: number;
-}
-
-/** The whole disc model of a single picked `.iso` from a structural scan. */
-interface InspectIsoRequest extends ListOptions {
-  kind: "inspect-iso";
-  file: File;
-  shortPlaylistSeconds: number;
-}
-
-/** Measure the picked BDMV folder, answering with the report AND the model. */
-interface ScanFullRequest extends ReportOptions {
-  kind: "scan-full";
-  paths: string[];
-  files: File[];
-  selection: string[];
-}
-
 /** Measure a single picked `.iso`, answering with the report AND the model. */
-interface ScanIsoFullRequest extends ReportOptions {
-  kind: "scan-iso-full";
+interface ScanIsoRequest extends ReportOptions, ClassifyOptions {
+  kind: "scan-iso";
   file: File;
   selection: string[];
 }
@@ -113,16 +78,7 @@ interface RenderRequest extends ReportOptions {
   disc: Disc;
 }
 
-type Request =
-  | ListRequest
-  | ScanRequest
-  | ListIsoRequest
-  | ScanIsoRequest
-  | InspectRequest
-  | InspectIsoRequest
-  | ScanFullRequest
-  | ScanIsoFullRequest
-  | RenderRequest;
+type Request = InspectRequest | InspectIsoRequest | ScanRequest | ScanIsoRequest | RenderRequest;
 
 let ready: Promise<unknown> | null = null;
 
@@ -139,84 +95,42 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       self.postMessage({ type: "progress", file, done, total });
     };
     switch (data.kind) {
-      case "list":
-        self.postMessage({
-          type: "rows",
-          rows: JSON.parse(
-            list_playlists(
-              data.paths,
-              data.files,
-              data.showShortPlaylists,
-              data.showLoopingPlaylists,
-            ),
-          ),
-        });
-        break;
-      case "list-iso":
-        self.postMessage({
-          type: "rows",
-          rows: JSON.parse(
-            list_iso_playlists(data.file, data.showShortPlaylists, data.showLoopingPlaylists),
-          ),
-        });
-        break;
-      case "scan":
-        self.postMessage({
-          type: "done",
-          report: scan_files(data.paths, data.files, data.selection, onProgress),
-        });
-        break;
-      case "scan-iso":
-        self.postMessage({
-          type: "done",
-          report: scan_iso(data.file, data.selection, onProgress),
-        });
-        break;
       case "inspect":
         self.postMessage({
           type: "disc",
-          disc: inspect_files(
-            data.paths,
-            data.files,
-            data.showShortPlaylists,
-            data.showLoopingPlaylists,
-            data.shortPlaylistSeconds,
-          ),
+          disc: inspect_files(data.paths, data.files, data.shortPlaylistSeconds),
         });
         break;
       case "inspect-iso":
         self.postMessage({
           type: "disc",
-          disc: inspect_iso(
-            data.file,
-            data.showShortPlaylists,
-            data.showLoopingPlaylists,
-            data.shortPlaylistSeconds,
-          ),
+          disc: inspect_iso(data.file, data.shortPlaylistSeconds),
         });
         break;
-      case "scan-full":
+      case "scan":
         self.postMessage({
           type: "result",
-          result: scan_files_full(
+          result: scan_files(
             data.paths,
             data.files,
             data.selection,
             onProgress,
             data.streamDiagnostics,
             data.quickSummary,
+            data.shortPlaylistSeconds,
           ),
         });
         break;
-      case "scan-iso-full":
+      case "scan-iso":
         self.postMessage({
           type: "result",
-          result: scan_iso_full(
+          result: scan_iso(
             data.file,
             data.selection,
             onProgress,
             data.streamDiagnostics,
             data.quickSummary,
+            data.shortPlaylistSeconds,
           ),
         });
         break;

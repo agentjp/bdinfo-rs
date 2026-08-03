@@ -100,8 +100,6 @@ async function main() {
     args: ["--no-sandbox"],
   });
 
-  let report;
-  let isoReport;
   let listings;
   let structured;
   let isoStructured;
@@ -126,13 +124,12 @@ async function main() {
       });
     }, entries);
 
-    // The folder path: the fixture handed in as a `(relativePath, File)` list.
-    report = await page.evaluate(async () => await window.__analyze(window.__files));
-
-    // The listing's filter options, driven through the real Worker: the same
+    // The playlist classification, driven through the real Worker: the same
     // disc plus a second playlist over the same clip patched to ~10 s (the first
     // PlayItem's OUT_time is a u32-BE at file offset 86, 45_000 ticks a second),
-    // which the short-playlist rule withholds unless the option is passed.
+    // which the short-playlist rule withholds until the threshold drops below
+    // its length. Both playlists are always returned; only `hiddenBy` moves.
+    // Sharing a clip also puts them in one group, longest first.
     listings = await page.evaluate(async () => {
       const source = window.__files.find((entry) => entry.path.endsWith("00000.mpls"));
       const bytes = new Uint8Array(await source.file.arrayBuffer());
@@ -144,18 +141,21 @@ async function main() {
           file: new File([bytes], "00001.mpls"),
         },
       ];
-      const names = async (options) =>
-        (await window.__listPlaylists(files, options)).map((row) => `${row.name}:${row.hiddenBy}`);
-      // The threshold only `inspect` takes: at 5 s the ~10 s playlist is no
-      // longer short, where the default 20 s withholds it.
+      const rules = (playlists) =>
+        playlists.map((playlist) => `${playlist.name}:${playlist.hiddenBy}`);
       const inspected = async (options) =>
-        (await window.__inspect(files, options)).playlists.map((playlist) => playlist.name);
+        rules((await window.__inspect(files, options)).playlists);
       return {
-        standard: await names(),
-        widened: await names({ showShortPlaylists: true }),
-        looping: await names({ showLoopingPlaylists: true }),
-        inspectStandard: await inspected(),
-        inspectLowered: await inspected({ shortPlaylistSeconds: 5 }),
+        standard: await inspected(),
+        lowered: await inspected({ shortPlaylistSeconds: 5 }),
+        // The measured export takes the same threshold, so a disc means the
+        // same thing whichever call produced it.
+        measured: rules(
+          (await window.__scan(files, undefined, { shortPlaylistSeconds: 5 })).disc.playlists,
+        ),
+        numbering: (await window.__inspect(files)).playlists.map(
+          (playlist) => `${playlist.group}/${playlist.position}`,
+        ),
       };
     });
 
@@ -172,6 +172,10 @@ async function main() {
           playlists: disc.playlists.map((playlist) => playlist.name),
           streams: disc.playlists[0].streams.length,
           rates: disc.playlists[0].streams.map((stream) => stream.bitrateBps),
+          group: disc.playlists[0].group,
+          position: disc.playlists[0].position,
+          hiddenBy: disc.playlists[0].hiddenBy,
+          ticks: disc.playlists[0].totalLengthTicks,
         },
         measured: scanned.disc.measured,
         rate: scanned.disc.playlists[0].streams[0].bitrateBps,
@@ -181,15 +185,8 @@ async function main() {
       };
     });
 
-    // The `.iso` path: the same disc fetched as one `File` and opened through the
-    // UDF reader — the real-browser Worker + FileReaderSync `scan_iso` seam.
-    isoReport = await page.evaluate(async () => {
-      const buf = await (await fetch("/__fixture.iso")).arrayBuffer();
-      const file = new File([new Uint8Array(buf)], "BigBuckBunny.iso");
-      return await window.__analyzeIso(file);
-    });
-
-    // The same image through the structured API. One `File` rather than a list
+    // The `.iso` path: the same disc fetched as one `File` and opened through
+    // the UDF reader — the real-browser Worker + FileReaderSync seam. One `File`
     // is what tells `inspect` and `scan` to open it as an `.iso`, so this is the
     // check that the two sources are told apart; the volume label is the genuine
     // one recorded in the filesystem, where a folder pick can only use the
@@ -235,28 +232,25 @@ async function main() {
     return false;
   }
 
-  const folderOk = compare("measured scan", report, golden);
-  const isoOk = compare(".iso scan", isoReport, isoGolden);
-
-  // Each listing is `name:hiddenBy` per row: the short playlist is listed only
-  // with its own option, and always names the rule that withholds it. The two
-  // `inspect` entries are playlist names, filtered by the threshold instead.
+  // Every call returns both playlists; the threshold moves only `hiddenBy`, and
+  // the table numbering describes the disc rather than any view of it.
   const want = {
-    standard: ["00000.MPLS:"],
-    widened: ["00000.MPLS:", "00001.MPLS:short"],
-    looping: ["00000.MPLS:"],
-    inspectStandard: ["00000.MPLS"],
-    inspectLowered: ["00000.MPLS", "00001.MPLS"],
+    standard: ["00000.MPLS:", "00001.MPLS:short"],
+    lowered: ["00000.MPLS:", "00001.MPLS:"],
+    measured: ["00000.MPLS:", "00001.MPLS:"],
+    numbering: ["1/1", "1/2"],
   };
   const listOk = JSON.stringify(listings) === JSON.stringify(want);
   if (listOk) {
-    console.log("PASS — Worker listing options widen the table by their own rule.");
+    console.log("PASS — Worker classification follows the threshold and withholds nothing.");
   } else {
-    console.error(`FAIL — listing options: got ${JSON.stringify(listings)}`);
+    console.error(`FAIL — classification: got ${JSON.stringify(listings)}`);
   }
 
   // The structural model: no demux ran, so `measured` is false and every rate is
-  // zero because nothing measured it.
+  // zero because nothing measured it. The one ~30 s playlist is group 1,
+  // position 1 and withheld by nothing; its 301,133,999 ticks integer-divide to
+  // the 30 s the table cell prints, which the 30.1134 s float cannot promise.
   const inspectOk =
     JSON.stringify(structured.inspected) ===
     JSON.stringify({
@@ -265,6 +259,10 @@ async function main() {
       playlists: ["00000.MPLS"],
       streams: 2,
       rates: [0, 0],
+      group: 1,
+      position: 1,
+      hiddenBy: [],
+      ticks: 301_133_999,
     });
   if (inspectOk) {
     console.log("PASS — Worker inspect returns the unmeasured disc model.");
@@ -310,7 +308,7 @@ async function main() {
     );
   }
 
-  process.exit(folderOk && isoOk && listOk && inspectOk && scanOk && isoStructuredOk ? 0 : 1);
+  process.exit(listOk && inspectOk && scanOk && isoStructuredOk ? 0 : 1);
 }
 
 main().catch((err) => {
