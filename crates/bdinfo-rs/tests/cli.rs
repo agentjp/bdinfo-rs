@@ -11,13 +11,11 @@
               deps (clap, bdinfo-rs-core) but uses neither directly"
 )]
 
-use std::path::PathBuf;
-use std::process::Command;
+pub mod common;
 
-/// A `Command` for the binary under test (path injected by cargo).
-fn bdinfo_rs() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_bdinfo-rs"))
-}
+use std::path::PathBuf;
+
+use common::{bdinfo_rs, real_fixture};
 
 #[test]
 fn version_prints_and_succeeds() {
@@ -656,11 +654,6 @@ fn a_subcommand_style_invocation_is_just_a_bad_path() {
 // a byte differing between arches would mean a real determinism bug. The
 // `.gitattributes` rules keep the disc bytes (`binary`) and the golden's CRLF
 // (`-text`) verbatim so checkout can't perturb either.
-
-/// Absolute path to a committed real-disc fixture under `tests/fixtures/`.
-fn real_fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name)
-}
 
 /// Scan `disc` with `-m 00000` into a fresh temp dest and return the report it
 /// writes as `BDINFO.{label}.txt`. `label` is the disc label the scan derives: a
