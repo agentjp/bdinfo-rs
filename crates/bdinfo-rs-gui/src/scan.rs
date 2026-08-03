@@ -19,12 +19,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
+use bdinfo_rs_core::bdrom::order::selection_order;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
 
-use crate::{selection, volume};
+use crate::volume;
 
 /// The disc the user picked: a Blu-ray **folder** or a single `.iso` image.
 ///
@@ -193,7 +194,8 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 /// `selection` order — the GUI equivalent of `bdinfo-rs <disc> --mpls A,B`.
 ///
 /// `selection` is the chosen playlist names in table order, and `scan_files` the
-/// matching clip set (`selection::selection_stream_files`), both derived from
+/// matching clip set ([`bdinfo_rs_core::bdrom::order::selection_stream_files`]),
+/// both derived from
 /// the structural scan. The packet scan reads only `scan_files`, so an unselected
 /// (possibly multi-GB) playlist is never demuxed. `options` is the report's
 /// section switches at scan start. Runs on the iced shell's worker
@@ -219,7 +221,7 @@ pub fn scan_measured(
 ) -> Result<Measured, String> {
     let (bdrom, errors) = open(input, ScanMode::Full, Some(scan_files), progress, cancel)
         .map_err(|err| err.to_string())?;
-    let order = selection::selection_order(&bdrom.playlists, selection);
+    let order = selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors, options);
     Ok(Measured {
         report,

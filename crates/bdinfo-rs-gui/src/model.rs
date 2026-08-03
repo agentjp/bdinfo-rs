@@ -1,16 +1,16 @@
 //! The pure playlist view-model.
 //!
-//! These constructors mirror the CLI's playlist table (and the wasm crate's
-//! `table_rows` / `table_length` / `estimated_bytes` / `playlist_rows`) over the
-//! public [`PlaylistSummary`] type — the GUI cannot import the CLI binary's
-//! private helpers, so it reimplements them the same way. No widgets, no IO:
-//! plain data in, plain data out, so `view()` is a thin projection.
+//! These constructors format the playlist table over
+//! [`bdinfo_rs_core::bdrom::order::table_rows`] and the public
+//! [`PlaylistSummary`] type, producing the same columns the CLI table prints.
+//! No widgets, no IO: plain data in, plain data out, so `view()` is a thin
+//! projection.
 
 use std::cmp::Ordering;
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
-use bdinfo_rs_core::bdrom::order::{PlaylistFilter, presentation_groups};
+use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, table_rows};
 use bdinfo_rs_core::report::text::RenderOptions;
 
 use crate::settings::Settings;
@@ -91,9 +91,9 @@ impl ViewSettings {
 }
 
 /// One structured playlist row — the machine-readable form of the CLI's
-/// `#`/Group/Playlist File/Length/Estimated Bytes table. Mirrors the wasm
-/// crate's `PlaylistRow`. (Measured Bytes is omitted: a structural scan never
-/// measures, so that column would always read `-` this phase.)
+/// `#`/Group/Playlist File/Length/Estimated Bytes table. (Measured Bytes is
+/// omitted: a structural scan never measures, so that column would always
+/// read `-` this phase.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlaylistRow {
     /// 1-based position in the table — the handle a later phase's picker uses.
@@ -167,20 +167,6 @@ pub struct SelectableRow {
     pub cells: TableRow,
 }
 
-/// The playlist table rows as `(group number, playlist index)` pairs in table
-/// order: the `filter`-kept set (by default short and looping playlists are
-/// dropped), grouped by shared clips, each group longest-first. Mirrors the
-/// CLI's `table_rows`.
-fn table_rows(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> Vec<(usize, usize)> {
-    presentation_groups(playlists, filter)
-        .into_iter()
-        .enumerate()
-        .flat_map(|(group, members)| {
-            members.into_iter().map(move |index| (group.saturating_add(1), index))
-        })
-        .collect()
-}
-
 /// `hh:mm:ss` from playlist seconds, truncated to the tick like the CLI table
 /// (hours wrap at 24; no day component).
 pub(crate) fn table_length(seconds: f64) -> String {
@@ -192,7 +178,7 @@ pub(crate) fn table_length(seconds: f64) -> String {
 }
 
 /// The estimated byte size shown for a playlist: the interleaved `*.ssif` size
-/// when known, else the `*.m2ts` size, else `None`. Mirrors the CLI/wasm.
+/// when known, else the `*.m2ts` size, else `None` (the `-` cell).
 const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
     if playlist.interleaved_file_size > 0 {
         Some(playlist.interleaved_file_size)
@@ -203,10 +189,11 @@ const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
     }
 }
 
-/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`).
+/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`) — the
+/// CLI table's byte-cell format.
 ///
-/// Mirrors the CLI's `group_n0`. Public so the binary's info box can group the
-/// exact disc-size byte count alongside its [`format_file_size`] short form.
+/// Public so the binary's info box can group the exact disc-size byte count
+/// alongside its [`format_file_size`] short form.
 #[must_use]
 pub fn group_n0(value: u64) -> String {
     let mut grouped = Vec::new();
@@ -266,7 +253,6 @@ pub fn format_file_size(bytes: u64) -> String {
 }
 
 /// Builds the structured selection-table rows over the `filter`-kept set.
-/// Mirrors the wasm crate's `playlist_rows`.
 pub(crate) fn playlist_rows(
     playlists: &[PlaylistSummary],
     filter: &PlaylistFilter,
@@ -413,10 +399,10 @@ pub(crate) fn any_hidden(rows: &[PlaylistRow]) -> bool {
 /// What a [`PlaylistFilter`] withholds from the playlist table — the count,
 /// the rules that withheld it, and the withheld names.
 ///
-/// The two rules are judged **independently**, each against the whole disc,
-/// mirroring the CLI's `Hidden by filters (…)` hint block: a playlist that is
-/// both short and looping is counted once and names both rules, and revealing
-/// it takes switching both off.
+/// The two rules are judged **independently**, each against the whole disc
+/// ([`PlaylistFilter::classify`]): a playlist that is both short and looping
+/// is counted once and names both rules, and revealing it takes switching
+/// both off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HiddenPlaylists {
     /// The withheld playlists' names, in the order the table would have listed
@@ -449,10 +435,10 @@ impl HiddenPlaylists {
     pub fn reasons(&self) -> String {
         let mut reasons = Vec::new();
         if self.short {
-            reasons.push("short");
+            reasons.push(HiddenRule::Short.label());
         }
         if self.looping {
-            reasons.push("looping");
+            reasons.push(HiddenRule::Looping.label());
         }
         reasons.join(", ")
     }
@@ -507,9 +493,9 @@ pub fn hidden_playlists(
             .then_with(|| a.name.cmp(&b.name))
     });
     let short = filter.filter_short_playlists
-        && hidden.iter().any(|playlist| playlist.total_length < filter.short_playlist_seconds);
-    let looping =
-        filter.filter_looping_playlists && hidden.iter().any(|playlist| playlist.has_loops);
+        && hidden.iter().any(|playlist| filter.classify(playlist).contains(&HiddenRule::Short));
+    let looping = filter.filter_looping_playlists
+        && hidden.iter().any(|playlist| filter.classify(playlist).contains(&HiddenRule::Looping));
     Some(HiddenPlaylists {
         names: hidden.iter().map(|playlist| playlist.name.clone()).collect(),
         short,
@@ -520,13 +506,12 @@ pub fn hidden_playlists(
 #[cfg(test)]
 mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
-    use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+    use bdinfo_rs_core::bdrom::order::{PlaylistFilter, table_rows};
 
     use super::{
         PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, compare,
         display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
         hidden_playlists, playlist_display_name, playlist_rows, sort_rows, table_length,
-        table_rows,
     };
     use crate::settings::Settings;
 
@@ -583,12 +568,6 @@ mod tests {
             sample_playlist("00002.MPLS", 70.0, 0, 2000, &["B.M2TS"]),
             sample_playlist("00003.MPLS", 5.0, 100, 0, &["C.M2TS"]),
         ]
-    }
-
-    #[test]
-    fn table_rows_groups_and_filters_like_the_cli() {
-        // Sorted by length desc, grouped by shared clip, the short row dropped.
-        assert_eq!(table_rows(&disc(), &PlaylistFilter::default()), [(1, 0), (1, 1), (2, 2)]);
     }
 
     #[test]
