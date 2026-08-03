@@ -1,0 +1,16 @@
+theme = dark
+ui-scale-percent = 150
+window-width = 1600
+window-height = 900
+window-x = -8
+window-y = 0
+window-maximized = true
+last-path = example/disc folder
+short-playlist-seconds = 45
+filter-short-playlists = false
+filter-looping-playlists = false
+human-readable-sizes = true
+display-chapter-count = false
+autosave-report = true
+report-stream-diagnostics = false
+report-quick-summary = false

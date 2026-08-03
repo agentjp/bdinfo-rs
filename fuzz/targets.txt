@@ -34,3 +34,7 @@ codec           -                       -
 udf             -                       -
 source          dictionaries/udf.dict   -
 parse_report    -                       -
+wasm_report     -                       -
+wasm_iso        -                       -
+wasm_disc       -                       -
+gui_settings    -                       -

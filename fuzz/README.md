@@ -28,12 +28,22 @@ posture or `cargo ck`/`cargo lt`.
 | `m2ts` | `bdinfo_rs_core::bdrom::m2ts::TsStreamFile::scan` — a `*.m2ts`/`*.ssif` transport stream | `scan_never_panics_on_arbitrary_bytes` |
 | `codec` | the audio `bdinfo_rs_core::codec::ac3::scan` / `truehd::scan` / `dts::scan` / `dts_hd::scan` / `lpcm::scan` / `aac::scan` / `mpa::scan`, the video `avc::scan` / `mpeg2::scan` / `vc1::scan` / `mvc::scan` / `hevc::scan` and the graphics `pgs::scan` — an access unit (first byte selects the stream type `% 17`; its high bits seed the DTS `bitrate`) | `codec::{ac3,truehd,dts,dts_hd,lpcm,aac,mpa,avc,mpeg2,vc1,mvc,hevc,pgs}::…::scan_never_panics_on_arbitrary_bytes` |
 | `udf` | the `vfs::udf` parsers — `Avdp`/`Lvd`/`PartitionDescriptor`/`Fsd::parse`, `FileEntry::parse`, `parse_directory`, CS0 `decode_dstring` — over disc-image sectors | `vfs::udf::…::*_never_panics` |
-| `source` | the whole-`.iso` `vfs::udf::source::UdfSource` reader (hostile-input caps included) — `open` over an in-memory image, then a full tree walk + bounded reads of every file. The input maps to byte 512 KiB (the AVDP's fixed sector), so seeds are images with the first 256 sectors stripped — the committed valid seeds mirror `source.rs`'s test fixtures | `vfs::udf::source::open_never_panics_on_arbitrary_bytes` |
-| `parse_report` | the **end-to-end** pipeline: the input becomes a synthetic in-memory BDMV tree (`u16`-BE length-prefixed sections → `index.bdmv`, `MovieObject.bdmv`, `00000.mpls`, `00000.clpi`, `00000.m2ts`, `META/DL/bdmt_eng.xml` — the roxmltree input) → `BdRom::open_resilient` with the packet scan on → `report::text::render` | the resilient-open fault proptests + the render fixture (`cargo nt`) |
+| `source` | the whole-`.iso` `vfs::udf::source::UdfSource` reader (hostile-input caps included) — `open` over an in-memory image, then a full tree walk + bounded reads of every file. The input *describes* a sparse image: a `u16`-BE sector count, then (`u16`-BE sector, `u16`-BE length, content) records the harness places — the same shape `source.rs`'s own test fixtures build images with | `vfs::udf::source::open_never_panics_on_arbitrary_bytes` |
+| `parse_report` | the **end-to-end** pipeline: the input becomes a synthetic in-memory BDMV tree (`u32`-BE length-prefixed sections → `index.bdmv`, `MovieObject.bdmv`, `00000.mpls`, `00000.clpi`, `00000.m2ts`, `META/DL/bdmt_eng.xml` — the roxmltree input — and an optional seventh section for `STREAM/SSIF/00000.ssif`, which makes the disc 3D) → `BdRom::open_resilient` with the packet scan on → `report::text::render` | the resilient-open fault proptests + the render fixture (`cargo nt`) |
+| `wasm_report` | `bdinfo_rs_wasm::run_report` — the in-memory entry point behind the browser package's `scanReport` export. Same six-section framing as `parse_report`, but through that crate's own `BdDir`/`BdFile` tree, glob matcher and render wrapper — the half of the pipeline shipped over npm that no other target links | the crate's `measured_scan_matches_golden` parity test |
+| `wasm_iso` | `bdinfo_rs_wasm::run_iso_report` — the `.iso` entry point behind `scanIso`: `UdfSource::open_resilient` (the recovering open, not `source`'s strict one) over the sparse image the `source` framing describes, then disc scan and render | the crate's `iso_scan_matches_golden` and `run_iso_report_renders_the_iso_golden_and_empties_a_bad_image` |
+| `wasm_disc` | the **reverse** mapping of the browser disc model: JSON bytes → `serde_json` → `mirror::Disc` → `Disc::into_scan` → `report::text::render`. This is the one boundary where the value a report is rendered from arrives from outside the scanner — `renderReport` takes a caller-supplied disc, so in a browser it comes from arbitrary JavaScript | the crate's `every_scan_stage_survives_the_round_trip` and `every_field_survives_a_round_trip_through_the_wire_form` |
+| `gui_settings` | `bdinfo_rs_gui::settings::Settings::parse_reporting` — the desktop app's hand-rolled `key = value` configuration reader over lossy UTF-8, and the round trip back through its writer | `any_text_parses_and_restabilizes` |
 
 Every untrusted-input surface now carries a target; the only deliberate exception is
 `vfs::fs` (OS-mediated folder IO, exercised by fault-injecting mock-tree tests instead
 of byte fuzzing).
+
+**The two `.iso` targets share one input framing** (`fuzz_targets/shared/sparse_iso.rs`), and
+`wasm_report` reads the same section framing `parse_report` writes, so a seed means the same
+thing on both sides of each pair and units promoted from one corpus are valid in the other.
+`parse_report` extends its framing with a seventh section the browser export does not read;
+sections past the sixth are ignored there, so seeds stay portable in both directions.
 
 ## Per-target discovery flags
 
@@ -96,17 +106,69 @@ Only the `source` target feels it. The per-parser `udf` target uses the same fil
 gains nothing, because it already feeds every parser at offset 0 and so is not gated the
 same way — which is why the table is keyed by target rather than by format.
 
+**Re-measured after `source`'s input framing changed** (2026-08-03), because a dictionary is
+a claim about one harness, not about a format: 18 independent 300 s samples per arm on the
+re-derived corpus.
+
+| arm | mean `cov` | samples |
+|---|---|---|
+| base | 780.3 | 750 751 752 753 764 765 767 768 774 781 782 792 795 795 797 815 818 827 |
+| `-dict=dictionaries/udf.dict` | **808.4** | 767 770 777 780 798 799 803 804 805 808 816 825 825 832 833 834 837 838 |
+
++3.6%, Mann-Whitney U 262.5 of 324 (z = 3.2). **It still earns its place, and the sample
+count is the lesson.** The first nine pairs alone gave U = 62 against a 5% critical value of
+64 — a "not separable" verdict that nine more pairs overturned. Under the old whole-image
+framing the base arm landed on exactly 735 counters in three consecutive runs, so a handful
+of samples settled it; the sparse framing puts every mutation into live descriptor bytes,
+and the base arm now spans 750–827. **Re-framing a target widens its run-to-run variance,
+so a flag measured under the old framing has to be re-measured under the new one with more
+samples, not fewer.**
+
 `parse_report` is the opposite case, and the reason is worth knowing before writing
-another dictionary for a target framed like it. Its input is a run of `u16` big-endian
-length-prefixed sections, so inserting or overwriting a token shifts the bytes a length
-prefix counts and desynchronises the split of all six files. **A dictionary and a
-length-prefixed container do not compose.**
+another dictionary for a target framed like it. Its input is a run of big-endian
+length-prefixed sections, so inserting a token shifts the bytes a length prefix counts
+and desynchronises the split of all six files. **A dictionary and a length-prefixed
+container do not compose.**
+
+### `wasm_disc` — measured 2026-08-03, neither dictionary wired
+
+Its input is JSON, so the obvious lever is a dictionary; two were written and measured
+separately, because they are different bets. `dictionaries/json.dict` holds the structural
+tokens `serde_json` matches (the three value keywords and the punctuation runs that open and
+close an object, an array and a member); `dictionaries/disc-fields.dict` holds every field
+and variant name the `mirror` types' `Deserialize` derives compare a key against. Four
+independent 300 s samples per arm, same corpus copy, same host, all three arms running
+concurrently so contention is shared:
+
+| arm | `cov` samples | mean |
+|---|---|---|
+| base | 4836, 4854, 4878 | 4856 |
+| `json.dict` | 4853, 4864, 4879, 4942 | 4885 |
+| `disc-fields.dict` | 4780, 4838, 4846, 4855 | 4830 |
+
++0.6% and −0.5%, neither separable. The field names land where prompt-02's rule predicts —
+they are literals a parser compares against, exactly the shape libFuzzer's comparison
+tracing already recovers. The structural tokens were the open question, and they do not pay
+either. Both files are kept for the record, wired to nothing.
+
+What the target's reach actually depends on is **how often a unit parses at all**. Measured
+over the same runs: **about 1 execution in 4,500** gets past `serde_json` and into
+`Disc::into_scan` (0.018–0.028% across seven runs). That sounds hopeless and is not: at
+~28,000 exec/s a 300 s run still renders roughly 2,000 caller-supplied discs. And the rate
+**compounds with the corpus** — a second run started from the first run's grown corpus
+reached **0.051%**, with `cov` 4,856 → 5,282. Under the nightly cache that is the regime the
+target actually runs in.
+
+That is also why the mirror types carry no `cfg(fuzzing)` `Arbitrary` derives, which would
+reach `into_scan` on every execution. Going through JSON is what makes the target's findings
+true of the shipped export: a `Disc` this target constructs is one a `renderReport` caller
+can construct, because both cross the same `Deserialize` derive.
 
 ### What `-max_len` is worth here — measured 2026-08-03
 
 `-max_len` does not truncate an over-long seed; libFuzzer **drops** it. Shortening the
 cap therefore trades seeds for throughput, and only pays when the throughput buys back
-more than the discarded seeds carried. Of the ten targets, only `m2ts` and `source` have
+more than the discarded seeds carried. Of the ten targets measured then, only `m2ts` and `source` have
 a cap above the 4096-byte default at all, because libFuzzer takes it from the largest
 seed.
 
@@ -190,10 +252,43 @@ cargo +nightly fuzz list                              # show targets
 Seed corpora live in `corpus/<target>/` (empty / boundary / valid / garbage inputs) and are
 committed so `-runs=0` is a deterministic replay.
 
+### What one coherent seed is worth — measured 2026-08-03
+
+`parse_report` reached **13.20%** of `report/text.rs` on 1,228 accumulated seeds: it parsed
+playlists well (`bdrom/mpls.rs` 96.92%) and then almost never assembled a disc whole enough
+to render. Two seeds framed from the committed Big Buck Bunny fixture — `valid-disc` and
+`valid-disc-3d`, 7 KB and 13 KB, the same six files the wasm parity test frames plus an
+`.ssif` — changed that:
+
+| module | 1,228 accumulated seeds | + the two fixture seeds |
+|---|---|---|
+| `report/text.rs` | 13.20% | **81.84%** |
+| `bdrom/chapters.rs` | 22.47% | 89.89% |
+| `bdrom/clpi.rs` | 20.00% | 79.44% |
+| `bdrom/m2ts.rs` | 20.82% | 74.78% |
+| `bdrom/disc.rs` | 49.34% | 75.33% |
+| `bdrom/interleaved.rs` | **0.00%** | 61.11% |
+| `stream.rs` | 18.41% | 51.80% |
+
+Accumulated fuzzer output explores *around* what the seeds already reach; it does not
+discover a format from nothing. Where a module is dark, check first whether any seed
+reaches it at all — a fixture-derived seed is cheaper than a target, and here it closed the
+three darkest modules in the tier at once. The full-length variants (99 KB and 198 KB of
+`*.m2ts`) were measured too and add `report/text.rs` 81.84% → 83.66%, which is not worth
+14× the bytes; the deeper demux coverage they also buy is `m2ts`'s job, and that target
+already holds `bdrom/m2ts.rs` at 89%.
+
 ## What a run costs (measured 2026-08-03, x86_64 Linux, cargo-fuzz 0.13.2)
 
-**Replaying the whole corpus takes about 4 seconds for all ten targets** — 0.13 s
+**Replaying the whole corpus takes a few seconds for the whole tier** — 0.13 s
 (`discovery`) to 1.03 s (`m2ts`). The `-runs=0` gate costs a build, not a run.
+
+The build is where the tier's cost sits, and one dependency dominates it: `gui_settings`
+pulls `bdinfo-rs-gui` in, and cargo builds every dependency of this package for **every**
+target in it, so the iced/wgpu tree is compiled on every fuzz build. Measured 2026-08-03 on
+a warm registry, 24 cores: **14 s for the whole tier without it, 65 s with it.** That is the
+price of fuzzing the desktop app's configuration reader from the shared workspace D7 chose,
+and it is paid once per build rather than once per target.
 
 **Fresh-fuzz throughput spans three orders of magnitude**, because a unit means something
 different per target: `discovery` classifies a filename at ~10^6 units/s, while an `m2ts`
@@ -214,5 +309,5 @@ Where a target stops learning — from fresh runs of 120 s on all ten, and 900 s
 | `parse_report` | still gaining linearly at 900 s |
 
 `parse_report` is the one target where a longer budget keeps paying: it is the end-to-end
-harness, and it reaches only 13% of `report::text`'s regions, so most of the renderer has
-never seen a fuzzed disc.
+harness, and it is the target the fixture-derived seeds above lifted from 13% of
+`report::text`'s regions to 82%.

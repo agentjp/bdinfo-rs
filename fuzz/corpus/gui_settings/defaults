@@ -1,0 +1,11 @@
+autosave-report = false
+display-chapter-count = true
+filter-looping-playlists = true
+filter-short-playlists = true
+human-readable-sizes = false
+report-quick-summary = true
+report-stream-diagnostics = true
+short-playlist-seconds = 20
+theme = system
+ui-scale-percent = 100
+window-maximized = false

@@ -16,6 +16,20 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 bdinfo-rs-core = { path = "../crates/bdinfo-rs-core" }
+# The browser package's own entry points. `run_report` / `run_iso_report` and
+# the `mirror::Disc` model are not `cfg(target_arch = "wasm32")`-gated, so a
+# native build reaches them; the six `#[wasm_bindgen]` exports around them are
+# browser-only and stay out of reach here.
+bdinfo-rs-wasm = { path = "../crates/bdinfo-rs-wasm" }
+# The native stand-in for the browser deserializer that hands `render_report` a
+# caller-supplied `Disc` — the same role `serde_json` plays in that crate's own
+# wire-format tests.
+serde_json = "1"
+# The desktop app's configuration reader. Only `settings` is fuzzed, but cargo
+# builds every dependency of this package for every target in it, so the crate's
+# iced/wgpu tree is compiled once per fuzz build — measured 2026-08-03 at +36 s
+# on a warm registry, against 14 s for the rest of the workspace.
+bdinfo-rs-gui = { path = "../crates/bdinfo-rs-gui" }
 
 [profile.release]
 debug = 1
@@ -86,6 +100,34 @@ bench = false
 [[bin]]
 name = "parse_report"
 path = "fuzz_targets/parse_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wasm_report"
+path = "fuzz_targets/wasm_report.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wasm_iso"
+path = "fuzz_targets/wasm_iso.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wasm_disc"
+path = "fuzz_targets/wasm_disc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gui_settings"
+path = "fuzz_targets/gui_settings.rs"
 test = false
 doc = false
 bench = false
