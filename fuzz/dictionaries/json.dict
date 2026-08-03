@@ -1,0 +1,30 @@
+# Structural tokens for the JSON documents `wasm_disc` feeds
+# `serde_json::from_slice::<bdinfo_rs_wasm::mirror::Disc>`.
+#
+# Every entry is a literal serde_json's own parser matches an input byte range
+# against — the three value keywords it compares verbatim, and the punctuation
+# runs that open and close an object, an array and a member. Field NAMES are
+# deliberately absent: they are the shape libFuzzer's comparison tracing already
+# recovers unaided, and `disc-fields.dict` records what writing them down was
+# measured to be worth.
+#
+# Value extremes (`u64::MAX` sizes, `1e308` lengths) are not here either. They
+# are not literals any parser compares against, so they belong in a seed —
+# `corpus/wasm_disc/saturated` carries them.
+
+"null"
+"true"
+"false"
+"{\""
+"\":"
+"\":\""
+"\",\""
+"\":["
+"\":[{\""
+"\"}"
+"\"}]"
+"}]}"
+"[]"
+"{}"
+"\":{\""
+"},{\""
