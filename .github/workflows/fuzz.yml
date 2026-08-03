@@ -631,14 +631,19 @@ jobs:
       # would sit in the repository's 10 GB store for the full 7-day retention,
       # seven passes deep, evicting caches a pull request needs. Delete every
       # entry but the newest per target.
+      #
+      # Master only, and filtered to master's own entries: `gh cache list` sees
+      # every ref's caches, so a run dispatched on a branch would otherwise
+      # delete the nightly corpus that only master-scoped runs can restore.
       - name: Prune superseded corpus caches
-        if: ${{ github.event_name != 'push' }}
+        if: ${{ github.ref == 'refs/heads/master' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          $caches = @(gh cache list --key fuzz-corpus- --limit 100 --json 'id,key,createdAt,sizeInBytes' | ConvertFrom-Json)
+          $caches = @(gh cache list --key fuzz-corpus- --limit 100 --json 'id,key,createdAt,sizeInBytes,ref' |
+            ConvertFrom-Json | Where-Object { $_.ref -eq 'refs/heads/master' })
           $groups = @($caches | Group-Object { $_.key -replace '-\d+$', '' })
           $kept = 0
           foreach ($group in $groups) {
