@@ -97,9 +97,18 @@ bdinfo-rs D:\Rips\MY_MOVIE --mpls 00800,00801    # scan exactly these playlists
 bdinfo-rs D:\Rips\MY_MOVIE --whole               # scan everything the table lists
 ```
 
-The table hides playlists shorter than 20 seconds and looping ones, and names what it withheld.
+The table hides short playlists and looping ones, and names what it withheld.
 `--show-short-playlists` and `--show-looping-playlists` put each category back — into the table,
-the picker, and `--whole`.
+the picker, and `--whole`. `--short-playlist-seconds` moves the cutoff a playlist has to reach to
+count as long, 20 seconds by default:
+
+```sh
+bdinfo-rs D:\Rips\MY_MOVIE --short-playlist-seconds 60   # hide anything under a minute
+```
+
+The report renders every section by default. `--no-stream-diagnostics` drops the per-playlist
+`STREAM DIAGNOSTICS` tables — the widest part of the file — and `--no-quick-summary` drops the
+`QUICK SUMMARY` blocks. Each omits exactly its own section and changes nothing else.
 
 A run on a terminal opens with the bdinfo-rs banner; `--no-banner` drops it. Piped or redirected
 output never carries it.

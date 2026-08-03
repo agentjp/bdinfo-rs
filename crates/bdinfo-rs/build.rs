@@ -82,7 +82,7 @@ const EXAMPLES: &str = "Examples:\n  \
 /// The man page's per-argument descriptions, keyed by the derive's argument id
 /// — the `Cli` field name. `mut_arg` panics on an id that no longer exists, so
 /// a renamed field fails this build rather than silently dropping its prose.
-const LONG_HELP: [(&str, &str); 10] = [
+const LONG_HELP: [(&str, &str); 13] = [
     (
         "bd_path",
         "The Blu-ray to analyze. This may be the disc root (the folder containing BDMV), the \
@@ -105,8 +105,8 @@ const LONG_HELP: [(&str, &str); 10] = [
     ),
     (
         "mpls",
-        "Select playlists by name instead of from the table, as a comma-separated list (for \
-         example 00800,00801). Names are matched case-insensitively and the .MPLS extension may \
+        "Select playlists by name instead of from the table, as a comma-separated list, for \
+         example --mpls 00800,00801. Names are matched case-insensitively and the .MPLS extension may \
          be omitted. The named playlists are scanned in the order given, unfiltered, so this \
          reaches playlists the table would hide. It takes precedence over --whole and the \
          interactive picker.",
@@ -118,9 +118,10 @@ const LONG_HELP: [(&str, &str); 10] = [
     ),
     (
         "show_short_playlists",
-        "Include playlists shorter than 20 seconds in the selection table. They are hidden by \
-         default — a disc's menu, logo and transition playlists are usually short — so this \
-         widens what --list prints, what the interactive picker offers, and what --whole scans.",
+        "Include short playlists — those below the --short-playlist-seconds cutoff — in the \
+         selection table. They are hidden by default — a disc's menu, logo and transition \
+         playlists are usually short — so this widens what --list prints, what the interactive \
+         picker offers, and what --whole scans.",
     ),
     (
         "show_looping_playlists",
@@ -128,6 +129,27 @@ const LONG_HELP: [(&str, &str); 10] = [
          are hidden by default as authoring artefacts, so this widens what --list prints, what \
          the interactive picker offers, and what --whole scans. A disc that disguises its main \
          feature as a loop needs this flag to make that playlist selectable.",
+    ),
+    (
+        "short_playlist_seconds",
+        "The length in whole seconds below which a playlist counts as short, 20 by default. A \
+         playlist of exactly this length is not short. The cutoff decides what the selection \
+         table hides, what the hidden-playlist line names, and therefore what --whole scans; \
+         --show-short-playlists lists the short ones anyway. Playlists named with --mpls are \
+         never filtered, so the cutoff does not reach them.",
+    ),
+    (
+        "no_stream_diagnostics",
+        "Omit each playlist's STREAM DIAGNOSTICS section from the report — the per-clip table of \
+         every presented stream with its language, duration, bitrate, byte and packet tallies. It \
+         is the widest part of the report, so dropping it leaves something short enough to paste. \
+         Nothing else in the report changes.",
+    ),
+    (
+        "no_quick_summary",
+        "Omit each playlist's QUICK SUMMARY block from the report — the condensed repeat of the \
+         disc, playlist and stream lines that the sections above already carry in full. Nothing \
+         else in the report changes.",
     ),
     (
         "no_banner",

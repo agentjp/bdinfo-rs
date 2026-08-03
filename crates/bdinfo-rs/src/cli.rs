@@ -64,15 +64,30 @@ struct Cli {
         long,
         value_name = "NAME,...",
         value_delimiter = ',',
-        help = "Scan only the named playlists (00800,00801)"
+        help = "Scan only the named playlists"
     )]
     mpls: Vec<String>,
     #[arg(short = 'w', long, help = "Scan every listed playlist")]
     whole: bool,
-    #[arg(long, help = "Also list playlists shorter than 20s")]
+    #[arg(long, help = "Also list short playlists")]
     show_short_playlists: bool,
     #[arg(long, help = "Also list looping playlists")]
     show_looping_playlists: bool,
+    // `hide_default_value` keeps clap from appending its own `[default: 20]`:
+    // the help card states the default inline instead, the way REPORT_DEST
+    // does, and the appended form would push this line past 80 columns.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = 20,
+        hide_default_value = true,
+        help = "Short-playlist cutoff (default: 20)"
+    )]
+    short_playlist_seconds: u32,
+    #[arg(long, help = "Omit the STREAM DIAGNOSTICS sections")]
+    no_stream_diagnostics: bool,
+    #[arg(long, help = "Omit the QUICK SUMMARY blocks")]
+    no_quick_summary: bool,
     #[arg(long, help = "Never print the banner")]
     no_banner: bool,
     #[arg(

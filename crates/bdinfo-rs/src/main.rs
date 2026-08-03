@@ -292,8 +292,8 @@ fn run(cli: &Cli) -> u8 {
         // filtered set the `--show-*-playlists` switches widen.
         let filter = PlaylistFilter {
             filter_short_playlists: !cli.show_short_playlists,
+            short_playlist_seconds: f64::from(cli.short_playlist_seconds),
             filter_looping_playlists: !cli.show_looping_playlists,
-            ..PlaylistFilter::default()
         };
         let rows = table_rows(&bdrom.playlists, &filter);
         print!("{}", selection_table(&bdrom.playlists, &rows));
@@ -340,16 +340,25 @@ fn run(cli: &Cli) -> u8 {
         &mut |progress, cancel| scan_disc(&cli.bd_path, true, Some(&scan_files), progress, cancel),
         &dest,
         &selection,
+        RenderOptions {
+            stream_diagnostics: !cli.no_stream_diagnostics,
+            quick_summary: !cli.no_quick_summary,
+        },
     )
 }
 
 /// The post-selection phase of [`run`]: packet-scans through `scan` with the
-/// live progress display, writes the report into `dest` in selection order,
-/// and returns the exit code. `scan` is injectable so the
-/// fatal-scan-failure path is testable (a structure that survived the
+/// live progress display, renders under `options`, writes the report into
+/// `dest` in selection order, and returns the exit code. `scan` is injectable
+/// so the fatal-scan-failure path is testable (a structure that survived the
 /// metadata scan rarely fails the packet scan, but the disc can vanish
 /// between the two).
-fn scan_and_report(scan: &mut ScanFn<'_>, dest: &Path, selection: &[String]) -> u8 {
+fn scan_and_report(
+    scan: &mut ScanFn<'_>,
+    dest: &Path,
+    selection: &[String],
+    options: RenderOptions,
+) -> u8 {
     let mut line = ProgressDisplay::new();
     // The scan's Ctrl+C affordance, styled path only: raw mode makes the press
     // arrive as a key event instead of killing the process, the per-tick poll
@@ -374,9 +383,7 @@ fn scan_and_report(scan: &mut ScanFn<'_>, dest: &Path, selection: &[String]) -> 
             line.finish(errors.is_empty());
             println!("Please wait while we generate the report...");
             let order = selection_order(&bdrom.playlists, selection);
-            // The CLI has no report flags (the reference CLI lineage has
-            // none either), so it always renders the full default report.
-            let rendered = text::render_with(&bdrom, &order, &errors, RenderOptions::default());
+            let rendered = text::render_with(&bdrom, &order, &errors, options);
             if let Err(code) = save_report(dest, &bdrom, &rendered) {
                 return code;
             }
@@ -1105,6 +1112,7 @@ mod tests {
     use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, ScanProgress};
     use bdinfo_rs_core::bdrom::order::{PlaylistFilter, table_rows};
     use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
+    use bdinfo_rs_core::report::text::RenderOptions;
     use clap::Parser;
     use clap::error::ErrorKind;
 
@@ -1662,14 +1670,17 @@ Arguments:
   [REPORT_DEST]  Report folder (default: BD_PATH; required for .iso)
 
 Options:
-  -l, --list                    List playlists and exit
-  -m, --mpls <NAME,...>         Scan only the named playlists (00800,00801)
-  -w, --whole                   Scan every listed playlist
-      --show-short-playlists    Also list playlists shorter than 20s
-      --show-looping-playlists  Also list looping playlists
-      --no-banner               Never print the banner
-  -v, --version                 Print version
-  -h, --help                    Print help
+  -l, --list                              List playlists and exit
+  -m, --mpls <NAME,...>                   Scan only the named playlists
+  -w, --whole                             Scan every listed playlist
+      --show-short-playlists              Also list short playlists
+      --show-looping-playlists            Also list looping playlists
+      --short-playlist-seconds <SECONDS>  Short-playlist cutoff (default: 20)
+      --no-stream-diagnostics             Omit the STREAM DIAGNOSTICS sections
+      --no-quick-summary                  Omit the QUICK SUMMARY blocks
+      --no-banner                         Never print the banner
+  -v, --version                           Print version
+  -h, --help                              Print help
 ";
 
     /// A piped, colourless stdout — the header tier that pins a stable page.
@@ -1975,6 +1986,52 @@ Options:
     }
 
     #[test]
+    fn the_short_playlist_cutoff_reaches_the_filter() {
+        // Same observable seam as the show switches: the table feeds `--whole`,
+        // so the cutoff's effect shows up as which playlists the report carries.
+        let bd = TempBd::with_filtered_playlists();
+        let path = bd.root.to_string_lossy().into_owned();
+        let scanned = |seconds: &str| -> String {
+            assert_eq!(
+                run_args(&[path.as_str(), "--whole", "--short-playlist-seconds", seconds]),
+                0
+            );
+            std::fs::read_to_string(bd.report_file()).expect("read the saved report")
+        };
+        // Below the 10 s playlist: it is no longer short, so it reports.
+        let lowered = scanned("5");
+        assert!(lowered.contains("PLAYLIST: 00002.MPLS"), "{lowered}");
+        // Above the 60 s playlist: the disc's one long playlist is short too,
+        // so nothing survives the filter and no playlist section is written.
+        let raised = scanned("61");
+        assert!(!raised.contains("PLAYLIST: "), "{raised}");
+    }
+
+    #[test]
+    fn each_report_switch_omits_only_its_own_section() {
+        let bd = TempBd::with_filtered_playlists();
+        let path = bd.root.to_string_lossy().into_owned();
+        let scanned = |args: &[&str]| -> String {
+            let mut full = vec![path.as_str(), "--whole"];
+            full.extend_from_slice(args);
+            assert_eq!(run_args(&full), 0, "{args:?}");
+            std::fs::read_to_string(bd.report_file()).expect("read the saved report")
+        };
+        let full = scanned(&[]);
+        assert!(full.contains("STREAM DIAGNOSTICS:"), "{full}");
+        assert!(full.contains("QUICK SUMMARY:"), "{full}");
+        let no_diagnostics = scanned(&["--no-stream-diagnostics"]);
+        assert!(!no_diagnostics.contains("STREAM DIAGNOSTICS:"), "{no_diagnostics}");
+        assert!(no_diagnostics.contains("QUICK SUMMARY:"), "{no_diagnostics}");
+        let no_summary = scanned(&["--no-quick-summary"]);
+        assert!(no_summary.contains("STREAM DIAGNOSTICS:"), "{no_summary}");
+        assert!(!no_summary.contains("QUICK SUMMARY:"), "{no_summary}");
+        let neither = scanned(&["--no-stream-diagnostics", "--no-quick-summary"]);
+        assert!(!neither.contains("STREAM DIAGNOSTICS:"), "{neither}");
+        assert!(!neither.contains("QUICK SUMMARY:"), "{neither}");
+    }
+
+    #[test]
     fn table_cells_group_digits_and_wrap_hours() {
         assert_eq!(group_n0(0), "0");
         assert_eq!(group_n0(123), "123");
@@ -2075,8 +2132,12 @@ Options:
         // The disc vanished between the metadata scan and the packet scan —
         // the injectable seam makes the fatal arm deterministic.
         let dest = TempDest::new();
-        let code =
-            super::scan_and_report(&mut |_, _| Err(BdError::StructureNotFound), &dest.root, &[]);
+        let code = super::scan_and_report(
+            &mut |_, _| Err(BdError::StructureNotFound),
+            &dest.root,
+            &[],
+            RenderOptions::default(),
+        );
         assert_eq!(code, 1);
     }
 
@@ -2095,6 +2156,7 @@ Options:
             },
             &dest.root,
             &[],
+            RenderOptions::default(),
         );
         assert_eq!(code, super::EXIT_CANCELLED);
         assert_eq!(code, 130, "the documented cancellation exit code");
