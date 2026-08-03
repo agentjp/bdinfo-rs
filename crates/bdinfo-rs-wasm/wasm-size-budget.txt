@@ -1,23 +1,25 @@
 # Size budget (bytes) for the optimized browser payload
 # (web/pkg/bdinfo_rs_wasm_bg.wasm, after `wasm-opt -Oz`).
 #
-# A RATCHET: the gate (scripts/wasm-compliance.ps1) and CI (wasm.yml) fail if the
-# optimized .wasm exceeds this. Lower it deliberately when the figure drops;
-# NEVER raise it without a written reason in the commit. Current optimized size
-# is ~511,231 B (rustc 1.96.0 + wasm-bindgen 0.2.126 + binaryen 131.0.0).
+# A ceiling, not a target: the gate and CI (wasm.yml) fail if the optimized
+# .wasm exceeds it. Current optimized size is ~508,372 B (rustc 1.97.1 +
+# wasm-bindgen 0.2.126 + binaryen 131.0.0).
 #
-# Three steps account for the growth over the ~362,471 B this crate started at.
-# Linking the read-only UDF 2.50 reader for `.iso` input (the scan_iso /
-# list_iso_playlists exports + WebIso) took it to ~402,504 B; the reader had
-# been dead-code-eliminated out before, because nothing called it. The
-# structural disc-model exports (inspect_files / inspect_iso) then added
-# ~22,290 B by giving the serde `Serialize` tree over the mirror types its
-# first caller, which is what pulls serde-wasm-bindgen into the payload. Taking
-# a disc model back IN (render_report / scan_files_full / scan_iso_full) then
-# added ~86,440 B: `Deserialize` over that same tree is the larger half of
-# serde, since reading a value needs a name-matching visitor per field where
-# writing one needs only a write.
+# The ceiling is 1 MiB, roughly double the current figure. It is deliberately
+# loose: a payload of this size is not a cost worth designing around for a tool
+# that reads multi-GB disc images, so the budget exists to catch a runaway
+# regression - a dependency that pulls in a formatter, a panic path that keeps
+# its formatting machinery, a monomorphization blow-up - and not to arbitrate
+# ordinary feature growth. Raising it again means something went wrong; find
+# that before editing this number.
 #
-# The ceiling (512 KiB) carries a small headroom for patch-level toolchain
-# drift (binaryen is ^131.x).
-524288
+# For reference, what moved the figure so far: the crate started at ~362,471 B.
+# Linking the read-only UDF 2.50 reader for `.iso` input took it to ~402,504 B
+# (the reader had been dead-code-eliminated before, because nothing called it).
+# Giving serde `Serialize` over the disc-model mirror its first caller added
+# ~22,290 B, which is what pulls serde-wasm-bindgen into the payload. Taking a
+# disc model back IN added ~86,440 B: `Deserialize` over that same tree is the
+# larger half of serde, since reading a value needs a name-matching visitor per
+# field where writing one needs only a write. Deleting the hand-written JSON
+# row serializer and the four exports that fed it took ~2,859 B back off.
+1048576

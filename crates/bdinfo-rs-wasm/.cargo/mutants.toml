@@ -22,11 +22,8 @@ exclude_re = [
     "build_web_tree", # &js_sys::Array -> Node<WebFile>
     "notify", # the wasm32 progress-callback shim -> js_sys::Function
     "scan_root", # the wasm32 whole-disc/by-name scan dispatch -> JsValue
-    "render_root", # the wasm32 scan dispatch rendered -> JsValue
-    "scan_files", # the #[wasm_bindgen] streaming exports (scan_files + scan_files_full)
-    "scan_iso", # the #[wasm_bindgen] .iso streaming exports (scan_iso + scan_iso_full)
-    "list_playlists", # the #[wasm_bindgen] structural-listing export
-    "list_iso_playlists", # the #[wasm_bindgen] .iso structural-listing export
+    "scan_files", # the #[wasm_bindgen] measured streaming export
+    "scan_iso", # the #[wasm_bindgen] measured .iso streaming export
     "inspect_files", # the #[wasm_bindgen] structural disc-model export
     "inspect_iso", # the #[wasm_bindgen] .iso structural disc-model export
     "render_report", # the #[wasm_bindgen] re-render-from-a-disc export

@@ -13,6 +13,7 @@
 //! | [`ScanError`] | [`ScanError`](bdinfo_rs_core::error::ScanError) |
 //! | [`ScanStage`] | [`ScanStage`](bdinfo_rs_core::error::ScanStage) |
 //! | [`ScanErrorReason`] | [`BdError`](bdinfo_rs_core::error::BdError) |
+//! | [`HiddenRule`] | [`HiddenRule`](bdinfo_rs_core::bdrom::order::HiddenRule) |
 //!
 //! ## Conventions
 //!
@@ -43,21 +44,20 @@
 //!
 //! ## Building one, and taking it apart again
 //!
-//! [`Disc::from_scan`] mirrors a whole scanned disc and [`Disc::from_listing`] mirrors one as a
-//! filtered playlist listing; every other type here is reached through a [`From`] impl those two
-//! walk. [`Disc::into_scan`] goes back the other way, rebuilding the [`BdRom`] and the recorded
-//! failures so the report can be rendered from a mirror alone.
+//! [`Disc::from_scan`] mirrors a whole scanned disc; every other type here is reached through a
+//! [`From`] impl it walks. [`Disc::into_scan`] goes back the other way, rebuilding the [`BdRom`]
+//! and the recorded failures so the report can be rendered from a mirror alone.
 //!
 //! [`ScanResult`] is the one type here with no counterpart in the model: it pairs a rendered
 //! report with the [`Disc`] it was rendered beside, for a scan that returns both.
 
 use std::io;
 
-use bdinfo_rs_core::bdrom::chapters::ChapterSummary;
+use bdinfo_rs_core::bdrom::chapters::{ChapterSummary, seconds_to_ticks};
 use bdinfo_rs_core::bdrom::disc::{
     BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary,
 };
-use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+use bdinfo_rs_core::bdrom::order::{self, PlaylistFilter, table_rows};
 use bdinfo_rs_core::error;
 use bdinfo_rs_core::primitives::Pid;
 use bdinfo_rs_core::stream::TsStreamType;
@@ -128,13 +128,13 @@ pub struct Disc {
     /// Whether the disc carries PSP or mobile content: a `*.mnv` file under
     /// `SNP`.
     pub is_psp: bool,
-    /// The playlists, sorted by file name.
+    /// Every playlist on the disc, sorted by file name.
     ///
-    /// A scan puts every playlist on the disc here, the short and looping ones
-    /// a selection table would withhold included. A listing narrows it to the
-    /// playlists its filter keeps, which is what the two options on the
-    /// structural calls select; the disc-level values above and `errors` below
-    /// always describe the whole disc.
+    /// Nothing is ever filtered out, the short and looping playlists a
+    /// selection table withholds included: each one carries the rules that
+    /// withhold it in `hiddenBy`, so a consumer narrows the list itself
+    /// without scanning again. Sorting by file name rather than by table
+    /// position is what makes `position` a field.
     pub playlists: Vec<Playlist>,
     /// Whether the packet scan ran. When false the scan read only the disc
     /// metadata, and every measured value below — bitrates, packet counts,
@@ -155,6 +155,11 @@ pub struct Playlist {
     pub name: String,
     /// Total presentation length in seconds.
     pub total_length_seconds: f64,
+    /// The same length in 100 ns ticks, truncated toward zero — the unit the
+    /// report and the selection table format their `hh:mm:ss` cells from.
+    /// Integer-dividing this by 10,000,000 reproduces those cells exactly,
+    /// where formatting `totalLengthSeconds` can land a tick either side.
+    pub total_length_ticks: i64,
     /// Summed size of the clip `*.m2ts` files in bytes.
     pub file_size_bytes: u64,
     /// Summed size of the clip interleaved `*.ssif` files in bytes.
@@ -171,6 +176,32 @@ pub struct Playlist {
     /// file from the same in-time. A selection table withholds a looping
     /// playlist by default.
     pub has_loops: bool,
+    /// The shared-clip group this playlist belongs to, numbered from 1 — the
+    /// Group column of the selection table. Playlists sharing any clip file
+    /// land in one group, and the groups are numbered in table order, so group
+    /// 1 holds the longest playlist on the disc.
+    ///
+    /// Computed over the whole disc, so it does not move when a consumer
+    /// narrows the list.
+    pub group: usize,
+    /// Where this playlist sits in the selection table, numbered from 1 —
+    /// group order, and longest first inside each group.
+    ///
+    /// Computed over the whole disc, like `group`. Sorting `playlists` by it
+    /// reproduces the table the classic report prints, which is why it is a
+    /// field rather than the array index: the array stays in the file-name
+    /// order the disc records.
+    pub position: usize,
+    /// The filter rules that classify this playlist as withheld: `short` for a
+    /// playlist under the length threshold in force, `looping` for one that
+    /// replays a clip, both, or none.
+    ///
+    /// A selection table shows the playlists whose `hiddenBy` is empty, so
+    /// filtering on this field client-side is the whole of what the two
+    /// playlist-filter switches of the classic report do — no rescan needed.
+    /// The threshold behind `short` defaults to 20 seconds, and
+    /// `shortPlaylistSeconds` on the scanning calls is what moves it.
+    pub hidden_by: Vec<HiddenRule>,
     /// The presented streams, sorted by PID.
     pub streams: Vec<Stream>,
     /// The sequenced clips in playlist order, angle clips included.
@@ -179,6 +210,20 @@ pub struct Playlist {
     /// that chapter. Present without the packet scan too, but then only the
     /// times are filled in.
     pub chapters: Vec<Chapter>,
+}
+
+/// One reason a selection table withholds a playlist, and one member of a
+/// `hiddenBy`.
+///
+/// `short` means the playlist is strictly shorter than the length threshold in
+/// force — 20 seconds unless `shortPlaylistSeconds` moved it — and a playlist
+/// of exactly the threshold length is not short. `looping` means it replays a
+/// clip. The two rules are judged independently, so a playlist can name both.
+#[derive(Tsify, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HiddenRule {
+    Short,
+    Looping,
 }
 
 /// One clip (`*.M2TS`) as one playlist sequences it.
@@ -465,31 +510,21 @@ impl Disc {
     /// mode rather than from the values: a measured scan can legitimately
     /// report a zero, and only the scan mode tells that apart from a value
     /// nothing ever measured.
+    ///
+    /// `filter` supplies the short-playlist threshold each playlist is
+    /// classified against for its `hiddenBy`; its two switches are not read,
+    /// because no playlist is ever dropped here.
     #[must_use]
-    pub fn from_scan(bdrom: &BdRom, errors: &[error::ScanError], measured: bool) -> Self {
-        Self::from_scan_filtered(bdrom, errors, measured, &PlaylistFilter::everything())
-    }
-
-    /// Mirrors a metadata-only scan as a playlist listing: as
-    /// [`from_scan`](Self::from_scan), except that `playlists` holds only the
-    /// playlists `filter` keeps and `measured` is false.
-    #[must_use]
-    pub fn from_listing(
-        bdrom: &BdRom,
-        errors: &[error::ScanError],
-        filter: &PlaylistFilter,
-    ) -> Self {
-        Self::from_scan_filtered(bdrom, errors, false, filter)
-    }
-
-    /// The body both constructors share; `from_scan` passes the filter that
-    /// keeps every playlist.
-    fn from_scan_filtered(
+    pub fn from_scan(
         bdrom: &BdRom,
         errors: &[error::ScanError],
         measured: bool,
         filter: &PlaylistFilter,
     ) -> Self {
+        // The table numbering describes the disc, not a view of it, so it is
+        // taken over every playlist: a group or a position that shifted when a
+        // consumer changed a display filter would be describing the view.
+        let rows = table_rows(&bdrom.playlists, &PlaylistFilter::everything());
         Self {
             volume_label: bdrom.volume_label.clone(),
             disc_title: bdrom.disc_title.clone(),
@@ -505,8 +540,23 @@ impl Disc {
             playlists: bdrom
                 .playlists
                 .iter()
-                .filter(|playlist| filter.keeps(playlist))
-                .map(Playlist::from)
+                .enumerate()
+                .map(|(index, playlist)| {
+                    // A keep-everything filter places every playlist in the
+                    // table exactly once, so the search always finds this one
+                    // and the (0, 0) default is unreachable.
+                    let (group, position) = rows
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (_, at))| *at == index)
+                        .map_or((0, 0), |(row, (group, _))| (*group, row.saturating_add(1)));
+                    Playlist::mirror(
+                        playlist,
+                        group,
+                        position,
+                        filter.classify(playlist).into_iter().map(HiddenRule::from).collect(),
+                    )
+                })
                 .collect(),
             measured,
             errors: errors.iter().map(ScanError::from).collect(),
@@ -514,20 +564,41 @@ impl Disc {
     }
 }
 
-impl From<&PlaylistSummary> for Playlist {
-    fn from(playlist: &PlaylistSummary) -> Self {
+impl Playlist {
+    /// Mirrors one playlist, with the table numbering and the classification
+    /// its own fields cannot supply — those describe where the playlist sits
+    /// among the others, which only the whole disc knows.
+    fn mirror(
+        playlist: &PlaylistSummary,
+        group: usize,
+        position: usize,
+        hidden_by: Vec<HiddenRule>,
+    ) -> Self {
         Self {
             name: playlist.name.clone(),
             total_length_seconds: playlist.total_length,
+            total_length_ticks: seconds_to_ticks(playlist.total_length),
             file_size_bytes: playlist.file_size,
             interleaved_file_size_bytes: playlist.interleaved_file_size,
             chapter_count: playlist.chapter_count,
             stream_count: playlist.stream_count,
             angle_count: playlist.angle_count,
             has_loops: playlist.has_loops,
+            group,
+            position,
+            hidden_by,
             streams: playlist.streams.iter().map(Stream::from).collect(),
             clips: playlist.clips.iter().map(Clip::from).collect(),
             chapters: playlist.chapters.iter().map(Chapter::from).collect(),
+        }
+    }
+}
+
+impl From<order::HiddenRule> for HiddenRule {
+    fn from(rule: order::HiddenRule) -> Self {
+        match rule {
+            order::HiddenRule::Short => Self::Short,
+            order::HiddenRule::Looping => Self::Looping,
         }
     }
 }
@@ -750,6 +821,10 @@ impl Disc {
 }
 
 impl From<Playlist> for PlaylistSummary {
+    // Four mirror fields have no counterpart to rebuild and are dropped:
+    // `totalLengthTicks` is `totalLengthSeconds` in another unit, and `group`,
+    // `position` and `hiddenBy` are projections of the whole disc that the
+    // presentation order recomputes from the rebuilt playlists.
     fn from(playlist: Playlist) -> Self {
         Self {
             name: playlist.name,
@@ -905,8 +980,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Chapter, Clip, ClipStream, Disc, Playlist, ScanError, ScanErrorReason, ScanStage, Stream,
-        borrowed_codec_alt_name,
+        Chapter, Clip, ClipStream, Disc, HiddenRule, Playlist, ScanError, ScanErrorReason,
+        ScanStage, Stream, borrowed_codec_alt_name, order,
     };
 
     // One fixture value and one hand-written wire form per mirror type, composed
@@ -1061,17 +1136,22 @@ mod tests {
         })
     }
 
-    /// A playlist with every field set to a distinct value.
+    /// A playlist with every field set to a distinct value. It is 3.5 s long
+    /// and loops, so the standard classification names both rules.
     fn a_playlist() -> Playlist {
         Playlist {
             name: "00000.MPLS".to_owned(),
             total_length_seconds: 3.5,
+            total_length_ticks: 35_000_000,
             file_size_bytes: 4,
             interleaved_file_size_bytes: 5,
             chapter_count: 6,
             stream_count: 7,
             angle_count: 8,
             has_loops: true,
+            group: 1,
+            position: 1,
+            hidden_by: vec![HiddenRule::Short, HiddenRule::Looping],
             streams: vec![a_stream()],
             clips: vec![a_clip()],
             chapters: vec![a_chapter()],
@@ -1083,12 +1163,16 @@ mod tests {
         json!({
             "name": "00000.MPLS",
             "totalLengthSeconds": 3.5,
+            "totalLengthTicks": 35_000_000,
             "fileSizeBytes": 4,
             "interleavedFileSizeBytes": 5,
             "chapterCount": 6,
             "streamCount": 7,
             "angleCount": 8,
             "hasLoops": true,
+            "group": 1,
+            "position": 1,
+            "hiddenBy": ["short", "looping"],
             "streams": [a_stream_json()],
             "clips": [a_clip_json()],
             "chapters": [a_chapter_json()],
@@ -1379,53 +1463,131 @@ mod tests {
         disc.playlists.iter().map(|playlist| playlist.name.as_str()).collect()
     }
 
-    /// The fixture disc scanned through the in-memory tree, mirrored.
+    /// The fixture disc scanned through the in-memory tree, mirrored under the
+    /// standard 20 s classification.
     fn a_fixture_disc(mode: ScanMode) -> Disc {
         let tree = crate::build_tree(&crate::tests::fixture_blob());
         let report = BdRom::open_resilient(&tree, mode).expect("the fixture disc opens");
-        Disc::from_scan(&report.bdrom, &report.errors, mode == ScanMode::Full)
+        Disc::from_scan(
+            &report.bdrom,
+            &report.errors,
+            mode == ScanMode::Full,
+            &PlaylistFilter::default(),
+        )
     }
 
     #[test]
     fn every_field_of_a_scanned_disc_maps_into_its_mirror() {
-        assert_eq!(Disc::from_scan(&a_core_bdrom(), &[a_core_scan_error()], true), a_disc());
+        assert_eq!(
+            Disc::from_scan(
+                &a_core_bdrom(),
+                &[a_core_scan_error()],
+                true,
+                &PlaylistFilter::default()
+            ),
+            a_disc()
+        );
     }
 
     #[test]
     fn the_scan_mode_alone_decides_the_measured_flag() {
         // Same disc, same values: only the flag differs, and it says whether a
         // zero below was measured or never looked at.
-        let unmeasured = Disc::from_scan(&a_core_bdrom(), &[], false);
+        let unmeasured = Disc::from_scan(&a_core_bdrom(), &[], false, &PlaylistFilter::default());
         assert!(!unmeasured.measured);
         assert!(unmeasured.errors.is_empty(), "a scan with no failures mirrors none");
         assert_eq!(Disc { measured: true, ..unmeasured }, Disc { errors: Vec::new(), ..a_disc() });
     }
 
     #[test]
-    fn from_scan_keeps_the_playlists_a_listing_would_withhold() {
-        let disc = Disc::from_scan(&a_mixed_core_bdrom(), &[], true);
-        assert_eq!(names(&disc), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    fn a_mirrored_disc_holds_every_playlist_whatever_the_classification_withholds() {
+        // A short playlist and a looping one are both mirrored, under the
+        // standard filter that withholds them and under one that keeps them —
+        // the filter only ever decides what `hiddenBy` names.
+        let bdrom = a_mixed_core_bdrom();
+        for filter in [PlaylistFilter::default(), PlaylistFilter::everything()] {
+            let disc = Disc::from_scan(&bdrom, &[a_core_scan_error()], true, &filter);
+            assert_eq!(names(&disc), ["00000.MPLS", "00001.MPLS", "00002.MPLS"], "{filter:?}");
+            assert_eq!(disc.errors, vec![a_scan_error()], "the failures are not filtered");
+        }
     }
 
     #[test]
-    fn from_listing_holds_only_the_playlists_the_filter_keeps() {
+    fn every_playlist_carries_the_rules_that_withhold_it() {
         let bdrom = a_mixed_core_bdrom();
-        let listing = |filter: &PlaylistFilter| {
-            let disc = Disc::from_listing(&bdrom, &[a_core_scan_error()], filter);
-            assert!(!disc.measured, "a listing scan never ran the packet scan");
-            assert_eq!(disc.errors, vec![a_scan_error()], "the failures are not filtered");
-            names(&disc).into_iter().map(str::to_owned).collect::<Vec<_>>()
+        let rules = |filter: &PlaylistFilter| {
+            Disc::from_scan(&bdrom, &[], false, filter)
+                .playlists
+                .into_iter()
+                .map(|playlist| playlist.hidden_by)
+                .collect::<Vec<_>>()
         };
-        // The standard filter withholds the short and the looping playlist.
-        assert_eq!(listing(&PlaylistFilter::default()), ["00000.MPLS"]);
-        // A threshold the short playlist meets exactly keeps it: the boundary
-        // is the same one `PlaylistFilter::keeps` draws.
-        let lowered = PlaylistFilter { short_playlist_seconds: 5.0, ..PlaylistFilter::default() };
-        assert_eq!(listing(&lowered), ["00000.MPLS", "00001.MPLS"]);
+        // 00001 is 5 s and 00002 loops, so the standard 20 s threshold names
+        // one rule for each and none for the 100 s feature.
         assert_eq!(
-            listing(&PlaylistFilter::everything()),
-            ["00000.MPLS", "00001.MPLS", "00002.MPLS"]
+            rules(&PlaylistFilter::default()),
+            [vec![], vec![HiddenRule::Short], vec![HiddenRule::Looping]]
         );
+        // A threshold the short playlist meets exactly clears its rule — the
+        // same boundary `PlaylistFilter::keeps` draws — and leaves the looping
+        // rule, which does not read the threshold, alone.
+        let lowered = PlaylistFilter { short_playlist_seconds: 5.0, ..PlaylistFilter::default() };
+        assert_eq!(rules(&lowered), [vec![], vec![], vec![HiddenRule::Looping]]);
+        // A playlist that is both short and looping names both, Short first.
+        let both =
+            BdRom { playlists: vec![filtered_playlist("00003.MPLS", 5.0, true)], ..a_core_bdrom() };
+        let disc = Disc::from_scan(&both, &[], false, &PlaylistFilter::default());
+        let playlist = disc.playlists.first().expect("the one playlist");
+        assert_eq!(playlist.hidden_by, [HiddenRule::Short, HiddenRule::Looping]);
+    }
+
+    #[test]
+    fn every_hidden_rule_crosses_under_the_name_the_scan_reports() {
+        // The wire strings are the ones core prints in its hidden-playlist
+        // lines, so a relabelling there fails here rather than reaching a
+        // consumer as a silently different union member.
+        for rule in [order::HiddenRule::Short, order::HiddenRule::Looping] {
+            let wire = serde_json::to_value(HiddenRule::from(rule)).expect("serialize the rule");
+            assert_eq!(wire, Value::String(rule.label().to_owned()), "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn the_table_numbering_describes_the_whole_disc_in_file_name_order() {
+        // 00002 (200 s, clip B) heads group 1; 00000 (100 s) and 00003 (50 s)
+        // share clip A, so they are group 2 in that order; 00001 (5 s, clip C)
+        // is group 3. The array itself stays in the file-name order the disc
+        // records, which is why the table position has to be a field.
+        let over = |name: &str, total_length: f64, clip: &str| PlaylistSummary {
+            clips: vec![ClipSummary { name: clip.to_owned(), ..a_core_clip() }],
+            ..filtered_playlist(name, total_length, false)
+        };
+        let bdrom = BdRom {
+            playlists: vec![
+                over("00000.MPLS", 100.0, "A.M2TS"),
+                over("00001.MPLS", 5.0, "C.M2TS"),
+                over("00002.MPLS", 200.0, "B.M2TS"),
+                over("00003.MPLS", 50.0, "A.M2TS"),
+            ],
+            ..a_core_bdrom()
+        };
+        // The standard filter would withhold the 5 s playlist; the numbering
+        // must not notice, since it describes the disc rather than a view.
+        let numbering = |filter: &PlaylistFilter| {
+            Disc::from_scan(&bdrom, &[], true, filter)
+                .playlists
+                .into_iter()
+                .map(|playlist| (playlist.name, playlist.group, playlist.position))
+                .collect::<Vec<_>>()
+        };
+        let want = vec![
+            ("00000.MPLS".to_owned(), 2, 2),
+            ("00001.MPLS".to_owned(), 3, 4),
+            ("00002.MPLS".to_owned(), 1, 1),
+            ("00003.MPLS".to_owned(), 2, 3),
+        ];
+        assert_eq!(numbering(&PlaylistFilter::default()), want);
+        assert_eq!(numbering(&PlaylistFilter::everything()), want);
     }
 
     #[test]

@@ -12,8 +12,8 @@
 // locked-output contract on every gate run, with only Node + the built wasm.
 //
 // The same golden also pins the round trip through the structured disc model:
-// the `disc` that `scan_files_full` returns beside the report, handed straight
-// back to `render_report`, must render those bytes again — so the model reaches
+// the `disc` that `scan_files` returns beside the report, handed straight back
+// to `render_report`, must render those bytes again — so the model reaches
 // JavaScript and comes back carrying every value the report prints.
 //
 // Prereq: `npm run build` (emits pkg/). Run with `npm run test:node`.
@@ -94,18 +94,8 @@ function shortPlaylist(mpls) {
 async function main() {
   const golden = await readFile(goldenPath);
 
-  const {
-    initSync,
-    scan_files,
-    list_playlists,
-    scan_iso,
-    list_iso_playlists,
-    inspect_files,
-    inspect_iso,
-    scan_files_full,
-    scan_iso_full,
-    render_report,
-  } = await import("../pkg/bdinfo_rs_wasm.js");
+  const { initSync, scan_files, scan_iso, inspect_files, inspect_iso, render_report } =
+    await import("../pkg/bdinfo_rs_wasm.js");
   initSync({ module: await readFile(wasmPath) });
 
   const paths = [];
@@ -118,45 +108,17 @@ async function main() {
     files.push(new ShimFile(bytes, name));
   }
 
-  const report = scan_files(paths, files, []);
-  const got = Buffer.from(report, "utf8");
+  const full = scan_files(paths, files, []);
+  const got = Buffer.from(full.report, "utf8");
 
-  // The new CLI-parity exports: the structural list, and a by-name selective
-  // scan. On this single-playlist fixture, selecting the only playlist measures
-  // the same bytes as `--whole`, so its report must equal the golden too.
-  const rows = JSON.parse(list_playlists(paths, files));
-  const selReport = Buffer.from(scan_files(paths, files, ["00000.MPLS"]), "utf8");
-  const listOk =
-    Array.isArray(rows) &&
-    rows.length === 1 &&
-    rows[0].name === "00000.MPLS" &&
-    rows[0].position === 1 &&
-    Array.isArray(rows[0].hiddenBy) &&
-    rows[0].hiddenBy.length === 0;
+  // A by-name selective scan. On this single-playlist fixture, selecting the
+  // only playlist measures the same bytes as `--whole`, so its report must
+  // equal the golden too.
+  const selReport = Buffer.from(scan_files(paths, files, ["00000.MPLS"]).report, "utf8");
   const selOk = selReport.equals(golden);
-  if (!listOk) {
-    console.error(`FAIL — list_playlists rows unexpected: ${JSON.stringify(rows)}`);
-  }
-
-  // The filter options: the same disc plus a second playlist over the same clip,
-  // patched to ~10 s so the short rule withholds it. Omitting the options (and
-  // passing `false`) must list only the feature; passing `show_short_playlists`
-  // must add the short playlist, tagged `hiddenBy: ["short"]`.
-  const mpls = new Uint8Array(await readFile(join(fixtures, "PLAYLIST/00000.mpls")));
-  const shortPaths = [...paths, "WASMDISC/BDMV/PLAYLIST/00001.mpls"];
-  const shortFiles = [...files, new ShimFile(shortPlaylist(mpls), "00001.mpls")];
-  const listNames = (...options) =>
-    JSON.parse(list_playlists(shortPaths, shortFiles, ...options)).map((row) => row.name);
-  const widened = JSON.parse(list_playlists(shortPaths, shortFiles, true));
-  const optionsOk =
-    JSON.stringify(listNames()) === '["00000.MPLS"]' &&
-    JSON.stringify(listNames(false, false)) === '["00000.MPLS"]' &&
-    JSON.stringify(listNames(false, true)) === '["00000.MPLS"]' &&
-    JSON.stringify(widened.map((row) => row.name)) === '["00000.MPLS","00001.MPLS"]' &&
-    JSON.stringify(widened.map((row) => row.hiddenBy)) === '[[],["short"]]';
-  if (!optionsOk) {
+  if (!selOk) {
     console.error(
-      `FAIL — filter options unexpected: ${JSON.stringify(listNames())} / ${JSON.stringify(widened)}`,
+      `FAIL — selective scan (${selReport.length} bytes) diverged from golden (${golden.length} bytes).`,
     );
   }
 
@@ -183,23 +145,50 @@ async function main() {
     console.error(`FAIL — inspect_files disc unexpected: ${JSON.stringify(inspected)}`);
   }
 
-  // The short-playlist threshold, which only the inspect exports take: the
-  // ~10 s playlist the default 20 s rule withholds is listed once the threshold
-  // drops below its length, and a zero threshold means the default.
-  const inspectNames = (...options) =>
-    inspect_files(shortPaths, shortFiles, ...options).playlists.map((playlist) => playlist.name);
-  const thresholdOk =
-    JSON.stringify(inspectNames()) === '["00000.MPLS"]' &&
-    JSON.stringify(inspectNames(false, false, 0)) === '["00000.MPLS"]' &&
-    JSON.stringify(inspectNames(false, false, 5)) === '["00000.MPLS","00001.MPLS"]';
-  if (!thresholdOk) {
+  // The four selection-table fields on the model. The fixture disc is one
+  // ~30 s playlist, so it is group 1, position 1, withheld by nothing, and its
+  // tick count divides exactly into the `00:00:30` the table cell prints.
+  const tableOk =
+    inspectedPlaylist.group === 1 &&
+    inspectedPlaylist.position === 1 &&
+    Array.isArray(inspectedPlaylist.hiddenBy) &&
+    inspectedPlaylist.hiddenBy.length === 0 &&
+    inspectedPlaylist.totalLengthTicks ===
+      Math.trunc(inspectedPlaylist.totalLengthSeconds * 10_000_000) &&
+    Math.trunc(inspectedPlaylist.totalLengthTicks / 10_000_000) === 30;
+  if (!tableOk) {
     console.error(
-      `FAIL — short-playlist threshold unexpected: ${JSON.stringify(inspectNames(false, false, 5))}`,
+      `FAIL — selection-table fields unexpected: group ${inspectedPlaylist.group}, position ${inspectedPlaylist.position}, hiddenBy ${JSON.stringify(inspectedPlaylist.hiddenBy)}, ticks ${inspectedPlaylist.totalLengthTicks}.`,
     );
   }
-  if (!selOk) {
+
+  // The short-playlist threshold and the classification it drives. The disc
+  // gains a second playlist over the same clip, patched to ~10 s: every export
+  // returns BOTH playlists whatever the threshold, and only `hiddenBy` moves.
+  // Sharing the clip also puts both in group 1, longest first.
+  const mpls = new Uint8Array(await readFile(join(fixtures, "PLAYLIST/00000.mpls")));
+  const shortPaths = [...paths, "WASMDISC/BDMV/PLAYLIST/00001.mpls"];
+  const shortFiles = [...files, new ShimFile(shortPlaylist(mpls), "00001.mpls")];
+  const classify = (playlists) =>
+    JSON.stringify(playlists.map((playlist) => `${playlist.name}:${playlist.hiddenBy}`));
+  const numbering = (playlists) =>
+    JSON.stringify(playlists.map((playlist) => [playlist.group, playlist.position]));
+  const standard = inspect_files(shortPaths, shortFiles).playlists;
+  const lowered = inspect_files(shortPaths, shortFiles, 5).playlists;
+  const measuredShort = scan_files(shortPaths, shortFiles, [], undefined, true, true, 5).disc;
+  const thresholdOk =
+    classify(standard) === '["00000.MPLS:","00001.MPLS:short"]' &&
+    classify(inspect_files(shortPaths, shortFiles, 0).playlists) ===
+      '["00000.MPLS:","00001.MPLS:short"]' &&
+    classify(lowered) === '["00000.MPLS:","00001.MPLS:"]' &&
+    numbering(standard) === "[[1,1],[1,2]]" &&
+    numbering(lowered) === "[[1,1],[1,2]]" &&
+    // The measured export applies the same threshold, so a `Disc` means the
+    // same thing whichever call produced it.
+    classify(measuredShort.playlists) === '["00000.MPLS:","00001.MPLS:"]';
+  if (!thresholdOk) {
     console.error(
-      `FAIL — selective scan (${selReport.length} bytes) diverged from golden (${golden.length} bytes).`,
+      `FAIL — classification unexpected: standard ${classify(standard)}, lowered ${classify(lowered)}, numbering ${numbering(standard)}, measured ${classify(measuredShort.playlists)}.`,
     );
   }
 
@@ -208,12 +197,10 @@ async function main() {
   // `render_report` must reproduce the same bytes — which is what proves the
   // model crossed to JavaScript and back without losing a value the report
   // prints. Switching a section off must then drop it and nothing else.
-  const full = scan_files_full(paths, files, []);
   const reRendered = Buffer.from(render_report(full.disc), "utf8");
   const noDiagnostics = render_report(full.disc, false);
   const noSummary = render_report(full.disc, true, false);
   const fullOk =
-    Buffer.from(full.report, "utf8").equals(golden) &&
     full.disc.measured === true &&
     full.disc.playlists[0].streams[0].bitrateBps > 0 &&
     reRendered.equals(golden) &&
@@ -223,31 +210,21 @@ async function main() {
     !noSummary.includes("QUICK SUMMARY:");
   if (!fullOk) {
     console.error(
-      `FAIL — scan_files_full/render_report round trip: report ${full.report.length} B, re-rendered ${reRendered.length} B, golden ${golden.length} B, measured ${full.disc.measured}.`,
+      `FAIL — scan_files/render_report round trip: report ${full.report.length} B, re-rendered ${reRendered.length} B, golden ${golden.length} B, measured ${full.disc.measured}.`,
     );
   }
 
   // The streaming `.iso` path: the same disc opened through the UDF reader as one
-  // `File`. scan_iso (whole + by-name) and list_iso_playlists must match the
-  // native `.iso` golden / table, exercising WebIso's FileReaderSync windowed
-  // reads through the same shims scan_files uses.
+  // `File`. scan_iso (whole + by-name) must match the native `.iso` golden,
+  // exercising WebIso's FileReaderSync windowed reads through the same shims
+  // scan_files uses.
   const isoGolden = await readFile(isoGoldenPath);
   const isoFile = new ShimFile(new Uint8Array(await readFile(isoPath)), "BigBuckBunny.iso");
-  const isoReport = Buffer.from(scan_iso(isoFile, []), "utf8");
-  const isoRows = JSON.parse(list_iso_playlists(isoFile));
-  const isoSelReport = Buffer.from(scan_iso(isoFile, ["00000.MPLS"]), "utf8");
+  const isoFull = scan_iso(isoFile, []);
+  const isoReport = Buffer.from(isoFull.report, "utf8");
+  const isoSelReport = Buffer.from(scan_iso(isoFile, ["00000.MPLS"]).report, "utf8");
   const isoOk = isoReport.equals(isoGolden);
-  const isoListOk =
-    Array.isArray(isoRows) &&
-    isoRows.length === 1 &&
-    isoRows[0].name === "00000.MPLS" &&
-    isoRows[0].position === 1 &&
-    Array.isArray(isoRows[0].hiddenBy) &&
-    isoRows[0].hiddenBy.length === 0;
   const isoSelOk = isoSelReport.equals(isoGolden);
-  if (!isoListOk) {
-    console.error(`FAIL — list_iso_playlists rows unexpected: ${JSON.stringify(isoRows)}`);
-  }
   // The disc model over the same image: the UDF volume label is the genuine
   // one recorded in the filesystem, where the folder pick above can only use
   // the picked folder name.
@@ -257,20 +234,21 @@ async function main() {
     isoInspected.volumeLabel === "Blu-Ray" &&
     isoInspected.playlists.length === 1 &&
     isoInspected.playlists[0].name === "00000.MPLS" &&
+    isoInspected.playlists[0].position === 1 &&
+    isoInspected.playlists[0].hiddenBy.length === 0 &&
     isoInspected.playlists[0].clips.length === 1;
   if (!isoInspectOk) {
     console.error(`FAIL — inspect_iso disc unexpected: ${JSON.stringify(isoInspected)}`);
   }
-  // The same both-outputs scan over the image, round-tripped the same way.
-  const isoFull = scan_iso_full(isoFile, []);
+  // The both-outputs scan over the image, round-tripped the same way.
   const isoFullOk =
-    Buffer.from(isoFull.report, "utf8").equals(isoGolden) &&
+    isoOk &&
     isoFull.disc.measured === true &&
     isoFull.disc.volumeLabel === "Blu-Ray" &&
     Buffer.from(render_report(isoFull.disc), "utf8").equals(isoGolden);
   if (!isoFullOk) {
     console.error(
-      `FAIL — scan_iso_full/render_report round trip: report ${isoFull.report.length} B, iso golden ${isoGolden.length} B.`,
+      `FAIL — scan_iso/render_report round trip: report ${isoFull.report.length} B, iso golden ${isoGolden.length} B.`,
     );
   }
   if (!isoSelOk) {
@@ -297,20 +275,18 @@ async function main() {
 
   if (
     got.equals(golden) &&
-    listOk &&
     selOk &&
-    optionsOk &&
     inspectOk &&
+    tableOk &&
     thresholdOk &&
     fullOk &&
     isoOk &&
-    isoListOk &&
     isoSelOk &&
     isoInspectOk &&
     isoFullOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); list + options + inspect + selection + round trip + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + selection + round trip + .iso OK.`,
     );
     process.exit(0);
   }

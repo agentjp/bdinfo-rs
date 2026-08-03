@@ -1,17 +1,54 @@
 // The vanilla (no-framework) demo driving the package's public API: pick or drop
-// a BDMV folder, list its playlists (structural scan), let the user select some,
-// run the measured scan in a Worker, and show the rendered report with copy +
-// download. No upload — everything stays in the browser. The settings dialog
-// holds the two playlist-filter opt-outs; they only widen what the table lists,
-// never what a scan measures or what the report says.
-import {
-  analyze,
-  analyzeIso,
-  type BdmvFile,
-  listPlaylists,
-  listPlaylistsIso,
-  type PlaylistRow,
-} from "./analyze.js";
+// a BDMV folder, inspect it (structural scan), let the user select some
+// playlists, run the measured scan in a Worker, and show the rendered report
+// with copy + download. No upload — everything stays in the browser. The
+// settings dialog holds the two playlist-filter opt-outs; they only widen what
+// the table lists, never what a scan measures or what the report says.
+import { type BdmvFile, type HiddenRule, inspect, type Playlist, scan } from "./analyze.js";
+
+/**
+ * One selection-table row — the CLI columns this page draws, distilled from a
+ * {@link Playlist}. The disc model carries the numbers; the table needs a
+ * formatted length cell and the two derived flags, so it computes them once
+ * here rather than in every cell.
+ */
+interface PlaylistRow {
+  position: number;
+  group: number;
+  name: string;
+  /** `hh:mm:ss`, truncated to the tick exactly as the CLI table truncates it. */
+  length: string;
+  /** Interleaved `*.ssif` size, else `*.m2ts` size, else null (the `-` cell). */
+  estimatedBytes: number | null;
+  /** Whether the playlist hides any stream (the CLI's `(*)` note). */
+  hasHidden: boolean;
+  hiddenBy: HiddenRule[];
+}
+
+/** The ticks in one second — the unit `totalLengthTicks` counts. */
+const TICKS_PER_SECOND = 10_000_000;
+
+/** A row per playlist, in the table order `position` records. */
+function playlistRows(playlists: Playlist[]): PlaylistRow[] {
+  return playlists
+    .map((playlist) => ({
+      position: playlist.position,
+      group: playlist.group,
+      name: playlist.name,
+      length: tableLength(playlist.totalLengthTicks),
+      estimatedBytes: playlist.interleavedFileSizeBytes || playlist.fileSizeBytes || null,
+      hasHidden: playlist.streams.some((stream) => stream.isHidden),
+      hiddenBy: playlist.hiddenBy,
+    }))
+    .sort((a, b) => a.position - b.position);
+}
+
+/** `hh:mm:ss` from playlist ticks, truncated like the CLI table (hours wrap at 24). */
+function tableLength(ticks: number): string {
+  const total = Math.max(0, Math.trunc(ticks / TICKS_PER_SECOND));
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(Math.trunc(total / 3600) % 24)}:${pad(Math.trunc(total / 60) % 60)}:${pad(total % 60)}`;
+}
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -66,9 +103,9 @@ let discName = "disc";
 /** Aborts the in-progress measured scan; null when no scan is running. */
 let scanController: AbortController | null = null;
 /**
- * Every playlist of the picked disc: the listing is always made with BOTH
- * filter options on, and the settings are applied to these rows in the page. So
- * toggling a setting redraws the table instantly instead of re-scanning.
+ * Every playlist of the picked disc: a scan returns them all, tagged with the
+ * rules that withhold them, and the settings are applied to these rows in the
+ * page. So toggling a setting redraws the table instantly instead of rescanning.
  */
 let allRows: PlaylistRow[] = [];
 /** The playlists the user has unticked, by name — persists across a redraw. */
@@ -224,12 +261,9 @@ async function loadSource(src: Source): Promise<void> {
   hide(playlistsCard);
   show(listingBox);
   try {
-    // Always the widened set: the settings are applied to `allRows` in the page.
-    const options = { showShortPlaylists: true, showLoopingPlaylists: true };
-    const rows =
-      src.kind === "folder"
-        ? await listPlaylists(src.files, options)
-        : await listPlaylistsIso(src.file, options);
+    // The whole disc: the settings are applied to `allRows` in the page.
+    const disc = await inspect(src.kind === "folder" ? src.files : src.file);
+    const rows = playlistRows(disc.playlists);
     if (rows.length === 0) {
       showError(
         src.kind === "folder"
@@ -445,11 +479,11 @@ async function runScan(): Promise<void> {
     setProgress(percent, `Scanning ${file}`);
   };
   try {
-    const options = { selection, signal: controller.signal };
-    reportText =
-      src.kind === "folder"
-        ? await analyze(src.files, onProgress, options)
-        : await analyzeIso(src.file, onProgress, options);
+    const result = await scan(src.kind === "folder" ? src.files : src.file, onProgress, {
+      selection,
+      signal: controller.signal,
+    });
+    reportText = result.report;
     setProgress(100, "Done");
     showReport(reportText);
   } catch (error) {
