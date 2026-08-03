@@ -227,7 +227,10 @@ jobs:
           find "fuzz/accumulated/$TARGET" -type f -exec cp -n -t "fuzz/corpus/$TARGET/" {} +
           echo "restored=$restored" >> "$GITHUB_OUTPUT"
           echo "seeds=$seeds" >> "$GITHUB_OUTPUT"
-          echo "$TARGET: $seeds committed seeds + $restored accumulated units"
+          # `seeds` counts distinct seed CONTENTS, which is what the comparison
+          # below is against — it reads lower than the tracked file count wherever
+          # two committed seeds hold identical bytes.
+          echo "$TARGET: $seeds distinct committed seeds + $restored accumulated units"
 
       # The per-target discovery flags come from fuzz/targets.txt (it documents
       # its own columns); an empty cell there is a measured verdict, not an
@@ -352,7 +355,7 @@ jobs:
           @(
             "### $($env:TARGET)"
             ''
-            "$($env:SEEDS) committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
+            "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
           if (-not $env:REPRO) { exit 0 }
 
@@ -366,8 +369,14 @@ jobs:
           # keys on the target and which guard fired; the reproducer's hash is
           # then only a tiebreaker in the body, because a hash key here would
           # file a fresh issue for every input that hangs the same way.
+          # The panic header is matched loosely between the thread name and
+          # `panicked at`: current nightly prints a thread id there
+          # (`thread '<unnamed>' (2596) panicked at ...`) and older toolchains do
+          # not. A tight match silently degrades every panic to the deadly-signal
+          # branch below, which would file one issue for all of a target's
+          # panics — the exact collapse D3's keying exists to prevent.
           $kind = 'unknown'; $where = ''; $message = ''
-          if ($log -match "(?m)^thread '[^']*' panicked at ([^\r\n]+):\r?\n([^\r\n]*)") {
+          if ($log -match "(?m)^thread '[^']*'.*? panicked at ([^\r\n]+):\r?\n([^\r\n]*)") {
             $kind = 'panic'; $where = $Matches[1].Trim(); $message = $Matches[2].Trim()
           }
           elseif ($log -match 'ERROR: libFuzzer: timeout') { $kind = 'timeout' }
