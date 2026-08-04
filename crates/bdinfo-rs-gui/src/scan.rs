@@ -158,6 +158,11 @@ fn open(
     }
 }
 
+/// What one open of the disc yields: the scanned disc paired with the per-file
+/// failures recorded getting there, or a user-facing message for a disc that
+/// holds no readable structure at all.
+type Opened = Result<(BdRom, Vec<ScanError>), String>;
+
 /// Recorded scan failures as display strings, for the UI's warning surfaces.
 fn error_lines(errors: &[ScanError]) -> Vec<String> {
     errors.iter().map(ToString::to_string).collect()
@@ -177,15 +182,36 @@ pub const fn no_progress(_: ScanProgress<'_>) {}
 /// A short message when the input holds no readable Blu-ray structure (no
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
 pub fn scan_structural(input: &Input) -> Result<Structural, String> {
-    // `Codecs` mode runs the bounded quick pass — reads only the head of each
-    // stream file — so the panes show full codec detail (profile / HDR / Dolby
-    // Vision) right after opening, like BDInfo, without the whole-file bitrate scan.
-    // Bounded and fast, so it carries no cancel affordance: the flag never trips.
-    let (bdrom, errors) =
-        open(input, ScanMode::Codecs, None, &mut no_progress, &AtomicBool::new(false))
-            .map_err(|err| err.to_string())?;
+    let (bdrom, errors) = listing_scan(|mode| {
+        open(input, mode, None, &mut no_progress, &AtomicBool::new(false))
+            .map_err(|err: BdError| err.to_string())
+    })?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
+}
+
+/// Opens the disc for the selection table, choosing how deep to read: the
+/// packet-free [`ScanMode::Metadata`] open alone for an AACS-encrypted disc,
+/// else a second [`ScanMode::Codecs`] open over the same disc.
+///
+/// The quick codec pass stops at the packet that completes the last stream's
+/// codec detail. On an encrypted disc the payloads are ciphertext, so no
+/// scanner ever initializes, the pass has no stopping point, and it reads every
+/// stream file to EOF — tens of gigabytes off an optical drive, for detail no
+/// key can recover. `open` is therefore never called a second time for such a
+/// disc.
+///
+/// For every other disc the `Codecs` open gives the panes their full codec
+/// detail (profile / HDR / Dolby Vision) right away, like `BDInfo`, without the
+/// whole-file bitrate scan; on readable streams it ends at codec init, so it
+/// carries no cancel affordance. Reaching it costs a second parse of the clip
+/// metadata the first open just read, which the filesystem cache serves.
+///
+/// # Errors
+/// Whatever `open` reports, from either call.
+fn listing_scan(open: impl Fn(ScanMode) -> Opened) -> Opened {
+    let cheap = open(ScanMode::Metadata)?;
+    if cheap.0.is_aacs_encrypted { Ok(cheap) } else { open(ScanMode::Codecs) }
 }
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.
@@ -286,9 +312,10 @@ impl<F: FnOnce()> Drop for PanicAlarm<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
-    use super::Input;
+    use super::{BdRom, FsDir, Input, ScanMode};
 
     /// A scratch directory under the crate's target dir (unique per test).
     fn scratch(name: &str) -> PathBuf {
@@ -444,6 +471,160 @@ mod tests {
         )
         .expect_err("no Blu-ray structure to open");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
+    }
+
+    /// The committed fixture disc copied to `name` and made to look
+    /// AACS-encrypted: the `AACS/Unit_Key_RO.inf` key file the probe looks for,
+    /// and a stream file whose first two 6144-byte Aligned Units carry the
+    /// encryption fingerprint — a sync byte at the head of the unit and none in
+    /// the 31 source packets after it (AACS Blu-ray Prerecorded Book §3.10
+    /// leaves only each unit's first 16 bytes in the clear).
+    ///
+    /// The disc's real packets follow that prefix, so the codec pass still has
+    /// something to find if it runs — which is what lets a test tell a skipped
+    /// pass from a completed one.
+    fn encrypted_fixture(name: &str) -> PathBuf {
+        const UNIT: usize = 6144;
+        const PACKET: usize = 192;
+
+        let root = scratch(name);
+        let _ = std::fs::remove_dir_all(&root);
+        copy_tree(&fixture("BigBuckBunny"), &root);
+        std::fs::create_dir_all(root.join("AACS")).expect("the AACS dir creates");
+        std::fs::write(root.join("AACS/Unit_Key_RO.inf"), b"key").expect("the key file writes");
+
+        let stream = root.join("BDMV/STREAM/00000.m2ts");
+        let real = std::fs::read(&stream).expect("the fixture stream reads");
+        // 0xA5 fills the ciphertext: any byte but the 0x47 sync the probe
+        // counts. Each unit then gets its one leading sync back.
+        let mut bytes = vec![0xA5_u8; UNIT.checked_mul(2).expect("two units fit")];
+        for unit in bytes.chunks_exact_mut(UNIT) {
+            let sync = unit.get_mut(4).expect("a unit holds a first packet header");
+            *sync = 0x47;
+        }
+        bytes.extend_from_slice(&real);
+        std::fs::write(&stream, &bytes).expect("the encrypted-looking stream writes");
+        // The prefix is a whole number of source packets, so the real packets
+        // after it stay on the 192-byte grid the demux walks.
+        assert_eq!(bytes.len() % PACKET, real.len() % PACKET, "the packet grid is preserved");
+        root
+    }
+
+    #[test]
+    fn the_crafted_encrypted_fixture_reads_as_encrypted() {
+        // The fixture builder is only useful if the probe agrees with it, and
+        // if the untouched fixture it is built from does NOT read as encrypted
+        // — the key file alone must never be the verdict.
+        let root = encrypted_fixture("aacs-probe");
+        let encrypted =
+            BdRom::open(&FsDir::new(&root), ScanMode::Metadata).expect("the crafted disc opens");
+        assert!(encrypted.is_aacs_encrypted, "the crafted stream shows the fingerprint");
+
+        let plain = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
+            .expect("the fixture disc opens");
+        assert!(!plain.is_aacs_encrypted, "an ordinary disc is not encrypted");
+    }
+
+    /// The metadata open the listing seam decides from, flagged or not.
+    fn cheap_open(is_aacs_encrypted: bool) -> (BdRom, Vec<super::ScanError>) {
+        let bdrom = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
+            .expect("the fixture disc opens");
+        (BdRom { is_aacs_encrypted, ..bdrom }, Vec::new())
+    }
+
+    /// Records every mode the seam asks for, answering each from `answer`.
+    fn opened_modes<F>(answer: F) -> (super::Opened, Vec<ScanMode>)
+    where
+        F: Fn(ScanMode) -> super::Opened,
+    {
+        let modes = RefCell::new(Vec::new());
+        let result = super::listing_scan(|mode| {
+            modes.borrow_mut().push(mode);
+            answer(mode)
+        });
+        (result, modes.into_inner())
+    }
+
+    #[test]
+    fn the_listing_seam_stops_at_the_metadata_open_for_an_encrypted_disc() {
+        // Recorded, not inferred from the result: the codec pass must never be
+        // *asked for*, because asking is what reads the disc end to end.
+        let (result, modes) = opened_modes(|_| Ok(cheap_open(true)));
+        let (bdrom, errors) = result.expect("the metadata open stands in");
+        assert_eq!(modes, [ScanMode::Metadata], "the codec pass must not be reached");
+        assert!(bdrom.is_aacs_encrypted);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn the_listing_seam_takes_the_codec_pass_for_an_ordinary_disc() {
+        let (result, modes) = opened_modes(|mode| {
+            let bdrom = cheap_open(false).0;
+            let label = if mode == ScanMode::Codecs { "DEEP" } else { "CHEAP" };
+            Ok((BdRom { volume_label: label.to_owned(), ..bdrom }, Vec::new()))
+        });
+        let (bdrom, _) = result.expect("the codec pass answers");
+        assert_eq!(modes, [ScanMode::Metadata, ScanMode::Codecs], "both opens, in that order");
+        assert_eq!(bdrom.volume_label, "DEEP", "the codec pass is what the listing keeps");
+    }
+
+    #[test]
+    fn the_listing_seam_reports_a_failure_from_either_open() {
+        // The first open failing is the ordinary "not a Blu-ray" road; the
+        // second failing means the media went away between the two, and is the
+        // listing's failure rather than a silently degraded table.
+        let (result, modes) = opened_modes(|_| Err("no disc".to_owned()));
+        assert_eq!(result.expect_err("the metadata failure propagates"), "no disc");
+        assert_eq!(modes, [ScanMode::Metadata], "a failed first open reaches no further");
+
+        let (result, modes) = opened_modes(|mode| match mode {
+            ScanMode::Metadata => Ok(cheap_open(false)),
+            _ => Err("the disc vanished".to_owned()),
+        });
+        assert_eq!(result.expect_err("the codec failure propagates"), "the disc vanished");
+        assert_eq!(modes, [ScanMode::Metadata, ScanMode::Codecs]);
+    }
+
+    #[test]
+    fn an_encrypted_disc_lists_without_running_the_codec_pass() {
+        // The quick codec pass ends at the packet that completes the last
+        // stream's codec detail. Ciphertext never completes one, so on an
+        // encrypted disc the pass has no stopping point and reads every stream
+        // file to EOF — tens of gigabytes off an optical drive, for detail no
+        // key can recover. The listing must stop at the metadata pass instead.
+        let root = encrypted_fixture("aacs-listing");
+        let listed = super::scan_structural(&Input::Folder(root.clone()))
+            .expect("an encrypted disc still lists");
+        assert!(listed.bdrom.is_aacs_encrypted);
+        assert!(!listed.bdrom.playlists.is_empty(), "the structure still lists");
+
+        let metadata =
+            BdRom::open(&FsDir::new(&root), ScanMode::Metadata).expect("the metadata pass opens");
+        assert_eq!(listed.bdrom.playlists, metadata.playlists, "the listing ran the codec pass");
+
+        // The proof that the assertion above discriminates: over this very
+        // disc the codec pass produces different streams, so a listing that ran
+        // it could not have matched the metadata pass.
+        let codecs =
+            BdRom::open(&FsDir::new(&root), ScanMode::Codecs).expect("the codec pass opens");
+        assert_ne!(
+            codecs.playlists, metadata.playlists,
+            "the fixture cannot tell the two passes apart, so the assertion above proves nothing"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_disc_still_gets_the_codec_pass() {
+        // The other side of the same gate: an unencrypted disc must keep the
+        // scanned codec detail the panes show, so the listing has to be the
+        // deeper pass rather than the metadata one.
+        let root = fixture("BigBuckBunny");
+        let listed =
+            super::scan_structural(&Input::Folder(root.clone())).expect("the fixture lists");
+        assert!(!listed.bdrom.is_aacs_encrypted);
+        let codecs =
+            BdRom::open(&FsDir::new(&root), ScanMode::Codecs).expect("the codec pass opens");
+        assert_eq!(listed.bdrom.playlists, codecs.playlists, "the listing skipped the codec pass");
     }
 
     #[test]

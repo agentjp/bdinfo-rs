@@ -161,6 +161,18 @@ impl Listing {
         self.rows = rows;
     }
 
+    /// Whether a measured scan of this disc is worth running: it has at least
+    /// one listed playlist, and its stream content is not AACS-encrypted.
+    ///
+    /// Encryption leaves only the first 16 bytes of each 6144-byte Aligned Unit
+    /// in the clear (AACS Blu-ray Prerecorded Book §3.10), so a demux of the
+    /// rest reads ciphertext and every value it measures is meaningless. The
+    /// core scan runs on such a disc if asked — refusing is this application's
+    /// policy, and the CLI applies the same one.
+    const fn scannable(&self) -> bool {
+        !self.rows.is_empty() && !self.bdrom.is_aacs_encrypted
+    }
+
     /// The playlists the **settings'** filter withholds — what the
     /// hidden-count line reports whether or not the transient reveal is on
     /// (with it on, the line names what restoring the settings view would
@@ -798,22 +810,33 @@ impl Flow {
         self.any_listing().is_some_and(|listing| listing.selection.all())
     }
 
-    /// Whether a measured scan can start now — an editable state with at least one
-    /// listed playlist. The selection may be empty: scanning with nothing checked
-    /// scans the whole disc (`BDInfo`'s behaviour), so the "Scan Bitrates" button
-    /// is live as soon as a disc is listed.
+    /// Whether the loaded disc's stream content is AACS-encrypted — the
+    /// encrypted-disc indicator in the info box, and the reason
+    /// [`can_scan`](Self::can_scan) is false for a disc that lists perfectly
+    /// well.
+    #[must_use]
+    pub fn disc_encrypted(&self) -> bool {
+        self.any_listing().is_some_and(|listing| listing.bdrom.is_aacs_encrypted)
+    }
+
+    /// Whether a measured scan can start now — an editable state holding a disc
+    /// with at least one listed playlist that is not
+    /// [encrypted](Self::disc_encrypted). The selection may be empty: scanning
+    /// with nothing checked scans the whole disc (`BDInfo`'s behaviour), so the
+    /// "Scan Bitrates" button is live as soon as a disc is listed.
     #[must_use]
     pub fn can_scan(&self) -> bool {
-        self.editable_listing().is_some_and(|listing| !listing.rows.is_empty())
+        self.editable_listing().is_some_and(Listing::scannable)
     }
 
     /// The measured-scan request, when [`Flow::can_scan`]. Scans the checked
     /// playlists, or — when nothing is checked — every listed playlist (scan-all).
     #[must_use]
     pub fn scan_request(&self) -> Option<ScanRequest> {
-        // The same gate as can_scan, through one fallible read: an editable
-        // listing with at least one row.
-        let listing = self.editable_listing().filter(|listing| !listing.rows.is_empty())?;
+        // The same gate as can_scan, through one fallible read — so a scan
+        // message that reaches `update` without the button (a stale event, a
+        // future shortcut) is refused on exactly the same terms.
+        let listing = self.editable_listing().filter(|listing| listing.scannable())?;
         let selection = listing.scan_names();
         let scan_files = selection_stream_files(&listing.bdrom.playlists, &selection);
         Some(ScanRequest {
@@ -1218,6 +1241,33 @@ mod tests {
         let one = flow.scan_request().expect("a request once a row is checked");
         assert_eq!(one.selection, ["00000.MPLS"]);
         assert_eq!(one.scan_files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
+    }
+
+    #[test]
+    fn an_encrypted_disc_lists_but_never_scans() {
+        // The same two-playlist disc, encrypted: it lists, browses and reports
+        // structurally exactly as the plain one does…
+        let mut structural = structural();
+        structural.bdrom.is_aacs_encrypted = true;
+        let mut flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        assert!(flow.disc_encrypted());
+        assert_eq!(flow.row_count(), 2);
+        assert!(flow.editable());
+        assert!(flow.report_available());
+        // …and the measured scan is refused, checked rows or not.
+        assert!(!flow.can_scan());
+        assert!(flow.scan_request().is_none());
+        flow.select_all();
+        assert!(!flow.can_scan());
+        assert!(flow.scan_request().is_none());
+        // The plain disc is the control: same rows, scan available.
+        let plain = listed();
+        assert!(!plain.disc_encrypted());
+        assert!(plain.can_scan());
+        assert!(plain.scan_request().is_some());
+        // A state with no disc reports neither.
+        assert!(!Flow::idle().disc_encrypted());
     }
 
     #[test]

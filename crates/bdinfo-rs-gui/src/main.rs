@@ -2383,7 +2383,20 @@ impl App {
             lines = lines.push(text(HIDDEN_NOTE).size(ui::TEXT_XS).color(p.text_muted));
         }
 
-        container(lines)
+        // The indicator takes the slack the strip already has to the right of
+        // its lines, so it costs no layout: the lines keep the full width they
+        // draw in (each is `Shrink`-wide and never wraps, so a narrower column
+        // does not move them), and the badge is one `TEXT_XS` line tall — the
+        // height of the line it sits beside — so the strip does not grow. A
+        // disc with the badge and the same disc without it are pixel-identical
+        // everywhere but the badge itself.
+        let mut strip = Row::new().width(Length::Fill).align_y(Vertical::Top).spacing(ui::GAP_3);
+        strip = strip.push(lines);
+        if self.flow.disc_encrypted() {
+            strip = strip.push(encrypted_badge(p));
+        }
+
+        container(strip)
             .width(Length::Fill)
             .padding([ui::GAP_2, ui::GAP_3])
             .style(ui::info_strip(p))
@@ -2531,14 +2544,21 @@ impl App {
                 .on_press(Message::Cancel)
                 .into()
         } else {
+            let scan = button(text("Scan Bitrates").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
+                .padding([ui::GAP_2, ui::GAP_4])
+                .style(ui::primary_button(p))
+                .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected));
+            // An encrypted disc leaves the button in place and dead — the same
+            // greyed control every other unavailable action shows — and says
+            // why on hover rather than in a dialog the user has to dismiss.
+            let scan: Element<'_, Message> = if self.flow.disc_encrypted() {
+                tooltip(scan, encrypted_bubble(p), tooltip::Position::Top).into()
+            } else {
+                scan.into()
+            };
             Row::new()
                 .spacing(ui::GAP_2)
-                .push(
-                    button(text("Scan Bitrates").size(ui::TEXT_SM).font(ui::UI_SEMIBOLD))
-                        .padding([ui::GAP_2, ui::GAP_4])
-                        .style(ui::primary_button(p))
-                        .on_press_maybe(self.flow.can_scan().then_some(Message::ScanSelected)),
-                )
+                .push(scan)
                 .push(
                     button(text("View Report...").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
                         .padding([ui::GAP_2, ui::GAP_4])
@@ -2578,6 +2598,19 @@ impl App {
 /// listed playlist hides a stream.
 const HIDDEN_NOTE: &str =
     "(*) Some playlists on this disc have hidden tracks. These tracks are marked with an asterisk.";
+
+/// The encrypted-disc indicator in the info box: a warning sign and the
+/// condition, spelled out rather than left to the glyph alone — the glyph is
+/// what catches the eye, the words are what make it findable.
+///
+/// U+26A0 is in the bundled Inter face, so it draws under the default Basic
+/// shaping like the rest of the fixed chrome.
+const ENCRYPTED_BADGE: &str = "⚠ AACS-encrypted";
+
+/// Why the encrypted-disc indicator is up and the measured scan is dead — the
+/// hover text on both of them, so the two read as one statement wherever the
+/// user meets it first.
+const ENCRYPTED_REASON: &str = "This disc is AACS-encrypted — stream data cannot be analyzed";
 
 // ── stateless widget builders ────────────────────────────────────────────────
 
@@ -3305,6 +3338,30 @@ fn info_line<'a>(p: Palette, label: &str, value: String, mono: bool) -> Element<
         .into()
 }
 
+/// The encrypted-disc indicator: [`ENCRYPTED_BADGE`] in the palette's warning
+/// tone, explaining itself on hover.
+///
+/// The tone is a token, so it reads correctly in both palettes; the bubble
+/// opens to the left because the badge sits at the right edge of the info
+/// strip.
+fn encrypted_badge<'a>(p: Palette) -> Element<'a, Message> {
+    tooltip(
+        text(ENCRYPTED_BADGE).size(ui::TEXT_XS).font(ui::UI_MEDIUM).color(p.warning),
+        encrypted_bubble(p),
+        tooltip::Position::Left,
+    )
+    .into()
+}
+
+/// The hover bubble both encrypted-disc controls carry — the indicator and the
+/// dead "Scan Bitrates" button.
+fn encrypted_bubble<'a>(p: Palette) -> Element<'a, Message> {
+    container(text(ENCRYPTED_REASON).size(ui::TEXT_XS).color(p.text))
+        .padding([ui::GAP_1, ui::GAP_2])
+        .style(ui::tooltip(p))
+        .into()
+}
+
 /// One right/centre-aligned numeric cell in the table's tabular monospace.
 fn num_cell<'a>(
     p: Palette,
@@ -3452,6 +3509,21 @@ mod harness {
         App { flow, ..App::default() }
     }
 
+    /// An app listed from the same synthetic disc as [`listed_app`], flagged
+    /// AACS-encrypted. The two differ in exactly that one flag, so anything
+    /// that differs between their views is the encrypted-disc treatment.
+    pub fn encrypted_app() -> App {
+        let mut structural = structural();
+        structural.bdrom.is_aacs_encrypted = true;
+        let input = Input::Folder("disc".into());
+        let flow = Flow::start_listing(input.clone()).listed(
+            &input,
+            Ok(structural),
+            ViewSettings::default(),
+        );
+        App { flow, ..App::default() }
+    }
+
     /// An app listed from a disc the default filters withhold two playlists
     /// from — one per rule: 00002 (80 s) loops and 00003 (5 s) is short,
     /// alongside the listed 00000 (100 s) and 00001 (70 s). The state the
@@ -3525,6 +3597,13 @@ mod harness {
         ui(app).find(label).is_ok()
     }
 
+    /// The laid-out rectangle of the text widget reading exactly `label` — the
+    /// position and size the renderer would draw it at, so two views can be
+    /// compared for layout rather than for content.
+    pub fn bounds(app: &App, label: &str) -> iced::Rectangle {
+        ui(app).find(label).expect("the label is on screen").bounds()
+    }
+
     /// Renders the app's view offscreen and ties it to the committed SHA-256
     /// under `snapshots/<family>/` (created on first run — commit it). On a
     /// mismatch the rendered PNG is dumped under `target/snapshot-failures/`
@@ -3588,8 +3667,10 @@ mod interaction {
     use bdinfo_rs_gui::model::{Sort, SortColumn};
     use bdinfo_rs_gui::theme::ThemePref;
 
-    use super::harness::{click, filtered_app, listed_app, sees, structural};
-    use super::{App, Message};
+    use super::harness::{
+        bounds, click, encrypted_app, filtered_app, listed_app, sees, structural,
+    };
+    use super::{App, ENCRYPTED_BADGE, Message};
 
     #[test]
     fn the_scan_flow_reaches_the_report_through_clicks() {
@@ -3618,6 +3699,54 @@ mod interaction {
         assert!(sees(&app, "THE REPORT BODY"), "the report text is on screen");
         click(&mut app, "← Back");
         assert!(!app.showing_report);
+    }
+
+    #[test]
+    fn an_encrypted_disc_shows_the_indicator_and_the_scan_stays_dead() {
+        let mut app = encrypted_app();
+        assert!(sees(&app, ENCRYPTED_BADGE), "the info box flags the disc");
+        assert!(!sees(&listed_app(), ENCRYPTED_BADGE), "an ordinary disc does not");
+
+        // The control is still there and still says what it does — it just
+        // does nothing. Clicking it dispatches no message…
+        assert!(sees(&app, "Scan Bitrates"));
+        assert!(click(&mut app, "Scan Bitrates").is_empty(), "the button is dead");
+        assert_eq!(app.flow.stage(), Stage::Listed);
+        // …and neither does the message it would have dispatched, so a road
+        // that skips the button cannot start the scan either.
+        let _ = app.update(Message::ScanSelected);
+        assert_eq!(app.flow.stage(), Stage::Listed);
+        assert!(app.scan_cancel.is_none(), "no worker was ever handed a cancel flag");
+
+        // Everything structural stays browsable: the playlists list, the panes
+        // fill from the active row, and the pre-scan report is still offered.
+        assert_eq!(app.flow.row_count(), 2);
+        assert!(sees(&app, "00000.MPLS"));
+        click(&mut app, "View Report...");
+        assert!(app.showing_report);
+    }
+
+    #[test]
+    fn the_encrypted_indicator_costs_no_layout() {
+        // The indicator draws into the slack the info strip already has, so
+        // every other widget is laid out at the same rectangle as on the same
+        // disc without it — the info-box lines it sits beside, the table above
+        // and the actions below. A shift shows up here as a moved rectangle.
+        let plain = listed_app();
+        let flagged = encrypted_app();
+        for label in [
+            "Disc Title:",
+            "Detected BDMV Folder:",
+            "Detected Features:",
+            "Disc Size:",
+            "00000.MPLS",
+            "0 of 2 selected",
+            "Scan Bitrates",
+            "View Report...",
+            "Settings...",
+        ] {
+            assert_eq!(bounds(&plain, label), bounds(&flagged, label), "{label} moved");
+        }
     }
 
     #[test]
