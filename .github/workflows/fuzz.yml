@@ -136,7 +136,7 @@ jobs:
   # per-target time budget is deliberately an unequal experiment rather than an
   # accident.
   #
-  # 14 targets x 2 arches is 28 legs against the Free plan's 20 concurrent jobs,
+  # 15 targets x 2 arches is 30 legs against the Free plan's 20 concurrent jobs,
   # so the last legs QUEUE rather than run — deliberately, and it costs wall
   # time, not runner minutes (which are unmetered on a public repository). The
   # alternative, folding both arches into one leg, was rejected: it would double

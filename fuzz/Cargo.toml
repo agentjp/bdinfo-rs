@@ -77,6 +77,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "m2ts_differential"
+path = "fuzz_targets/m2ts_differential.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "codec"
 path = "fuzz_targets/codec.rs"
 test = false
