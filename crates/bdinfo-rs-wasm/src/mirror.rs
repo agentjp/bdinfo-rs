@@ -171,6 +171,10 @@ pub struct Playlist {
     /// of `streams`.
     pub stream_count: usize,
     /// Number of extra camera angles, zero for a playlist with a single angle.
+    ///
+    /// A playlist can declare at most 254, so that is also as many angle blocks
+    /// as a rendered report will carry: a disc handed back with a larger count
+    /// here renders the first 254 rather than one block per angle.
     pub angle_count: usize,
     /// Whether the playlist loops: two main-angle clips replay the same clip
     /// file from the same in-time. A selection table withholds a looping
