@@ -723,7 +723,12 @@ impl TsStreamFile {
     /// chunks in the very same order, poll `cancel` at the very same per-chunk
     /// boundary (`fill_buffer`), and call `finish_scan` under the very same
     /// condition, so the demux output is byte-for-byte identical whichever
-    /// strategy a build runs.
+    /// strategy a build runs. Held rather than asserted: the
+    /// `m2ts_differential` fuzz target (`fuzz/fuzz_targets/`) runs both
+    /// strategies over the same bytes and compares the result, the demuxed clip
+    /// and the playlist writes — every `f64` by its bits — across read-chunk
+    /// sizes, both scan modes and an injected read failure. Its in-tree mirror
+    /// is the `sequential_demux_matches_the_threaded_demux` proptest below.
     ///
     /// # Errors
     /// Returns [`BdError::Io`] if reading fails and [`BdError::ScanCancelled`]
