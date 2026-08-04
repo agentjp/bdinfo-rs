@@ -208,7 +208,7 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 /// Whatever `deep` reports, for a disc that is not encrypted.
 fn listing_scan(
     cheap: (BdRom, Vec<ScanError>),
-    deep: impl FnOnce() -> Result<(BdRom, Vec<ScanError>), String>,
+    deep: impl Fn() -> Result<(BdRom, Vec<ScanError>), String>,
 ) -> Result<(BdRom, Vec<ScanError>), String> {
     if cheap.0.is_aacs_encrypted { Ok(cheap) } else { deep() }
 }
@@ -311,6 +311,7 @@ impl<F: FnOnce()> Drop for PanicAlarm<F> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::{Path, PathBuf};
 
     use super::{BdRom, FsDir, Input, ScanMode};
@@ -531,35 +532,37 @@ mod tests {
     }
 
     #[test]
-    fn the_listing_seam_never_opens_an_encrypted_disc_a_second_time() {
-        // Not "the deeper open returns nothing useful" — it is never called at
-        // all, which is the whole point: calling it is what reads the disc end
-        // to end.
-        let (bdrom, errors) = super::listing_scan(cheap_open(true), || {
-            panic!("an encrypted disc must not reach the codec pass")
-        })
-        .expect("the metadata open stands in");
+    fn the_listing_seam_opens_a_second_time_only_for_a_disc_that_can_finish() {
+        // Counted, not inferred from the result: an encrypted disc must not
+        // *reach* the codec pass, because calling it at all is what reads the
+        // disc end to end. Both cases drive the one closure, so the count is
+        // the whole assertion.
+        let calls = Cell::new(0_u32);
+        let deep = || {
+            calls.set(calls.get().saturating_add(1));
+            let bdrom = cheap_open(false).0;
+            Ok((BdRom { volume_label: "DEEP".to_owned(), ..bdrom }, Vec::new()))
+        };
+
+        let (bdrom, errors) =
+            super::listing_scan(cheap_open(true), &deep).expect("the metadata open stands in");
+        assert_eq!(calls.get(), 0, "an encrypted disc must not reach the codec pass");
         assert!(bdrom.is_aacs_encrypted);
         assert!(errors.is_empty());
-    }
 
-    #[test]
-    fn the_listing_seam_takes_the_deeper_open_for_an_ordinary_disc() {
-        let deep = cheap_open(false).0;
-        let label = deep.volume_label.clone();
-        let (bdrom, _) = super::listing_scan(cheap_open(false), || {
-            Ok((BdRom { volume_label: format!("{label}-deep"), ..deep }, Vec::new()))
-        })
-        .expect("the deeper open answers");
-        assert_eq!(bdrom.volume_label, format!("{label}-deep"), "the deeper open won");
+        let (bdrom, _) =
+            super::listing_scan(cheap_open(false), &deep).expect("the deeper open answers");
+        assert_eq!(calls.get(), 1, "an ordinary disc reaches it exactly once");
+        assert_eq!(bdrom.volume_label, "DEEP", "the deeper open is what the listing keeps");
     }
 
     #[test]
     fn the_listing_seam_reports_a_failed_deeper_open() {
         // The media going away between the two opens: the failure is the
         // listing's, not a silently degraded table.
-        let message = super::listing_scan(cheap_open(false), || Err("the disc vanished".to_owned()))
-            .expect_err("the deeper failure propagates");
+        let message =
+            super::listing_scan(cheap_open(false), || Err("the disc vanished".to_owned()))
+                .expect_err("the deeper failure propagates");
         assert_eq!(message, "the disc vanished");
     }
 
