@@ -1,14 +1,26 @@
 name: fuzz
 
 # The DISCOVERY half of the adversarial tier: fresh (mutating) fuzz runs over
-# every libFuzzer target — nightly on a 10-way matrix, and again on every v*
-# release tag. cargo-fuzz / libFuzzer need a nightly toolchain and have no
-# Windows MSVC support, so this runs on Linux only; the local mirror is
-# scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the guards and the
-# per-target discovery flags here match it, both sides reading fuzz/targets.txt.
-# The fast per-PR/push leg — replaying the committed seed corpus with -runs=0
-# (the required `corpus replay (regression gate)` check) — lives in core.yml as
-# a plan-gated job on the `fuzz` area; the daily sweep re-runs it ungated.
+# every libFuzzer target at both shipped pointer widths — nightly, and again on
+# every v* release tag. cargo-fuzz / libFuzzer need a nightly toolchain and have
+# no Windows MSVC support, so this runs on Linux only; the local mirror is
+# scripts/fuzz-docker.{ps1,sh} (Windows via Docker) — the guards, the arches and
+# the per-target discovery flags here match it, both sides reading
+# fuzz/targets.txt. The fast per-PR/push leg — replaying the committed seed
+# corpus with -runs=0 (the `corpus replay (regression gate, <arch>)` checks) —
+# lives in core.yml as a plan-gated job on the `fuzz` area; the daily sweep
+# re-runs it ungated.
+#
+# TWO POINTER WIDTHS, ONE CORPUS. The npm package compiles bdinfo-rs-core to
+# wasm32-unknown-unknown, where `usize` is 32 bits, so every checked_* offset
+# guard and length computation in the parser has a different overflow boundary
+# in a browser than on the 64-bit host. wasm32 cannot host libFuzzer;
+# i686-unknown-linux-gnu is a supported libFuzzer target at the same width, so
+# it is the proxy — and it is the width with the least operator supervision,
+# since a browser hands this parser arbitrary files with nobody in the loop.
+# Both arches run the SAME per-target flags out of fuzz/targets.txt and feed the
+# SAME corpus: a libFuzzer corpus is arch-agnostic byte files, so a unit found at
+# one width is a valid seed at the other (D6).
 #
 # What makes discovery COMPOUND is the per-target corpus cache: a leg starts
 # from the committed seeds PLUS everything earlier runs found, and saves the
@@ -84,12 +96,6 @@ env:
   # cargo-fuzz needs nightly. Keep in lockstep with core.yml NIGHTLY and
   # $script:Nightly in scripts/_common.ps1.
   NIGHTLY: nightly-2026-07-06
-  # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
-  # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
-  # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
-  # with a statically linked musl libc and need a musl C++ cross-compiler the runner
-  # lacks. The gnu host has the dynamic libc + system C++ that libFuzzer needs.
-  FUZZ_TARGET: x86_64-unknown-linux-gnu
   # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
   # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
   # (allocation-amplification guard). Both turn a hang or an allocation blow-up
@@ -123,13 +129,22 @@ jobs:
           echo "list=[$list]" >> "$GITHUB_OUTPUT"
           echo "matrix: [$list]"
 
-  # One leg per target, so a slow target no longer eats the others' budget and
-  # the wall time of the pass is one target rather than ten. Throughput spans
-  # 1,695x across the tier (990,019 exec/s on `discovery` against 584 on
-  # `m2ts`, measured 2026-08-03), which is also why an equal per-target time
-  # budget is deliberately an unequal experiment rather than an accident.
+  # One leg per target PER ARCH, so a slow target no longer eats the others'
+  # budget and the wall time of the pass is one target rather than ten.
+  # Throughput spans 1,695x across the tier (990,019 exec/s on `discovery`
+  # against 584 on `m2ts`, measured 2026-08-03), which is also why an equal
+  # per-target time budget is deliberately an unequal experiment rather than an
+  # accident.
+  #
+  # 14 targets x 2 arches is 28 legs against the Free plan's 20 concurrent jobs,
+  # so the last legs QUEUE rather than run — deliberately, and it costs wall
+  # time, not runner minutes (which are unmetered on a public repository). The
+  # alternative, folding both arches into one leg, was rejected: it would double
+  # each leg's wall time anyway AND make the crash-classification path — the one
+  # this repository has already had silently disarmed once — read two runs out of
+  # one log. This shape leaves every leg's internals exactly as they were.
   deep:
-    name: fuzz ${{ matrix.target }}
+    name: fuzz ${{ matrix.target }} (${{ matrix.arch }})
     needs: [targets]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -137,10 +152,38 @@ jobs:
       fail-fast: false
       matrix:
         target: ${{ fromJSON(needs.targets.outputs.list) }}
+        arch: [x86_64, i686]
+        # Neither key exists in the two dimensions above, so each entry decorates
+        # every combination of its own arch rather than adding legs.
+        include:
+          - arch: x86_64
+            # Fuzz on the gnu host, NOT the workspace default. The repo's
+            # .cargo/config.toml sets build.target = x86_64-unknown-linux-musl (the
+            # static-binary build), which cargo-fuzz would otherwise inherit — but
+            # libFuzzer's sanitizers are incompatible with a statically linked musl
+            # libc and need a musl C++ cross-compiler the runner lacks. The gnu host
+            # has the dynamic libc + system C++ that libFuzzer needs.
+            triple: x86_64-unknown-linux-gnu
+            sanitizer: address
+          - arch: i686
+            triple: i686-unknown-linux-gnu
+            # NO AddressSanitizer at 32 bits, and not by choice: rustc declares
+            # i686-unknown-linux-gnu as `"supported-sanitizers":["address"]` while
+            # the distributed rust-std for it ships no librustc-*_rt.asan.a, so
+            # -Zsanitizer=address compiles and fails at LINK (measured 2026-08-04).
+            # Lost with it: -malloc_limit_mb, which hooks the sanitizer's allocator
+            # and aborts on one huge allocation. Kept: -timeout and -rss_limit_mb,
+            # both of which libFuzzer implements itself. Acceptable because this
+            # leg exists for pointer WIDTH — memory safety in a forbid(unsafe)
+            # crate is the compiler's job. core.yml's replay leg records the same.
+            sanitizer: none
     env:
       # Every value a run step needs, routed through env rather than an
       # expression inside the script (template injection).
       TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      FUZZ_TARGET: ${{ matrix.triple }}
+      SANITIZER: ${{ matrix.sanitizer }}
       # 600 s on a release tag, 300 s nightly. The tag budget is the one place a
       # long run pays: measured 2026-08-03, six of ten targets stop learning
       # inside 250 s, but `m2ts` is still gaining at 843 s and `parse_report`
@@ -166,17 +209,31 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned nightly
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
+
+      # libfuzzer-sys's build script COMPILES libFuzzer's C++ sources with the cc
+      # crate, which for an i686 target invokes the host compiler with -m32 — so a
+      # 32-bit C++ toolchain is the FIRST thing that blocks this leg, before any
+      # Rust code is reached. Without it the failure names `libfuzzer-sys` and
+      # reads like a Rust problem.
+      - name: Install the 32-bit C++ toolchain
+        if: matrix.arch == 'i686'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
-          # One cache lineage for all ten legs, not ten: they build the same
-          # dependency graph and differ only in which target binary they link,
-          # and ten multi-hundred-MB archives would churn the repository's 10 GB
-          # Actions-cache budget (sweep.yml's shards share a key for the same
-          # reason). First finisher saves; the rest skip gracefully.
-          shared-key: fuzz-deep
+          # One cache lineage per ARCH, not per leg: within an arch every leg
+          # builds the same dependency graph and differs only in which target
+          # binary it links, and a per-leg archive of a few hundred MB would churn
+          # the repository's 10 GB Actions-cache budget (sweep.yml's shards share
+          # a key for the same reason). First finisher saves; the rest skip
+          # gracefully. Across arches the artifacts are different triples, so one
+          # shared archive would give whichever arch lost the race a miss dressed
+          # as a hit.
+          shared-key: fuzz-deep-${{ matrix.arch }}
           # Tag runs build fresh: this pass is release-adjacent and must not
           # consume a build cache poisoned elsewhere (zizmor cache-poisoning).
           # Scheduled runs execute on master, where only master-scoped runs can
@@ -214,7 +271,15 @@ jobs:
       # seeds do not already cover. The key carries the run id so every save is a
       # fresh entry (cache entries are immutable), and restore-keys picks the
       # newest entry for this target — the standard rolling-cache shape. Per
-      # target, so ten legs cannot clobber each other.
+      # target AND per arch, so 28 legs cannot clobber each other.
+      #
+      # BOTH lineages are restored into every leg, which is what makes the corpus
+      # SHARED rather than forked: a unit is bytes, and bytes that found new
+      # coverage at one width are a valid seed at the other. Only this leg's own
+      # arch is saved back, by the leg that produced it. The two lineages
+      # therefore converge on the same content and the cache costs about twice
+      # what one arch would — the price of losing nothing, against a design where
+      # the newest entry wins and half of each night's discoveries evaporate.
       #
       # TRUST MODEL. This entry holds fuzzer INPUT BYTES, never anything
       # executed: libFuzzer feeds each unit to the harness and the harness parses
@@ -226,14 +291,21 @@ jobs:
       # accumulated into the shared scope; and only master-scoped runs (schedule
       # and dispatch on master) write this key at all, since a pull request's
       # caches are scoped to its own ref and are invisible here.
-      - name: Restore the accumulated corpus
-        id: corpus
+      - name: Restore the accumulated corpus (64-bit lineage)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/accumulated/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/accumulated/${{ matrix.target }}/x86_64
+          key: fuzz-corpus-${{ matrix.target }}-x86_64-${{ github.run_id }}
           restore-keys: |
-            fuzz-corpus-${{ matrix.target }}-
+            fuzz-corpus-${{ matrix.target }}-x86_64-
+
+      - name: Restore the accumulated corpus (32-bit lineage)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/accumulated/${{ matrix.target }}/i686
+          key: fuzz-corpus-${{ matrix.target }}-i686-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-i686-
 
       # What counts as an accumulated unit is decided by CONTENT, not by
       # filename: libFuzzer's merge (which `cargo fuzz cmin` runs) writes every
@@ -246,7 +318,10 @@ jobs:
         run: |
           mkdir -p "fuzz/accumulated/$TARGET" "fuzz/corpus/$TARGET"
           git ls-files -z -- "fuzz/corpus/$TARGET" | xargs -0 -r sha1sum | cut -c1-40 | sort -u > seed-hashes.txt
-          restored=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
+          # Both arches' lineages, flattened into the one corpus directory the
+          # fuzzer reads. `restored` counts distinct BYTES across them, because
+          # the two lineages overlap heavily by construction.
+          restored=$(find "fuzz/accumulated/$TARGET" -type f -print0 | xargs -0 -r sha1sum | cut -c1-40 | sort -u | wc -l)
           seeds=$(wc -l < seed-hashes.txt)
           # -n so a name collision can never overwrite a tracked seed; colliding
           # names here mean identical bytes anyway, both being sha1-named.
@@ -256,7 +331,7 @@ jobs:
           # `seeds` counts distinct seed CONTENTS, which is what the comparison
           # below is against — it reads lower than the tracked file count wherever
           # two committed seeds hold identical bytes.
-          echo "$TARGET: $seeds distinct committed seeds + $restored accumulated units"
+          echo "$TARGET/$ARCH: $seeds distinct committed seeds + $restored accumulated units"
 
       # The per-target discovery flags come from fuzz/targets.txt (it documents
       # its own columns); an empty cell there is a measured verdict, not an
@@ -266,7 +341,10 @@ jobs:
       # A crash must NOT abort the leg here: the steps below still have to
       # minimise the reproducer, quarantine it, and leave the corpus cache in a
       # state tomorrow's run can use. The leg is failed at the end instead.
-      - name: Fresh-fuzz ${{ matrix.target }}
+      # BOTH arches read the flag columns, deliberately: an arch leg running
+      # different flags is not the same experiment, and a difference in what it
+      # finds would then be unattributable to the width.
+      - name: Fresh-fuzz ${{ matrix.target }} (${{ matrix.arch }})
         id: run
         run: |
           flags=$(awk -v t="$TARGET" -v dir="$PWD/fuzz" '
@@ -274,9 +352,9 @@ jobs:
               if ($2 != "-") printf " -dict=%s/%s", dir, $2
               if ($3 != "-") printf " -max_len=%s", $3
             }' fuzz/targets.txt)
-          echo "budget ${FUZZ_SECONDS}s x ${WORKERS} process(es), guards $GUARDS, flags:${flags:- (none)}"
+          echo "$FUZZ_TARGET (sanitizer=$SANITIZER): budget ${FUZZ_SECONDS}s x ${WORKERS} process(es), guards $GUARDS, flags:${flags:- (none)}"
           set +e
-          cargo +"$NIGHTLY" fuzz run "$TARGET" --target "$FUZZ_TARGET" -- \
+          cargo +"$NIGHTLY" fuzz run "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" -- \
             -max_total_time="$FUZZ_SECONDS" -jobs="$WORKERS" -workers="$WORKERS" \
             $GUARDS $flags -print_final_stats=1 2>&1 | tee fuzz-parent.log
           rc=${PIPESTATUS[0]}
@@ -308,7 +386,23 @@ jobs:
             cp fuzz-parent.log fuzz-run.log
           fi
           echo "captured $(echo "$logs" | grep -c .) worker log(s), $(wc -l < fuzz-run.log) lines"
-          if [ "$rc" -eq 0 ]; then echo "$TARGET: clean"; else echo "$TARGET: exit $rc"; fi
+          if [ "$rc" -eq 0 ]; then echo "$TARGET/$ARCH: clean"; else echo "$TARGET/$ARCH: exit $rc"; fi
+
+      # Proof that the leg fuzzed at the width it claims rather than silently
+      # falling back to the host: a half-wired arch leg reads as coverage nobody
+      # has, which is worse than no arch leg at all.
+      - name: Prove the fuzzed binary's pointer width
+        if: ${{ !cancelled() }}
+        run: |
+          bin=$(find "fuzz/target/$FUZZ_TARGET/release" -maxdepth 1 -type f -perm -u+x -name "$TARGET")
+          [ -n "$bin" ] || { echo "no $TARGET binary under fuzz/target/$FUZZ_TARGET"; exit 1; }
+          file "$bin"
+          file "$bin" | grep -q 'ELF 32-bit' && width=32 || width=64
+          case "$FUZZ_TARGET" in
+            i686-*)   [ "$width" = 32 ] || { echo "expected a 32-bit binary"; exit 1; } ;;
+            x86_64-*) [ "$width" = 64 ] || { echo "expected a 64-bit binary"; exit 1; } ;;
+          esac
+          echo "$TARGET fuzzed a $width-bit binary"
 
       # libFuzzer writes a crashing input to fuzz/artifacts/, never to the
       # corpus — but a unit ALREADY in the corpus can start crashing after a code
@@ -341,7 +435,7 @@ jobs:
           # tmin is bounded: its default 255 attempts each cost up to -timeout
           # seconds, so a hang would otherwise minimise for over an hour. Five
           # minutes, then keep whatever it had.
-          timeout 300 cargo +"$NIGHTLY" fuzz tmin "$TARGET" --target "$FUZZ_TARGET" "$repro" -- $GUARDS || echo "tmin did not finish; keeping the raw reproducer"
+          timeout 300 cargo +"$NIGHTLY" fuzz tmin "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" "$repro" -- $GUARDS || echo "tmin did not finish; keeping the raw reproducer"
           min=$(find "fuzz/artifacts/$TARGET" -maxdepth 1 -type f -name 'minimized-from-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
           [ -n "$min" ] && repro="$min"
           echo "repro=$repro" >> "$GITHUB_OUTPUT"
@@ -354,6 +448,11 @@ jobs:
       # same units become tracked, drop out of the "new" set, and the growth
       # issue closes itself. The committed corpus is never rewritten — the
       # runner's checkout is scratch and nothing is pushed from here.
+      #
+      # cmin takes the GUARDS and nothing else. Never a per-target flag from
+      # targets.txt: -max_len DROPS an over-long unit rather than truncating it,
+      # so minimising under the cap would silently strip from the shared corpus
+      # exactly the long seeds the other arch's leg still expects to restore.
       - name: Minimise and collect the new units
         id: collect
         if: ${{ !cancelled() }}
@@ -364,14 +463,14 @@ jobs:
               awk 'NR == FNR { seen[$1] = 1; next } !($1 in seen) { print substr($0, 43) }' seed-hashes.txt -
           }
           grown=$(new_units | wc -l)
-          cargo +"$NIGHTLY" fuzz cmin "$TARGET" --target "$FUZZ_TARGET" -- $GUARDS || echo "cmin failed; keeping the corpus un-minimised"
-          rm -rf "fuzz/accumulated/$TARGET"
-          mkdir -p "fuzz/accumulated/$TARGET"
-          new_units | while IFS= read -r f; do cp -- "$f" "fuzz/accumulated/$TARGET/"; done
-          new=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
+          cargo +"$NIGHTLY" fuzz cmin "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" -- $GUARDS || echo "cmin failed; keeping the corpus un-minimised"
+          rm -rf "fuzz/accumulated/$TARGET/$ARCH"
+          mkdir -p "fuzz/accumulated/$TARGET/$ARCH"
+          new_units | while IFS= read -r f; do cp -- "$f" "fuzz/accumulated/$TARGET/$ARCH/"; done
+          new=$(find "fuzz/accumulated/$TARGET/$ARCH" -type f | wc -l)
           echo "grown=$grown" >> "$GITHUB_OUTPUT"
           echo "new=$new" >> "$GITHUB_OUTPUT"
-          echo "$TARGET: $grown new units before cmin, $new after"
+          echo "$TARGET/$ARCH: $grown new units before cmin, $new after"
 
       - name: Record this leg's numbers
         if: ${{ !cancelled() }}
@@ -411,6 +510,7 @@ jobs:
           }
           $stats = [ordered]@{
             target = $env:TARGET
+            arch = $env:ARCH
             seconds = [int]$env:FUZZ_SECONDS
             workers = [int]$env:WORKERS
             seeds = [int]$env:SEEDS
@@ -425,7 +525,7 @@ jobs:
           }
           $stats | ConvertTo-Json | Set-Content result/stats.json
           @(
-            "### $($env:TARGET)"
+            "### $($env:TARGET) ($($env:ARCH))"
             ''
             "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - $($env:WORKERS) process(es), cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
@@ -462,6 +562,7 @@ jobs:
           Copy-Item $env:REPRO result/repro.bin
           $crash = [ordered]@{
             target = $env:TARGET
+            arch = $env:ARCH
             kind = $kind
             where = $where
             message = $message
@@ -490,22 +591,27 @@ jobs:
           $crash | ConvertTo-Json | Set-Content result/crash.json
           Write-Host "crash signature $signature ($kind)"
 
+      # Artifact names carry the arch because upload-artifact rejects a second
+      # upload under a name the run already used.
       - name: Upload this leg's result
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-result-${{ matrix.target }}
+          name: fuzz-result-${{ matrix.target }}-${{ matrix.arch }}
           path: result/
           if-no-files-found: ignore
 
       # The units a human can promote into the committed regression set: unzip
-      # into fuzz/corpus/<target>/ and open a pull request.
+      # into fuzz/corpus/<target>/ and open a pull request. Both arches upload,
+      # and a unit found at both widths appears in both — as the SAME file, since
+      # cmin names a unit by the sha1 of its bytes, so unzipping both into one
+      # directory collapses the duplicate.
       - name: Upload the new corpus units
         if: ${{ !cancelled() && steps.collect.outputs.new != '0' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fuzz-corpus-${{ matrix.target }}
-          path: fuzz/accumulated/${{ matrix.target }}/
+          name: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}
+          path: fuzz/accumulated/${{ matrix.target }}/${{ matrix.arch }}/
           if-no-files-found: ignore
 
       # Saved even when the leg failed, and deliberately: a crash must not cost
@@ -518,15 +624,15 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'push' && steps.collect.outputs.new != '0' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/accumulated/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/accumulated/${{ matrix.target }}/${{ matrix.arch }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}-${{ github.run_id }}
 
       - name: Fail the leg on a crash
         if: ${{ steps.run.outputs.rc != '0' }}
         env:
           RC: ${{ steps.run.outputs.rc }}
         run: |
-          echo "$TARGET exited $RC — see the crash issue and the fuzz-result-$TARGET artifact"
+          echo "$TARGET/$ARCH exited $RC — see the crash issue and the fuzz-result-$TARGET-$ARCH artifact"
           exit 1
 
   # One issue per distinct crash signature, plus ONE rolling issue for corpus
@@ -580,21 +686,26 @@ jobs:
             $stats = @(Get-ChildItem results -Recurse -Filter stats.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
             $crashes = @(Get-ChildItem results -Recurse -Filter crash.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
           }
-          $rows = @($stats | Sort-Object target | ForEach-Object {
-            "| $($_.target) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.cov) | $($_.ft) | $($_.execs_per_sec) |"
+          $rows = @($stats | Sort-Object target, arch | ForEach-Object {
+            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.cov) | $($_.ft) | $($_.execs_per_sec) |"
           })
           # [int] on purpose: Measure-Object sums an empty set to $null, and
           # $null is not 0, so an artifact-less run would otherwise file a
           # growth issue with a blank count.
           $totalNew = [int](($stats | Measure-Object -Property new -Sum).Sum)
           $totalRestored = [int](($stats | Measure-Object -Property restored -Sum).Sum)
+          # Counted per leg, so a unit found at both widths counts twice here —
+          # the arches share one corpus and cmin names a unit by the sha1 of its
+          # bytes, so the duplicate collapses the moment both artifacts are
+          # unzipped into one directory. The number is a review-queue signal, not
+          # a distinct-unit count.
           @(
             '## Discovery pass'
             ''
-            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds."
+            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target per arch across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup)."
             ''
-            '| target | seeds | restored | new | cov | ft | exec/s |'
-            '|---|---|---|---|---|---|---|'
+            '| target | arch | seeds | restored | new | cov | ft | exec/s |'
+            '|---|---|---|---|---|---|---|---|'
             $rows
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
 
@@ -615,9 +726,13 @@ jobs:
           }
           foreach ($group in ($crashes | Group-Object signature)) {
             $c = $group.Group[0]
-            $targets = (@($group.Group | ForEach-Object { "``$($_.target)``" } | Sort-Object -Unique) -join ', ')
+            # Target AND arch, because a crash that reproduces at only one
+            # pointer width is the whole reason this matrix has two: reading
+            # "i686 only" off the issue is what tells the reader it is an
+            # overflow boundary rather than a parser bug.
+            $targets = (@($group.Group | ForEach-Object { "``$($_.target)`` ($($_.arch))" } | Sort-Object -Unique) -join ', ')
             $marker = "<!-- fuzz-signature: $($c.signature) -->"
-            $headline = if ($c.kind -eq 'panic') { "$($c.message) at $($c.where)" } else { "$($c.kind) in $($c.target)" }
+            $headline = if ($c.kind -eq 'panic') { "$($c.message) at $($c.where)" } else { "$($c.kind) in $($c.target) ($($c.arch))" }
             $title = "fuzz: $headline"
             if ($title.Length -gt 120) { $title = $title.Substring(0, 117) + '...' }
             $repro = if ($c.repro_base64) {
@@ -632,7 +747,11 @@ jobs:
                 "base64 -d > repro.bin <<'EOF'"
                 $c.repro_base64
                 'EOF'
-                "cargo +nightly fuzz run $($c.target) repro.bin"
+                $(if ($c.arch -eq 'i686') {
+                  "cargo +nightly fuzz run $($c.target) --target i686-unknown-linux-gnu --sanitizer none repro.bin"
+                } else {
+                  "cargo +nightly fuzz run $($c.target) repro.bin"
+                })
                 '```'
               )
             }
@@ -645,7 +764,7 @@ jobs:
               "**Kind:** $($c.kind)"
               $(if ($c.where) { "**Where:** ``$($c.where)``" })
               $(if ($c.message) { "**Message:** $($c.message)" })
-              "**Reproducer:** ``$($c.repro_name)``, $($c.repro_bytes) bytes, sha1 ``$($c.repro_sha1)`` — artifact ``fuzz-result-$($c.target)`` of $env:RUN_URL"
+              "**Reproducer:** ``$($c.repro_name)``, $($c.repro_bytes) bytes, sha1 ``$($c.repro_sha1)`` — artifact ``fuzz-result-$($c.target)-$($c.arch)`` of $env:RUN_URL"
               ''
               $repro
               ''
@@ -684,15 +803,17 @@ jobs:
             }
             exit 0
           }
-          $grownRows = @($stats | Where-Object { $_.new -gt 0 } | Sort-Object target | ForEach-Object {
-            "| ``$($_.target)`` | $($_.new) | ``fuzz-corpus-$($_.target)`` |"
+          $grownRows = @($stats | Where-Object { $_.new -gt 0 } | Sort-Object target, arch | ForEach-Object {
+            "| ``$($_.target)`` | $($_.arch) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
           })
           $title = "Fuzz corpus: $totalNew unit(s) beyond the committed seeds"
           $body = @(
-            "The nightly discovery pass has accumulated $totalNew unit(s) that the committed seed corpus does not cover. They live in this workflow's per-target Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
+            "The nightly discovery pass has accumulated $totalNew unit(s) that the committed seed corpus does not cover. They live in this workflow's per-target, per-arch Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
             ''
-            '| target | units | artifact |'
-            '|---|---|---|'
+            'The count is summed over both pointer widths. A unit found at both is the same bytes under the same sha1 filename, so it collapses when both artifacts are unzipped into one directory — the distinct total is what lands in the pull request.'
+            ''
+            '| target | arch | units | artifact |'
+            '|---|---|---|---|'
             $grownRows
             ''
             "Latest run: $env:RUN_URL"
@@ -701,7 +822,7 @@ jobs:
             ''
             '```sh'
             "gh run download $($env:RUN_URL -replace '.*/', '') --pattern 'fuzz-corpus-*' --dir /tmp/grown"
-            '# then copy each /tmp/grown/fuzz-corpus-<target>/* into fuzz/corpus/<target>/ and open a PR'
+            '# then copy each /tmp/grown/fuzz-corpus-<target>-<arch>/* into fuzz/corpus/<target>/ and open a PR'
             '```'
             ''
             'This is one rolling issue, edited after every pass. It closes itself once the accumulated corpus adds nothing over the committed seeds — which is what happens the night after the units above are merged.'
@@ -715,12 +836,14 @@ jobs:
             Write-Host 'Filed the corpus-growth issue'
           }
 
-      # Every pass writes ten NEW cache entries (the key carries the run id,
-      # because cache entries are immutable), and a superseded entry is never
-      # restored again — restore-keys always picks the newest. Left alone they
-      # would sit in the repository's 10 GB store for the full 7-day retention,
-      # seven passes deep, evicting caches a pull request needs. Delete every
-      # entry but the newest per target.
+      # Every pass writes one NEW cache entry per target per arch (the key carries
+      # the run id, because cache entries are immutable), and a superseded entry
+      # is never restored again — restore-keys always picks the newest. Left
+      # alone they would sit in the repository's 10 GB store for the full 7-day
+      # retention, seven passes deep, evicting caches a pull request needs.
+      # Delete every entry but the newest per (target, arch): the run id is the
+      # only trailing digit run in the key, so stripping it is what groups them
+      # — `fuzz-corpus-m2ts-i686-30865213418` groups as `fuzz-corpus-m2ts-i686`.
       #
       # Master only, and filtered to master's own entries: `gh cache list` sees
       # every ref's caches, so a run dispatched on a branch would otherwise
@@ -744,4 +867,4 @@ jobs:
               Write-Host "deleted $($stale.key)"
             }
           }
-          Write-Host "kept $([math]::Round($kept / 1MB, 1)) MB of corpus cache across $($groups.Count) target(s)"
+          Write-Host "kept $([math]::Round($kept / 1MB, 1)) MB of corpus cache across $($groups.Count) target/arch lineage(s)"
