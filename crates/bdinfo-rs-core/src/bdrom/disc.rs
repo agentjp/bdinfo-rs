@@ -971,11 +971,16 @@ fn read_index_bytes(bdmv: &dyn BdDir) -> Result<Option<Vec<u8>>, BdError> {
 }
 
 /// Resolves the disc's UHD flag from `index.bdmv`, with the resilient-path
-/// extras: a failed *primary* read falls back to `BDMV/BACKUP/index.bdmv`
-/// (recording the primary failure), and a present-but-untagged index — one
-/// lacking the `INDX` magic — is surfaced as a `ScanReport` warning while still
-/// being tolerated as non-UHD (a garbage index just means "not UHD", but a
-/// corrupted one should not silently read as an SDR disc).
+/// extras: `BDMV/BACKUP/index.bdmv` answers whenever the primary cannot — both
+/// when the primary *read* fails and when it succeeds but yields an index
+/// lacking the `INDX` magic (libbluray likewise retries the backup on a parse
+/// failure, `indx_get`). Either way the primary's defect is recorded once as a
+/// `ScanReport` warning, so the `WARNING` block surfaces the bad primary even
+/// when the backup supplied the verdict.
+///
+/// An untagged index that the backup cannot replace stays *tolerated* as non-UHD
+/// (a garbage index just means "not UHD", but a corrupted one should not
+/// silently read as an SDR disc).
 ///
 /// A *missing* `index.bdmv` (no file to open) is non-UHD with no warning and no
 /// backup attempt — the same silent-false both products give "the disc says
@@ -995,14 +1000,23 @@ fn read_uhd_flag(
     let Some(bytes) = bytes else {
         return Ok(false);
     };
-    if !index::has_index_tag(&bytes) {
-        sink.record(
-            ScanStage::Discovery,
-            "index.bdmv",
-            BdError::UnknownFileType(index::read_index_version(&bytes).unwrap_or_default()),
-        );
+    if index::has_index_tag(&bytes) {
+        return Ok(index::is_uhd(&bytes));
     }
-    Ok(index::is_uhd(&bytes))
+    sink.record(
+        ScanStage::Discovery,
+        "index.bdmv",
+        BdError::UnknownFileType(index::read_index_version(&bytes).unwrap_or_default()),
+    );
+    // The untagged bytes may themselves have come from the backup (an unreadable
+    // primary recovered above); re-reading it then reaches the same untagged
+    // verdict, costing one extra small read on an already doubly-damaged disc.
+    // The backup needs no tag check of its own: an untagged one cannot carry the
+    // UHD magic, so its verdict is the same tolerated non-UHD as no backup.
+    match recover_backup(backup_index, "index.bdmv", |_, bytes| Ok(bytes.to_vec())) {
+        Some(Ok(backup)) => Ok(index::is_uhd(&backup)),
+        _ => Ok(false),
+    }
 }
 
 /// Whether `root` has a `BDSVM`/`SLYVM`/`ANYVM` child directory (`is_bd_plus`).
@@ -5128,5 +5142,96 @@ mod tests {
             report.errors.first().expect("short index warning").reason.to_string(),
             "unknown file type: "
         );
+    }
+
+    #[test]
+    fn an_untagged_index_falls_back_to_the_backup_copy() {
+        // The primary `index.bdmv` reads fine but is garbage. A tagged BACKUP
+        // copy supplies the verdict (UHD here); an untagged or absent one leaves
+        // the tolerated non-UHD. Every case warns about the primary exactly once.
+        let clip = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let make = |backup: Option<&[u8]>| {
+            let mut files = vec![
+                ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00000.clpi", clip.clone()),
+                ("BDMV/index.bdmv", b"XXXXjunk".to_vec()),
+                // A BACKUP directory is present in every case, so the missing
+                // -counterpart case differs from the others only in its index.
+                ("BDMV/BACKUP/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])),
+            ];
+            if let Some(bytes) = backup {
+                files.push(("BDMV/BACKUP/index.bdmv", bytes.to_vec()));
+            }
+            TempDisc::build(&[], &files)
+        };
+        let scan = |disc: &TempDisc| {
+            BdRom::open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
+                .expect("scans")
+        };
+
+        // A tagged BACKUP copy recovers the UHD verdict…
+        let recovered = make(Some(b"INDX0300"));
+        let report = scan(&recovered);
+        assert!(report.bdrom.is_uhd, "UHD flag recovered from an intact BACKUP index");
+        assert_eq!(report.errors.len(), 1, "the untagged primary warns exactly once");
+        let err = report.errors.first().expect("index warning");
+        assert_eq!((err.stage, err.file.as_str()), (ScanStage::Discovery, "index.bdmv"));
+        assert_eq!(err.reason.to_string(), "unknown file type: XXXXjunk");
+        // …and a tagged non-UHD BACKUP copy answers non-UHD from the tag, not
+        // from the fallback.
+        assert!(!scan(&make(Some(b"INDX0200"))).bdrom.is_uhd);
+        // Strict open builds no recovery pool, so it stays at the tolerated
+        // non-UHD with no warning.
+        assert!(!recovered.open().expect("strict tolerates an untagged index").is_uhd);
+
+        // An untagged BACKUP copy recovers nothing, and is not warned about.
+        let report = scan(&make(Some(b"YYYYjunk")));
+        assert!(!report.bdrom.is_uhd);
+        assert_eq!(report.errors.len(), 1);
+
+        // Neither does a BACKUP directory holding no `index.bdmv`.
+        let report = scan(&make(None));
+        assert!(!report.bdrom.is_uhd);
+        assert_eq!(report.errors.len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_primary_index_recovered_as_garbage_stays_non_uhd() {
+        // Both copies are damaged in different ways: the primary cannot be read
+        // and the BACKUP copy is untagged. The recovered garbage is tolerated as
+        // non-UHD, and only the primary's read failure is recorded.
+        let trip = Trip::new(usize::MAX);
+        let mk = |name: &str, bytes: Vec<u8>, fail_read: bool| MockFile {
+            name: name.to_owned(),
+            extension: name.rsplit_once('.').map_or_else(String::new, |(_, e)| format!(".{e}")),
+            bytes,
+            trip: trip.clone(),
+            fail_read,
+        };
+        let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
+            name: name.to_owned(),
+            dirs,
+            files,
+            trip: trip.clone(),
+        };
+        let root = dir(
+            "disc",
+            vec![dir(
+                "BDMV",
+                vec![
+                    dir("CLIPINF", vec![], vec![]),
+                    dir("PLAYLIST", vec![], vec![]),
+                    dir("BACKUP", vec![], vec![mk("index.bdmv", b"XXXXjunk".to_vec(), false)]),
+                ],
+                vec![mk("index.bdmv", vec![0], true)], // primary unreadable
+            )],
+            vec![],
+        );
+        let report = BdRom::open_resilient(&root, ScanMode::Metadata).expect("scans");
+        assert!(!report.bdrom.is_uhd);
+        assert_eq!(report.errors.len(), 2, "the unreadable primary, then its untagged stand-in");
+        for err in &report.errors {
+            assert_eq!((err.stage, err.file.as_str()), (ScanStage::Discovery, "index.bdmv"));
+        }
     }
 }
