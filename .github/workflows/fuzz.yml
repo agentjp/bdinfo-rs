@@ -273,13 +273,24 @@ jobs:
       # newest entry for this target — the standard rolling-cache shape. Per
       # target AND per arch, so 28 legs cannot clobber each other.
       #
-      # BOTH lineages are restored into every leg, which is what makes the corpus
-      # SHARED rather than forked: a unit is bytes, and bytes that found new
-      # coverage at one width are a valid seed at the other. Only this leg's own
-      # arch is saved back, by the leg that produced it. The two lineages
-      # therefore converge on the same content and the cache costs about twice
-      # what one arch would — the price of losing nothing, against a design where
-      # the newest entry wins and half of each night's discoveries evaporate.
+      # BOTH lineages are restored into ONE directory, which is what makes the
+      # corpus SHARED rather than forked: a unit is bytes, and bytes that found
+      # new coverage at one width are a valid seed at the other. Two restores
+      # over the same path union rather than replace (each unpacks a tar into the
+      # workspace), and every unit is named by the sha1 of its bytes, so a unit
+      # both widths found lands once. Only this leg's own arch is saved back, by
+      # the leg that produced it; the two lineages converge on the same content
+      # and the cache costs about twice what one arch would — the price of losing
+      # nothing, against a design where the newest entry wins and half of each
+      # night's discoveries evaporate.
+      #
+      # The PATH is what the cache's entry version is computed from, so it must
+      # stay `fuzz/accumulated/<target>`: putting each arch in a subdirectory
+      # would make every pre-arch entry unrestorable and silently reset discovery
+      # to the committed seeds — the exact failure the nightly cadence exists to
+      # avoid. The bare `fuzz-corpus-<target>-` restore key below is what carries
+      # those entries across, and it keeps working afterwards as the fallback for
+      # a width that has no entry of its own yet.
       #
       # TRUST MODEL. This entry holds fuzzer INPUT BYTES, never anything
       # executed: libFuzzer feeds each unit to the harness and the harness parses
@@ -294,15 +305,16 @@ jobs:
       - name: Restore the accumulated corpus (64-bit lineage)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/accumulated/${{ matrix.target }}/x86_64
+          path: fuzz/accumulated/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-x86_64-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-x86_64-
+            fuzz-corpus-${{ matrix.target }}-
 
       - name: Restore the accumulated corpus (32-bit lineage)
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/accumulated/${{ matrix.target }}/i686
+          path: fuzz/accumulated/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-i686-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-i686-
@@ -318,10 +330,7 @@ jobs:
         run: |
           mkdir -p "fuzz/accumulated/$TARGET" "fuzz/corpus/$TARGET"
           git ls-files -z -- "fuzz/corpus/$TARGET" | xargs -0 -r sha1sum | cut -c1-40 | sort -u > seed-hashes.txt
-          # Both arches' lineages, flattened into the one corpus directory the
-          # fuzzer reads. `restored` counts distinct BYTES across them, because
-          # the two lineages overlap heavily by construction.
-          restored=$(find "fuzz/accumulated/$TARGET" -type f -print0 | xargs -0 -r sha1sum | cut -c1-40 | sort -u | wc -l)
+          restored=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
           seeds=$(wc -l < seed-hashes.txt)
           # -n so a name collision can never overwrite a tracked seed; colliding
           # names here mean identical bytes anyway, both being sha1-named.
@@ -464,10 +473,10 @@ jobs:
           }
           grown=$(new_units | wc -l)
           cargo +"$NIGHTLY" fuzz cmin "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" -- $GUARDS || echo "cmin failed; keeping the corpus un-minimised"
-          rm -rf "fuzz/accumulated/$TARGET/$ARCH"
-          mkdir -p "fuzz/accumulated/$TARGET/$ARCH"
-          new_units | while IFS= read -r f; do cp -- "$f" "fuzz/accumulated/$TARGET/$ARCH/"; done
-          new=$(find "fuzz/accumulated/$TARGET/$ARCH" -type f | wc -l)
+          rm -rf "fuzz/accumulated/$TARGET"
+          mkdir -p "fuzz/accumulated/$TARGET"
+          new_units | while IFS= read -r f; do cp -- "$f" "fuzz/accumulated/$TARGET/"; done
+          new=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
           echo "grown=$grown" >> "$GITHUB_OUTPUT"
           echo "new=$new" >> "$GITHUB_OUTPUT"
           echo "$TARGET/$ARCH: $grown new units before cmin, $new after"
@@ -611,7 +620,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}
-          path: fuzz/accumulated/${{ matrix.target }}/${{ matrix.arch }}/
+          path: fuzz/accumulated/${{ matrix.target }}/
           if-no-files-found: ignore
 
       # Saved even when the leg failed, and deliberately: a crash must not cost
@@ -624,7 +633,7 @@ jobs:
         if: ${{ !cancelled() && github.event_name != 'push' && steps.collect.outputs.new != '0' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: fuzz/accumulated/${{ matrix.target }}/${{ matrix.arch }}
+          path: fuzz/accumulated/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}-${{ github.run_id }}
 
       - name: Fail the leg on a crash
