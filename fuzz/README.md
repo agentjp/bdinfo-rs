@@ -11,6 +11,14 @@ these fuzz targets are the amplifier that runs deeper, on a Linux/nightly tier.
 > note, and the no-panic / no-hang contract is held by the proptests). Replays carry per-unit
 > `-timeout`/`-rss_limit_mb` guards so a non-termination or allocation blow-up on hostile bytes
 > fails the gate instead of hanging it.
+>
+> **Two pointer widths.** Every leg runs twice — on `x86_64-unknown-linux-gnu` and on
+> `i686-unknown-linux-gnu`, where `usize` is **32 bits**. That second width is the one the npm
+> package ships: it compiles `bdinfo-rs-core` to `wasm32-unknown-unknown`, so every `checked_*`
+> offset guard and length computation in the parser has a different overflow boundary in a browser
+> than on a 64-bit host. wasm32 cannot host libFuzzer; i686 is a supported libFuzzer target at the
+> same width, so it is the proxy. Both widths share **one corpus** — a libFuzzer corpus is
+> arch-agnostic byte files, so a unit found at one width is a valid seed at the other.
 
 This is an **independent workspace** (own `[workspace]`, `exclude`d from the root) so its
 `unsafe`-using `libfuzzer-sys` harness never touches the main workspace's `forbid(unsafe_code)`
@@ -209,9 +217,9 @@ Three legs, two of them adversarial and one of them a gate:
 
 | leg | when | what it does |
 |---|---|---|
-| corpus replay (`core.yml`) | every pull request and push touching the `fuzz` area, and daily through the sweep | `-runs=0` over the committed seeds — a deterministic regression check, and a **required status check** |
-| nightly discovery (`fuzz.yml`) | 21:11 UTC daily, one job per target, 300 s each on four concurrent libFuzzer processes | fresh fuzzing that **starts where last night stopped** |
-| release-tag pass (`fuzz.yml`) | every `v*` tag, 600 s per target | a release checkpoint; runs alongside the publish workflows and blocks none of them |
+| corpus replay (`core.yml`) | every pull request and push touching the `fuzz` area, and daily through the sweep — one job per pointer width | `-runs=0` over the committed seeds — a deterministic regression check, and a **gating status check** |
+| nightly discovery (`fuzz.yml`) | 21:11 UTC daily, one job per target per width, 300 s each on four concurrent libFuzzer processes | fresh fuzzing that **starts where last night stopped** |
+| release-tag pass (`fuzz.yml`) | every `v*` tag, 600 s per target per width | a release checkpoint; runs alongside the publish workflows and blocks none of them |
 
 **Discovery compounds through a per-target Actions cache.** A nightly leg restores
 everything earlier runs found, fuzzes from the seeds plus that, minimises the union, and

@@ -543,19 +543,55 @@ jobs:
   # MSVC support, so this runs on Linux only; the local mirror is
   # scripts/fuzz-docker.{ps1,sh}. The tag-triggered extended fresh-fuzz pass
   # stays in fuzz.yml.
+  #
+  # ONE LEG PER POINTER WIDTH. The npm package compiles bdinfo-rs-core to
+  # wasm32-unknown-unknown, where `usize` is 32 BITS — so every checked_* offset
+  # guard, length field and capacity computation in the parser has a different
+  # overflow boundary in a browser than on the 64-bit host. wasm32 cannot host
+  # libFuzzer; i686-unknown-linux-gnu is a supported libFuzzer target with the
+  # same arithmetic width, so it is the proxy. Both legs replay the SAME
+  # committed corpus: a libFuzzer corpus is arch-agnostic byte files, so a unit
+  # found at one width is a valid seed at the other and forking them per arch
+  # would only halve each set (D6).
   replay:
-    name: corpus replay (regression gate)
+    name: corpus replay (regression gate, ${{ matrix.arch }})
     if: inputs.fuzz == 'true'
-    # x64: FUZZ_TARGET below pins the libFuzzer binary to x86_64-unknown-linux-gnu,
-    # which an arm64 host cannot execute.
+    # x64: FUZZ_TARGET below pins the libFuzzer binary to an x86 triple, which an
+    # arm64 host can execute neither at 64 nor at 32 bits.
     runs-on: ubuntu-latest
+    strategy:
+      # Independent widths: a 32-bit-only overflow must not hide the 64-bit
+      # verdict, or the reverse.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            # Fuzz on the gnu host, NOT the workspace default. The repo's
+            # .cargo/config.toml sets build.target = x86_64-unknown-linux-musl (the
+            # static-binary build), which cargo-fuzz would otherwise inherit — but
+            # libFuzzer's sanitizers are incompatible with a statically linked musl
+            # libc and need a musl C++ cross-compiler the runner lacks. The gnu host
+            # has the dynamic libc + system C++ that libFuzzer needs.
+            triple: x86_64-unknown-linux-gnu
+            sanitizer: address
+          - arch: i686
+            triple: i686-unknown-linux-gnu
+            # NO AddressSanitizer at 32 bits, and the reason is not a policy
+            # choice. rustc DECLARES i686-unknown-linux-gnu as
+            # `"supported-sanitizers":["address"]`, but the distributed rust-std
+            # for that target ships no librustc-*_rt.asan.a, so -Zsanitizer=address
+            # compiles and then fails at LINK (measured 2026-08-04 on
+            # nightly 1.99.0). What that costs is -malloc_limit_mb, which hooks the
+            # sanitizer's allocator: a SINGLE huge allocation no longer aborts.
+            # -timeout and -rss_limit_mb both survive — libFuzzer reads RSS from a
+            # background thread of its own — so the non-termination and
+            # allocation-amplification guards still fire. That is an acceptable
+            # trade here because this leg exists for POINTER WIDTH, and memory
+            # safety in a forbid(unsafe) crate is the compiler's job, not ASan's.
+            sanitizer: none
     env:
-      # Fuzz on the gnu host, NOT the workspace default. The repo's .cargo/config.toml
-      # sets build.target = x86_64-unknown-linux-musl (the static-binary build), which
-      # cargo-fuzz would otherwise inherit — but libFuzzer's sanitizers are incompatible
-      # with a statically linked musl libc and need a musl C++ cross-compiler the runner
-      # lacks. The gnu host has the dynamic libc + system C++ that libFuzzer needs.
-      FUZZ_TARGET: x86_64-unknown-linux-gnu
+      FUZZ_TARGET: ${{ matrix.triple }}
+      SANITIZER: ${{ matrix.sanitizer }}
       # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
       # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
       # (allocation-amplification guard).
@@ -566,11 +602,27 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned nightly
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal
+        run: |
+          rustup toolchain install "$NIGHTLY" --profile minimal
+          rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
+
+      # libfuzzer-sys's build script COMPILES libFuzzer's C++ sources with the cc
+      # crate, which for an i686 target invokes the host compiler with -m32 — so a
+      # 32-bit C++ toolchain is the FIRST thing that blocks this leg, before any
+      # Rust code is reached. Without it the failure names `libfuzzer-sys` and
+      # reads like a Rust problem.
+      - name: Install the 32-bit C++ toolchain
+        if: matrix.arch == 'i686'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: fuzz
+          # Per arch: rust-cache keys off the job id, which both legs share, and
+          # the two build different target triples into different subtrees of
+          # fuzz/target. One archive would hold whichever leg saved first and the
+          # other would restore a miss dressed as a hit.
+          key: ${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # cargo-fuzz is absent from taiki-e/install-action's manifest (101 tools at
@@ -578,6 +630,9 @@ jobs:
       # it has no prebuilt channel here. Compile the pinned version from crates.io
       # once and cache the binary, the same lane cargo-vet uses; keep the pin equal
       # to fuzz.yml's, which version-freshness.yml enforces and watches.
+      # NOT keyed by matrix.arch: cargo-fuzz is a HOST executable driving a
+      # cross-compile, identical for both legs. On a cold cache both legs miss and
+      # both save the same bytes; the loser logs a reserve conflict and moves on.
       - name: Cache the pinned cargo-fuzz binary
         id: fuzz-bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -609,10 +664,25 @@ jobs:
           fail=0
           for t in $targets; do
             echo "::group::replay $t"
-            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" -- -runs=0 $GUARDS || fail=1
+            cargo +"$NIGHTLY" fuzz run "$t" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" -- -runs=0 $GUARDS || fail=1
             echo "::endgroup::"
           done
           exit $fail
+
+      # Proof that the leg replayed at the width it claims, rather than silently
+      # falling back to the host: an arch leg that runs the wrong binary is worse
+      # than no arch leg, because it reads as coverage nobody has.
+      - name: Prove the replayed binaries' pointer width
+        run: |
+          bin=$(find "fuzz/target/$FUZZ_TARGET/release" -maxdepth 1 -type f -perm -u+x -name read_be)
+          [ -n "$bin" ] || { echo "no read_be binary under fuzz/target/$FUZZ_TARGET"; exit 1; }
+          file "$bin"
+          file "$bin" | grep -q 'ELF 32-bit' && width=32 || width=64
+          case "$FUZZ_TARGET" in
+            i686-*)   [ "$width" = 32 ] || { echo "expected a 32-bit binary"; exit 1; } ;;
+            x86_64-*) [ "$width" = 64 ] || { echo "expected a 64-bit binary"; exit 1; } ;;
+          esac
+          echo "$FUZZ_TARGET replayed a $width-bit binary"
 
   # PR-time smoke test for the .deb / .rpm packaging. The packages are built INSIDE
   # the release (dist `extra-artifacts` -> .github/build-linux-packages.sh), and a
