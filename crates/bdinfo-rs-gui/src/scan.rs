@@ -545,13 +545,13 @@ mod tests {
         };
 
         let (bdrom, errors) =
-            super::listing_scan(cheap_open(true), &deep).expect("the metadata open stands in");
+            super::listing_scan(cheap_open(true), deep).expect("the metadata open stands in");
         assert_eq!(calls.get(), 0, "an encrypted disc must not reach the codec pass");
         assert!(bdrom.is_aacs_encrypted);
         assert!(errors.is_empty());
 
         let (bdrom, _) =
-            super::listing_scan(cheap_open(false), &deep).expect("the deeper open answers");
+            super::listing_scan(cheap_open(false), deep).expect("the deeper open answers");
         assert_eq!(calls.get(), 1, "an ordinary disc reaches it exactly once");
         assert_eq!(bdrom.volume_label, "DEEP", "the deeper open is what the listing keeps");
     }
