@@ -124,6 +124,7 @@ const optChapters = el<HTMLInputElement>("opt-chapters");
 const optDiagnostics = el<HTMLInputElement>("opt-diagnostics");
 const optSummary = el<HTMLInputElement>("opt-summary");
 const hiddenHint = el("hidden-hint");
+const encryptedNote = el("encrypted-note");
 
 /** The picked disc — a `webkitdirectory` BDMV folder, or a single `.iso`. */
 type Source =
@@ -354,6 +355,7 @@ async function loadSource(src: Source): Promise<void> {
   hide(progressCard);
   hide(playlistsCard);
   hide(discardNote);
+  hide(encryptedNote);
   show(listingBox);
   // A fresh pick discards everything held for the previous one.
   scanController?.abort();
@@ -403,7 +405,19 @@ function adoptDisc(next: Disc, threshold: number): void {
   discThreshold = threshold;
   playlists = next.playlists;
   allRows = playlistRows(next.playlists);
+  encryptedNote.hidden = !next.isAacsEncrypted;
   renderRows();
+}
+
+/**
+ * Whether the measured scan is offered: never for an AACS-encrypted disc, whose
+ * stream data is ciphertext, so every value the scan would measure is
+ * meaningless. The page still lists it — the structure comes from cleartext
+ * metadata and is correct. The library imposes no such policy; this is the
+ * demo's, and the desktop app's.
+ */
+function scanOffered(): boolean {
+  return disc !== null && !disc.isAacsEncrypted;
 }
 
 /**
@@ -646,7 +660,7 @@ function updateSelection(): void {
     }
   }
   selCount.textContent = `${count} selected`;
-  scanBtn.disabled = count === 0;
+  scanBtn.disabled = count === 0 || !scanOffered();
 }
 
 function selectedNames(): string[] {
@@ -772,7 +786,7 @@ function showReport(text: string): void {
 }
 
 async function runScan(): Promise<void> {
-  if (source === null) {
+  if (source === null || !scanOffered()) {
     return;
   }
   const selection = selectedNames();
@@ -825,7 +839,7 @@ async function runScan(): Promise<void> {
   } finally {
     scanController = null;
     hide(progressCard);
-    scanBtn.disabled = selectedNames().length === 0;
+    scanBtn.disabled = selectedNames().length === 0 || !scanOffered();
   }
   // A report switch flipped while the scan ran was deferred (the disc it would
   // have rendered was about to be replaced); one cheap re-render catches up,
