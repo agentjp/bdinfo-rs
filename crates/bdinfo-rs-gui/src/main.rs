@@ -3667,7 +3667,9 @@ mod interaction {
     use bdinfo_rs_gui::model::{Sort, SortColumn};
     use bdinfo_rs_gui::theme::ThemePref;
 
-    use super::harness::{bounds, click, encrypted_app, filtered_app, listed_app, sees, structural};
+    use super::harness::{
+        bounds, click, encrypted_app, filtered_app, listed_app, sees, structural,
+    };
     use super::{App, ENCRYPTED_BADGE, Message};
 
     #[test]

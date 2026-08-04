@@ -811,18 +811,19 @@ impl Flow {
     }
 
     /// Whether the loaded disc's stream content is AACS-encrypted — the
-    /// encrypted-disc indicator in the info box, and the reason the measured
-    /// scan is refused ([`Listing::scannable`]).
+    /// encrypted-disc indicator in the info box, and the reason
+    /// [`can_scan`](Self::can_scan) is false for a disc that lists perfectly
+    /// well.
     #[must_use]
     pub fn disc_encrypted(&self) -> bool {
         self.any_listing().is_some_and(|listing| listing.bdrom.is_aacs_encrypted)
     }
 
-    /// Whether a measured scan can start now — an editable state over a
-    /// [scannable](Listing::scannable) disc. The selection may be empty:
-    /// scanning with nothing checked scans the whole disc (`BDInfo`'s
-    /// behaviour), so the "Scan Bitrates" button is live as soon as a disc is
-    /// listed.
+    /// Whether a measured scan can start now — an editable state holding a disc
+    /// with at least one listed playlist that is not
+    /// [encrypted](Self::disc_encrypted). The selection may be empty: scanning
+    /// with nothing checked scans the whole disc (`BDInfo`'s behaviour), so the
+    /// "Scan Bitrates" button is live as soon as a disc is listed.
     #[must_use]
     pub fn can_scan(&self) -> bool {
         self.editable_listing().is_some_and(Listing::scannable)
