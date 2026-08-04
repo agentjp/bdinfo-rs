@@ -45,9 +45,13 @@
 //! Exit codes: `0` success (a bare invocation prints the help and lands here
 //! too), `1` malformed/not a BD structure or no matching playlist, `2` no such
 //! path / unusable `REPORT_DEST` / unwritable report file / an invalid
-//! argument, `3` completed with errors (a partial report was written), `130`
-//! scan cancelled by Ctrl+C (the Unix `128 + SIGINT` spelling, used on every
-//! platform; no report is written).
+//! argument, `3` completed with errors (a partial report was written), `4`
+//! AACS-encrypted disc — the scan is refused up front (no picker, no scan, no
+//! report file), since only ciphertext would be measured; `--list` still
+//! works, its output being entirely database-derived, and exits by its own
+//! rules with the same stderr notice, `130` scan cancelled by Ctrl+C (the
+//! Unix `128 + SIGINT` spelling, used on every platform; no report is
+//! written).
 //!
 //! Ctrl+C during the packet scan, on the styled (ANSI-terminal) progress
 //! path, cancels cooperatively: the terminal is put in raw mode for the scan
@@ -286,6 +290,18 @@ fn run(cli: &Cli) -> u8 {
                 return 1;
             }
         };
+    if bdrom.is_aacs_encrypted {
+        // One dry notice on stderr either way; only `--list` continues — its
+        // output is entirely database-derived, so it is correct on an
+        // encrypted disc, while a measured scan would demux ciphertext.
+        eprintln!(
+            "Disc is AACS-encrypted: stream data cannot be analyzed. Playlists can still be \
+             listed with --list."
+        );
+        if !cli.list {
+            return EXIT_ENCRYPTED;
+        }
+    }
 
     let selection: Vec<String> = if cli.mpls.is_empty() {
         // Every mode but `--mpls` starts from the playlist table, over the
@@ -407,6 +423,12 @@ fn scan_and_report(
 /// from `3` (scan errors) and recognizable everywhere — it carries no special
 /// meaning on Windows but is documented in the crate docs' exit-code list.
 const EXIT_CANCELLED: u8 = 130;
+
+/// The AACS-refusal exit code: the disc opened fine but its stream content is
+/// encrypted ([`BdRom::is_aacs_encrypted`]), so the measured scan was refused
+/// before any selection. Distinct from `1` (the disc did not open) and `3`
+/// (the disc was scanned, with damage).
+const EXIT_ENCRYPTED: u8 = 4;
 
 /// The Ctrl+C interception decision for one observed press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1190,6 +1212,22 @@ mod tests {
             bd
         }
 
+        /// [`with_item_playlist`](Self::with_item_playlist) turned into an
+        /// AACS-encrypted disc: the `AACS/Unit_Key_RO.inf` key file plus the
+        /// stream file rewritten as two encrypted Aligned Units.
+        fn with_encrypted_stream() -> Self {
+            let bd = Self::with_item_playlist();
+            std::fs::create_dir_all(bd.root.join("AACS")).expect("create AACS");
+            std::fs::write(bd.root.join("AACS").join("Unit_Key_RO.inf"), [])
+                .expect("write key file");
+            std::fs::write(
+                bd.root.join("BDMV").join("STREAM").join("00000.m2ts"),
+                encrypted_m2ts(),
+            )
+            .expect("write m2ts");
+            bd
+        }
+
         /// The folder's expected report-file path (the default `REPORT_DEST`
         /// is the disc folder; the label is the directory name).
         fn report_file(&self) -> PathBuf {
@@ -1241,6 +1279,16 @@ mod tests {
         buf.extend_from_slice(&[0_u8; 4]); // PlayListMark length
         buf.extend_from_slice(&0_u16.to_be_bytes()); // zero marks
         buf
+    }
+
+    /// Two AACS-encrypted 6144-byte Aligned Units: in each, only packet 0's
+    /// `0x47` sync byte (offset 4, inside the unit's 16 cleartext bytes)
+    /// survives; the other 31 packets' sync positions read ciphertext (`0xAA`).
+    fn encrypted_m2ts() -> Vec<u8> {
+        let mut unit = vec![0xAA_u8; 4];
+        unit.push(0x47);
+        unit.resize(6144, 0xAA);
+        [unit.clone(), unit].concat()
     }
 
     /// A valid `*.clpi` declaring one AVC 1080p video stream at PID 0x1011.
@@ -1538,6 +1586,40 @@ mod tests {
         let path = bd.root.to_string_lossy().into_owned();
         assert_eq!(run_args(&[&path, "--whole"]), 3);
         // The (partial) report is still written.
+        assert!(bd.report_file().is_file());
+    }
+
+    #[test]
+    fn an_encrypted_disc_refuses_every_scanning_mode_with_exit_4() {
+        let bd = TempBd::with_encrypted_stream();
+        let path = bd.root.to_string_lossy().into_owned();
+        // The default (picker), `--whole`, and `--mpls` modes all refuse
+        // before any table, picker, or scan.
+        assert_eq!(run_args(&[&path]), 4);
+        assert_eq!(run_args(&[&path, "--whole"]), 4);
+        assert_eq!(run_args(&[&path, "--mpls", "00000"]), 4);
+        assert!(!bd.report_file().exists(), "no report is written");
+    }
+
+    #[test]
+    fn list_still_works_on_an_encrypted_disc() {
+        // `--list` output is entirely database-derived, so it stays correct
+        // and keeps its own exit rules on an encrypted disc.
+        let bd = TempBd::with_encrypted_stream();
+        let path = bd.root.to_string_lossy().into_owned();
+        assert_eq!(run_args(&[&path, "--list"]), 0);
+        assert!(!bd.report_file().exists());
+    }
+
+    #[test]
+    fn a_leftover_aacs_folder_with_clear_streams_refuses_nothing() {
+        // A decrypted rip that kept the key file: the content probe resolves
+        // to "not encrypted" and the scan runs to a report.
+        let bd = TempBd::with_item_playlist();
+        std::fs::create_dir_all(bd.root.join("AACS")).expect("create AACS");
+        std::fs::write(bd.root.join("AACS").join("Unit_Key_RO.inf"), []).expect("write key file");
+        let path = bd.root.to_string_lossy().into_owned();
+        assert_eq!(run_args(&[&path, "--whole"]), 0);
         assert!(bd.report_file().is_file());
     }
 

@@ -2116,6 +2116,76 @@ mod tests {
         assert!(UdfSource::read_label(&*factory).is_err());
     }
 
+    /// One 6144-byte AACS Aligned Unit (32 source packets of 192 bytes): the
+    /// `0x47` sync byte at every packet's offset 4 when `clear`, at packet 0's
+    /// alone otherwise (the encryption fingerprint), `0xAA` filler elsewhere.
+    fn aligned_unit(clear: bool) -> Vec<u8> {
+        let mut unit = vec![0xAA_u8; 6144];
+        for (index, packet) in unit.chunks_exact_mut(192).enumerate() {
+            if (clear || index == 0)
+                && let Some(byte) = packet.get_mut(4)
+            {
+                *byte = 0x47;
+            }
+        }
+        unit
+    }
+
+    /// Builds a single-physical-partition `.iso` holding a minimal BD-ROM
+    /// layout — `BDMV/{CLIPINF,PLAYLIST,STREAM/00000.m2ts}` plus
+    /// `AACS/Unit_Key_RO.inf` — whose stream file holds two [`aligned_unit`]s.
+    fn bd_iso(clear_streams: bool) -> Vec<u8> {
+        let head = [aligned_unit(clear_streams), aligned_unit(clear_streams)].concat();
+        let mut iso = Iso::new(300);
+        iso.write(256, &avdp(257, 3 * SS as u32));
+        iso.write(257, &pd(0, 260, 50));
+        iso.write(258, &lvd("BDVOL", SS as u32, 1, 0, &phys_map(0), 1));
+        iso.write(261, &fsd(0, 2));
+        // Partition 0 starts at sector 260 (block N → sector 260 + N). Root
+        // dir FE at block 2, its FID data at block 3.
+        let root_fids =
+            dir_data(&[fid(0x0A, "", 2, 0), fid(0x02, "BDMV", 4, 0), fid(0x02, "AACS", 5, 0)]);
+        let root_len = root_fids.len() as u64;
+        iso.write(262, &fe(261, 4, 0, root_len, &sad(0, root_len as u32, 3)));
+        iso.write(263, &root_fids);
+        // BDMV: embedded dir with the three BD children, themselves embedded.
+        let bdmv_fids = dir_data(&[
+            fid(0x0A, "", 4, 0),
+            fid(0x02, "CLIPINF", 6, 0),
+            fid(0x02, "PLAYLIST", 7, 0),
+            fid(0x02, "STREAM", 8, 0),
+        ]);
+        iso.write(264, &fe(261, 4, 3, bdmv_fids.len() as u64, &bdmv_fids));
+        let aacs_fids = dir_data(&[fid(0x0A, "", 5, 0), fid(0x00, "Unit_Key_RO.inf", 9, 0)]);
+        iso.write(265, &fe(261, 4, 3, aacs_fids.len() as u64, &aacs_fids));
+        let clipinf_fids = dir_data(&[fid(0x0A, "", 6, 0)]);
+        iso.write(266, &fe(261, 4, 3, clipinf_fids.len() as u64, &clipinf_fids));
+        let playlist_fids = dir_data(&[fid(0x0A, "", 7, 0)]);
+        iso.write(267, &fe(261, 4, 3, playlist_fids.len() as u64, &playlist_fids));
+        let stream_fids = dir_data(&[fid(0x0A, "", 8, 0), fid(0x00, "00000.m2ts", 10, 0)]);
+        iso.write(268, &fe(261, 4, 3, stream_fids.len() as u64, &stream_fids));
+        // Unit_Key_RO.inf: an empty embedded file (existence is what counts).
+        iso.write(269, &fe(261, 5, 3, 0, b""));
+        // 00000.m2ts: one 12288-byte extent at block 20 (sectors 280..286).
+        iso.write(270, &fe(261, 5, 0, head.len() as u64, &sad(0, head.len() as u32, 20)));
+        iso.write(280, &head);
+        iso.into_bytes()
+    }
+
+    #[test]
+    fn a_bd_iso_reports_aacs_encryption_through_the_udf_backend() {
+        use crate::bdrom::disc::{BdRom, ScanMode};
+        // Encrypted stream heads → the flag is set on the `.iso` backend, with
+        // the marker file and the stream both found through the UDF tree.
+        let encrypted = UdfSource::open(MemIso::boxed(bd_iso(false))).expect("open encrypted iso");
+        let bd = BdRom::open(&encrypted.root(), ScanMode::Metadata).expect("scan encrypted iso");
+        assert!(bd.is_aacs_encrypted);
+        // The same image with clear streams is a decrypted rip: not encrypted.
+        let ripped = UdfSource::open(MemIso::boxed(bd_iso(true))).expect("open ripped iso");
+        let bd = BdRom::open(&ripped.root(), ScanMode::Metadata).expect("scan ripped iso");
+        assert!(!bd.is_aacs_encrypted);
+    }
+
     /// The largest length a 30-bit `short_ad` extent can encode (~1 GiB).
     const MAX_EXTENT: u32 = 0x3FFF_FFFF;
 
