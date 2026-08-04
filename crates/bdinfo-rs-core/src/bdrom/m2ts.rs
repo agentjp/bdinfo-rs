@@ -2998,6 +2998,118 @@ mod tests {
         assert!(consumed < reader.inner.get_ref().len(), "the tail is never read");
     }
 
+    // ── the sequential scan strategy (the wasm32 build's path) ──────────────
+
+    /// The shared no-op codec-seam observer for the sequential-strategy tests
+    /// (one named function rather than per-test `|_, _| {}` literals: the
+    /// no-data tests never reach a seam, and an unexecuted closure is an
+    /// uncovered function of its own).
+    fn no_seam(_pid: u16, _buffer: &TsStreamBuffer) {}
+
+    /// Runs [`TsStreamFile::scan_sequential`] over `bytes` with an explicit
+    /// chunk size and an unset cancel flag, returning the demuxer.
+    fn seq_scan(
+        name: &str,
+        bytes: &[u8],
+        playlists: &mut [TsPlaylistFile],
+        full: bool,
+        chunk: usize,
+    ) -> TsStreamFile {
+        let mut file = TsStreamFile::new(name);
+        let mut cur = Cursor::new(bytes.to_vec());
+        file.scan_sequential(
+            &mut cur,
+            playlists,
+            full,
+            chunk,
+            &AtomicBool::new(false),
+            &mut no_seam,
+        )
+        .expect("sequential scan");
+        file
+    }
+
+    #[test]
+    fn a_sequential_scan_on_empty_playlists_is_a_noop() {
+        // The reader always errors, so returning `Ok` proves the empty-playlist
+        // early return fires before any read.
+        let mut file = TsStreamFile::new("00000.m2ts");
+        file.scan_sequential(
+            &mut AlwaysError,
+            &mut [],
+            true,
+            4096,
+            &AtomicBool::new(false),
+            &mut no_seam,
+        )
+        .expect("no-op scan");
+        assert_eq!(file.size, 0);
+        assert!(file.streams.is_empty());
+    }
+
+    #[test]
+    fn a_sequential_non_full_scan_stops_at_the_finishing_chunk() {
+        // One packet per tiny chunk; the PES that finishes the quick scan sits
+        // in the third chunk and eight trailing chunks follow. Mirrors
+        // `non_full_scan_early_exit_stops_the_pipelined_reader` on the
+        // sequential strategy, where the stop is directly observable on the
+        // reader: no read-ahead, so the cursor rests exactly at the finishing
+        // chunk's end.
+        let mut bytes = pat_pmt_video();
+        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 90_000, 90_000, &sps_au())));
+        for n in 0..8_u64 {
+            let pts = 180_000_u64.wrapping_add(n.wrapping_mul(3600));
+            bytes.extend(packet(0x1011, true, &pes_dts(0xE0, pts, pts, &[0; 40])));
+        }
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [empty_playlist()];
+        let mut cur = Cursor::new(bytes);
+        file.scan_sequential(&mut cur, &mut pls, false, 192, &AtomicBool::new(false), &mut no_seam)
+            .expect("scan");
+        assert!(file.streams.get(&0x1011).unwrap().base().is_initialized);
+        // The PAT and PMT chunks were parsed in full; the chunk holding the
+        // finishing PES early-returned before its size was added.
+        assert_eq!(file.size, 384);
+        assert_eq!(cur.position(), 576);
+    }
+
+    #[test]
+    fn a_sequential_scan_propagates_read_errors() {
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [empty_playlist()];
+        let err = file
+            .scan_sequential(
+                &mut AlwaysError,
+                &mut pls,
+                true,
+                4096,
+                &AtomicBool::new(false),
+                &mut no_seam,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "io error: read failed");
+    }
+
+    #[test]
+    fn a_sequential_preset_cancel_aborts_before_the_first_read() {
+        // The reader always errors, so reaching it at all would surface `Io` —
+        // the returned `ScanCancelled` proves the flag is polled BEFORE the
+        // first read, exactly as on the threaded strategy.
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [empty_playlist()];
+        let err = file
+            .scan_sequential(
+                &mut AlwaysError,
+                &mut pls,
+                true,
+                4096,
+                &AtomicBool::new(true),
+                &mut no_seam,
+            )
+            .unwrap_err();
+        assert_eq!(err.to_string(), "scan cancelled");
+    }
+
     /// The decoded marker the demux records for a video update whose timestamp is
     /// `ts` — `pts_to_f64(ts) / 90000` (the `TsStreamDiagnostics::marker` formula).
     fn expect_marker(ts: u64) -> u64 {
@@ -3968,6 +4080,77 @@ mod tests {
             let mut pls = [empty_playlist()];
             let mut cur = Cursor::new(data);
             drop(file.scan(&mut cur, &mut pls, full));
+        }
+
+        #[test]
+        fn sequential_scan_never_panics_on_arbitrary_bytes(
+            data in any::<Vec<u8>>(),
+            full in any::<bool>(),
+        ) {
+            let mut file = TsStreamFile::new("fuzz.m2ts");
+            let mut pls = [empty_playlist()];
+            let mut cur = Cursor::new(data);
+            drop(file.scan_sequential(
+                &mut cur,
+                &mut pls,
+                full,
+                DATA_SIZE,
+                &AtomicBool::new(false),
+                &mut no_seam,
+            ));
+        }
+
+        #[test]
+        fn sequential_demux_matches_the_threaded_demux(chunk in 64_usize..=400) {
+            // The equivalence contract on `scan_sequential`: same chunks, same
+            // order, same finish condition ⇒ byte-identical demux state,
+            // whichever strategy runs.
+            let pmt_pid = 0x0100;
+            let mut bytes = packet(0, true, &pat_payload(pmt_pid));
+            bytes.extend(packet(pmt_pid, true, &pmt_payload(&[(0x1B, 0x1011), (0x81, 0x1100)])));
+            bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 90_000, 90_000, &[1; 80])));
+            bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 180_000, 180_000, &[2; 80])));
+            bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 90_000, &[3; 40])));
+
+            let mut threaded_pls = [video_playlist(0x1011)];
+            let mut threaded = TsStreamFile::new("00000.m2ts");
+            let mut cur = Cursor::new(bytes.clone());
+            threaded
+                .scan_threaded(
+                    &mut cur,
+                    &mut threaded_pls,
+                    true,
+                    chunk,
+                    &AtomicBool::new(false),
+                    &mut no_seam,
+                )
+                .unwrap();
+            let mut seq_pls = [video_playlist(0x1011)];
+            let seq = seq_scan("00000.m2ts", &bytes, &mut seq_pls, true, chunk);
+
+            prop_assert_eq!(threaded.size, seq.size);
+            prop_assert_eq!(threaded.length.to_bits(), seq.length.to_bits());
+            prop_assert_eq!(&threaded.stream_order, &seq.stream_order);
+            prop_assert_eq!(&threaded.stream_diagnostics, &seq.stream_diagnostics);
+            let threaded_pids: Vec<u16> = threaded.streams.keys().copied().collect();
+            let seq_pids: Vec<u16> = seq.streams.keys().copied().collect();
+            prop_assert_eq!(threaded_pids, seq_pids);
+            prop_assert_eq!(
+                threaded.streams.get(&0x1011).unwrap().base().payload_bytes,
+                seq.streams.get(&0x1011).unwrap().base().payload_bytes
+            );
+            let threaded_state = threaded.stream_states.get(&0x1011).unwrap();
+            let seq_state = seq.stream_states.get(&0x1011).unwrap();
+            prop_assert_eq!(threaded_state.total_packets, seq_state.total_packets);
+            prop_assert_eq!(threaded_state.total_bytes, seq_state.total_bytes);
+            prop_assert_eq!(
+                threaded_state.peak_transfer_length,
+                seq_state.peak_transfer_length
+            );
+            prop_assert_eq!(
+                threaded_pls[0].streams.get(&0x1011).unwrap().base().bit_rate,
+                seq_pls[0].streams.get(&0x1011).unwrap().base().bit_rate
+            );
         }
 
         #[test]
