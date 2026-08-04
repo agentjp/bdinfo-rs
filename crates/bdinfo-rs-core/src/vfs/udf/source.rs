@@ -1523,8 +1523,13 @@ enum ChildKind {
 
 /// Reads the directory File Entry at `(dir_ref, dir_block)`, enumerates its File
 /// Identifier Descriptors, and resolves each non-parent, non-deleted child into a
-/// [`Child`]. A directory whose File Entry or data cannot be read yields no
-/// children (it stays an empty directory) rather than failing the whole scan.
+/// [`Child`]. A directory whose File Entry sector is unresolvable, unparsable, or
+/// not marked as a directory yields no children (it stays an empty directory), and
+/// a child whose File Entry is unresolvable, unreadable, or unparsable is skipped.
+/// Three reads are *not* degraded: the directory's own File Entry, its directory
+/// data, and a child file's body all propagate an IO error, failing
+/// [`UdfSource::open`] in both modes — resilience covers file-data reads made after
+/// the open, not the tree walk.
 fn expand_directory(
     reader: &mut dyn ReadSeek,
     volume: &Volume,

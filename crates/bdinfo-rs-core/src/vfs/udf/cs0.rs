@@ -51,17 +51,22 @@ pub fn decode_dchars(data: &[u8]) -> String {
 ///
 /// The used bytes (compression ID + characters) are decoded via
 /// [`decode_dchars`]. Returns the empty string for an empty field or a used
-/// length that runs past the field (malformed). Used for the volume / file-set
-/// identifiers in the LVD and FSD.
+/// length past the `field.len() - 1` bytes the content may occupy (malformed).
+/// Used for the volume / file-set identifiers in the LVD and FSD.
 #[must_use]
 pub fn decode_dstring(field: &[u8]) -> String {
-    let Some(&used_len) = field.last() else {
+    let Some((&used_len, body)) = field.split_last() else {
         return String::new();
     };
     let used = usize::from(used_len);
     // The used bytes (compression ID + characters) sit at the front of the
-    // field; an out-of-range used length is malformed → empty.
-    field.get(..used).map_or_else(String::new, decode_dchars)
+    // field, and the length byte itself is excluded from them — UDF 2.50 §2.1.3
+    // caps the content at `field.len() - 1`, so a used length equal to the full
+    // field would otherwise decode the length byte as a character. Indexing
+    // `body` (the field minus that byte) applies the cap; an out-of-range used
+    // length is malformed → empty. libudfread clamps to the same bound instead
+    // (`_decode_dstring`); empty matches this module's other malformed cases.
+    body.get(..used).map_or_else(String::new, decode_dchars)
 }
 
 #[cfg(test)]
@@ -140,6 +145,16 @@ mod tests {
     fn dstring_zero_used_is_empty() {
         let field = [8_u8, b'X', b'Y', 0];
         assert_eq!(decode_dstring(&field), "");
+    }
+
+    #[test]
+    fn dstring_used_length_of_the_whole_field_is_empty() {
+        // A 4-byte field: the content may occupy at most 3 bytes, so a used
+        // length of 3 decodes compId 8 + "AB"...
+        assert_eq!(decode_dstring(&[8, b'A', b'B', 3]), "AB");
+        // ...while 4 is malformed — the length byte is not a character, and a
+        // clamp to 3 would be wrong here too (the byte is 0x04, not 'C').
+        assert_eq!(decode_dstring(&[8, b'A', b'B', 4]), "");
     }
 
     #[test]
