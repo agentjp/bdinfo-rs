@@ -158,6 +158,11 @@ fn open(
     }
 }
 
+/// What one open of the disc yields: the scanned disc paired with the per-file
+/// failures recorded getting there, or a user-facing message for a disc that
+/// holds no readable structure at all.
+type Opened = Result<(BdRom, Vec<ScanError>), String>;
+
 /// Recorded scan failures as display strings, for the UI's warning surfaces.
 fn error_lines(errors: &[ScanError]) -> Vec<String> {
     errors.iter().map(ToString::to_string).collect()
@@ -204,9 +209,7 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 ///
 /// # Errors
 /// Whatever `open` reports, from either call.
-fn listing_scan(
-    open: impl Fn(ScanMode) -> Result<(BdRom, Vec<ScanError>), String>,
-) -> Result<(BdRom, Vec<ScanError>), String> {
+fn listing_scan(open: impl Fn(ScanMode) -> Opened) -> Opened {
     let cheap = open(ScanMode::Metadata)?;
     if cheap.0.is_aacs_encrypted { Ok(cheap) } else { open(ScanMode::Codecs) }
 }
@@ -530,9 +533,9 @@ mod tests {
     }
 
     /// Records every mode the seam asks for, answering each from `answer`.
-    fn opened_modes<F>(answer: F) -> (Result<(BdRom, Vec<super::ScanError>), String>, Vec<ScanMode>)
+    fn opened_modes<F>(answer: F) -> (super::Opened, Vec<ScanMode>)
     where
-        F: Fn(ScanMode) -> Result<(BdRom, Vec<super::ScanError>), String>,
+        F: Fn(ScanMode) -> super::Opened,
     {
         let modes = RefCell::new(Vec::new());
         let result = super::listing_scan(|mode| {
