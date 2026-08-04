@@ -210,7 +210,7 @@ Three legs, two of them adversarial and one of them a gate:
 | leg | when | what it does |
 |---|---|---|
 | corpus replay (`core.yml`) | every pull request and push touching the `fuzz` area, and daily through the sweep | `-runs=0` over the committed seeds — a deterministic regression check, and a **required status check** |
-| nightly discovery (`fuzz.yml`) | 21:11 UTC daily, one job per target, 300 s each | fresh fuzzing that **starts where last night stopped** |
+| nightly discovery (`fuzz.yml`) | 21:11 UTC daily, one job per target, 300 s each on four concurrent libFuzzer processes | fresh fuzzing that **starts where last night stopped** |
 | release-tag pass (`fuzz.yml`) | every `v*` tag, 600 s per target | a release checkpoint; runs alongside the publish workflows and blocks none of them |
 
 **Discovery compounds through a per-target Actions cache.** A nightly leg restores
@@ -236,6 +236,61 @@ keys on the target and the guard that fired. The reproducer is minimised with `t
 uploaded as an artifact, and inlined base64 in the issue so the evidence outlives the
 90-day artifact retention. **A human closes a crash issue with the fix**: a later green
 run is not evidence, because the fuzzer need not have replayed that input.
+
+### What the runner's other three cores are worth — measured 2026-08-04
+
+A standard hosted runner is **4 vCPU / 16 GB** on a public repository (2 vCPU / 8 GB on a
+private one — that is the figure that is easy to get wrong), and a discovery leg used one
+core. libFuzzer's own answer is several processes over one shared corpus directory, with
+`-reload` (on by default) carrying each process's finds to the others. **Both flags are
+needed**: given `-jobs` alone libFuzzer sets `-workers` to `min(cores / 2, jobs)`, which is
+2 here. `-rss_limit_mb` is per process, so four workers bound a leg at 8 GiB of the
+runner's 16 GB.
+
+Two independent pairs of 300 s runs, single process (`workers=0`, which never enters
+libFuzzer's multi-process path) against four. All four runs restored the **identical**
+accumulated corpus on every target, so the arms differ only in process count.
+
+| target | `cov` 1 process | `cov` 4 processes | mean delta | executions |
+|---|---|---|---|---|
+| `m2ts` | 2189, 2175 | 2571, 2316 | **+12.0%** | x1.40 |
+| `source` | 807, 837 | 847, 848 | +3.1% | x2.71 |
+| `wasm_report` | 5330, 5440 | 5457, 5553 | +2.2% | x1.68 |
+| `wasm_iso` | 818, 802 | 827, 824 | +1.9% | x2.51 |
+| `parse_report` | 5562, 5634 | 5657, 5657 | +1.1% | x1.47 |
+| `gui_settings` | 446, 446 | 450, 446 | +0.4% | x2.18 |
+| `codec` | 2624, 2624 | 2627, 2625 | +0.1% | x2.15 |
+| `wasm_disc` | 5141, 5024 | 5100, 5061 | −0.0% | x1.26 |
+| `bitstream` | 309, 309 | 309, 309 | 0.0% | x2.14 |
+| `clpi` | 392, 392 | 392, 392 | 0.0% | x2.44 |
+| `discovery` | 227, 227 | 227, 227 | 0.0% | x2.21 |
+| `mpls` | 718, 718 | 718, 718 | 0.0% | x2.20 |
+| `read_be` | 74, 74 | 74, 74 | 0.0% | x2.00 |
+| `udf` | 589, 589 | 589, 589 | 0.0% | x2.26 |
+
+**Four processes on four vCPUs buy x2.13 the executions, not x4** (446.5 M against 949.2 M
+over the whole tier). The heaviest targets scale worst — `wasm_disc` x1.26, `m2ts` x1.40,
+`parse_report` x1.47 against x2.0–2.7 for the light ones — so the ceiling is not CPU alone.
+Budget throughput from the measured multiplier, never from the core count.
+
+**No target lost coverage, and the gains land exactly where a longer budget would have
+put them.** The six targets pinned to an identical counter across all four runs are the
+ones measured as finished inside 120 s; the ones that gained are the ones still learning at
+300 s. Parallelism is therefore the same lever as a longer run, bought without lengthening
+the night — which is what the cadence finding above asks for.
+
+**Sample the noisy targets before quoting a per-target figure.** The first pair alone read
+`m2ts` at +17.5%; the second read +6.5%. That is the same tail behaviour the `-max_len`
+measurement found (1574–2003 across nine 300 s runs), and one sample would have overstated
+the gain by nearly 2x. The six deterministic targets are what make the *shape* of this
+table trustworthy on two pairs: where the measurement can move, it does; where the target
+is saturated, all four runs agree to the counter.
+
+**Sizing the matrix — for whoever widens it next.** The tier is **14 targets**, one leg
+each, and the GitHub Free plan allows **20 concurrent jobs**. So the matrix has six legs of
+headroom, and a target-by-architecture expansion at 28 legs would queue rather than run.
+Throughput per leg is the lever that does not spend that budget; it is now spent to x2.13,
+and the remaining headroom is six legs.
 
 ## Running (Linux / WSL / CI, nightly)
 
