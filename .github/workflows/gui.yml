@@ -110,7 +110,7 @@ jobs:
       # action's checksummed manifest, never its runtime-resolved cargo-binstall
       # fallback (rationale in core.yml).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
           tool: cargo-nextest
           fallback: none
@@ -305,7 +305,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
           fallback: none
@@ -475,7 +475,7 @@ jobs:
       # from source if missing — this pre-install just makes the smoke fast.
       - name: Install cargo-deb (release-pinned, prebuilt)
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2.85.5
+        uses: taiki-e/install-action@1beb33eee6d086258184383af9a538940be190ed # v2.85.6
         with:
           tool: cargo-deb@3.7.0
           fallback: none
