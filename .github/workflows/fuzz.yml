@@ -18,6 +18,14 @@ name: fuzz
 # 14,178 units and discarded every one of them, so run N+1 learned roughly what
 # run N learned.
 #
+# Each leg runs FOUR libFuzzer processes over its one shared corpus directory,
+# not one. A standard hosted runner is 4 vCPU / 16 GB on a PUBLIC repository and
+# 2 vCPU / 8 GB on a private one — the public figure is the one that applies here
+# and the one that is easy to get wrong — so a single-process leg used a quarter
+# of the machine. Buying the other three cores buys executions INSIDE the
+# existing budget, which is the direction the cadence measurement below points;
+# raising FUZZ_SECONDS instead would push against it.
+#
 # NIGHTLY rather than weekly, deliberately: GitHub evicts a cache unused for 7
 # days, so a weekly schedule rides the eviction boundary and would silently
 # reset discovery to the seeds — and this repository's cron fires 2-4 h late
@@ -54,6 +62,9 @@ on:
       seconds:
         description: Per-target fresh-fuzz budget in seconds
         default: "300"
+      workers:
+        description: Concurrent libFuzzer processes per target - 4 = one per runner vCPU, 1 = the single-process arm, 0 = no multi-process wrapper at all
+        default: "4"
       file_issues:
         description: File crash / corpus-growth issues from this run (schedule and tag runs always do)
         type: boolean
@@ -83,6 +94,10 @@ env:
   # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
   # (allocation-amplification guard). Both turn a hang or an allocation blow-up
   # into a libFuzzer crash, which is what makes them reportable below.
+  # -rss_limit_mb is PER FUZZER PROCESS and WORKERS of them run at once, so the
+  # guard now bounds the leg at 4 x 2048 MiB = 8 GiB against the runner's 16 GB.
+  # Raising either number has to be checked against that product, not against
+  # the single-process figure this line used to mean.
   GUARDS: -timeout=25 -rss_limit_mb=2048
 
 jobs:
@@ -134,6 +149,17 @@ jobs:
       # The `inputs` context is read only under the event that populates it, so
       # a scheduled run never depends on how an absent context resolves.
       FUZZ_SECONDS: ${{ github.event_name == 'push' && '600' || github.event_name == 'workflow_dispatch' && inputs.seconds || '300' }}
+      # libFuzzer's own multi-process mode: -jobs is how many fuzzer processes
+      # to run in total, -workers how many at a time. Equal values start them
+      # all together for the same -max_total_time, so the leg's wall time is
+      # unchanged and only its execution count moves. BOTH are set on purpose:
+      # given -jobs alone libFuzzer defaults -workers to min(jobs, cores/2),
+      # which is 2 on a 4-vCPU runner and leaves half the machine idle.
+      # The processes share one corpus directory and libFuzzer's -reload
+      # default (1) makes each pick up what the others write.
+      # Dispatching with workers=1 gives the single-process arm on the same
+      # code path, which is how the comparison in fuzz/README.md was run.
+      WORKERS: ${{ github.event_name == 'workflow_dispatch' && inputs.workers || '4' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -248,13 +274,40 @@ jobs:
               if ($2 != "-") printf " -dict=%s/%s", dir, $2
               if ($3 != "-") printf " -max_len=%s", $3
             }' fuzz/targets.txt)
-          echo "budget ${FUZZ_SECONDS}s, guards $GUARDS, flags:${flags:- (none)}"
+          echo "budget ${FUZZ_SECONDS}s x ${WORKERS} process(es), guards $GUARDS, flags:${flags:- (none)}"
           set +e
           cargo +"$NIGHTLY" fuzz run "$TARGET" --target "$FUZZ_TARGET" -- \
-            -max_total_time="$FUZZ_SECONDS" $GUARDS $flags -print_final_stats=1 2>&1 | tee fuzz-run.log
+            -max_total_time="$FUZZ_SECONDS" -jobs="$WORKERS" -workers="$WORKERS" \
+            $GUARDS $flags -print_final_stats=1 2>&1 | tee fuzz-parent.log
           rc=${PIPESTATUS[0]}
           set -e
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+          # WHAT THE CLASSIFIER READS. In multi-process mode the parent does not
+          # fuzz: it spawns each worker with its stdout and stderr redirected to
+          # fuzz-<N>.log beside the fuzz binary, and copies that whole file to
+          # its own stderr as the job exits. So the tee above does carry every
+          # worker's panic header, libFuzzer ERROR block and -print_final_stats
+          # counters (measured 2026-08-04 on cargo-fuzz 0.13.2 / the pinned
+          # nightly; parent rc is still 0 clean / 1 on a crashing job).
+          #
+          # Read the worker files anyway, for two reasons. The copy is an
+          # upstream implementation detail, and the classifier is exactly the
+          # path this repository has already had silently disarmed once by an
+          # upstream output change; and reading only the files means the
+          # per-worker aggregation below cannot count a worker twice. The
+          # parent's stream is the fallback for a failure with no worker at all
+          # (a build break, a missing toolchain), which writes no fuzz-<N>.log.
+          # Only the parent's per-job exit codes are kept from it.
+          logs=$(find . -maxdepth 2 -name 'fuzz-[0-9]*.log' | sort)
+          if [ -n "$logs" ]; then
+            grep -h 'exited with exit code' fuzz-parent.log > fuzz-run.log || true
+            # shellcheck disable=SC2086  # one word per worker log, all name-safe
+            cat $logs >> fuzz-run.log
+          else
+            cp fuzz-parent.log fuzz-run.log
+          fi
+          echo "captured $(echo "$logs" | grep -c .) worker log(s), $(wc -l < fuzz-run.log) lines"
           if [ "$rc" -eq 0 ]; then echo "$TARGET: clean"; else echo "$TARGET: exit $rc"; fi
 
       # libFuzzer writes a crashing input to fuzz/artifacts/, never to the
@@ -334,14 +387,32 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force result | Out-Null
           $log = if (Test-Path fuzz-run.log) { Get-Content -Raw fuzz-run.log } else { '' }
-          # libFuzzer's last progress line carries the run's final figures:
+          # One DONE line per worker, each carrying that process's final figures:
           # `#N DONE cov: 1696 ft: 5719 corp: 402/15Mb ... exec/s: 720 ...`.
-          $cov = if ($log -match '(?s).*\bcov:\s*(\d+)') { [int]$Matches[1] } else { 0 }
-          $ft = if ($log -match '(?s).*\bft:\s*(\d+)') { [int]$Matches[1] } else { 0 }
-          $execs = if ($log -match '(?s).*\bexec/s:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+          # cov and ft are per-process views of a SHARED corpus that -reload
+          # keeps in sync, so the highest is the leg's reach; exec/s and the
+          # executed-unit count are per process, so their SUM is the leg's
+          # throughput — and that sum against the single-process arm is the
+          # whole question this parallelism is answering.
+          $done = [regex]::Matches($log, '(?m)^#\d+\s+DONE\s+cov:\s*(\d+)\s+ft:\s*(\d+).*?\bexec/s:\s*(\d+)')
+          $units = [regex]::Matches($log, '(?m)^stat::number_of_executed_units:\s*(\d+)')
+          if ($done.Count -gt 0) {
+            $cov = ($done | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum
+            $ft = ($done | ForEach-Object { [int]$_.Groups[2].Value } | Measure-Object -Maximum).Maximum
+            $execs = [int](($done | ForEach-Object { [int]$_.Groups[3].Value } | Measure-Object -Sum).Sum)
+          }
+          else {
+            # A crashing process never reaches its DONE line, so fall back to the
+            # last progress line anywhere in the capture. Measured: a run whose
+            # every worker panicked prints no DONE at all.
+            $cov = if ($log -match '(?s).*\bcov:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+            $ft = if ($log -match '(?s).*\bft:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+            $execs = if ($log -match '(?s).*\bexec/s:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+          }
           $stats = [ordered]@{
             target = $env:TARGET
             seconds = [int]$env:FUZZ_SECONDS
+            workers = [int]$env:WORKERS
             seeds = [int]$env:SEEDS
             restored = [int]$env:RESTORED
             grown = [int]$env:GROWN
@@ -349,13 +420,14 @@ jobs:
             cov = $cov
             ft = $ft
             execs_per_sec = $execs
+            units_executed = [int64](($units | ForEach-Object { [int64]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
             rc = [int]$env:RC
           }
           $stats | ConvertTo-Json | Set-Content result/stats.json
           @(
             "### $($env:TARGET)"
             ''
-            "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
+            "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - $($env:WORKERS) process(es), cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
           if (-not $env:REPRO) { exit 0 }
 
@@ -403,7 +475,16 @@ jobs:
             # its fix, while a tmin'd unit is small enough to paste. Skipped
             # above 16 KiB, which no minimised unit has reached.
             repro_base64 = if ($bytes.Length -le 16384) { [Convert]::ToBase64String($bytes) } else { $null }
-            log_tail = ($log -split "`n" | Select-Object -Last 40) -join "`n"
+            # Anchored on the crash, not on the end of the capture: with several
+            # workers concatenated the last lines belong to whichever process
+            # finished last, which is usually a clean one. Falls back to the tail
+            # when nothing matched, which is the shape a build break leaves.
+            log_tail = (& {
+              $lines = $log -split "`r?`n"
+              $at = ($lines | Select-String -Pattern 'panicked at|ERROR: libFuzzer' | Select-Object -First 1).LineNumber
+              if ($at) { $lines[[math]::Max(0, $at - 6) .. [math]::Min($lines.Count - 1, $at + 33)] }
+              else { $lines | Select-Object -Last 40 }
+            }) -join "`n"
             run_url = $env:RUN_URL
           }
           $crash | ConvertTo-Json | Set-Content result/crash.json
@@ -510,7 +591,7 @@ jobs:
           @(
             '## Discovery pass'
             ''
-            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target. Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds."
+            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds."
             ''
             '| target | seeds | restored | new | cov | ft | exec/s |'
             '|---|---|---|---|---|---|---|'
