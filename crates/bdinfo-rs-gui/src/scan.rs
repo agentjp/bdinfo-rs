@@ -177,28 +177,40 @@ pub const fn no_progress(_: ScanProgress<'_>) {}
 /// A short message when the input holds no readable Blu-ray structure (no
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
 pub fn scan_structural(input: &Input) -> Result<Structural, String> {
-    // `Metadata` first, for the encryption verdict. The quick codec pass stops
-    // at the packet that completes the last stream's codec detail, so on an
-    // AACS-encrypted disc — where the payloads are ciphertext and no scanner
-    // ever initializes — it has no stopping point and reads every stream file
-    // to EOF: tens of gigabytes off an optical drive, for a codec detail that
-    // cannot be recovered. `Metadata` reads no packets at all and still carries
-    // the flag, so it is what decides whether the deeper pass is worth running.
-    //
-    // `Codecs` mode then gives the panes their full codec detail (profile /
-    // HDR / Dolby Vision) right after opening, like BDInfo, without the
-    // whole-file bitrate scan. On a disc whose streams are readable it ends at
-    // codec init, so it carries no cancel affordance. Re-reading the clip
-    // metadata to get there costs a second parse of files the first pass just
-    // read, which the filesystem cache serves.
-    let scan =
-        |mode| open(input, mode, None, &mut no_progress, &AtomicBool::new(false)).map_err(
-            |err: BdError| err.to_string(),
-        );
+    let scan = |mode| {
+        open(input, mode, None, &mut no_progress, &AtomicBool::new(false))
+            .map_err(|err: BdError| err.to_string())
+    };
     let cheap = scan(ScanMode::Metadata)?;
-    let (bdrom, errors) = if cheap.0.is_aacs_encrypted { cheap } else { scan(ScanMode::Codecs)? };
+    let (bdrom, errors) = listing_scan(cheap, || scan(ScanMode::Codecs))?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
     Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
+}
+
+/// Chooses which open the selection table is built from: `cheap` — the
+/// packet-free `Metadata` open already in hand — for an AACS-encrypted disc,
+/// else whatever `deep` reads.
+///
+/// The quick codec pass stops at the packet that completes the last stream's
+/// codec detail. On an encrypted disc the payloads are ciphertext, so no
+/// scanner ever initializes, the pass has no stopping point, and it reads every
+/// stream file to EOF — tens of gigabytes off an optical drive, for detail no
+/// key can recover. `deep` is therefore never even called for such a disc.
+///
+/// For every other disc `deep` is the `Codecs` open, which gives the panes
+/// their full codec detail (profile / HDR / Dolby Vision) right after opening,
+/// like `BDInfo`, without the whole-file bitrate scan; on readable streams it
+/// ends at codec init, so it carries no cancel affordance. Reaching it costs a
+/// second parse of the clip metadata the first open just read, which the
+/// filesystem cache serves.
+///
+/// # Errors
+/// Whatever `deep` reports, for a disc that is not encrypted.
+fn listing_scan(
+    cheap: (BdRom, Vec<ScanError>),
+    deep: impl FnOnce() -> Result<(BdRom, Vec<ScanError>), String>,
+) -> Result<(BdRom, Vec<ScanError>), String> {
+    if cheap.0.is_aacs_encrypted { Ok(cheap) } else { deep() }
 }
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.
@@ -477,8 +489,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         copy_tree(&fixture("BigBuckBunny"), &root);
         std::fs::create_dir_all(root.join("AACS")).expect("the AACS dir creates");
-        std::fs::write(root.join("AACS/Unit_Key_RO.inf"), b"key")
-            .expect("the key file writes");
+        std::fs::write(root.join("AACS/Unit_Key_RO.inf"), b"key").expect("the key file writes");
 
         let stream = root.join("BDMV/STREAM/00000.m2ts");
         let real = std::fs::read(&stream).expect("the fixture stream reads");
@@ -503,13 +514,53 @@ mod tests {
         // if the untouched fixture it is built from does NOT read as encrypted
         // — the key file alone must never be the verdict.
         let root = encrypted_fixture("aacs-probe");
-        let encrypted = BdRom::open(&FsDir::new(&root), ScanMode::Metadata)
-            .expect("the crafted disc opens");
+        let encrypted =
+            BdRom::open(&FsDir::new(&root), ScanMode::Metadata).expect("the crafted disc opens");
         assert!(encrypted.is_aacs_encrypted, "the crafted stream shows the fingerprint");
 
         let plain = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
             .expect("the fixture disc opens");
         assert!(!plain.is_aacs_encrypted, "an ordinary disc is not encrypted");
+    }
+
+    /// The metadata open the listing seam decides from, flagged or not.
+    fn cheap_open(is_aacs_encrypted: bool) -> (BdRom, Vec<super::ScanError>) {
+        let bdrom = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
+            .expect("the fixture disc opens");
+        (BdRom { is_aacs_encrypted, ..bdrom }, Vec::new())
+    }
+
+    #[test]
+    fn the_listing_seam_never_opens_an_encrypted_disc_a_second_time() {
+        // Not "the deeper open returns nothing useful" — it is never called at
+        // all, which is the whole point: calling it is what reads the disc end
+        // to end.
+        let (bdrom, errors) = super::listing_scan(cheap_open(true), || {
+            panic!("an encrypted disc must not reach the codec pass")
+        })
+        .expect("the metadata open stands in");
+        assert!(bdrom.is_aacs_encrypted);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn the_listing_seam_takes_the_deeper_open_for_an_ordinary_disc() {
+        let deep = cheap_open(false).0;
+        let label = deep.volume_label.clone();
+        let (bdrom, _) = super::listing_scan(cheap_open(false), || {
+            Ok((BdRom { volume_label: format!("{label}-deep"), ..deep }, Vec::new()))
+        })
+        .expect("the deeper open answers");
+        assert_eq!(bdrom.volume_label, format!("{label}-deep"), "the deeper open won");
+    }
+
+    #[test]
+    fn the_listing_seam_reports_a_failed_deeper_open() {
+        // The media going away between the two opens: the failure is the
+        // listing's, not a silently degraded table.
+        let message = super::listing_scan(cheap_open(false), || Err("the disc vanished".to_owned()))
+            .expect_err("the deeper failure propagates");
+        assert_eq!(message, "the disc vanished");
     }
 
     #[test]
