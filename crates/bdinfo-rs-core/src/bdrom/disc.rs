@@ -83,6 +83,20 @@ pub struct PlaylistSummary {
     pub chapters: Vec<ChapterSummary>,
 }
 
+/// The most extra camera angles [`PlaylistSummary::angle_totals`] builds totals
+/// for — the most a playlist can declare.
+///
+/// A playlist item's angle table opens with a one-byte angle count and
+/// [`super::mpls`] takes the *extra* angles as that byte less one, so the widest
+/// table a `*.mpls` can express (255) is 254 extras and no parsed playlist can
+/// carry more. [`PlaylistSummary::angle_count`] is a plain `usize` field,
+/// though, so a caller that assembles a summary rather than scanning one can set
+/// it to anything, and every angle costs an [`AngleTotals`] slot plus a walk of
+/// the clip list: 100,000,000 angles asked for a 3 GiB allocation (measured
+/// 2026-08-03, one playlist, one clip). Bounding the loop holds every caller to
+/// what the format itself can say.
+const MAX_EXTRA_ANGLES: usize = 254;
+
 impl PlaylistSummary {
     /// The playlist's packet-derived size in bytes: the sum of the main
     /// (angle-0) clips' [`ClipSummary::packet_size`] values.
@@ -144,10 +158,14 @@ impl PlaylistSummary {
     /// replacing them at the same playlist position (matched by exact start
     /// time, last write winning): `packet_size`/`length` sum the angle's own
     /// clips, `timeline_packet_size` the whole timeline.
+    ///
+    /// At most 254 entries, whatever [`angle_count`](Self::angle_count) says:
+    /// 254 extra angles is the widest angle table a playlist can declare, so a
+    /// larger count is bounded here rather than allocated for.
     #[must_use]
     pub fn angle_totals(&self) -> Vec<AngleTotals> {
         let mut totals = Vec::new();
-        for angle in 1..=self.angle_count {
+        for angle in 1..=self.angle_count.min(MAX_EXTRA_ANGLES) {
             let angle_index = i32::try_from(angle).unwrap_or(i32::MAX);
             let mut timeline: Vec<(u64, &ClipSummary)> = Vec::new();
             for clip in &self.clips {
@@ -3305,15 +3323,30 @@ mod tests {
         assert_eq!(two.timeline_bit_rate(0.0), 0);
     }
 
+    #[test]
+    fn angle_totals_stop_at_the_widest_angle_table_a_playlist_can_declare() {
+        // 254 extra angles is a one-byte angle count of 255, so a summary a scan
+        // produced is never clamped; a larger count reaches here only from a
+        // hand-assembled summary, where it would otherwise buy one entry (and
+        // one walk of the clip list) per angle asked for.
+        let clips = vec![clip_summary(0, 0.0, 40.0, 10), clip_summary(1, 0.0, 40.0, 30)];
+        assert_eq!(playlist_summary(100.0, 253, clips.clone()).angle_totals().len(), 253);
+        assert_eq!(playlist_summary(100.0, 254, clips.clone()).angle_totals().len(), 254);
+        assert_eq!(playlist_summary(100.0, 255, clips.clone()).angle_totals().len(), 254);
+        assert_eq!(playlist_summary(100.0, usize::MAX, clips).angle_totals().len(), 254);
+    }
+
     proptest! {
-        /// The totals hold their set relations for arbitrary clip lists: the
-        /// all-angles size counts every clip, the main size only angle 0, and
-        /// each angle's own size never exceeds its timeline's.
+        /// The totals hold their set relations for arbitrary clip lists and any
+        /// angle count: the all-angles size counts every clip, the main size
+        /// only angle 0, each angle's own size never exceeds its timeline's,
+        /// and the row count never passes the format's 254.
         #[test]
         fn playlist_totals_invariants(
             clips in proptest::collection::vec(
                 (0_i32..3, 0_u8..4, 1.0_f64..100.0, 0_u64..1000), 0..8,
             ),
+            angle_count in proptest::prop_oneof![0_usize..300, proptest::strategy::Just(usize::MAX)],
         ) {
             let clips: Vec<ClipSummary> = clips
                 .into_iter()
@@ -3321,12 +3354,12 @@ mod tests {
                     clip_summary(angle, f64::from(slot) * 50.0, length, packets)
                 })
                 .collect();
-            let playlist = playlist_summary(100.0, 2, clips);
+            let playlist = playlist_summary(100.0, angle_count, clips);
             let total = playlist.total_packet_size();
             let total_angle = playlist.total_angle_packet_size();
             prop_assert!(total <= total_angle);
             let angles = playlist.angle_totals();
-            prop_assert_eq!(angles.len(), 2);
+            prop_assert_eq!(angles.len(), angle_count.min(254));
             for angle in &angles {
                 prop_assert!(angle.packet_size <= angle.timeline_packet_size);
                 prop_assert!(angle.timeline_packet_size <= total_angle);
