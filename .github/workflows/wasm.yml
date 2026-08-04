@@ -33,7 +33,7 @@ permissions:
 
 env:
   NIGHTLY: nightly-2026-07-06 # keep in lockstep with scripts/_common.ps1 + core.yml
-  NODE_VERSION: "26.5.1"      # the active Node line (26 -> LTS Oct 2026); watched by version-freshness.yml
+  NODE_VERSION: "26.6.0"      # the active Node line (26 -> LTS Oct 2026); watched by version-freshness.yml
   # Keep the cached target/ small: no incremental-compilation metadata, and
   # line tables instead of full DWARF (still enough for file:line in a test
   # backtrace). A called workflow inherits none of its caller's env, so these

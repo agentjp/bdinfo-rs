@@ -284,7 +284,7 @@ jobs:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           set -euo pipefail
-          pipx install cloudsmith-cli==1.20.2 >/dev/null
+          pipx install cloudsmith-cli==1.21.0 >/dev/null
           ver="${VERSION#v}"
           repo=bdinfo-rs/bdinfo-rs
           file="dl/bdinfo-rs-${{ matrix.triple }}.deb"
@@ -363,7 +363,7 @@ jobs:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
           set -euo pipefail
-          pipx install cloudsmith-cli==1.20.2 >/dev/null
+          pipx install cloudsmith-cli==1.21.0 >/dev/null
           ver="${VERSION#v}"
           repo=bdinfo-rs/bdinfo-rs
           file="dl/bdinfo-rs-${{ matrix.triple }}.rpm"
