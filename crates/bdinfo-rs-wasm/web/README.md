@@ -102,6 +102,13 @@ side.
 measured value — bitrates, packet counts, chapter rates — is zero because
 nothing measured it; `true` after `scan`, where a zero is a genuine zero.
 
+`disc.isAacsEncrypted` says the disc's stream content is AACS-encrypted. Neither
+call throws for it: the structure — playlists, streams as the disc declares
+them, chapters — comes from cleartext metadata and is correct either way. Only
+the stream content is unreadable, so a measured `scan` of such a disc demuxes
+ciphertext and every value it measures is meaningless. What to do about that is
+yours to decide; the demo tells the user and offers no measured scan.
+
 ### Re-rendering the report
 
 The model carries **every value the report prints**, so `renderReport(disc)`

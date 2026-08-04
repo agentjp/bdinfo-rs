@@ -93,7 +93,7 @@ pub struct ScanResult {
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "seven independent disc properties (3D/50Hz/UHD/BD+/BD-Java/D-BOX/PSP) plus the scan-mode flag, not a state machine"
+    reason = "eight independent disc properties (3D/50Hz/UHD/AACS/BD+/BD-Java/D-BOX/PSP) plus the scan-mode flag, not a state machine"
 )]
 pub struct Disc {
     /// The disc volume label. For a disc image this is the volume identifier
@@ -117,6 +117,18 @@ pub struct Disc {
     /// Whether the disc is 4K UHD: the `INDX0300` version magic in
     /// `index.bdmv`.
     pub is_uhd: bool,
+    /// Whether the disc's stream content is AACS-encrypted: the disc root
+    /// carries the `AACS/Unit_Key_RO.inf` key file and the sampled stream heads
+    /// show the AACS encryption fingerprint.
+    ///
+    /// Data, not an error: the scanning calls return the disc either way and
+    /// never throw for it. Everything structural — playlists, streams as the
+    /// disc declares them, chapters — is read from cleartext metadata and is
+    /// correct. What no key can be recovered for is the stream content, so a
+    /// measured scan of an encrypted disc demuxes ciphertext and every value it
+    /// measures is meaningless. Deciding what to do about that — refuse the
+    /// measured scan, warn, or scan anyway — is the consumer's policy.
+    pub is_aacs_encrypted: bool,
     /// Whether the disc carries BD+ copy protection: a `BDSVM`, `SLYVM` or
     /// `ANYVM` directory.
     pub is_bd_plus: bool,
@@ -537,6 +549,7 @@ impl Disc {
             is_3d: bdrom.is_3d,
             is_50hz: bdrom.is_50hz,
             is_uhd: bdrom.is_uhd,
+            is_aacs_encrypted: bdrom.is_aacs_encrypted,
             is_bd_plus: bdrom.is_bd_plus,
             is_bd_java: bdrom.is_bd_java,
             is_dbox: bdrom.is_dbox,
@@ -814,10 +827,7 @@ impl Disc {
             is_3d: self.is_3d,
             is_50hz: self.is_50hz,
             is_uhd: self.is_uhd,
-            // The mirror does not carry the AACS flag yet, so the rebuild
-            // defaults it — the same degrade-until-mirrored rule the unknown
-            // scan-error kinds follow (see [`ScanErrorKind`]).
-            is_aacs_encrypted: false,
+            is_aacs_encrypted: self.is_aacs_encrypted,
             is_bd_plus: self.is_bd_plus,
             is_bd_java: self.is_bd_java,
             is_dbox: self.is_dbox,
@@ -1215,6 +1225,7 @@ mod tests {
             is_3d: true,
             is_50hz: false,
             is_uhd: true,
+            is_aacs_encrypted: true,
             is_bd_plus: false,
             is_bd_java: true,
             is_dbox: false,
@@ -1235,6 +1246,7 @@ mod tests {
             "is3d": true,
             "is50hz": false,
             "isUhd": true,
+            "isAacsEncrypted": true,
             "isBdPlus": false,
             "isBdJava": true,
             "isDbox": false,
@@ -1264,6 +1276,26 @@ mod tests {
         assert_eq!(wire.get("discTitle"), Some(&Value::Null));
         let back: Disc = serde_json::from_value(wire).expect("deserialize a disc with no title");
         assert_eq!(back, disc);
+    }
+
+    #[test]
+    fn the_encrypted_flag_crosses_and_rebuilds_at_both_values() {
+        // Both values, both directions. The whole-fields fixtures pin the flag
+        // set; an unencrypted disc is the value a consumer sees on nearly every
+        // disc, and mirroring it as a constant either way would be invisible
+        // there.
+        for encrypted in [false, true] {
+            let bdrom = BdRom { is_aacs_encrypted: encrypted, ..a_core_bdrom() };
+            let disc = Disc::from_scan(&bdrom, &[], false, &PlaylistFilter::default());
+            assert_eq!(disc.is_aacs_encrypted, encrypted);
+
+            let wire = serde_json::to_value(&disc).expect("serialize the mirror");
+            assert_eq!(wire.get("isAacsEncrypted"), Some(&Value::Bool(encrypted)));
+
+            let back: Disc = serde_json::from_value(wire).expect("deserialize the mirror");
+            assert_eq!(back, disc);
+            assert_eq!(back.into_scan().0.is_aacs_encrypted, encrypted);
+        }
     }
 
     #[test]
@@ -1439,7 +1471,7 @@ mod tests {
             is_3d: true,
             is_50hz: false,
             is_uhd: true,
-            is_aacs_encrypted: false,
+            is_aacs_encrypted: true,
             is_bd_plus: false,
             is_bd_java: true,
             is_dbox: false,
