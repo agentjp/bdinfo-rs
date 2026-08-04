@@ -294,11 +294,87 @@ the gain by nearly 2x. The six deterministic targets are what make the *shape* o
 table trustworthy on two pairs: where the measurement can move, it does; where the target
 is saturated, all four runs agree to the counter.
 
-**Sizing the matrix — for whoever widens it next.** The tier is **14 targets**, one leg
-each, and the GitHub Free plan allows **20 concurrent jobs**. So the matrix has six legs of
-headroom, and a target-by-architecture expansion at 28 legs would queue rather than run.
-Throughput per leg is the lever that does not spend that budget; it is now spent to x2.13,
-and the remaining headroom is six legs.
+**Sizing the matrix — for whoever widens it next.** The tier is **14 targets over 2 pointer
+widths**, one leg each, against the GitHub Free plan's **20 concurrent jobs**. So the 28 legs
+do not all start at once: measured 2026-08-04, 20 ran and 8 queued. That costs wall time, not
+runner minutes — unmetered on a public repository — and the pass fires at 21:11 UTC with
+nothing else scheduled. Throughput per leg is the lever that does not spend the concurrency
+budget, and it is already spent to x2.13. A third dimension would have to buy its legs back
+from somewhere.
+
+### The 32-bit leg — measured 2026-08-04
+
+`i686-unknown-linux-gnu` is the tier's proxy for the pointer width the npm package ships:
+`wasm32-unknown-unknown` has a **32-bit `usize`**, and wasm32 cannot host libFuzzer. What the
+leg takes, in the order it bites:
+
+- **A 32-bit C++ toolchain first, and it does not look like one.** `libfuzzer-sys`'s build
+  script compiles libFuzzer's own C++ sources through the `cc` crate, which for an i686 target
+  drives the host compiler with `-m32`. Without `gcc-multilib`/`g++-multilib` the build dies
+  in that build script before reaching any Rust of ours, and the error names `libfuzzer-sys` —
+  it reads like a dependency problem. Installing them costs 21 s on a runner.
+- **No AddressSanitizer, and rustc says otherwise.** `rustc --print target-spec-json` reports
+  `"supported-sanitizers":["address"]` for this target, but the distributed `rust-std` ships no
+  `librustc-*_rt.asan.a`, so `-Zsanitizer=address` compiles the whole tree and then fails at
+  **link**. The leg runs `--sanitizer none`. Lost with ASan: `-malloc_limit_mb`, which hooks the
+  sanitizer's allocator and aborts on a single huge allocation. Kept: `-timeout` and
+  `-rss_limit_mb`, both libFuzzer's own — so the non-termination and allocation-amplification
+  guards still fire, and the leg's purpose is pointer width rather than memory safety, which
+  `forbid(unsafe)` already answers.
+- **It is the cheaper leg.** On the per-PR replay gate, both legs cold: **i686 5 m 11 s against
+  x86_64 6 m 28 s.** Building without ASan instrumentation more than pays for the multilib
+  install.
+- **On the heavy harnesses it is also the faster fuzzer**, for the same reason — which means it
+  contributes proportionally more to the shared corpus:
+
+  | target | exec/s i686 | exec/s x86_64 | units grown i686 | x86_64 |
+  |---|---|---|---|---|
+  | `wasm_iso` | 6,080 | 1,719 | 997 | 577 |
+  | `wasm_report` | 5,384 | 1,731 | 11,397 | 5,443 |
+  | `parse_report` | 5,397 | 1,846 | 8,815 | 3,810 |
+  | `source` | 7,519 | 2,248 | 1,545 | 1,059 |
+  | `m2ts` | 3,312 | 1,364 | 9,655 | 4,003 |
+
+  The direction reverses on the light targets (`bitstream` 44,536 against 71,773; `codec` 2,356
+  against 3,498), where ASan costs little and 32-bit register pressure costs more.
+- **`cov` does not compare across the two legs — and the cause is the sanitizer, not the
+  width.** The i686 leg reads 0.43–0.71 of the x86_64 leg on all fourteen targets, which
+  invites the reading that 32-bit coverage is worse. It is not. Three arms over the identical
+  corpus at `-runs=0`, which is deterministic, separate the two variables:
+
+  | target | x86_64 + ASan | x86_64, no ASan | i686, no ASan | ASan | width |
+  |---|---|---|---|---|---|
+  | `read_be` | 74 | 41 | 35 | −45% | −15% |
+  | `discovery` | 225 | 104 | 102 | −54% | −2% |
+  | `bitstream` | 309 | 190 | 179 | −39% | −6% |
+  | `clpi` | 391 | 274 | 270 | −30% | −1% |
+  | `mpls` | 718 | 486 | 465 | −32% | −4% |
+  | `m2ts` | 2610 | 1636 | 1665 | −37% | **+2%** |
+  | `codec` | 2633 | 1507 | 1571 | −43% | **+4%** |
+  | `udf` | 586 | 255 | 255 | −56% | **0** |
+  | `source` | 872 | 464 | 467 | −47% | **+1%** |
+  | `parse_report` | 6038 | 4201 | 4061 | −30% | −3% |
+  | `wasm_report` | 6271 | 4333 | 4190 | −31% | −3% |
+  | `wasm_iso` | 906 | 477 | 480 | −47% | **+1%** |
+  | `wasm_disc` | 5101 | 3852 | 3702 | −24% | −4% |
+  | `gui_settings` | 442 | 309 | 291 | −30% | −6% |
+
+  Removing the sanitizer costs 24–56% of the counters on **every** target, because ASan
+  instruments code of its own. Changing only the width moves the figure by −15% to +4% and
+  **not always downward** — `udf` is identical to the counter, and four targets read higher at
+  32 bits. Compare a target against itself over time, per arch; never one arch against the
+  other.
+
+  Measuring this has its own trap: alternating `--sanitizer` or `--target` between arms
+  invalidates cargo's fingerprint, so a script that loops targets outer and arms inner rebuilds
+  the whole workspace on every switch. Loop **arms outer, targets inner**.
+
+**One corpus, proven rather than asserted.** Both widths restore the same accumulated units and
+each saves back only its own arch's key. In the 2026-08-04 verification pass `restored` was
+*identical* across the arches on 12 of 14 targets (`m2ts` 1124/1124, `parse_report` 1299/1299,
+`wasm_disc` 5044/5044). The exceptions show the sharing working live rather than breaking it:
+`read_be` restored 0 at i686 and **2** at x86_64, because the i686 leg finished first and the
+x86_64 leg picked up the two units it had just found.
 
 ## Running (Linux / WSL / CI, nightly)
 
