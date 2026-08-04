@@ -1358,14 +1358,16 @@ impl TsStreamFile {
                         };
                         if !self.streams.contains_key(&stream_pid) {
                             self.create_stream(stream_pid, stream_type);
-                            // An Unknown type registers no stream; the walk then
-                            // abandons the rest of this PMT section's entries
-                            // rather than trusting the layout past an
-                            // unrecognised entry.
-                            let Some(s) = self.streams.get_mut(&stream_pid) else {
-                                break;
-                            };
-                            if s.base().is_graphics_stream() {
+                            // An unrecognised type registers no stream, and the
+                            // walk steps over that entry: ISO 13818-1 makes each
+                            // entry self-delimiting through its ES_info_length,
+                            // so the stride below lands on the next entry
+                            // without interpreting the skipped one, and later
+                            // entries keep their streams. Classic BDInfo
+                            // dereferences the absent stream here instead.
+                            if let Some(s) = self.streams.get_mut(&stream_pid)
+                                && s.base().is_graphics_stream()
+                            {
                                 s.base_mut().is_initialized = !is_full_scan;
                             }
                         }
@@ -1821,10 +1823,21 @@ pub mod packets {
     /// Builds a PMT payload listing `streams` (each `(stream_type, pid)`),
     /// `table_id` `0x02`, no program-info, no per-stream ES-info.
     pub(crate) fn pmt_payload(streams: &[(u8, u16)]) -> Vec<u8> {
+        let with_es: Vec<(u8, u16, &[u8])> =
+            streams.iter().map(|&(st, pid)| (st, pid, &[][..])).collect();
+        pmt_payload_es(&with_es)
+    }
+
+    /// Builds a PMT payload listing `streams` (each `(stream_type, pid, es_info)`,
+    /// the ES-info descriptor bytes emitted verbatim behind their length field),
+    /// `table_id` `0x02`, no program-info.
+    pub(crate) fn pmt_payload_es(streams: &[(u8, u16, &[u8])]) -> Vec<u8> {
         let mut entries = Vec::new();
-        for &(st, pid) in streams {
+        for &(st, pid, es) in streams {
             let [hi, lo] = pid.to_be_bytes();
-            entries.extend_from_slice(&[st, 0xE0 | (hi & 0x1F), lo, 0xF0, 0x00]);
+            let [eshi, eslo] = u16::try_from(es.len()).unwrap().to_be_bytes();
+            entries.extend_from_slice(&[st, 0xE0 | (hi & 0x1F), lo, 0xF0 | (eshi & 0x0F), eslo]);
+            entries.extend_from_slice(es);
         }
         let section_len = entries.len().wrapping_add(13); // 9 header + 4 CRC
         let [slhi, sllo] = u16::try_from(section_len).unwrap().to_be_bytes();
@@ -1966,7 +1979,7 @@ mod tests {
 
     use super::packets::{
         encode_pts, packet, packet_raw, pat_payload, pes_dts, pes_dts_padded, pes_none, pes_pts,
-        pes_pts_padded, pes_variable, pmt_payload, pmt_section,
+        pes_pts_padded, pes_variable, pmt_payload, pmt_payload_es, pmt_section,
     };
     use super::{
         DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics, TsStreamFile, pts_to_f64, round_long,
@@ -2084,18 +2097,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_pmt_stream_type_aborts_the_rest_of_the_section() {
-        // An unknown type registers no stream, and the section walk then aborts,
-        // leaving every later entry unregistered. The unknown type's diagnostics
-        // slot is still created (during registration) before the abort.
+    fn an_unknown_pmt_stream_type_does_not_hide_the_entries_after_it() {
         let pmt_pid = 0x0100;
         let mut bytes = packet(0, true, &pat_payload(pmt_pid));
         bytes.extend(packet(
             pmt_pid,
             true,
-            &pmt_payload(&[
-                (0x99, 0x1C00), // unknown → no stream → the section aborts here
-                (0x1B, 0x1011), // AVC video, never reached
+            &pmt_payload_es(&[
+                // ES-info on the skipped entry: stepping over the entry means
+                // stepping over its descriptor bytes too, so a stride that
+                // ignores ES_info_length reads the next entry from the middle of
+                // these three and registers 0x0107 instead of 0x1011.
+                (0x99, 0x1C00, &[0x52, 0x01, 0x07][..]),
+                (0x1B, 0x1011, &[][..]),
             ]),
         ));
         let mut pls = [empty_playlist()];
@@ -2104,10 +2118,11 @@ mod tests {
         // The unknown type registers no stream but does get a diagnostics slot.
         assert_eq!(file.streams.get(&0x1C00).map(TsStream::stream_type), None);
         assert!(file.stream_diagnostics.contains_key(&0x1C00));
-        // The AVC entry after the unknown type is never processed (the abort), so it
-        // gets neither a stream nor a diagnostics slot.
-        assert_eq!(file.streams.get(&0x1011).map(TsStream::stream_type), None);
-        assert!(!file.stream_diagnostics.contains_key(&0x1011));
+        assert_eq!(
+            file.streams.get(&0x1011).map(TsStream::stream_type),
+            Some(TsStreamType::AvcVideo)
+        );
+        assert!(!file.streams.contains_key(&0x0107));
     }
 
     #[test]
