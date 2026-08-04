@@ -1,7 +1,7 @@
 //! Disc-level orchestration: discovery plus the metadata scan.
 //!
 //! [`BdRom::open`] locates the BD directories case-insensitively through the
-//! [`crate::vfs`] seam, reads the disc flags (3D/UHD/BD+/BD-Java/PSP), the
+//! [`crate::vfs`] seam, reads the disc flags (3D/UHD/AACS/BD+/BD-Java/PSP), the
 //! recursive byte [`size`](BdRom::size), the volume label and disc title, then
 //! scans the clip and playlist metadata into the per-playlist
 //! [`PlaylistSummary`] rows the report emits.
@@ -379,7 +379,7 @@ pub struct StreamSummary {
 #[derive(Debug, Clone, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "the seven flags are independent disc properties (3D/50Hz/UHD/BD+/BD-Java/D-BOX/PSP), not a state machine"
+    reason = "the eight flags are independent disc properties (3D/50Hz/UHD/AACS/BD+/BD-Java/D-BOX/PSP), not a state machine"
 )]
 pub struct BdRom {
     /// Disc volume label — the genuine UDF `LogicalVolumeIdentifier` for
@@ -400,6 +400,12 @@ pub struct BdRom {
     pub is_50hz: bool,
     /// 4K UHD disc — `index.bdmv` version magic `INDX0300`.
     pub is_uhd: bool,
+    /// AACS-encrypted stream content — the disc root carries the
+    /// `AACS/Unit_Key_RO.inf` key file AND the sampled stream heads show the
+    /// AACS encryption fingerprint (see [`detect_aacs_encryption`]). State
+    /// only: the report never mentions it, and the measured scan still runs if
+    /// a caller asks — whether to scan ciphertext is the caller's policy.
+    pub is_aacs_encrypted: bool,
     /// BD+ copy protection — a `BDSVM`/`SLYVM`/`ANYVM` directory.
     pub is_bd_plus: bool,
     /// BD-Java — a non-empty `BDJO` directory.
@@ -797,6 +803,9 @@ impl BdRom {
         let (size, interleaved_size) =
             sink.absorb(ScanStage::Discovery, &root_name, (0, 0), directory_size(root))?;
         let is_uhd = read_uhd_flag(&*bdmv, &backup_index, sink)?;
+        // Deliberately outside the sink: the verdict is disc state, not disc
+        // damage — a failed probe is a "not encrypted" verdict, never an error.
+        let is_aacs_encrypted = detect_aacs_encryption(root, stream.as_deref());
         let is_bd_plus =
             sink.absorb(ScanStage::Discovery, &root_name, false, has_bd_plus_dir(root))?;
         let is_bd_java = match &bdjo {
@@ -875,6 +884,7 @@ impl BdRom {
             is_3d,
             is_50hz,
             is_uhd,
+            is_aacs_encrypted,
             is_bd_plus,
             is_bd_java,
             is_dbox,
@@ -1027,6 +1037,112 @@ fn has_bd_plus_dir(root: &dyn BdDir) -> Result<bool, BdError> {
         }
     }
     Ok(false)
+}
+
+/// One BDAV source packet in bytes: a 4-byte `TP_extra_header` followed by a
+/// 188-byte TS packet whose first byte is the `0x47` sync (see [`super::m2ts`]).
+const SOURCE_PACKET_BYTES: usize = 192;
+
+/// One AACS Aligned Unit in bytes — 32 source packets of
+/// [`SOURCE_PACKET_BYTES`]. AACS encrypts each Aligned Unit of a stream file
+/// separately, leaving only its first 16 bytes cleartext (AACS Blu-ray Disc
+/// Prerecorded Book 0.953 §3.10), so packet 0's sync byte survives encryption
+/// and the other 31 syncs vanish into ciphertext.
+const ALIGNED_UNIT_BYTES: usize = 6144;
+
+/// How many stream files [`stream_content_encrypted`] samples. Two, the
+/// largest first: every sampled unit must agree for an "encrypted" verdict,
+/// and the largest files are the feature streams — never the sub-Aligned-Unit
+/// menu stubs whose short read would fail the probe open.
+const SAMPLED_STREAM_FILES: usize = 2;
+
+/// How many leading Aligned Units [`file_head_encrypted`] checks per sampled
+/// stream file.
+const SAMPLED_UNITS_PER_FILE: usize = 2;
+
+/// The most `0x47` bytes tolerated at the 31 ciphertext sync positions of an
+/// Aligned Unit that still counts as encrypted. Ciphertext is uniform, so each
+/// position matches with chance 1/256 (~0.12 expected per unit); three keeps
+/// the false-"clear" chance negligible while staying far under the 31/31 a
+/// clear unit shows.
+const MAX_STRAY_SYNCS: usize = 3;
+
+/// Whether the disc's stream content is AACS-encrypted (`is_aacs_encrypted`):
+/// the disc root carries `AACS/Unit_Key_RO.inf` — mandatory on every encrypted
+/// disc (AACS Blu-ray Disc Prerecorded Book 0.953 §3.9.3), but routinely left
+/// behind by decrypting rippers, so its existence alone proves nothing — AND
+/// the sampled stream heads show the encryption fingerprint
+/// ([`stream_content_encrypted`]).
+///
+/// Fail-open by design: every failure — IO error, missing directory, short or
+/// damaged stream — resolves to `false`. A false "not encrypted" costs a
+/// caller one pointless scan of ciphertext; a false "encrypted" would brand a
+/// readable disc unreadable. Damage therefore stays with the damaged-disc
+/// machinery (the resilient sink), which this probe never touches.
+fn detect_aacs_encryption(root: &dyn BdDir, stream: Option<&dyn BdDir>) -> bool {
+    has_aacs_key_file(root) && stream.is_some_and(stream_content_encrypted)
+}
+
+/// Whether the disc root has an `AACS` directory holding `Unit_Key_RO.inf`,
+/// both matched ASCII case-insensitively like the rest of the discovery. The
+/// file's contents are never read — existence is the whole hint. Enumeration
+/// failures read as "absent" (the probe's fail-open rule).
+fn has_aacs_key_file(root: &dyn BdDir) -> bool {
+    let Ok(dirs) = root.get_directories() else {
+        return false;
+    };
+    dirs.iter().filter(|dir| dir.name().eq_ignore_ascii_case("AACS")).any(|dir| {
+        dir.get_files().is_ok_and(|files| {
+            files.iter().any(|file| file.name().eq_ignore_ascii_case("Unit_Key_RO.inf"))
+        })
+    })
+}
+
+/// Whether the sampled stream content confirms encryption: the
+/// [`SAMPLED_STREAM_FILES`] largest `*.m2ts` files (ties broken by name, so
+/// the verdict never depends on directory enumeration order) must **all** pass
+/// [`file_head_encrypted`]. No stream files, an enumeration failure, or any
+/// non-fingerprint sample resolves to `false` (fail-open).
+fn stream_content_encrypted(stream: &dyn BdDir) -> bool {
+    let Ok(mut files) = vfs::find_files(stream, BdFileKind::Stream) else {
+        return false;
+    };
+    if files.is_empty() {
+        return false;
+    }
+    files.sort_by(|a, b| b.length().cmp(&a.length()).then_with(|| a.name().cmp(b.name())));
+    files.truncate(SAMPLED_STREAM_FILES);
+    files.iter().all(|file| file_head_encrypted(&**file))
+}
+
+/// Whether `file`'s first [`SAMPLED_UNITS_PER_FILE`] Aligned Units all show
+/// the encryption fingerprint. A failed open, a short read (a file under
+/// 2 × [`ALIGNED_UNIT_BYTES`]), or any non-fingerprint unit reads `false`.
+fn file_head_encrypted(file: &dyn BdFile) -> bool {
+    let Ok(mut reader) = file.open_read() else {
+        return false;
+    };
+    let mut unit = [0_u8; ALIGNED_UNIT_BYTES];
+    for _ in 0..SAMPLED_UNITS_PER_FILE {
+        if reader.read_exact(&mut unit).is_err() || !unit_shows_encryption(&unit) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether one Aligned Unit shows the AACS encryption fingerprint: packet 0's
+/// `0x47` sync byte intact (it sits inside the unit's 16 cleartext bytes) and
+/// at most [`MAX_STRAY_SYNCS`] of the 31 encrypted packets' sync positions
+/// matching by ciphertext chance. A clear unit shows all 32 (the container
+/// guarantees them); anything else — damage, garbage, a partial wipe — is not
+/// this fingerprint and reads `false`.
+fn unit_shows_encryption(unit: &[u8; ALIGNED_UNIT_BYTES]) -> bool {
+    let mut syncs =
+        unit.chunks_exact(SOURCE_PACKET_BYTES).map(|packet| packet.get(4) == Some(&0x47));
+    let first = syncs.next() == Some(true);
+    let strays = syncs.filter(|&hit| hit).count();
+    first && strays <= MAX_STRAY_SYNCS
 }
 
 /// Whether `dir` contains at least one file.
@@ -2055,13 +2171,14 @@ mod tests {
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID, PlaylistFilter,
-        PlaylistSummary, Progress, ScanMode, ScanProgress, ScanStage, Sink, TsPlaylistFile,
-        TsStreamFile, backup_subdir_files, build_chapter_summaries, build_clip_summaries,
-        build_sorted_streams, clear_measurements, clip_has_50hz_video, clip_stem, collect_backups,
-        merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
-        resolve_playlist_streams, scan_stream_files, scan_total, select_reference, stream_summary,
-        walked_disc_root,
+        ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID,
+        PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanProgress,
+        ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
+        build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
+        clip_has_50hz_video, clip_stem, collect_backups, has_aacs_key_file, merge_stream,
+        rate_over, read_disc_title, read_file, read_file_capped, resolve_playlist_streams,
+        scan_stream_files, scan_total, select_reference, stream_content_encrypted, stream_summary,
+        unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::interleaved::{MemBdFile, TsInterleavedFile};
@@ -2932,6 +3049,7 @@ mod tests {
         assert!(bd.is_bd_java);
         assert!(bd.is_dbox);
         assert!(bd.is_psp);
+        assert!(!bd.is_aacs_encrypted); // no AACS/Unit_Key_RO.inf
         assert!(bd.is_50hz);
         // Every extras label, in the fixed presentation order.
         assert_eq!(
@@ -3007,6 +3125,7 @@ mod tests {
         assert!(!bd.is_bd_java); // BDJO empty
         assert!(!bd.is_dbox); // no FilmIndex.xml in the root
         assert!(!bd.is_psp); // SNP has no *.mnv
+        assert!(!bd.is_aacs_encrypted); // no AACS/Unit_Key_RO.inf
         assert!(bd.extra_features().is_empty()); // no flag set, no label
         assert!(!bd.is_50hz); // 24 fps
         assert_eq!(bd.disc_title, None); // META has no bdmt_eng.xml
@@ -3021,6 +3140,294 @@ mod tests {
         assert_eq!(clip0.interleaved_file_size, 0);
         assert_eq!(pl.chapter_count, 0);
         assert_eq!(pl.stream_count, 1);
+    }
+
+    // ── AACS encryption detection ───────────────────────────────────────────
+
+    /// One Aligned Unit: `0x47` at the sync positions `present` selects
+    /// (packet 0 first), `0xAA` everywhere else.
+    fn unit_with_syncs(present: &[bool; 32]) -> [u8; ALIGNED_UNIT_BYTES] {
+        let mut unit = [0xAA_u8; ALIGNED_UNIT_BYTES];
+        for (packet, &sync) in unit.chunks_exact_mut(SOURCE_PACKET_BYTES).zip(present) {
+            if sync && let Some(byte) = packet.get_mut(4) {
+                *byte = 0x47;
+            }
+        }
+        unit
+    }
+
+    /// One Aligned Unit with the exact encryption fingerprint: packet 0's sync
+    /// intact, the other 31 sync positions ciphertext (no chance matches).
+    fn encrypted_unit() -> [u8; ALIGNED_UNIT_BYTES] {
+        let mut present = [false; 32];
+        present[0] = true;
+        unit_with_syncs(&present)
+    }
+
+    /// The first two Aligned Units of an AACS-encrypted stream file.
+    fn encrypted_stream() -> Vec<u8> {
+        [encrypted_unit().as_slice(), encrypted_unit().as_slice()].concat()
+    }
+
+    /// Two clear Aligned Units: all 32 sync bytes in place in each.
+    fn clear_stream() -> Vec<u8> {
+        let unit = unit_with_syncs(&[true; 32]);
+        [unit.as_slice(), unit.as_slice()].concat()
+    }
+
+    #[test]
+    fn the_unit_fingerprint_needs_the_first_sync_and_tolerates_only_stray_ones() {
+        let mut present = [false; 32];
+        present[0] = true;
+        // The exact fingerprint, and up to MAX_STRAY_SYNCS chance matches.
+        assert!(unit_shows_encryption(&unit_with_syncs(&present)));
+        present[7] = true;
+        present[15] = true;
+        present[31] = true;
+        assert!(unit_shows_encryption(&unit_with_syncs(&present)));
+        // One stray past the tolerance is no longer the fingerprint.
+        present[20] = true;
+        assert!(!unit_shows_encryption(&unit_with_syncs(&present)));
+        // Without packet 0's sync nothing reads encrypted, however few strays.
+        present[0] = false;
+        assert!(!unit_shows_encryption(&unit_with_syncs(&present)));
+        assert!(!unit_shows_encryption(&unit_with_syncs(&[false; 32])));
+        // A clear unit shows all 32 syncs — the container guarantee.
+        assert!(!unit_shows_encryption(&unit_with_syncs(&[true; 32])));
+    }
+
+    #[test]
+    fn an_encrypted_disc_sets_the_aacs_flag_without_a_scan_error() {
+        let disc = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[
+                ("AACS/Unit_Key_RO.inf", Vec::new()),
+                ("BDMV/STREAM/00000.m2ts", encrypted_stream()),
+                ("BDMV/STREAM/00001.m2ts", encrypted_stream()),
+            ],
+        );
+        assert!(disc.open().expect("scan encrypted disc").is_aacs_encrypted);
+        // State only: the resilient sink records nothing for the verdict.
+        let report = BdRom::open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
+            .expect("resilient scan");
+        assert!(report.bdrom.is_aacs_encrypted);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn the_aacs_marker_matches_case_insensitively_and_one_stream_file_suffices() {
+        let disc = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[("aacs/UNIT_KEY_RO.INF", Vec::new()), ("BDMV/STREAM/00000.m2ts", encrypted_stream())],
+        );
+        assert!(disc.open().expect("scan encrypted disc").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn a_decrypted_rip_keeping_the_aacs_folder_is_not_encrypted() {
+        // The feature's safety proof: the key file plus clear streams is a
+        // decrypted rip, and it must scan exactly like any clear disc.
+        let disc = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[
+                ("AACS/Unit_Key_RO.inf", Vec::new()),
+                ("BDMV/STREAM/00000.m2ts", clear_stream()),
+                ("BDMV/STREAM/00001.m2ts", clear_stream()),
+            ],
+        );
+        assert!(!disc.open().expect("scan decrypted rip").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn encrypted_looking_streams_without_the_key_file_stay_unflagged() {
+        // No AACS directory at all…
+        let bare = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[("BDMV/STREAM/00000.m2ts", encrypted_stream())],
+        );
+        assert!(!bare.open().expect("scan").is_aacs_encrypted);
+        // …and an AACS directory without Unit_Key_RO.inf.
+        let keyless = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[("AACS/Content000.cer", vec![b'x']), ("BDMV/STREAM/00000.m2ts", encrypted_stream())],
+        );
+        assert!(!keyless.open().expect("scan").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn a_keyed_disc_without_confirmable_stream_content_is_not_encrypted() {
+        // No STREAM directory…
+        let streamless = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[("AACS/Unit_Key_RO.inf", Vec::new())],
+        );
+        assert!(!streamless.open().expect("scan").is_aacs_encrypted);
+        // …an empty STREAM directory (the all-of-nothing guard)…
+        let empty = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF", "BDMV/STREAM"],
+            &[("AACS/Unit_Key_RO.inf", Vec::new())],
+        );
+        assert!(!empty.open().expect("scan").is_aacs_encrypted);
+        // …and a stream file too short for two Aligned Units.
+        let short = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[
+                ("AACS/Unit_Key_RO.inf", Vec::new()),
+                ("BDMV/STREAM/00000.m2ts", encrypted_unit().to_vec()),
+            ],
+        );
+        assert!(!short.open().expect("scan").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn any_clear_sample_resolves_to_not_encrypted() {
+        // One encrypted and one clear stream file: mixed content is damage or
+        // a partial rip, never the fingerprint.
+        let mixed = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[
+                ("AACS/Unit_Key_RO.inf", Vec::new()),
+                ("BDMV/STREAM/00000.m2ts", encrypted_stream()),
+                ("BDMV/STREAM/00001.m2ts", clear_stream()),
+            ],
+        );
+        assert!(!mixed.open().expect("scan").is_aacs_encrypted);
+        // A file whose second Aligned Unit is clear: every sampled unit must
+        // agree, not just the first.
+        let clear_tail = [encrypted_unit(), unit_with_syncs(&[true; 32])].concat();
+        let tailed = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[("AACS/Unit_Key_RO.inf", Vec::new()), ("BDMV/STREAM/00000.m2ts", clear_tail)],
+        );
+        assert!(!tailed.open().expect("scan").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn the_probe_samples_the_two_largest_stream_files() {
+        // Two feature-sized encrypted files plus a tiny menu stub: the stub is
+        // never sampled, so its short read cannot fail the verdict open.
+        let disc = TempDisc::build(
+            &["BDMV/PLAYLIST", "BDMV/CLIPINF"],
+            &[
+                ("AACS/Unit_Key_RO.inf", Vec::new()),
+                ("BDMV/STREAM/00000.m2ts", encrypted_stream()),
+                ("BDMV/STREAM/00001.m2ts", encrypted_stream()),
+                ("BDMV/STREAM/00002.m2ts", vec![0_u8; 100]),
+            ],
+        );
+        assert!(disc.open().expect("scan").is_aacs_encrypted);
+    }
+
+    #[test]
+    fn equal_sized_samples_are_chosen_by_name_not_listing_order() {
+        let trip = Trip::new(usize::MAX);
+        let mk = |name: &str, bytes: Vec<u8>| MockFile {
+            name: name.to_owned(),
+            extension: ".m2ts".to_owned(),
+            bytes,
+            trip: trip.clone(),
+            fail_read: false,
+        };
+        let four_units = [encrypted_stream(), encrypted_stream()].concat();
+        // Listed out of name order: the sample must be the largest file plus —
+        // by the name tie-break, not listing position — the *clear* 00001, so
+        // the verdict is `false`; sampling by listing order would take the two
+        // encrypted files and read `true`.
+        let stream = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: vec![
+                mk("00000.m2ts", four_units.clone()),
+                mk("00002.m2ts", encrypted_stream()),
+                mk("00001.m2ts", clear_stream()),
+            ],
+            trip: trip.clone(),
+        };
+        assert!(!stream_content_encrypted(&stream));
+        // Largest-first, deterministically: with the sizes distinct and listed
+        // smallest-first, the two largest (encrypted) files win over the short
+        // stub whose sampling would fail the verdict open.
+        let sized = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: vec![
+                mk("00002.m2ts", vec![0_u8; 100]),
+                mk("00001.m2ts", encrypted_stream()),
+                mk("00000.m2ts", four_units),
+            ],
+            trip: trip.clone(),
+        };
+        assert!(stream_content_encrypted(&sized));
+    }
+
+    #[test]
+    fn every_probe_io_failure_reads_as_not_encrypted() {
+        let ok = Trip::new(usize::MAX);
+        let key = |trip: &Trip| MockFile {
+            name: "Unit_Key_RO.inf".to_owned(),
+            extension: ".inf".to_owned(),
+            bytes: Vec::new(),
+            trip: trip.clone(),
+            fail_read: false,
+        };
+        let aacs = |trip: &Trip| MockDir {
+            name: "AACS".to_owned(),
+            dirs: Vec::new(),
+            files: vec![key(&ok)],
+            trip: trip.clone(),
+        };
+        // The root listing fails → no marker.
+        let root = MockDir {
+            name: "disc".to_owned(),
+            dirs: vec![aacs(&ok)],
+            files: Vec::new(),
+            trip: Trip::new(0),
+        };
+        assert!(!has_aacs_key_file(&root));
+        // The AACS directory's file listing fails → no marker.
+        let root = MockDir {
+            name: "disc".to_owned(),
+            dirs: vec![aacs(&Trip::new(0))],
+            files: Vec::new(),
+            trip: ok.clone(),
+        };
+        assert!(!has_aacs_key_file(&root));
+        // The STREAM listing fails → no confirmation.
+        let stream = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: Vec::new(),
+            trip: Trip::new(0),
+        };
+        assert!(!stream_content_encrypted(&stream));
+        // A stream file that cannot open → not encrypted.
+        let unopenable = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: vec![MockFile {
+                name: "00000.m2ts".to_owned(),
+                extension: ".m2ts".to_owned(),
+                bytes: encrypted_stream(),
+                trip: Trip::new(0),
+                fail_read: false,
+            }],
+            trip: ok.clone(),
+        };
+        assert!(!stream_content_encrypted(&unopenable));
+        // A stream file whose reader fails mid-unit → not encrypted.
+        let unreadable = MockDir {
+            name: "STREAM".to_owned(),
+            dirs: Vec::new(),
+            files: vec![MockFile {
+                name: "00000.m2ts".to_owned(),
+                extension: ".m2ts".to_owned(),
+                bytes: encrypted_stream(),
+                trip: ok.clone(),
+                fail_read: true,
+            }],
+            trip: ok,
+        };
+        assert!(!stream_content_encrypted(&unreadable));
     }
 
     // ── orchestration: the truly-minimal disc (None branches) ───────────────
@@ -4225,16 +4632,23 @@ mod tests {
         assert!(total > 12, "expected many io ops, got {total}");
 
         // Failing each successive IO op must surface as an error (never a panic),
-        // walking every `?` propagation arm in `open` and its helpers.
+        // walking every `?` propagation arm in `open` and its helpers. The one
+        // exception is the AACS probe (fail-open by design): a failure it
+        // absorbs must leave the scan identical to the clean one.
+        let mut fail_open = 0_usize;
         for fail_at in 0..total {
             let trip = Trip::new(fail_at);
             // Each injected io failure surfaces as an error (never a panic); the io
             // path only ever yields `BdError::Io`.
-            assert!(
-                BdRom::open(&mock_disc(&trip), ScanMode::Full).is_err(),
-                "io failure at op {fail_at}"
-            );
+            if let Ok(scanned) = BdRom::open(&mock_disc(&trip), ScanMode::Full) {
+                assert_eq!(scanned, bd, "io failure at op {fail_at} altered the scan");
+                fail_open = fail_open.saturating_add(1);
+            }
         }
+        // Exactly the probe's root listing: with no `AACS` directory the probe
+        // short-circuits after one op, so exactly one failure is absorbed — more
+        // would mean the probe kept sampling without its key-file hint.
+        assert_eq!(fail_open, 1);
     }
 
     #[test]
@@ -4689,20 +5103,29 @@ mod tests {
         let total = probe.used();
 
         let mut absorbed = 0_usize;
+        let mut fail_open = 0_usize;
         for fail_at in 0..total {
             let trip = Trip::new(fail_at);
-            // An `Err` is the fatal BDMV/CLIPINF/PLAYLIST block; everything else
-            // must complete with the failure recorded.
+            // An `Err` is the fatal BDMV/CLIPINF/PLAYLIST block; a completed scan
+            // must either record the failure or — only in the fail-open AACS
+            // probe — absorb it with the scan left identical to the clean one.
             if let Ok(report) = BdRom::open_resilient(&mock_disc(&trip), ScanMode::Full) {
-                assert!(
-                    !report.errors.is_empty(),
-                    "io failure at op {fail_at} was swallowed without a record"
-                );
-                absorbed = absorbed.saturating_add(1);
+                if report.errors.is_empty() {
+                    assert_eq!(
+                        report.bdrom, clean.bdrom,
+                        "io failure at op {fail_at} was swallowed and altered the scan"
+                    );
+                    fail_open = fail_open.saturating_add(1);
+                } else {
+                    absorbed = absorbed.saturating_add(1);
+                }
             }
         }
         // Most ops are isolated (only the directory-locating block is fatal).
         assert!(absorbed > total.saturating_div(2), "absorbed {absorbed} of {total}");
+        // Exactly the AACS probe's root listing (no `AACS` directory here, so
+        // the probe short-circuits after one op).
+        assert_eq!(fail_open, 1);
     }
 
     #[test]

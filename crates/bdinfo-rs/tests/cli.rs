@@ -13,7 +13,7 @@
 
 pub mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use common::{bdinfo_rs, real_fixture};
 
@@ -251,7 +251,7 @@ fn filtered_bd(tag: &str) -> PathBuf {
 }
 
 /// The default report file for a disc folder: `BDINFO.{dir name}.txt` inside it.
-fn report_file(root: &std::path::Path) -> PathBuf {
+fn report_file(root: &Path) -> PathBuf {
     let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     root.join(format!("BDINFO.{label}.txt"))
 }
@@ -407,7 +407,7 @@ fn list_prints_the_playlist_table_and_exits() {
     clippy::expect_used,
     reason = "end-to-end test driver; a failed spawn should abort the test loudly"
 )]
-fn listing(disc: &std::path::Path, switches: &[&str]) -> String {
+fn listing(disc: &Path, switches: &[&str]) -> String {
     let mut args = vec![disc.to_string_lossy().into_owned(), "--list".to_owned()];
     args.extend(switches.iter().map(|&s| s.to_owned()));
     let output = bdinfo_rs().args(&args).output().expect("spawn bdinfo-rs");
@@ -658,7 +658,7 @@ fn a_subcommand_style_invocation_is_just_a_bad_path() {
 /// Scan `disc` with `-m 00000` into a fresh temp dest and return the report it
 /// writes as `BDINFO.{label}.txt`. `label` is the disc label the scan derives: a
 /// folder takes its directory name, an `.iso` its UDF volume label.
-fn scan_report(disc: &std::path::Path, label: &str, tag: &str) -> String {
+fn scan_report(disc: &Path, label: &str, tag: &str) -> String {
     scan_report_with(disc, label, tag, &[])
 }
 
@@ -667,7 +667,7 @@ fn scan_report(disc: &std::path::Path, label: &str, tag: &str) -> String {
     clippy::expect_used,
     reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
 )]
-fn scan_report_with(disc: &std::path::Path, label: &str, tag: &str, switches: &[&str]) -> String {
+fn scan_report_with(disc: &Path, label: &str, tag: &str, switches: &[&str]) -> String {
     let dest = std::env::temp_dir().join(format!("bdinfo-rs-real-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dest).expect("create dest");
     let output = bdinfo_rs()
@@ -759,6 +759,111 @@ fn a_real_whole_folder_scan_matches_the_golden_byte_for_byte() {
         include_str!("fixtures/golden/folder.txt"),
         "the default `--whole` selection drifted from the `-m 00000` golden"
     );
+}
+
+// --- AACS-encrypted discs: the refusal, `--list`, and the decrypted-rip pin ---
+
+/// Copies the committed `BigBuckBunny` folder fixture to a fresh temp disc
+/// root still named `BigBuckBunny` — the folder-derived disc label, and with
+/// it the report's name and bytes, must not change. Returns the copy's root
+/// and the parent to remove for cleanup.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed copy should abort the test loudly"
+)]
+fn copy_fixture(tag: &str) -> (PathBuf, PathBuf) {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create copy dir");
+        for entry in std::fs::read_dir(from).expect("list fixture") {
+            let entry = entry.expect("fixture entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("entry type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy fixture file");
+            }
+        }
+    }
+    let parent = std::env::temp_dir().join(format!("bdinfo-rs-aacs-{tag}-{}", std::process::id()));
+    let root = parent.join("BigBuckBunny");
+    copy_tree(&real_fixture("BigBuckBunny"), &root);
+    (root, parent)
+}
+
+/// Stamps the copied disc with the AACS marker: an *empty*
+/// `AACS/Unit_Key_RO.inf`, zero bytes so the report's disc-size line — and
+/// with it every report byte — is unchanged.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed write should abort the test loudly"
+)]
+fn add_aacs_marker(root: &Path) {
+    std::fs::create_dir_all(root.join("AACS")).expect("create AACS");
+    std::fs::write(root.join("AACS").join("Unit_Key_RO.inf"), []).expect("write key file");
+}
+
+/// Rewrites the stream file the way AACS encryption leaves it: every
+/// 6144-byte Aligned Unit keeps its first 16 bytes cleartext, the rest
+/// becomes ciphertext-like filler.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed rewrite should abort the test loudly"
+)]
+fn encrypt_stream(root: &Path) {
+    let path = root.join("BDMV").join("STREAM").join("00000.m2ts");
+    let mut bytes = std::fs::read(&path).expect("read the stream file");
+    for unit in bytes.chunks_mut(6144) {
+        for byte in unit.iter_mut().skip(16) {
+            *byte = 0xAA;
+        }
+    }
+    std::fs::write(&path, bytes).expect("write the encrypted stream");
+}
+
+#[test]
+fn a_decrypted_rip_with_a_leftover_aacs_folder_matches_the_golden_byte_for_byte() {
+    // The feature's safety pin at the report level: the AACS key file over
+    // clear streams (a decrypted rip) changes not one byte of the report.
+    let (root, parent) = copy_fixture("rip");
+    add_aacs_marker(&root);
+    let got = scan_report(&root, "BigBuckBunny", "ripdest");
+    let _ = std::fs::remove_dir_all(&parent).is_ok();
+    assert_eq!(
+        got,
+        include_str!("fixtures/golden/folder.txt"),
+        "a decrypted rip's report drifted from the clear-disc golden"
+    );
+}
+
+#[test]
+fn an_encrypted_disc_refuses_the_scan_with_exit_4_and_a_notice() {
+    let (root, parent) = copy_fixture("enc");
+    add_aacs_marker(&root);
+    encrypt_stream(&root);
+    let output =
+        bdinfo_rs().args([root.as_os_str(), "-w".as_ref()]).output().expect("spawn bdinfo-rs");
+    let wrote_report = root.join("BDINFO.BigBuckBunny.txt").exists();
+    let _ = std::fs::remove_dir_all(&parent).is_ok();
+    assert_eq!(output.status.code(), Some(4), "the refusal has its own exit code");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("AACS-encrypted"), "the notice names the cause: {stderr}");
+    assert!(stderr.contains("--list"), "the notice points at --list: {stderr}");
+    assert!(!wrote_report, "a refused scan writes no report file");
+}
+
+#[test]
+fn list_on_an_encrypted_disc_prints_the_table_with_the_notice() {
+    let (root, parent) = copy_fixture("enclist");
+    add_aacs_marker(&root);
+    encrypt_stream(&root);
+    let output =
+        bdinfo_rs().args([root.as_os_str(), "--list".as_ref()]).output().expect("spawn bdinfo-rs");
+    let _ = std::fs::remove_dir_all(&parent).is_ok();
+    assert_eq!(output.status.code(), Some(0), "--list keeps its own exit rules");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1   1      00000.MPLS"), "the table still lists: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("AACS-encrypted"), "the notice still prints: {stderr}");
 }
 
 #[test]

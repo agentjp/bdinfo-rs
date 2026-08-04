@@ -944,6 +944,7 @@ mod tests {
             is_3d: false,
             is_50hz: false,
             is_uhd: false,
+            is_aacs_encrypted: false,
             is_bd_plus: false,
             is_bd_java: false,
             is_dbox: false,

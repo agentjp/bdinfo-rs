@@ -3,7 +3,7 @@ name = "bdinfo-rs-gui"
 # Lock-stepped with the root workspace's version by hand (this independent
 # workspace cannot inherit [workspace.package]); the gui-release.yml tag guard
 # and the gui-publish.yml crates leg both refuse a gui-v* tag that disagrees.
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
 rust-version = "1.96"
 license = "LGPL-2.1-or-later"
@@ -53,7 +53,7 @@ path = "src/main.rs"
 # path + version, the same shape as the root [workspace.dependencies] pin, so
 # the crate is publishable: cargo strips the path on publish and resolves the
 # registry copy from the version alone. Keep lock-stepped with `version` above.
-bdinfo-rs-core = { path = "../bdinfo-rs-core", version = "2.0.0" }
+bdinfo-rs-core = { path = "../bdinfo-rs-core", version = "3.0.0" }
 # Pure-Rust GUI: wgpu (+ tiny-skia CPU fallback) / cosmic-text / winit. No C.
 # `tokio` makes iced's executor a Tokio runtime — the ambient context zbus's
 # tokio backend (forced tree-wide by rfd below; cargo features are additive)

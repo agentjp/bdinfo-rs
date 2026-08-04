@@ -814,6 +814,10 @@ impl Disc {
             is_3d: self.is_3d,
             is_50hz: self.is_50hz,
             is_uhd: self.is_uhd,
+            // The mirror does not carry the AACS flag yet, so the rebuild
+            // defaults it — the same degrade-until-mirrored rule the unknown
+            // scan-error kinds follow (see [`ScanErrorKind`]).
+            is_aacs_encrypted: false,
             is_bd_plus: self.is_bd_plus,
             is_bd_java: self.is_bd_java,
             is_dbox: self.is_dbox,
@@ -1435,6 +1439,7 @@ mod tests {
             is_3d: true,
             is_50hz: false,
             is_uhd: true,
+            is_aacs_encrypted: false,
             is_bd_plus: false,
             is_bd_java: true,
             is_dbox: false,
