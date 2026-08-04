@@ -34,6 +34,7 @@ posture or `cargo ck`/`cargo lt`.
 | `clpi` | `bdinfo_rs_core::bdrom::clpi::TsStreamClipFile::scan` — a `*.clpi` clip-info file | `scan_never_panics_on_arbitrary_input` |
 | `mpls` | `bdinfo_rs_core::bdrom::mpls::TsPlaylistFile::scan` — a `*.mpls` playlist file | `scan_never_panics_on_arbitrary_input` |
 | `m2ts` | `bdinfo_rs_core::bdrom::m2ts::TsStreamFile::scan` — a `*.m2ts`/`*.ssif` transport stream | `scan_never_panics_on_arbitrary_bytes` |
+| `m2ts_differential` | **both** M2TS scan strategies over one input: `TsStreamFile::scan_threaded` (every build with threads — the command-line tool's) and `TsStreamFile::scan_sequential` (the `wasm32-unknown-unknown` build the npm package ships), asserted to return the same result and leave the same demuxed clip and the same playlist writes. Same stream framing as `m2ts`; its first byte doubles as a control byte (full-scan flag, read-chunk size, an injected read failure) that the demux discards with the `TP_extra_header` time code | `sequential_demux_matches_the_threaded_demux` |
 | `codec` | the audio `bdinfo_rs_core::codec::ac3::scan` / `truehd::scan` / `dts::scan` / `dts_hd::scan` / `lpcm::scan` / `aac::scan` / `mpa::scan`, the video `avc::scan` / `mpeg2::scan` / `vc1::scan` / `mvc::scan` / `hevc::scan` and the graphics `pgs::scan` — an access unit (first byte selects the stream type `% 17`; its high bits seed the DTS `bitrate`) | `codec::{ac3,truehd,dts,dts_hd,lpcm,aac,mpa,avc,mpeg2,vc1,mvc,hevc,pgs}::…::scan_never_panics_on_arbitrary_bytes` |
 | `udf` | the `vfs::udf` parsers — `Avdp`/`Lvd`/`PartitionDescriptor`/`Fsd::parse`, `FileEntry::parse`, `parse_directory`, CS0 `decode_dstring` — over disc-image sectors | `vfs::udf::…::*_never_panics` |
 | `source` | the whole-`.iso` `vfs::udf::source::UdfSource` reader (hostile-input caps included) — `open` over an in-memory image, then a full tree walk + bounded reads of every file. The input *describes* a sparse image: a `u16`-BE sector count, then (`u16`-BE sector, `u16`-BE length, content) records the harness places — the same shape `source.rs`'s own test fixtures build images with | `vfs::udf::source::open_never_panics_on_arbitrary_bytes` |
@@ -52,6 +53,13 @@ of byte fuzzing).
 thing on both sides of each pair and units promoted from one corpus are valid in the other.
 `parse_report` extends its framing with a seventh section the browser export does not read;
 sections past the sixth are ignored there, so seeds stay portable in both directions.
+`m2ts_differential` reads the same whole-input stream framing as `m2ts`, so units are
+portable between those two as well — which is where its seed corpus comes from.
+
+`m2ts_differential` is the one target that is not a no-panic harness. The rest assert
+nothing and fail only on a panic, a hang or a sanitizer report; this one asserts an
+equality, so it can fail on a correct-but-different result. What "equal" means, and what
+it deliberately leaves out, is defended in the target's own module docs.
 
 ## Per-target discovery flags
 
@@ -195,6 +203,23 @@ seeds, so it starts about 46 counters behind at `INITED` (1363 against 1410, ave
 over the same nine runs each) and still finishes ahead. 8 KiB, 32 KiB and 64 KiB were
 also measured and none beat 16 KiB.
 
+`m2ts_differential` pays harder, and had to be measured rather than inherited: it reads the
+same seeds but runs the stream through **two** scans per unit, so its unit cost is roughly
+double and the throughput half of the trade is worth more. Nine independent 300 s samples per
+arm, measured 2026-08-04, nine processes at a time on a 24-core host so both arms saw the same
+load:
+
+| arm | `cov` samples | mean | exec/s |
+|---|---|---|---|
+| corpus-derived (98,304) | 1953, 1953, 1960, 1966, 1973, 1976, 1987, 1989, 2015 | 1975 | ~355 |
+| `-max_len=16384` | 2012, 2013, 2014, 2016, 2037, 2038, 2046, 2072, 2078 | **2036** | ~955 |
+
++3.1% mean on **2.7× the throughput**, and the separation is far cleaner than `m2ts`'s: eight
+of the nine capped runs beat *every* uncapped run (Mann-Whitney U 78/81). The same 16 KiB cap
+keeps the same 161 of the 415 seeds, so this arm too starts behind at `INITED` — 1738 counters
+against 1778 — and ends 61 ahead. Features move the other way (`ft` 7285 → 7139, −2.0%): shorter
+units reach more edges and fewer value combinations, and `cov` is what the table above compares.
+
 `source` does not pay, and shows the failure mode. Capping it at 8 KiB costs 24% of its
 reach (784 → 557) — deep multi-extent structures stop being expressible — while the
 throughput number improves. Its cap is left as the corpus sets it.
@@ -294,9 +319,9 @@ the gain by nearly 2x. The six deterministic targets are what make the *shape* o
 table trustworthy on two pairs: where the measurement can move, it does; where the target
 is saturated, all four runs agree to the counter.
 
-**Sizing the matrix — for whoever widens it next.** The tier is **14 targets over 2 pointer
-widths**, one leg each, against the GitHub Free plan's **20 concurrent jobs**. So the 28 legs
-do not all start at once: measured 2026-08-04, 20 ran and 8 queued. That costs wall time, not
+**Sizing the matrix — for whoever widens it next.** The tier is **15 targets over 2 pointer
+widths**, one leg each, against the GitHub Free plan's **20 concurrent jobs**. So the 30 legs
+do not all start at once: measured 2026-08-04 at 14 targets, 20 ran and 8 queued. That costs wall time, not
 runner minutes — unmetered on a public repository — and the pass fires at 21:11 UTC with
 nothing else scheduled. Throughput per leg is the lever that does not spend the concurrency
 budget, and it is already spent to x2.13. A third dimension would have to buy its legs back

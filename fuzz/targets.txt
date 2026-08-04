@@ -23,18 +23,19 @@
 # what was tried per target and what it bought; a flag that does not move
 # coverage in a controlled comparison does not belong in this table.
 
-# target        dict                    max_len
-read_be         -                       -
-discovery       -                       -
-bitstream       -                       -
-clpi            -                       -
-mpls            -                       -
-m2ts            -                       16384
-codec           -                       -
-udf             -                       -
-source          dictionaries/udf.dict   -
-parse_report    -                       -
-wasm_report     -                       -
-wasm_iso        -                       -
-wasm_disc       -                       -
-gui_settings    -                       -
+# target            dict                    max_len
+read_be             -                       -
+discovery           -                       -
+bitstream           -                       -
+clpi                -                       -
+mpls                -                       -
+m2ts                -                       16384
+m2ts_differential   -                       16384
+codec               -                       -
+udf                 -                       -
+source              dictionaries/udf.dict   -
+parse_report        -                       -
+wasm_report         -                       -
+wasm_iso            -                       -
+wasm_disc           -                       -
+gui_settings        -                       -
