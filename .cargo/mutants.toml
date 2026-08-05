@@ -226,7 +226,7 @@ exclude_re = [
     # mounted physical UDF disc, so every mutant is indistinguishable from the
     # original in any test environment. The returned label is validated end-to-end
     # against real hardware; the pure machinery it drives (AlignedReader,
-    # UdfSource::read_label, resolve_with, drive_root_letter, safe_report_stem) is
+    # UdfSource::read_label, resolve_with, drive_root_letter) is
     # unit-tested AND mutation-covered. cargo-mutants ignores `cfg`, so it also
     # mutates the cfg'd-out non-Windows stub; both are matched here by the fn name.
     "volume\\.rs:\\d+:\\d+:.*real_volume_label",

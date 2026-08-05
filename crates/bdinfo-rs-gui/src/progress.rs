@@ -1,17 +1,16 @@
 //! The pure live-progress model.
 //!
-//! Ports the CLI's (`main.rs`) `progress_stats` + `hms` math: from a scan's
-//! `done` / `total` byte counts and the elapsed wall time it derives the
-//! percent, the elapsed seconds, and a remaining-time estimate. The model is
-//! pure — `(file, done, total, elapsed) -> ProgressModel` — so the iced progress
-//! bar + text line are a thin projection of it, and the boundary cases the CLI
-//! pins (an empty scan reads 100%, the first-second estimate already shows) are
-//! unit-testable here without a window. The two other pieces of progress-line
-//! decision logic live here for the same reason: the indeterminate bar's
-//! triangle wave ([`pulse_fraction`] / [`pulse_advance`]) and the worker's
-//! event-coalescing rule ([`emit_due`]).
+//! Wraps the core's [`progress_stats`] + [`hms`] math — percent, elapsed
+//! seconds, remaining estimate — in a pure
+//! `(file, done, total, elapsed) -> ProgressModel` projection, so the iced
+//! progress bar + text line are a thin read of it and are unit-testable without
+//! a window. The two other pieces of progress-line decision logic live here for
+//! the same reason: the indeterminate bar's triangle wave ([`pulse_fraction`] /
+//! [`pulse_advance`]) and the worker's event-coalescing rule ([`emit_due`]).
 
 use std::time::Duration;
+
+use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
 
 /// The indeterminate-bar animation period (one full 0→1→0 breath).
 pub const PULSE_PERIOD: u16 = 1000;
@@ -51,35 +50,6 @@ const EMIT_EVERY: Duration = Duration::from_millis(100);
 #[must_use]
 pub fn emit_due(file_changed: bool, done: u64, total: u64, since_last: Option<Duration>) -> bool {
     file_changed || done == total || since_last.is_none_or(|elapsed| elapsed >= EMIT_EVERY)
-}
-
-/// The percent / elapsed-seconds / remaining-seconds triple the progress line
-/// draws.
-///
-/// The percent comes from the byte counts (an empty scan — `total == 0` — reads
-/// 100%); the remaining estimate scales the elapsed time by the bytes still to
-/// read. The estimate works in **milliseconds**: whole-second math would read
-/// zero for the entire first second, exactly when the first plausible estimate
-/// should already show.
-fn progress_stats(done: u64, total: u64, elapsed: Duration) -> (u64, u64, u64) {
-    let percent =
-        if total == 0 { 100 } else { done.saturating_mul(100).checked_div(total).unwrap_or(100) };
-    let elapsed_seconds = elapsed.as_secs();
-    let remaining = total.saturating_sub(done);
-    let remaining_seconds = elapsed
-        .as_millis()
-        .saturating_mul(u128::from(remaining))
-        .checked_div(u128::from(done).saturating_mul(1000))
-        .map_or(0, |seconds| u64::try_from(seconds).unwrap_or(u64::MAX));
-    (percent, elapsed_seconds, remaining_seconds)
-}
-
-/// `hh:mm:ss` from whole seconds (no day component — hours accumulate).
-fn hms(seconds: u64) -> String {
-    let h = seconds.checked_div(3600).unwrap_or(0);
-    let m = seconds.checked_div(60).and_then(|m| m.checked_rem(60)).unwrap_or(0);
-    let s = seconds.checked_rem(60).unwrap_or(0);
-    format!("{h:02}:{m:02}:{s:02}")
 }
 
 /// A live-progress snapshot: the current file, the percent, and the estimates.
@@ -154,51 +124,7 @@ impl ProgressModel {
 mod tests {
     use std::time::Duration;
 
-    use super::{ProgressModel, hms, progress_stats};
-
-    #[test]
-    fn an_empty_scan_reads_one_hundred_percent() {
-        // total == 0 (a disc with no measurable bytes) is complete, not a
-        // divide-by-zero.
-        let (percent, _, remaining) = progress_stats(0, 0, Duration::from_secs(5));
-        assert_eq!(percent, 100);
-        assert_eq!(remaining, 0);
-    }
-
-    #[test]
-    fn percent_is_the_byte_ratio() {
-        assert_eq!(progress_stats(0, 200, Duration::ZERO).0, 0);
-        assert_eq!(progress_stats(50, 200, Duration::ZERO).0, 25);
-        assert_eq!(progress_stats(200, 200, Duration::ZERO).0, 100);
-    }
-
-    #[test]
-    fn the_first_second_already_estimates() {
-        // Half-read after 500 ms: the ms-based math estimates ~500 ms remaining
-        // (reads 0 s), where whole-second math would have shown nothing yet. The
-        // point is it does not panic and rounds down to 0 s, not that it is
-        // non-zero — the next event past 1 s is the first whole-second estimate.
-        let (_, elapsed, remaining) = progress_stats(100, 200, Duration::from_millis(500));
-        assert_eq!(elapsed, 0);
-        assert_eq!(remaining, 0);
-        // Half-read after 4 s → ~4 s remaining.
-        assert_eq!(progress_stats(100, 200, Duration::from_secs(4)).2, 4);
-    }
-
-    #[test]
-    fn remaining_is_zero_before_any_bytes() {
-        // done == 0 → the estimate would divide by zero; it reads 0 instead.
-        assert_eq!(progress_stats(0, 200, Duration::from_secs(3)).2, 0);
-    }
-
-    #[test]
-    fn hms_formats_hours_minutes_seconds() {
-        assert_eq!(hms(0), "00:00:00");
-        assert_eq!(hms(61), "00:01:01");
-        assert_eq!(hms(3661), "01:01:01");
-        // Hours accumulate past a day (no wrap) — a long scan estimate stays legible.
-        assert_eq!(hms(90_061), "25:01:01");
-    }
+    use super::ProgressModel;
 
     #[test]
     fn model_projects_fraction_and_line() {
@@ -263,34 +189,16 @@ mod tests {
         assert!(super::emit_due(false, 100, 100, Some(Duration::ZERO)));
     }
 
-    // The estimate math runs over hostile-shaped byte counts and durations, so
+    // The projection runs over hostile-shaped byte counts and durations, so
     // amplify the unit cases with property tests.
     mod prop {
         use std::time::Duration;
 
         use proptest::prelude::*;
 
-        use super::super::{ProgressModel, progress_stats};
-
-        /// A `(done, total)` pair with `done <= total` — the real scan invariant
-        /// (a packet scan never reports more bytes read than the disc holds).
-        fn done_and_total() -> impl Strategy<Value = (u64, u64)> {
-            (0_u64..1_000_000).prop_flat_map(|total| (0..=total, Just(total)))
-        }
+        use super::super::ProgressModel;
 
         proptest! {
-            #[test]
-            fn percent_is_bounded_and_monotone(
-                (done, total) in done_and_total(),
-                millis in 0_u64..10_000,
-            ) {
-                let (percent, _, _) = progress_stats(done, total, Duration::from_millis(millis));
-                prop_assert!(percent <= 100);
-                // Reading one more byte (still within total) never lowers the percent.
-                let more = progress_stats(done.saturating_add(1), total, Duration::ZERO).0;
-                prop_assert!(more >= percent || done >= total);
-            }
-
             #[test]
             fn fraction_stays_in_unit_range(
                 done in 0_u64..1_000_000,

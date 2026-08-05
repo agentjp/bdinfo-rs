@@ -53,16 +53,15 @@ use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-#[cfg(any(target_arch = "wasm32", test))]
-use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanProgress, ScanReport};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
-use bdinfo_rs_core::bdrom::order::{selection_order, selection_stream_files};
+use bdinfo_rs_core::bdrom::order::{named_selection, selection_order, selection_stream_files};
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
+use bdinfo_rs_core::vfs::fs::glob_ci;
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -106,31 +105,10 @@ impl<F> Node<F> {
     }
 }
 
-/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte. Mirrors
-/// `glob_ci` in the core's `vfs::fs` (crate-private there, so it cannot be
-/// reused or linked) so file-backed input matches patterns exactly like
-/// folder input does — the two implementations must agree.
-fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
-    match pattern.split_first() {
-        None => name.is_empty(),
-        Some((b'*', rest)) => {
-            (0..=name.len()).any(|skip| name.get(skip..).is_some_and(|tail| glob_match(rest, tail)))
-        }
-        Some((b'?', rest)) => match name.split_first() {
-            Some((_, tail)) => glob_match(rest, tail),
-            None => false,
-        },
-        Some((c, rest)) => match name.split_first() {
-            Some((n, tail)) => c.eq_ignore_ascii_case(n) && glob_match(rest, tail),
-            None => false,
-        },
-    }
-}
-
 impl<F: BdFile + Clone + 'static> Node<F> {
     fn collect_pattern(&self, pattern: &str, recurse: bool, out: &mut Vec<Box<dyn BdFile>>) {
         for f in &self.files {
-            if glob_match(pattern.as_bytes(), f.name().as_bytes()) {
+            if glob_ci(pattern.as_bytes(), f.name().as_bytes()) {
                 out.push(Box::new(f.clone()));
             }
         }
@@ -731,28 +709,6 @@ fn classification_filter(short_seconds: Option<f64>) -> PlaylistFilter {
     }
 }
 
-/// Normalizes a requested playlist name to the model's spelling: upper-cased,
-/// with `.MPLS` appended when no extension was given. Mirrors the CLI.
-#[cfg(any(target_arch = "wasm32", test))]
-fn normalize_playlist_name(name: &str) -> String {
-    let upper = name.to_ascii_uppercase();
-    if upper.contains('.') { upper } else { format!("{upper}.MPLS") }
-}
-
-/// Resolves the requested names against the disc, in the given order, first
-/// occurrence wins, unknown names skipped — the CLI's `--mpls` selection.
-#[cfg(any(target_arch = "wasm32", test))]
-fn named_selection(playlists: &[PlaylistSummary], requested: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for raw in requested {
-        let name = normalize_playlist_name(raw);
-        if playlists.iter().any(|playlist| playlist.name == name) && !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
 /// Why a by-name [`scan_selection`] could not produce a report.
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug)]
@@ -1185,8 +1141,8 @@ mod tests {
     use std::io::{self, SeekFrom};
 
     use super::{
-        MAX_TREE_DEPTH, RenderOptions, TreeError, assemble_tree, extension_of, glob_match,
-        path_components, read_window, seek_target, split_sections,
+        MAX_TREE_DEPTH, RenderOptions, TreeError, assemble_tree, extension_of, path_components,
+        read_window, seek_target, split_sections,
     };
 
     /// Parses path strings into the `(components, id)` entries `assemble_tree`
@@ -1217,18 +1173,6 @@ mod tests {
             blob.extend_from_slice(section);
         }
         blob
-    }
-
-    #[test]
-    fn glob_match_is_literal_anchored_and_case_insensitive() {
-        assert!(glob_match(b"00000.MPLS", b"00000.mpls"));
-        assert!(glob_match(b"*.mpls", b"00000.MPLS"));
-        assert!(glob_match(b"00???.clpi", b"00012.clpi"));
-        assert!(glob_match(b"*", b""));
-        assert!(glob_match(b"", b""));
-        assert!(!glob_match(b"*.mpls", b"00000.m2ts"));
-        assert!(!glob_match(b"?", b""));
-        assert!(!glob_match(b"a", b""));
     }
 
     #[test]
@@ -1673,7 +1617,7 @@ mod tests {
         use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
         use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 
-        use crate::{classification_filter, named_selection, normalize_playlist_name};
+        use crate::classification_filter;
 
         /// A `ClipSummary` carrying just a name + length (the fields the
         /// selection helpers read); the measured tallies stay zero.
@@ -1782,35 +1726,6 @@ mod tests {
                 classification_filter(Some(0.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
             );
-        }
-
-        #[test]
-        fn normalize_playlist_name_uppercases_and_appends_mpls() {
-            assert_eq!(normalize_playlist_name("00000"), "00000.MPLS");
-            assert_eq!(normalize_playlist_name("00000.mpls"), "00000.MPLS");
-            assert_eq!(normalize_playlist_name("feature.m2ts"), "FEATURE.M2TS");
-        }
-
-        #[test]
-        fn named_selection_normalizes_dedupes_and_keeps_order() {
-            let playlists = [
-                sample_playlist("00000.MPLS", 1.0, 0, 0, &[]),
-                sample_playlist("00002.MPLS", 1.0, 0, 0, &[]),
-            ];
-            // unknown skipped, duplicate skipped, order preserved, name normalized.
-            assert_eq!(
-                named_selection(
-                    &playlists,
-                    &[
-                        "00002".to_owned(),
-                        "00000.mpls".to_owned(),
-                        "99999".to_owned(),
-                        "00002".to_owned(),
-                    ],
-                ),
-                ["00002.MPLS", "00000.MPLS"]
-            );
-            assert!(named_selection(&playlists, &[]).is_empty());
         }
 
         #[test]

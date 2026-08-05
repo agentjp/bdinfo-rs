@@ -77,11 +77,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
-use bdinfo_rs_core::bdrom::order::{
-    HiddenRule, PlaylistFilter, selection_order, selection_stream_files, table_rows,
+use bdinfo_rs_core::bdrom::disc::{
+    BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanProgress,
 };
+use bdinfo_rs_core::bdrom::order::{
+    HiddenRule, PlaylistFilter, named_selection, presentation_cmp, selection_order,
+    selection_stream_files, table_rows,
+};
+use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
 use bdinfo_rs_core::error::{BdError, ScanError};
+use bdinfo_rs_core::report;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
@@ -317,10 +322,7 @@ fn run(cli: &Cli) -> u8 {
             .iter()
             .any(|&(_, i)| bdrom.playlists.get(i).is_some_and(PlaylistSummary::has_hidden_streams))
         {
-            println!(
-                "(*) Some playlists on this disc have hidden tracks. These tracks are marked \
-                 with an asterisk."
-            );
+            println!("{HIDDEN_STREAMS_NOTE}");
         }
         print!("{}", hidden_hint(&bdrom.playlists, &filter));
         if cli.whole || cli.list {
@@ -625,27 +627,6 @@ fn resolve_dest(cli: &Cli, bd_path: &Path) -> Result<PathBuf, u8> {
     Ok(dest)
 }
 
-/// Normalizes a `--mpls` value to the playlist-file spelling the model uses:
-/// upper-cased, with `.MPLS` appended when no extension was given.
-fn normalize_playlist_name(name: &str) -> String {
-    let upper = name.to_ascii_uppercase();
-    if upper.contains('.') { upper } else { format!("{upper}.MPLS") }
-}
-
-/// The `--mpls` selection: each requested name normalized and matched against
-/// the disc, in the given order, first occurrence wins; an unknown name is
-/// skipped, the classic selection behaviour.
-fn named_selection(playlists: &[PlaylistSummary], requested: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for raw in requested {
-        let name = normalize_playlist_name(raw);
-        if playlists.iter().any(|p| p.name == name) && !names.contains(&name) {
-            names.push(name);
-        }
-    }
-    names
-}
-
 /// How many playlist names a hint line spells out before it counts the rest —
 /// enough to recognize the disc's numbering, short enough to stay on one line
 /// on an 80-column console.
@@ -697,12 +678,7 @@ fn hint_line(
     if hidden.is_empty() {
         return String::new();
     }
-    hidden.sort_by(|a, b| {
-        b.total_length
-            .partial_cmp(&a.total_length)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    hidden.sort_by(|a, b| presentation_cmp(a, b));
     let named: Vec<&str> =
         hidden.iter().take(HINT_NAMES).map(|playlist| playlist.name.as_str()).collect();
     let rest = hidden.len().saturating_sub(HINT_NAMES);
@@ -731,10 +707,10 @@ fn row_names(
 
 /// Composes the playlist selection table: the `#`/Group/Playlist
 /// File/Length/Estimated Bytes/Measured Bytes header (followed by a blank
-/// line) and one row per listed playlist. Estimated bytes prefer the
-/// interleaved `*.ssif` size, fall back to the `*.m2ts` size, and read `-`
-/// when neither is known; measured bytes read `-` until a packet scan has
-/// measured the playlist.
+/// line) and one row per listed playlist. Both byte columns read `-` when the
+/// size is not known — estimated per
+/// [`PlaylistSummary::estimated_bytes`](bdinfo_rs_core::bdrom::disc::PlaylistSummary::estimated_bytes),
+/// measured until a packet scan has measured the playlist.
 fn selection_table(playlists: &[PlaylistSummary], rows: &[(usize, usize)]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -747,17 +723,11 @@ fn selection_table(playlists: &[PlaylistSummary], rows: &[(usize, usize)]) -> St
         let Some(playlist) = playlists.get(index) else {
             continue;
         };
-        let estimated = if playlist.interleaved_file_size > 0 {
-            group_n0(playlist.interleaved_file_size)
-        } else if playlist.file_size > 0 {
-            group_n0(playlist.file_size)
-        } else {
-            "-".to_owned()
-        };
-        let measured = if playlist.total_packet_size() > 0 {
-            group_n0(playlist.total_packet_size())
-        } else {
-            "-".to_owned()
+        let cell = |bytes: u64| text::group(u128::from(bytes));
+        let estimated = playlist.estimated_bytes().map_or_else(|| "-".to_owned(), cell);
+        let measured = match playlist.total_packet_size() {
+            0 => "-".to_owned(),
+            bytes => cell(bytes),
         };
         let _ = writeln!(
             out,
@@ -765,34 +735,12 @@ fn selection_table(playlists: &[PlaylistSummary], rows: &[(usize, usize)]) -> St
             position.saturating_add(1),
             group,
             playlist.name,
-            table_length(playlist.total_length),
+            text::time_hh_short(seconds_to_ticks(playlist.total_length)),
             estimated,
             measured
         );
     }
     out
-}
-
-/// `hh:mm:ss` from playlist seconds, truncated to the tick like the classic
-/// table (hours wrap at 24; the day component is not shown).
-fn table_length(seconds: f64) -> String {
-    let total = seconds_to_ticks(seconds).max(0).checked_div(10_000_000).unwrap_or(0);
-    let h = total.checked_div(3600).and_then(|h| h.checked_rem(24)).unwrap_or(0);
-    let m = total.checked_div(60).and_then(|m| m.checked_rem(60)).unwrap_or(0);
-    let s = total.checked_rem(60).unwrap_or(0);
-    format!("{h:02}:{m:02}:{s:02}")
-}
-
-/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`).
-fn group_n0(value: u64) -> String {
-    let mut grouped = Vec::new();
-    for (position, digit) in value.to_string().chars().rev().enumerate() {
-        if position > 0 && position.checked_rem(3) == Some(0) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped.into_iter().rev().collect()
 }
 
 /// The interactive playlist picker: prompts `Select (q when finished): `
@@ -858,7 +806,7 @@ fn analyze_preamble(playlists: &[PlaylistSummary], selection: &[String]) -> Stri
 /// Writes `rendered` into `dest` as `BDINFO.{volume label}.txt` (CRLF, UTF-8,
 /// no BOM). Returns the exit code on a failed write (`2`).
 fn save_report(dest: &Path, bdrom: &BdRom, rendered: &str) -> Result<(), u8> {
-    let target = dest.join(format!("BDINFO.{}.txt", volume::safe_report_stem(&bdrom.volume_label)));
+    let target = dest.join(report::file_name(&bdrom.volume_label));
     std::fs::write(&target, rendered.as_bytes()).map_err(|err| {
         eprintln!("error: cannot write {}: {err}", target.display());
         2
@@ -1053,7 +1001,8 @@ fn compose_styled_progress(
     elapsed: Duration,
     columns: usize,
 ) -> String {
-    let (percent, elapsed_seconds, remaining_seconds) = progress_stats(progress, elapsed);
+    let (percent, elapsed_seconds, remaining_seconds) =
+        progress_stats(progress.done, progress.total, elapsed);
     let tail = format!(
         "{percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
@@ -1088,40 +1037,14 @@ fn compose_styled_progress(
 /// Composes the plain progress line: percent, current file, elapsed, and the
 /// remaining-time estimate.
 fn compose_progress(progress: &ScanProgress<'_>, elapsed: Duration) -> String {
-    let (percent, elapsed_seconds, remaining_seconds) = progress_stats(progress, elapsed);
+    let (percent, elapsed_seconds, remaining_seconds) =
+        progress_stats(progress.done, progress.total, elapsed);
     format!(
         "Scanning {percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
         hms(elapsed_seconds),
         hms(remaining_seconds)
     )
-}
-
-/// The percent / elapsed-seconds / remaining-seconds triple both progress
-/// spellings draw: the percent from the byte counts (an empty scan reads
-/// 100%), the remaining estimate the elapsed time scaled by the bytes still
-/// to read. The estimate works in milliseconds — whole-second math would
-/// read zero for the entire first second, exactly when the first plausible
-/// estimate should already show.
-fn progress_stats(progress: &ScanProgress<'_>, elapsed: Duration) -> (u64, u64, u64) {
-    let percent = if progress.total == 0 {
-        100
-    } else {
-        progress.done.saturating_mul(100).checked_div(progress.total).unwrap_or(100)
-    };
-    let elapsed_seconds = elapsed.as_secs();
-    let remaining = progress.total.saturating_sub(progress.done);
-    let remaining_seconds = elapsed
-        .as_millis()
-        .saturating_mul(u128::from(remaining))
-        .checked_div(u128::from(progress.done).saturating_mul(1000))
-        .map_or(0, |seconds| u64::try_from(seconds).unwrap_or(u64::MAX));
-    (percent, elapsed_seconds, remaining_seconds)
-}
-
-/// `hh:mm:ss` from whole seconds.
-fn hms(seconds: u64) -> String {
-    format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
 }
 
 #[cfg(test)]
@@ -1140,9 +1063,8 @@ mod tests {
 
     use super::{
         BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, banner, compose_progress,
-        compose_styled_progress, erase_sequence, finish_early, group_n0, help_page, hidden_hint,
-        hms, named_selection, normalize_playlist_name, pick_playlists, redraw_sequence,
-        report_parse_failure, row_names, run, selection_table, table_length,
+        compose_styled_progress, erase_sequence, finish_early, help_page, hidden_hint,
+        pick_playlists, redraw_sequence, report_parse_failure, row_names, run, selection_table,
     };
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
@@ -1703,12 +1625,8 @@ mod tests {
     }
 
     #[test]
-    fn playlist_names_normalize_to_the_model_spelling() {
-        assert_eq!(normalize_playlist_name("00800"), "00800.MPLS");
-        assert_eq!(normalize_playlist_name("00800.mpls"), "00800.MPLS");
-        assert_eq!(normalize_playlist_name("00800.MPLS"), "00800.MPLS");
-        // The shared no-op observer observes nothing (it backs the scan paths
-        // that never run the packet scan).
+    fn the_no_op_progress_observer_observes_nothing() {
+        // It backs the scan paths that never run the packet scan.
         super::no_progress(ScanProgress { file: "00000.M2TS", done: 0, total: 0 });
     }
 
@@ -1876,8 +1794,6 @@ Options:
             Duration::ZERO,
         );
         assert!(line.starts_with("Scanning 100% - 00000.M2TS"));
-        assert_eq!(hms(3661), "01:01:01");
-        assert_eq!(hms(0), "00:00:00");
     }
 
     /// A playlist summary carrying only what the selection flow reads.
@@ -2114,19 +2030,6 @@ Options:
     }
 
     #[test]
-    fn table_cells_group_digits_and_wrap_hours() {
-        assert_eq!(group_n0(0), "0");
-        assert_eq!(group_n0(123), "123");
-        assert_eq!(group_n0(1_000), "1,000");
-        assert_eq!(group_n0(1_234_567), "1,234,567");
-        assert_eq!(table_length(0.0), "00:00:00");
-        assert_eq!(table_length(100.0), "00:01:40");
-        // 26 h wraps at 24, like the classic table's TimeSpan hours.
-        assert_eq!(table_length(93_600.0 + 65.0), "02:01:05");
-        assert_eq!(table_length(-5.0), "00:00:00");
-    }
-
-    #[test]
     fn the_picker_collects_indices_until_q() {
         // An invalid word, an out-of-range number, two picks (one repeated),
         // then `q` — picks keep their order and the duplicate.
@@ -2169,16 +2072,6 @@ Options:
         }
 
         fn consume(&mut self, _: usize) {}
-    }
-
-    #[test]
-    fn named_selection_keeps_the_given_order_and_dedups() {
-        let playlists =
-            [summary("00001.MPLS", 60.0, &["A.M2TS"]), summary("00002.MPLS", 60.0, &["B.M2TS"])];
-        let requested =
-            ["00002".to_owned(), "00001.mpls".to_owned(), "00002".to_owned(), "X".to_owned()];
-        assert_eq!(named_selection(&playlists, &requested), ["00002.MPLS", "00001.MPLS"]);
-        assert!(named_selection(&playlists, &["X".to_owned()]).is_empty());
     }
 
     #[test]

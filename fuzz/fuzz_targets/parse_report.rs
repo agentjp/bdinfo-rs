@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode};
 use bdinfo_rs_core::report::text;
+use bdinfo_rs_core::vfs::fs::glob_ci;
 use bdinfo_rs_core::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 use libfuzzer_sys::fuzz_target;
 
@@ -82,28 +83,10 @@ struct MemDir {
     files: Vec<MemFile>,
 }
 
-/// ASCII case-insensitive glob: `*` = any run, `?` = any one byte.
-fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
-    match pattern.split_first() {
-        None => name.is_empty(),
-        Some((b'*', rest)) => {
-            (0..=name.len()).any(|skip| glob_match(rest, &name[skip..]))
-        }
-        Some((b'?', rest)) => match name.split_first() {
-            Some((_, tail)) => glob_match(rest, tail),
-            None => false,
-        },
-        Some((c, rest)) => match name.split_first() {
-            Some((n, tail)) => c.eq_ignore_ascii_case(n) && glob_match(rest, tail),
-            None => false,
-        },
-    }
-}
-
 impl MemDir {
     fn collect_pattern(&self, pattern: &str, recurse: bool, out: &mut Vec<Box<dyn BdFile>>) {
         for f in &self.files {
-            if glob_match(pattern.as_bytes(), f.name.as_bytes()) {
+            if glob_ci(pattern.as_bytes(), f.name.as_bytes()) {
                 out.push(Box::new(f.clone()));
             }
         }
