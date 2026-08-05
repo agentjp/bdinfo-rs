@@ -82,16 +82,13 @@ use bdinfo_rs_core::bdrom::disc::{
     BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanProgress,
 };
 use bdinfo_rs_core::bdrom::order::{
-    HiddenRule, PlaylistFilter, named_selection, presentation_cmp, selection_order,
+    HiddenRule, PlaylistFilter, hidden_by, named_selection, selection_order,
     selection_stream_files, table_rows,
 };
 use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
 use bdinfo_rs_core::error::{BdError, ScanError};
-use bdinfo_rs_core::report;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
-use bdinfo_rs_core::vfs::fs::FsDir;
-use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
-use bdinfo_rs_core::vfs::volume;
+use bdinfo_rs_core::{report, scan};
 use clap::error::ErrorKind;
 use crossterm::style::Stylize as _;
 use crossterm::{Command as _, cursor, terminal};
@@ -173,58 +170,6 @@ type ScanOutcome = (BdRom, Vec<ScanError>);
 type ScanFn<'a> =
     dyn FnMut(&mut dyn FnMut(ScanProgress<'_>), &AtomicBool) -> Result<ScanOutcome, BdError> + 'a;
 
-/// Scans the Blu-ray `.iso` at `path` through the UDF reader, returning the same
-/// `BdRom` the folder path would (only the IO backend differs). The resilient
-/// scan merges its per-file failures with the reader's bad-sector recordings.
-/// `scan_files` narrows the packet scan, `progress` observes it, and `cancel`
-/// aborts it (the library's `open_with` extras).
-fn scan_iso(
-    path: &str,
-    run_packet_scan: bool,
-    scan_files: Option<&BTreeSet<String>>,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
-) -> Result<ScanOutcome, BdError> {
-    let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-    let report = BdRom::open_resilient_with(
-        &source.root(),
-        scan_mode(run_packet_scan),
-        scan_files,
-        progress,
-        cancel,
-    )?;
-    let mut errors = report.errors;
-    errors.extend(source.take_errors());
-    Ok((report.bdrom, errors))
-}
-
-/// Scans the Blu-ray folder at `location` through `std::fs`. The resilient
-/// scan merges its per-file failures with the enumeration's recorded
-/// per-entry failures.
-fn scan_folder(
-    location: &Path,
-    run_packet_scan: bool,
-    scan_files: Option<&BTreeSet<String>>,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
-) -> Result<ScanOutcome, BdError> {
-    let root = FsDir::new(location);
-    let report = BdRom::open_resilient_with(
-        &root,
-        scan_mode(run_packet_scan),
-        scan_files,
-        progress,
-        cancel,
-    )?;
-    let mut errors = report.errors;
-    errors.extend(root.take_errors());
-    let mut bdrom = report.bdrom;
-    // A disc mounted at a nameless drive root (`J:\`) leaves the folder-derived
-    // label unusable; recover the real UDF volume label (or the drive letter).
-    bdrom.volume_label = volume::resolve_folder_label(&bdrom.volume_label);
-    Ok((bdrom, errors))
-}
-
 /// The CLI's scan depth: it only ever wants the metadata list or the full
 /// measured report, so `run_packet_scan` maps to [`ScanMode::Full`] or
 /// [`ScanMode::Metadata`] (the bounded [`ScanMode::Codecs`] is a GUI affordance).
@@ -236,7 +181,9 @@ const fn scan_mode(run_packet_scan: bool) -> ScanMode {
 /// packet scan, so no display fires.
 const fn no_progress(_: ScanProgress<'_>) {}
 
-/// Dispatches `path` to the `.iso` or folder scan.
+/// Dispatches `path` to the `.iso` or folder scan. `scan_files` narrows the
+/// packet scan, `progress` observes it, and `cancel` aborts it (the library's
+/// `open_with` extras).
 fn scan_disc(
     path: &str,
     run_packet_scan: bool,
@@ -245,11 +192,13 @@ fn scan_disc(
     cancel: &AtomicBool,
 ) -> Result<ScanOutcome, BdError> {
     let location = Path::new(path);
-    if is_iso(location) {
-        scan_iso(path, run_packet_scan, scan_files, progress, cancel)
+    let mode = scan_mode(run_packet_scan);
+    let report = if is_iso(location) {
+        scan::open_iso(location, mode, scan_files, progress, cancel)
     } else {
-        scan_folder(location, run_packet_scan, scan_files, progress, cancel)
-    }
+        scan::open_folder(location, mode, scan_files, progress, cancel)
+    }?;
+    Ok((report.bdrom, report.errors))
 }
 
 /// Prints the "scan completed with errors" stderr summary — one line per recorded
@@ -637,8 +586,7 @@ const HINT_NAMES: usize = 3;
 /// on *and* withheld at least one playlist, looping first, then short. Empty
 /// (so the flow's bytes are unchanged) when every rule is off or hid nothing.
 ///
-/// Each rule is judged on its own against the whole disc
-/// ([`PlaylistFilter::classify`]), not against what the table dropped, so a
+/// Each rule is judged on its own, not against what the table dropped, so a
 /// playlist that is both short and looping is named on both lines and is only
 /// revealed when both switches are passed.
 ///
@@ -661,10 +609,10 @@ fn hidden_hint(playlists: &[PlaylistSummary], filter: &PlaylistFilter) -> String
 }
 
 /// One `Hidden by filters (KIND): NAMES - rerun with FLAG` line for the
-/// playlists `rule` matches under `filter`'s threshold, empty when it matches
-/// none. The names come in the order the table would have listed them (length
-/// descending, then name ascending), the first [`HINT_NAMES`] spelled out and
-/// the rest counted as ` and N more`.
+/// playlists [`hidden_by`] reports under `rule`, empty when it withheld none.
+/// The names keep that function's table order (length descending, then name
+/// ascending), the first [`HINT_NAMES`] spelled out and the rest counted as
+/// ` and N more`.
 ///
 /// ASCII only — the console flow must survive a legacy OEM codepage, so a
 /// plain hyphen stands where prose would take a dash.
@@ -674,14 +622,15 @@ fn hint_line(
     rule: HiddenRule,
     flag: &str,
 ) -> String {
-    let mut hidden: Vec<&PlaylistSummary> =
-        playlists.iter().filter(|playlist| filter.classify(playlist).contains(&rule)).collect();
+    let hidden: Vec<&str> = hidden_by(playlists, filter)
+        .into_iter()
+        .filter(|(_, rules)| rules.contains(&rule))
+        .map(|(playlist, _)| playlist.name.as_str())
+        .collect();
     if hidden.is_empty() {
         return String::new();
     }
-    hidden.sort_by(|a, b| presentation_cmp(a, b));
-    let named: Vec<&str> =
-        hidden.iter().take(HINT_NAMES).map(|playlist| playlist.name.as_str()).collect();
+    let named: Vec<&str> = hidden.iter().take(HINT_NAMES).copied().collect();
     let rest = hidden.len().saturating_sub(HINT_NAMES);
     let more = if rest == 0 { String::new() } else { format!(" and {rest} more") };
     format!(

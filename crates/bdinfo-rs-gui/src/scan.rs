@@ -1,9 +1,8 @@
 //! The scan seam — a picked folder or `.iso` → the structural playlist list and,
 //! after a selection, the measured report.
 //!
-//! Drives the identical `bdinfo-rs-core` API the CLI (`main.rs`) and the wasm
-//! crate use, dispatching folder vs `.iso` input exactly like the CLI's
-//! `scan_disc` (`FsDir` / `UdfSource` → [`BdRom::open_resilient_with`] →
+//! Drives the identical `bdinfo-rs-core` API the CLI and the wasm crate use
+//! ([`core_scan::open_folder`] / [`core_scan::open_iso`] →
 //! [`text::render_with`]). The pure formatting / selection / progress math is the
 //! Tier-A [`crate::model`] / `selection` / [`crate::progress`]; this
 //! module is the thin IO glue, verified by the golden-tie parity test (byte-exact
@@ -22,9 +21,7 @@ use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress
 use bdinfo_rs_core::bdrom::order::selection_order;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
-use bdinfo_rs_core::vfs::fs::FsDir;
-use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
-use bdinfo_rs_core::vfs::volume;
+use bdinfo_rs_core::scan as core_scan;
 
 /// The disc the user picked: a Blu-ray **folder** or a single `.iso` image.
 ///
@@ -36,7 +33,8 @@ pub enum Input {
     /// A disc folder: the disc root, its `BDMV` directory, or any directory
     /// inside it (the scan walks up to the disc root). The label is the
     /// directory name — or, when the disc root is a nameless Windows drive
-    /// root, the real UDF label recovered by [`volume::resolve_folder_label`].
+    /// root, the real UDF label
+    /// [`bdinfo_rs_core::vfs::volume::resolve_folder_label`] recovers.
     Folder(PathBuf),
     /// A single `.iso` image. The label is the real UDF volume label.
     Iso(PathBuf),
@@ -122,10 +120,11 @@ pub struct Measured {
     pub playlists: Vec<PlaylistSummary>,
 }
 
-/// Opens `input` at the given scan depth, merging the backend's recorded
-/// failures (filesystem enumeration, or `.iso` bad-sector recordings) into the
-/// scan's own. The shared body behind both entry points — the one place folder
-/// vs `.iso` input diverges, mirroring the CLI's `scan_disc`.
+/// Opens `input` at the given scan depth through the core's path-based scan,
+/// which merges the backend's own recorded failures (filesystem enumeration,
+/// or `.iso` bad-sector recordings) into the scan's and repairs a folder's
+/// label. This dispatch is the whole of what the two input kinds do
+/// differently here.
 fn open(
     input: &Input,
     mode: ScanMode,
@@ -133,28 +132,11 @@ fn open(
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
-    match input {
-        Input::Folder(path) => {
-            let root = FsDir::new(path);
-            let report = BdRom::open_resilient_with(&root, mode, scan_files, progress, cancel)?;
-            let mut errors = report.errors;
-            errors.extend(root.take_errors());
-            let mut bdrom = report.bdrom;
-            // A folder scan labels the disc after its root directory; a disc
-            // at a bare Windows drive root (`J:\`) has no such name — recover
-            // the real UDF label, exactly like the CLI's `scan_folder`.
-            bdrom.volume_label = volume::resolve_folder_label(&bdrom.volume_label);
-            Ok((bdrom, errors))
-        }
-        Input::Iso(path) => {
-            let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-            let report =
-                BdRom::open_resilient_with(&source.root(), mode, scan_files, progress, cancel)?;
-            let mut errors = report.errors;
-            errors.extend(source.take_errors());
-            Ok((report.bdrom, errors))
-        }
-    }
+    let report = match input {
+        Input::Folder(path) => core_scan::open_folder(path, mode, scan_files, progress, cancel),
+        Input::Iso(path) => core_scan::open_iso(path, mode, scan_files, progress, cancel),
+    }?;
+    Ok((report.bdrom, report.errors))
 }
 
 /// What one open of the disc yields: the scanned disc paired with the per-file
@@ -314,7 +296,9 @@ mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
-    use super::{BdRom, FsDir, Input, ScanMode};
+    use bdinfo_rs_core::vfs::fs::FsDir;
+
+    use super::{BdRom, Input, ScanMode};
 
     /// A scratch directory under the crate's target dir (unique per test).
     fn scratch(name: &str) -> PathBuf {
