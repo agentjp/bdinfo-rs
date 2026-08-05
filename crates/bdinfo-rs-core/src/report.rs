@@ -73,7 +73,11 @@ mod tests {
                 // `.txt` must match exactly, never case-insensitively).
                 let stem = name.strip_prefix("BDINFO.").and_then(|rest| rest.strip_suffix(".txt"));
                 prop_assert!(stem.is_some(), "the name keeps its fixed shape: {name}");
-                prop_assert!(!name.chars().any(|c| c.is_control() || ILLEGAL.contains(&c)));
+                // Two assertions, not one `||` predicate: the combined form's
+                // second operand is unreachable by the very property being
+                // asserted, so it would read as a permanently uncovered branch.
+                prop_assert!(!name.chars().any(char::is_control));
+                prop_assert!(!name.chars().any(|c| ILLEGAL.contains(&c)));
                 // Joining it onto a directory can never re-root the path.
                 prop_assert_eq!(std::path::Path::new(&name).components().count(), 1);
             }
