@@ -442,76 +442,53 @@ fn stream_tables(rows: &[&StreamSummary]) -> (String, String) {
         }
     }
 
-    if rows.iter().any(|s| s.stream_type.is_audio()) {
-        out.push_str("\r\nAUDIO:\r\n\r\n");
-        out.push_str(&kind_table_header());
-        for stream in rows.iter().copied().filter(|s| s.stream_type.is_audio()) {
-            let bitrate = format!("{:>5} kbps", kbps(stream.bitrate));
-            let _ = write!(
-                out,
-                "{:<32}{:<16}{:<16}{:<16}\r\n",
-                format!("{}{}", hidden_prefix(stream), stream.codec_name),
-                stream.language_name,
-                bitrate,
-                stream.full_description
-            );
-            let _ = write!(
-                summary,
-                "{:<16}{} / {} / {}\r\n",
-                format!("{}Audio:", hidden_prefix(stream)),
-                stream.language_name,
-                stream.codec_name,
-                stream.full_description
-            );
-        }
+    out.push_str(&kind_table(rows, "AUDIO", |s| s.stream_type.is_audio(), whole_kbps));
+    for stream in rows.iter().copied().filter(|s| s.stream_type.is_audio()) {
+        let _ = write!(
+            summary,
+            "{:<16}{} / {} / {}\r\n",
+            format!("{}Audio:", hidden_prefix(stream)),
+            stream.language_name,
+            stream.codec_name,
+            stream.full_description
+        );
     }
 
-    if rows.iter().any(|s| s.stream_type.is_graphics()) {
-        out.push_str("\r\nSUBTITLES:\r\n\r\n");
-        out.push_str(&kind_table_header());
-        for stream in rows.iter().copied().filter(|s| s.stream_type.is_graphics()) {
-            let bitrate = format!("{:>5} kbps", fixed_even(int_to_f64(stream.bitrate) / 1000.0, 2));
-            let _ = write!(
-                out,
-                "{:<32}{:<16}{:<16}{:<16}\r\n",
-                format!("{}{}", hidden_prefix(stream), stream.codec_name),
-                stream.language_name,
-                bitrate,
-                stream.full_description
-            );
-            let _ = write!(
-                summary,
-                "{:<16}{} / {}\r\n",
-                format!("{}Subtitle:", hidden_prefix(stream)),
-                stream.language_name,
-                bitrate.trim()
-            );
-        }
+    out.push_str(&kind_table(rows, "SUBTITLES", |s| s.stream_type.is_graphics(), cents_kbps));
+    for stream in rows.iter().copied().filter(|s| s.stream_type.is_graphics()) {
+        let _ = write!(
+            summary,
+            "{:<16}{} / {}\r\n",
+            format!("{}Subtitle:", hidden_prefix(stream)),
+            stream.language_name,
+            cents_kbps(stream).trim()
+        );
     }
 
-    if rows.iter().any(|s| s.stream_type.is_text()) {
-        out.push_str("\r\nTEXT:\r\n\r\n");
-        out.push_str(&kind_table_header());
-        for stream in rows.iter().copied().filter(|s| s.stream_type.is_text()) {
-            let bitrate = format!("{:>5} kbps", fixed_even(int_to_f64(stream.bitrate) / 1000.0, 2));
-            let _ = write!(
-                out,
-                "{:<32}{:<16}{:<16}{:<16}\r\n",
-                format!("{}{}", hidden_prefix(stream), stream.codec_name),
-                stream.language_name,
-                bitrate,
-                stream.full_description
-            );
-        }
-    }
+    out.push_str(&kind_table(rows, "TEXT", |s| s.stream_type.is_text(), cents_kbps));
 
     (out, summary)
 }
 
-/// The shared `Codec/Language/Bitrate/Description` header pair of the audio,
-/// subtitle, and text tables.
-fn kind_table_header() -> String {
+/// One `Codec/Language/Bitrate/Description` stream table — the `AUDIO`,
+/// `SUBTITLES` and `TEXT` blocks are the same four columns at the same widths,
+/// differing only in the `title` banner, the `keep` predicate selecting their
+/// rows, and how `bitrate` spells the rate cell. Empty (the block is omitted)
+/// when `keep` selects nothing.
+///
+/// The `Video:`/`Audio:`/`Subtitle:` summary lines stay at the call sites:
+/// they are three different shapes, and `TEXT` emits none.
+fn kind_table(
+    rows: &[&StreamSummary],
+    title: &str,
+    keep: fn(&StreamSummary) -> bool,
+    bitrate: fn(&StreamSummary) -> String,
+) -> String {
     let mut out = String::new();
+    if !rows.iter().any(|s| keep(s)) {
+        return out;
+    }
+    let _ = write!(out, "\r\n{title}:\r\n\r\n");
     let _ =
         write!(out, "{:<32}{:<16}{:<16}{:<16}\r\n", "Codec", "Language", "Bitrate", "Description");
     let _ = write!(
@@ -519,7 +496,29 @@ fn kind_table_header() -> String {
         "{:<32}{:<16}{:<16}{:<16}\r\n",
         "---------------", "-------------", "-------------", "-----------"
     );
+    for stream in rows.iter().copied().filter(|s| keep(s)) {
+        let _ = write!(
+            out,
+            "{:<32}{:<16}{:<16}{:<16}\r\n",
+            format!("{}{}", hidden_prefix(stream), stream.codec_name),
+            stream.language_name,
+            bitrate(stream),
+            stream.full_description
+        );
+    }
     out
+}
+
+/// The audio table's bitrate cell: whole kbps, as the classic report spells an
+/// audio rate.
+fn whole_kbps(stream: &StreamSummary) -> String {
+    format!("{:>5} kbps", kbps(stream.bitrate))
+}
+
+/// The subtitle and text tables' bitrate cell: kbps to two decimals — the rates
+/// are small enough that whole kbps would read as `0`.
+fn cents_kbps(stream: &StreamSummary) -> String {
+    format!("{:>5} kbps", fixed_even(int_to_f64(stream.bitrate) / 1000.0, 2))
 }
 
 /// The `* ` marker prefixed to a hidden stream's name and summary label.
