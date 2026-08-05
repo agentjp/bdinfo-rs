@@ -309,6 +309,20 @@ begin {
             Match      = { param($f) (Test-Match $f @('.github/scripts/gui-*.ps1')) }
         },
         @{
+            Name       = 'wasm gate script'
+            Areas      = @('wasm')
+            Structural = $true
+            Why        = 'The wasm workflow runs it directly, twice: the LICENSE/NOTICE parity check and the unsafe-token tripwire.'
+            Match      = { param($f) (Test-Match $f @('.github/scripts/wasm-*.ps1')) }
+        },
+        @{
+            Name       = 'coverage floor script'
+            Areas      = @('gui', 'wasm')
+            Structural = $true
+            Why        = 'Both sibling-crate workflows hand it their llvm-cov export, so it decides both coverage verdicts. The root workspace enforces its floors through cargo-llvm-cov''s own --fail-under flags and never reads this script.'
+            Match      = { param($f) $f -eq '.github/scripts/cov-floor.ps1' }
+        },
+        @{
             Name       = 'linux package script'
             Areas      = @('pkg')
             Structural = $true
@@ -489,6 +503,8 @@ end {
             @{ Path = '.github/workflows/gui.yml'; Areas = 'gui links typos workflows yaml' }
             @{ Path = '.github/workflows/docker.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
+            @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
+            @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }
             @{ Path = 'packaging/aur/PKGBUILD.template'; Areas = 'links typos' }
             @{ Path = 'Dockerfile'; Areas = 'links typos' }

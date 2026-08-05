@@ -365,23 +365,14 @@ jobs:
       - name: Coverage (llvm-cov nextest — Tier A 100% lines/regions/functions)
         working-directory: crates/bdinfo-rs-gui
         shell: pwsh
+        # The floor itself lives in the single-source .github/scripts/cov-floor.ps1
+        # the local gate runs too. No branch floor is passed — branch counts are
+        # platform-variant (see cov-floor.ps1).
         run: |
           $json = Join-Path $env:RUNNER_TEMP 'gui-cov.json'
           cargo "+$env:NIGHTLY" llvm-cov nextest --locked --no-tests=fail --json --output-path $json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $files = @((Get-Content -Raw $json | ConvertFrom-Json).data[0].files |
-              Where-Object { $_.filename -match 'bdinfo-rs-gui[\\/]src[\\/]' -and
-                  $_.filename -notmatch '[\\/]src[\\/](main|ui)\.rs$' })
-          if (-not $files.Count) { Write-Host 'no Tier-A src files in the coverage report'; exit 1 }
-          $fail = @()
-          foreach ($m in 'lines', 'regions', 'functions') {
-            $covered = (@($files | ForEach-Object { $_.summary.$m.covered }) | Measure-Object -Sum).Sum
-            $count = (@($files | ForEach-Object { $_.summary.$m.count }) | Measure-Object -Sum).Sum
-            $pct = if ($count) { 100.0 * $covered / $count } else { 100.0 }
-            Write-Host ("{0,-10}{1,7:N2}%  ({2}/{3})" -f $m, $pct, $covered, $count)
-            if ($covered -lt $count) { $fail += "$m $covered/$count" }
-          }
-          if ($fail.Count) { Write-Host "coverage below 100%: $($fail -join ', ')"; exit 1 }
+          ../../.github/scripts/cov-floor.ps1 -JsonPath $json -Label 'GUI coverage' -Include 'bdinfo-rs-gui[\\/]src[\\/]' -Exclude '[\\/]src[\\/](main|ui)\.rs$'
 
   # The declared MSRV is enforced, not decorative: build with exactly the
   # rust-version toolchain from Cargo.toml, read from the manifest at run time
