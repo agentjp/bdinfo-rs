@@ -1413,23 +1413,28 @@ impl TsStreamFile {
                         parser.pmt_assembler.transfer_state = true;
                     }
                 }
-                // `!= 0` rather than `> 0`: identical for a u16, but `> 0`'s
-                // `>= 0` mutant is equivalent (an idle-state drain wraps both
-                // countdowns in lockstep from 0 and self-heals) and so could
-                // never be killed; `!= 0`'s `== 0` mutant dies on any
-                // descriptor-bearing PMT.
-                SectionByte::Idle if parser.pmt_program_info_length != 0 => {
-                    // Program-info descriptors carry nothing the analysis reads;
-                    // only the byte consumption (positioning the stream entries)
-                    // matters.
-                    parser.pmt_assembler.section_length =
-                        parser.pmt_assembler.section_length.wrapping_sub(1);
-                    parser.pmt_program_info_length = parser.pmt_program_info_length.wrapping_sub(1);
-                    if parser.pmt_program_info_length == 0 {
-                        parser.pmt_assembler.transfer_state = true;
+                SectionByte::Idle => {
+                    // A body `if` spelled `!= 0`, not a `> 0` match guard: the
+                    // guard's replace-with-true mutant (like `> 0`'s `>= 0`)
+                    // is equivalent — at idle both countdowns are 0 and wrap
+                    // in lockstep, so a spurious drain fires only zero-length
+                    // pseudo-transfers that re-walk the stale section
+                    // idempotently — and so could never be killed. `!= 0`'s
+                    // `== 0` mutant dies on any descriptor-bearing PMT.
+                    if parser.pmt_program_info_length != 0 {
+                        // Program-info descriptors carry nothing the analysis
+                        // reads; only the byte consumption (positioning the
+                        // stream entries) matters.
+                        parser.pmt_assembler.section_length =
+                            parser.pmt_assembler.section_length.wrapping_sub(1);
+                        parser.pmt_program_info_length =
+                            parser.pmt_program_info_length.wrapping_sub(1);
+                        if parser.pmt_program_info_length == 0 {
+                            parser.pmt_assembler.transfer_state = true;
+                        }
                     }
                 }
-                SectionByte::Taken | SectionByte::Header(_) | SectionByte::Idle => {}
+                SectionByte::Taken | SectionByte::Header(_) => {}
             }
         }
     }
