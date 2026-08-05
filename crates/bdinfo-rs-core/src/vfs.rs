@@ -8,6 +8,10 @@
 //! Case-insensitive BDMV lookup is folded in here, done once and correctly and
 //! routed through [`crate::discovery`] — see [`find_directory`] and
 //! [`find_files`].
+//!
+//! [`volume`] sits beside the two backends rather than behind the pair: it is
+//! the one place that opens a raw volume device, and it does so to repair the
+//! *label* a folder scan derived, never to feed a parser bytes.
 
 use std::io::{self, BufRead, Read, Seek};
 
@@ -15,6 +19,7 @@ use crate::discovery::{BdFileKind, BdmvDir};
 
 pub mod fs;
 pub mod udf;
+pub mod volume;
 
 /// A readable, seekable byte stream — the return type of [`BdFile::open_read`].
 ///

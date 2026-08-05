@@ -165,9 +165,9 @@ workspace = true
 [workspace.lints.rust]
 unsafe_code = "forbid" # memory safety is the product guarantee — no unsafe here.
 # `cargo llvm-cov` sets cfg(coverage)/cfg(coverage_nightly) when instrumenting;
-# register them so the `#[cfg_attr(coverage_nightly, …)]` coverage-exclusion
-# attributes in `volume` don't trip `unexpected_cfgs` under the `-D warnings`
-# gate (mirrors the root workspace's declaration).
+# register them so a `#[cfg_attr(coverage_nightly, …)]` coverage-exclusion
+# attribute does not trip `unexpected_cfgs` under the `-D warnings` gate
+# (mirrors the root workspace's declaration).
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
 
 [workspace.lints.clippy]
