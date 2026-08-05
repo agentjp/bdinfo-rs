@@ -942,46 +942,22 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
+    use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, fixtures};
 
     use super::{Flow, Stage};
     use crate::model::{Sort, SortColumn, ViewSettings};
     use crate::scan::{Input, Structural};
 
-    fn clip(name: &str) -> ClipSummary {
-        ClipSummary {
-            name: name.to_owned(),
-            display_name: name.to_owned(),
-            file_size: 0,
-            interleaved_file_size: 0,
-            angle_index: 0,
-            relative_time_in: 0.0,
-            length: 0.0,
-            payload_bytes: 0,
-            packet_count: 0,
-            packet_seconds: 0.0,
-            file_seconds: 0.0,
-            streams: Vec::new(),
-        }
-    }
-
     fn playlist(name: &str, length: f64, clips: &[&str]) -> PlaylistSummary {
         playlist_sized(name, length, 1000, clips)
     }
 
+    /// A playlist with a name, a length, an estimated `*.m2ts` size, and clips
+    /// carrying a name only — nothing here reads their lengths.
     fn playlist_sized(name: &str, length: f64, file_size: u64, clips: &[&str]) -> PlaylistSummary {
         PlaylistSummary {
-            name: name.to_owned(),
-            total_length: length,
             file_size,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
-            has_loops: false,
-            streams: Vec::new(),
-            clips: clips.iter().map(|c| clip(c)).collect(),
-            chapters: Vec::new(),
+            ..fixtures::playlist(name, length, fixtures::clips(clips, 0.0))
         }
     }
 

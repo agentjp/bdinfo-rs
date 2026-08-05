@@ -131,7 +131,7 @@ fn bitrate_cell(bits_per_second: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary};
+    use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary, fixtures};
     use bdinfo_rs_core::primitives::Pid;
     use bdinfo_rs_core::stream::TsStreamType;
 
@@ -152,18 +152,11 @@ mod tests {
         interleaved_file_size: u64,
     ) -> ClipSummary {
         ClipSummary {
-            name: name.to_owned(),
-            display_name: name.to_owned(),
             file_size,
             interleaved_file_size,
             angle_index,
-            relative_time_in: 0.0,
-            length,
-            payload_bytes: 0,
             packet_count,
-            packet_seconds: 0.0,
-            file_seconds: 0.0,
-            streams: Vec::new(),
+            ..fixtures::clip(name, length)
         }
     }
 
@@ -195,25 +188,21 @@ mod tests {
     /// A two-clip, two-stream playlist (the fields the panes read).
     fn playlist() -> PlaylistSummary {
         PlaylistSummary {
-            name: "00000.MPLS".to_owned(),
-            total_length: 130.0,
-            file_size: 0,
-            interleaved_file_size: 0,
-            chapter_count: 0,
             stream_count: 2,
-            angle_count: 0,
-            has_loops: false,
             streams: vec![
                 stream("MPEG-4 AVC Video", "", 0, "1080p / 23.976 fps / 16:9"),
                 stream("DTS-HD Master Audio", "English", 3_948_000, "5.1 / 48 kHz / 24-bit"),
             ],
-            clips: vec![
-                // A plain clip: a 500 KB `*.m2ts`, 1000 packets demuxed.
-                sized_clip("00000.M2TS", 0, 100.0, 1000, 500_000, 0),
-                // No file on disk, nothing demuxed yet: both sizes unknown.
-                clip("00001.M2TS", 0, 30.0, 0),
-            ],
-            chapters: Vec::new(),
+            ..fixtures::playlist(
+                "00000.MPLS",
+                130.0,
+                vec![
+                    // A plain clip: a 500 KB `*.m2ts`, 1000 packets demuxed.
+                    sized_clip("00000.M2TS", 0, 100.0, 1000, 500_000, 0),
+                    // No file on disk, nothing demuxed yet: both sizes unknown.
+                    clip("00001.M2TS", 0, 30.0, 0),
+                ],
+            )
         }
     }
 

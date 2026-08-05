@@ -28,6 +28,13 @@ doctest = false
 [lints]
 workspace = true
 
+# Off by default: a normal build compiles none of it. `test-fixtures` exposes
+# `bdrom::disc::fixtures`, the constructors that build a `PlaylistSummary` or
+# `ClipSummary` from the few fields a test varies — the only way the crates that
+# consume this one (which cannot see its `#[cfg(test)]` code) can share them.
+[features]
+test-fixtures = []
+
 [dependencies]
 roxmltree = { workspace = true }
 thiserror = { workspace = true }

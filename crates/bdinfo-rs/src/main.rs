@@ -1004,7 +1004,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
-    use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, ScanProgress};
+    use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress, fixtures};
     use bdinfo_rs_core::bdrom::order::{PlaylistFilter, table_rows};
     use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
     use bdinfo_rs_core::report::text::RenderOptions;
@@ -1746,37 +1746,10 @@ Options:
         assert!(line.starts_with("Scanning 100% - 00000.M2TS"));
     }
 
-    /// A playlist summary carrying only what the selection flow reads.
+    /// A playlist summary carrying only what the selection flow reads: name,
+    /// total length, and its clip names (each clip as long as the playlist).
     fn summary(name: &str, total_length: f64, clips: &[&str]) -> PlaylistSummary {
-        PlaylistSummary {
-            name: name.to_owned(),
-            total_length,
-            file_size: 0,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
-            has_loops: false,
-            streams: Vec::new(),
-            clips: clips
-                .iter()
-                .map(|clip| ClipSummary {
-                    name: (*clip).to_owned(),
-                    display_name: (*clip).to_owned(),
-                    file_size: 0,
-                    interleaved_file_size: 0,
-                    angle_index: 0,
-                    relative_time_in: 0.0,
-                    length: total_length,
-                    payload_bytes: 0,
-                    packet_count: 0,
-                    packet_seconds: 0.0,
-                    file_seconds: 0.0,
-                    streams: Vec::new(),
-                })
-                .collect(),
-            chapters: Vec::new(),
-        }
+        fixtures::playlist(name, total_length, fixtures::clips(clips, total_length))
     }
 
     #[test]

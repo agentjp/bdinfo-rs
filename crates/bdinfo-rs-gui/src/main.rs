@@ -3424,7 +3424,7 @@ async fn pick_iso() -> Option<PathBuf> {
 mod harness {
     use std::path::PathBuf;
 
-    use bdinfo_rs_core::bdrom::disc::{BdRom, ClipSummary, PlaylistSummary};
+    use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, fixtures};
     use bdinfo_rs_gui::flow::Flow;
     use bdinfo_rs_gui::model::ViewSettings;
     use bdinfo_rs_gui::scan::{Input, Structural};
@@ -3432,38 +3432,12 @@ mod harness {
 
     use super::{App, Message};
 
-    /// A `ClipSummary` carrying just a name (what the panes read here).
-    fn clip(name: &str) -> ClipSummary {
-        ClipSummary {
-            name: name.to_owned(),
-            display_name: name.to_owned(),
-            file_size: 0,
-            interleaved_file_size: 0,
-            angle_index: 0,
-            relative_time_in: 0.0,
-            length: 0.0,
-            payload_bytes: 0,
-            packet_count: 0,
-            packet_seconds: 0.0,
-            file_seconds: 0.0,
-            streams: Vec::new(),
-        }
-    }
-
-    /// A `PlaylistSummary` with a name, length, estimated size, and clips.
+    /// A `PlaylistSummary` with a name, length, estimated size, and clips
+    /// carrying a name only (what the panes read here).
     fn playlist(name: &str, length: f64, file_size: u64, clips: &[&str]) -> PlaylistSummary {
         PlaylistSummary {
-            name: name.to_owned(),
-            total_length: length,
             file_size,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
-            has_loops: false,
-            streams: Vec::new(),
-            clips: clips.iter().map(|c| clip(c)).collect(),
-            chapters: Vec::new(),
+            ..fixtures::playlist(name, length, fixtures::clips(clips, 0.0))
         }
     }
 

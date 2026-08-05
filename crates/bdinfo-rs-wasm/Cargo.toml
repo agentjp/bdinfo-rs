@@ -44,6 +44,9 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Blob", "File", "FileReaderSync"] }
 
 [dev-dependencies]
+# The analyzer library again, with the feature that exposes its summary
+# constructors (`bdinfo_rs_core::bdrom::disc::fixtures`) to the tests here.
+bdinfo-rs-core = { path = "../bdinfo-rs-core", features = ["test-fixtures"] }
 wasm-bindgen-test = "0.3"
 # The native stand-in for the browser serializer: the mirror wire-format tests
 # assert property names and value shapes, which are the same whichever

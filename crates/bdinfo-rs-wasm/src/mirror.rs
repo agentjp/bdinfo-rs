@@ -988,7 +988,7 @@ mod tests {
 
     use bdinfo_rs_core::bdrom::chapters::ChapterSummary;
     use bdinfo_rs_core::bdrom::disc::{
-        BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, ScanMode, StreamSummary,
+        BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, ScanMode, StreamSummary, fixtures,
     };
     use bdinfo_rs_core::bdrom::order::PlaylistFilter;
     use bdinfo_rs_core::error;
@@ -1399,20 +1399,24 @@ mod tests {
     }
 
     /// The [`ClipSummary`] whose mirror is [`a_clip`].
+    ///
+    /// Every field is spelled with a value distinct from every other field's,
+    /// including the two the constructor already sets to them: the round-trip
+    /// test rebuilds this value through the mirror, so a field wired to the
+    /// wrong counterpart surfaces as an inequality rather than as a coincidence.
     fn a_core_clip() -> ClipSummary {
         ClipSummary {
-            name: "00001.M2TS".to_owned(),
             display_name: "00001.SSIF".to_owned(),
             file_size: 12,
             interleaved_file_size: 13,
             angle_index: 14,
             relative_time_in: 15.5,
-            length: 16.25,
             payload_bytes: 17,
             packet_count: 18,
             packet_seconds: 19.5,
             file_seconds: 20.5,
             streams: vec![a_core_clip_stream()],
+            ..fixtures::clip("00001.M2TS", 16.25)
         }
     }
 
@@ -1434,11 +1438,10 @@ mod tests {
         }
     }
 
-    /// The [`PlaylistSummary`] whose mirror is [`a_playlist`].
+    /// The [`PlaylistSummary`] whose mirror is [`a_playlist`] — every field
+    /// distinctly valued, for the reason [`a_core_clip`] records.
     fn a_core_playlist() -> PlaylistSummary {
         PlaylistSummary {
-            name: "00000.MPLS".to_owned(),
-            total_length: 3.5,
             file_size: 4,
             interleaved_file_size: 5,
             chapter_count: 6,
@@ -1446,8 +1449,8 @@ mod tests {
             angle_count: 8,
             has_loops: true,
             streams: vec![a_core_stream()],
-            clips: vec![a_core_clip()],
             chapters: vec![a_core_chapter()],
+            ..fixtures::playlist("00000.MPLS", 3.5, vec![a_core_clip()])
         }
     }
 
