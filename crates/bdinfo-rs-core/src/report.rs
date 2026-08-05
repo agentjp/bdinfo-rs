@@ -15,10 +15,11 @@ pub mod text;
 /// identical everywhere.
 const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
-/// The report's save-file name for a disc labelled `label`: `BDINFO.<stem>.txt`,
-/// the stem being `label` with each illegal or control character replaced by
-/// `_`. A clean label — a folder name, a `.iso` volume identifier, a resolved
-/// drive label — passes through unchanged.
+/// The report's save-file name for a disc labelled `label`: `BDINFO.<stem>.txt`.
+///
+/// The stem is `label` with each illegal or control character replaced by `_`.
+/// A clean label — a folder name, a `.iso` volume identifier, a resolved drive
+/// label — passes through unchanged.
 ///
 /// The disc controls its own label bytes and a caller may save without a user in
 /// the loop, so the result is always **one flat path component**: a label

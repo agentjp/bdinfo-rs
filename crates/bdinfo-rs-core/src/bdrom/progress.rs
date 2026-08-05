@@ -15,7 +15,9 @@
 use std::time::Duration;
 
 /// The `(percent, elapsed seconds, remaining seconds)` triple a progress line
-/// draws, from the bytes read so far, the bytes the pass will read, and the
+/// draws.
+///
+/// Derived from the bytes read so far, the bytes the pass will read, and the
 /// wall time since it started.
 ///
 /// The percent is the byte ratio; a scan with nothing to read (`total == 0`)

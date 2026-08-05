@@ -151,9 +151,11 @@ impl PlaylistSummary {
         self.streams.iter().any(|stream| stream.is_hidden)
     }
 
-    /// The playlist's *estimated* (on-disk, unmeasured) size in bytes: the
-    /// interleaved `*.ssif` total when the playlist has one, else the `*.m2ts`
-    /// total, else `None` — neither file is present, or none has a size.
+    /// The playlist's *estimated* (on-disk, unmeasured) size in bytes.
+    ///
+    /// The interleaved `*.ssif` total when the playlist has one, else the
+    /// `*.m2ts` total, else `None` — neither file is present, or none has a
+    /// size.
     ///
     /// The interleaved total wins because an `*.ssif` already contains its
     /// playlist's `*.m2ts` bytes; adding the two would double-count. How an
@@ -213,8 +215,10 @@ impl PlaylistSummary {
 }
 
 /// The footnote a playlist listing prints when any listed playlist reports
-/// [`PlaylistSummary::has_hidden_streams`] — the classic `BDInfo` wording,
-/// explaining the `*` those playlists are marked with.
+/// [`PlaylistSummary::has_hidden_streams`].
+///
+/// The classic `BDInfo` wording, explaining the `*` those playlists are marked
+/// with.
 ///
 /// A surface with no room for a footnote need not show it, but one that does
 /// must show this text: the mark and its explanation are one contract.
@@ -282,9 +286,10 @@ impl ClipSummary {
         rate_over(self.packet_size(), self.packet_seconds)
     }
 
-    /// The clip's *estimated* (on-disk, unmeasured) size in bytes — the
-    /// interleaved `*.ssif` size when the clip has one, else the `*.m2ts` size,
-    /// else `None` (the file is absent). The per-clip form of
+    /// The clip's *estimated* (on-disk, unmeasured) size in bytes.
+    ///
+    /// The interleaved `*.ssif` size when the clip has one, else the `*.m2ts`
+    /// size, else `None` (the file is absent) — the per-clip form of
     /// [`PlaylistSummary::estimated_bytes`], with the same preference and the
     /// same reason for it.
     #[must_use]

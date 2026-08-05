@@ -125,9 +125,10 @@ impl PlaylistFilter {
 }
 
 /// Compares two playlists in presentation order: total length descending,
-/// then name ascending (ordinal byte order). A non-comparable length pair
-/// (NaN, impossible for parsed playlists) falls through to the name, mirroring
-/// a `>`-based three-way comparison.
+/// then name ascending (ordinal byte order).
+///
+/// A non-comparable length pair (NaN, impossible for parsed playlists) falls
+/// through to the name, mirroring a `>`-based three-way comparison.
 ///
 /// Public because a surface that lists playlists *outside* the presentation
 /// order — the hidden-playlist lines, which name what the filter withheld —

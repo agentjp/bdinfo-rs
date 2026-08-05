@@ -341,8 +341,9 @@ fn extension_of(path: &Path) -> String {
     }
 }
 
-/// ASCII case-insensitive glob match of `name` against `pattern`, where `*`
-/// matches any run (including empty) and `?` matches exactly one byte. One
+/// ASCII case-insensitive glob match of `name` against `pattern`.
+///
+/// `*` matches any run (including empty) and `?` matches exactly one byte. One
 /// case-folded pass finds `*.mpls` and `*.MPLS` spellings alike.
 ///
 /// Shared with the UDF backend ([`super::udf`]) so `.iso` and folder input
