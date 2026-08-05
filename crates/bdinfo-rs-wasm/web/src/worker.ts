@@ -25,11 +25,11 @@ import init, {
 
 /**
  * The playlist-classification threshold a scanning request carries: the length
- * under which a playlist counts as short. Zero means the wasm module's 20 s
- * default.
+ * under which a playlist counts as short. Absent means the wasm module's 20 s
+ * default; zero switches the short rule off.
  */
 interface ClassifyOptions {
-  shortPlaylistSeconds: number;
+  shortPlaylistSeconds: number | undefined;
 }
 
 /**

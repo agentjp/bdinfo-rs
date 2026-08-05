@@ -86,7 +86,8 @@ export interface ScanOptions {
   selection?: string[];
   /**
    * The length in seconds under which a playlist counts as short, defaulting to
-   * 20. Zero or less means that default.
+   * 20 when omitted. Zero switches the short rule off, since no playlist is
+   * shorter than zero seconds; a negative or non-finite value means the default.
    *
    * Read by {@link inspect} and {@link scan}, both of which classify every
    * playlist against it and report the outcome in {@link Playlist.hiddenBy}.
@@ -149,11 +150,12 @@ function payload(files: BdmvFile[]): { paths: string[]; files: File[] } {
 }
 
 /**
- * The playlist-classification threshold a scanning request carries. Zero is how
- * the WebAssembly module spells "use the 20 s default".
+ * The playlist-classification threshold a scanning request carries. An omitted
+ * one is forwarded as `undefined`, which is how the WebAssembly module spells
+ * "use the 20 s default" — zero means the caller switched the short rule off.
  */
-function classifyOptions(options?: ScanOptions): { shortPlaylistSeconds: number } {
-  return { shortPlaylistSeconds: options?.shortPlaylistSeconds ?? 0 };
+function classifyOptions(options?: ScanOptions): { shortPlaylistSeconds: number | undefined } {
+  return { shortPlaylistSeconds: options?.shortPlaylistSeconds };
 }
 
 /**

@@ -178,8 +178,10 @@ async function main() {
   const measuredShort = scan_files(shortPaths, shortFiles, [], undefined, true, true, 5).disc;
   const thresholdOk =
     classify(standard) === '["00000.MPLS:","00001.MPLS:short"]' &&
+    // A zero threshold switches the short rule off: nothing is shorter than
+    // zero seconds, so neither playlist is withheld.
     classify(inspect_files(shortPaths, shortFiles, 0).playlists) ===
-      '["00000.MPLS:","00001.MPLS:short"]' &&
+      '["00000.MPLS:","00001.MPLS:"]' &&
     classify(lowered) === '["00000.MPLS:","00001.MPLS:"]' &&
     numbering(standard) === "[[1,1],[1,2]]" &&
     numbering(lowered) === "[[1,1],[1,2]]" &&

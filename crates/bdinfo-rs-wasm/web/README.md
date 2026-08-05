@@ -153,6 +153,10 @@ playlist is judged against it:
 const disc = await inspect(picked, { shortPlaylistSeconds: 5 });
 ```
 
+It defaults to 20 seconds when omitted. Zero switches the short rule off — no
+playlist is shorter than zero seconds — so no `Disc` from that call names
+`"short"` in its `hiddenBy`.
+
 Nothing else moves with it: which playlists a `Disc` holds, which ones a
 `selection` measures, and the rendered report are the same either way.
 
