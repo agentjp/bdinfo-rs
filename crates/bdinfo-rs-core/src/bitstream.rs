@@ -27,12 +27,24 @@
 //! read whose `skip_bits + bits` exceeds that span yields the in-window bits
 //! followed by **zero** tail bits: all three carry an explicit in-window index
 //! guard, and none of them reads further into the stream, so the true
-//! downstream bits are never returned. The rule is latent in-tree — every
-//! *full-width* call site is byte-aligned, and the unaligned callers are all
-//! sub-width (`hevc` reads a 6-bit `nal_unit_type` one bit into the NAL header;
-//! `ac3`'s EMDF sync search reads 16 bits per iteration while advancing one bit
-//! at a time), so no current read reaches its tail. A new unaligned full-width
-//! caller would get zeros where it expects stream bits.
+//! downstream bits are never returned. The condition is
+//! `skip_bits + bits > window width`, not `bits < width`: a 12-bit
+//! [`read_bits2`](TsStreamBuffer::read_bits2) at bit offset 5 reaches its tail.
+//!
+//! Two in-tree paths do reach it, neither observably.
+//! [`bs_skip_bits`](TsStreamBuffer::bs_skip_bits) reaches it routinely on
+//! well-formed streams — it chops a skip into 16-bit `read_bits2` calls from
+//! whatever bit offset it starts at — but discards every value, and the cursor
+//! advance is computed from the requested `bits` alone.
+//! [`read_exp`](TsStreamBuffer::read_exp) reaches it with a *used* value when an
+//! Exp-Golomb code carries 33 or more leading zeros, which it passes straight to
+//! [`read_bits4`](TsStreamBuffer::read_bits4); no conforming H.264/H.265 stream
+//! can, since such a code encodes a value around 2^33 — far outside every field
+//! these parsers decode. (Verified 2026-08-05 by computing the pre-guard wrapping
+//! result alongside the zero-filled one in both readers and asserting they agree,
+//! `bs_skip_bits` excluded: the whole test suite's only disagreement came from
+//! `hevc`'s malformed-SPS fixture, through `read_exp`.) A new unaligned
+//! full-width caller would get zeros where it expects stream bits.
 
 /// Fixed capacity of the backing byte buffer — the 5 MiB logical window.
 /// [`add`]
@@ -285,19 +297,20 @@ impl TsStreamBuffer {
         value
     }
 
-    /// Loads up to four bytes from the cursor, big-endian, into the low-to-high
-    /// bytes of a `u32` (`b0 << 24 | b1 << 16 | b2 << 8 | b3`) — the four-byte
-    /// shift-accumulate window shared by [`read_bits4`](Self::read_bits4)
-    /// and [`read_bits8`](Self::read_bits8).
+    /// Loads up to `bytes` bytes from the cursor, big-endian, into the top-down
+    /// bytes of a `u32` (for `bytes = 4`, `b0 << 24 | b1 << 16 | b2 << 8 | b3`;
+    /// for `bytes = 2`, `b0 << 8 | b1`) — the shift-accumulate window every
+    /// `read_bits*` reader loads. A byte the buffer does not reach is not read at
+    /// all, so its place in the window stays zero.
     ///
     /// The in-bounds test deliberately uses the *original* `pos` (`pos + i`) —
     /// so the loop count is governed by `pos` while the reads
     /// continue from the advancing cursor; [`read_bits8`](Self::read_bits8) relies
     /// on that quirk by passing the same `pos` to both of its loads.
-    fn load_be_word(&mut self, pos: usize, skip_h26x_emulation_byte: bool) -> u32 {
-        let mut shift: u32 = 24;
+    fn load_be_bytes(&mut self, pos: usize, bytes: usize, skip_h26x_emulation_byte: bool) -> u32 {
+        let mut shift = u32::try_from(bytes).unwrap_or(0).saturating_sub(1).wrapping_mul(8);
         let mut data: u32 = 0;
-        for i in 0..4_usize {
+        for i in 0..bytes {
             if pos.saturating_add(i) >= self.buffer.len() {
                 break;
             }
@@ -306,6 +319,26 @@ impl TsStreamBuffer {
             shift = shift.wrapping_sub(8);
         }
         data
+    }
+
+    /// Reads bytes from the cursor until the last four form `sync`, and reports
+    /// whether they did.
+    ///
+    /// The rolling 32-bit window advances one byte per step over at most
+    /// [`length`](Self::length) bytes, so the hunt is bounded and leaves the
+    /// cursor just past the sync word it found (at the end of the content
+    /// otherwise). Emulation-prevention is not honoured — the audio codecs that
+    /// hunt for a sync word carry no RBSP.
+    #[must_use]
+    pub fn find_sync32(&mut self, sync: u32) -> bool {
+        let mut window: u32 = 0;
+        for _ in 0..self.length() {
+            window = window.wrapping_shl(8).wrapping_add(u32::from(self.read_byte(false)));
+            if window == sync {
+                return true;
+            }
+        }
+        false
     }
 
     /// Reads up to 16 bits MSB-first into a `u16`.
@@ -318,16 +351,7 @@ impl TsStreamBuffer {
     pub fn read_bits2(&mut self, bits: usize, skip_h26x_emulation_byte: bool) -> u16 {
         let pos = self.position;
         self.skipped_bytes = 0;
-        let mut shift: u32 = 8;
-        let mut data: u32 = 0;
-        for i in 0..2_usize {
-            if pos.saturating_add(i) >= self.buffer.len() {
-                break;
-            }
-            let byte = u32::from(self.read_byte(skip_h26x_emulation_byte));
-            data = data.wrapping_add(byte.wrapping_shl(shift));
-            shift = shift.wrapping_sub(8);
-        }
+        let data = self.load_be_bytes(pos, 2, skip_h26x_emulation_byte);
         let count = i32::try_from(bits).unwrap_or(i32::MAX);
         let end = self.skip_bits.wrapping_add(count);
         let mut value: u16 = 0;
@@ -356,7 +380,7 @@ impl TsStreamBuffer {
     pub fn read_bits4(&mut self, bits: usize, skip_h26x_emulation_byte: bool) -> u32 {
         let pos = self.position;
         self.skipped_bytes = 0;
-        let data = self.load_be_word(pos, skip_h26x_emulation_byte);
+        let data = self.load_be_bytes(pos, 4, skip_h26x_emulation_byte);
         let count = i32::try_from(bits).unwrap_or(i32::MAX);
         let end = self.skip_bits.wrapping_add(count);
         let mut value: u32 = 0;
@@ -383,8 +407,8 @@ impl TsStreamBuffer {
     pub fn read_bits8(&mut self, bits: usize, skip_h26x_emulation_byte: bool) -> u64 {
         let pos = self.position;
         self.skipped_bytes = 0;
-        let data = self.load_be_word(pos, skip_h26x_emulation_byte);
-        let data2 = self.load_be_word(pos, skip_h26x_emulation_byte);
+        let data = self.load_be_bytes(pos, 4, skip_h26x_emulation_byte);
+        let data2 = self.load_be_bytes(pos, 4, skip_h26x_emulation_byte);
         let window = u64::from(data).wrapping_shl(32).wrapping_add(u64::from(data2));
         let count = i32::try_from(bits).unwrap_or(i32::MAX);
         let end = self.skip_bits.wrapping_add(count);
@@ -863,6 +887,24 @@ mod tests {
         assert_eq!(b.read_bits2(8, false), 0xAC);
         let mut b = buf(&[0x12, 0x34]);
         assert_eq!(b.read_bits2(16, false), 0x1234);
+    }
+
+    #[test]
+    fn find_sync32_stops_just_past_the_word_it_finds() {
+        // The sync word starts at byte 2, so the cursor lands on byte 6.
+        let mut b = buf(&[0x11, 0x22, 0xDE, 0xAD, 0xBE, 0xEF, 0x99]);
+        assert!(b.find_sync32(0xDEAD_BEEF));
+        assert_eq!(b.position(), 6);
+        assert_eq!(b.read_byte(false), 0x99);
+
+        // A buffer holding only the first three bytes of the word never matches,
+        // and the hunt stops at the end of the content.
+        let mut b = buf(&[0xDE, 0xAD, 0xBE]);
+        assert!(!b.find_sync32(0xDEAD_BEEF));
+        assert_eq!(b.position(), 3);
+
+        // An empty buffer runs the loop zero times.
+        assert!(!buf(&[]).find_sync32(0xDEAD_BEEF));
     }
 
     #[test]

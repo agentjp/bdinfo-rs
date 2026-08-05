@@ -42,7 +42,36 @@ pub mod truehd;
 pub mod vc1;
 
 use crate::bitstream::TsStreamBuffer;
-use crate::stream::{TsStream, TsStreamType};
+use crate::stream::{TsAudioStream, TsStream, TsStreamType};
+
+/// Scans the access unit in `buffer` as `stream`'s embedded legacy core,
+/// creating that core stream (of type `core_type`) on first sight and handing it
+/// to `scan_core`.
+///
+/// The two HD audio codecs that wrap a backward-compatible core ([`truehd`] over
+/// AC-3, [`dts_hd`] over DTS) call this for an access unit that carries no HD
+/// sync word. `buffer` is rewound first, and that rewind is what makes the
+/// delegation correct: the caller has already consumed the access unit hunting
+/// for its sync word, and the core scanner expects the buffer from offset 0.
+/// A core already initialized is left alone — one decoded core frame is enough.
+pub(crate) fn scan_embedded_core(
+    stream: &mut TsAudioStream,
+    buffer: &mut TsStreamBuffer,
+    core_type: TsStreamType,
+    scan_core: impl FnOnce(&mut TsAudioStream, &mut TsStreamBuffer),
+) {
+    if stream.core_stream.is_none() {
+        let mut core = TsAudioStream::default();
+        core.base.stream_type = core_type;
+        stream.core_stream = Some(Box::new(core));
+    }
+    if let Some(core) = stream.core_stream.as_mut()
+        && !core.base.is_initialized
+    {
+        buffer.begin_read();
+        scan_core(core, buffer);
+    }
+}
 
 /// Decodes one assembled access-unit `buffer` into `stream`, dispatching by stream
 /// type to the matching codec scanner.

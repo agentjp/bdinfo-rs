@@ -11,8 +11,8 @@
 //!   top-level read error still propagates as `Err`. Directory-ness comes from the listing's own
 //!   [`file_type`](std::fs::DirEntry::file_type) (no extra follow-stat per entry — one fewer
 //!   failure point on flaky media).
-//! - The extension ([`extension_of`]) is the text after the last `.` verbatim (a lone `.` for a
-//!   trailing-dot name); no further path normalization is applied.
+//! - The extension ([`extension_of`]) is derived from the final path component by the
+//!   backend-shared [`extension_of_name`]; no further path normalization is applied.
 //! - The full name ([`full_name_of`]) is the path as opened, not canonicalized to a rooted absolute
 //!   path.
 
@@ -21,7 +21,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::{BdDir, BdFile, ReadSeek, SearchOption};
+use super::{BdDir, BdFile, ReadSeek, SearchOption, extension_of_name};
 use crate::error::{BdError, ScanError, ScanStage};
 
 /// A file backed by [`std::fs`] — the [`BdFile`] implementation for folder
@@ -328,17 +328,13 @@ fn full_name_of(path: &Path) -> String {
 }
 
 /// The extension *including* the leading dot, e.g. `.mpls`; the empty string
-/// when there is no name or no `.` in it. The text after the last `.` is
-/// returned verbatim (a lone `.` for a trailing-dot name like `00000.`); no
-/// further path normalization is applied.
+/// when the path has no final component. The name itself is handed to
+/// [`extension_of_name`], the rule both backends share.
 fn extension_of(path: &Path) -> String {
     let Some(name) = path.file_name() else {
         return String::new();
     };
-    match name.to_string_lossy().rsplit_once('.') {
-        Some((_, ext)) => format!(".{ext}"),
-        None => String::new(),
-    }
+    extension_of_name(&name.to_string_lossy())
 }
 
 /// ASCII case-insensitive glob match of `name` against `pattern`.

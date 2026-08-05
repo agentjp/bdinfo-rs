@@ -57,7 +57,7 @@ use super::{
 };
 use crate::error::{BdError, ScanError, ScanStage};
 use crate::vfs::fs::glob_ci;
-use crate::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
+use crate::vfs::{BdDir, BdFile, ReadSeek, SearchOption, extension_of_name};
 
 /// The Anchor Volume Descriptor Pointer's fixed logical sector (ECMA-167 §3/10.2).
 const ANCHOR_SECTOR: u64 = 256;
@@ -418,7 +418,7 @@ impl UdfDir {
                 inner: Arc::clone(&self.inner),
                 name: node.name.clone(),
                 full_name: node.full_name.clone(),
-                extension: extension_of(&node.name),
+                extension: extension_of_name(&node.name),
                 body: Arc::clone(body),
             }),
             NodeKind::Dir => None,
@@ -524,9 +524,8 @@ pub struct UdfFile {
     name: String,
     /// The synthesized full path.
     full_name: String,
-    /// The extension including the leading dot, or empty (derived from the name
-    /// exactly as the folder backend derives it, so the `.SSIF` disc-size skip
-    /// is identical).
+    /// The extension including the leading dot, or empty — derived by the
+    /// backend-shared [`extension_of_name`].
     extension: String,
     /// The shared size + content.
     body: Arc<FileBody>,
@@ -747,16 +746,6 @@ impl Seek for EmbeddedReader {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         self.pos = seek_within(self.pos, self.length, from)?;
         Ok(self.pos)
-    }
-}
-
-/// The extension *including* the leading dot (e.g. `.SSIF`), or the empty string
-/// when `name` has no `.` — derived exactly as the folder backend derives it, so
-/// the disc-size `.SSIF` skip behaves identically over either input.
-fn extension_of(name: &str) -> String {
-    match name.rsplit_once('.') {
-        Some((_, ext)) => format!(".{ext}"),
-        None => String::new(),
     }
 }
 
@@ -1200,10 +1189,7 @@ const AED_AD_START: usize = 24;
 /// descriptors. The declared `L_AD` bounds the descriptors (slack bytes past it
 /// are not descriptors), clamped to the block.
 fn aed_allocation_area(area: &[u8]) -> Option<&[u8]> {
-    let tag = Tag::parse(area, 0)?;
-    if tag.identifier != TAG_ALLOCATION_EXTENT {
-        return None;
-    }
+    Tag::expect(area, TAG_ALLOCATION_EXTENT)?;
     let l_ad = as_offset(u32_le(area, AED_L_AD_OFFSET)?);
     let end = AED_AD_START.saturating_add(l_ad).min(area.len());
     area.get(AED_AD_START..end)
@@ -1673,9 +1659,9 @@ mod tests {
     use super::{
         BdDir, BdFile, Content, EmbeddedReader, ExtentKind, FileEntry, IsoReader, Limits, Node,
         NodeKind, PartitionLoc, PathIso, Run, UdfDir, UdfFileReader, UdfInner, UdfSource, Volume,
-        build_tree, collect_extents, directory_bytes, expand_directory, extension_of, extent_runs,
-        file_body, metadata_runs, metadata_sector, offset_by, parse_volume, read_runs,
-        resolve_partitions, resolve_sector,
+        build_tree, collect_extents, directory_bytes, expand_directory, extent_runs, file_body,
+        metadata_runs, metadata_sector, offset_by, parse_volume, read_runs, resolve_partitions,
+        resolve_sector,
     };
     use crate::error::ScanStage;
     use crate::vfs::SearchOption;
@@ -3382,14 +3368,6 @@ mod tests {
     }
 
     // ── Pure helpers ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn extension_of_handles_dotted_and_bare_names() {
-        assert_eq!(extension_of("00000.MPLS"), ".MPLS");
-        assert_eq!(extension_of("a.b.ssif"), ".ssif");
-        assert_eq!(extension_of("README"), "");
-        assert_eq!(extension_of("trailing."), ".");
-    }
 
     #[test]
     fn offset_by_clamps_and_overflows() {

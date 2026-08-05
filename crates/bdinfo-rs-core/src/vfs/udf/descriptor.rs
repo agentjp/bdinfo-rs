@@ -48,10 +48,7 @@ impl Avdp {
     /// AVDP (id 2) or the bytes are too short.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_ANCHOR_VOLUME_POINTER {
-            return None;
-        }
+        Tag::expect(buf, TAG_ANCHOR_VOLUME_POINTER)?;
         let main_vds = ExtentAd::parse(buf, 16)?;
         let reserve_vds = ExtentAd::parse(buf, 24)?;
         Some(Self { main_vds, reserve_vds })
@@ -78,10 +75,7 @@ impl Pvd {
     /// Descriptor (id 1) or the identifier field is out of range.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_PRIMARY_VOLUME {
-            return None;
-        }
+        Tag::expect(buf, TAG_PRIMARY_VOLUME)?;
         let volume_identifier = cs0::decode_dstring(buf.get(24..56)?);
         Some(Self { volume_identifier })
     }
@@ -101,10 +95,7 @@ impl Vdp {
     /// Volume Descriptor Pointer (id 3) or the extent is out of range.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_VOLUME_DESCRIPTOR_POINTER {
-            return None;
-        }
+        Tag::expect(buf, TAG_VOLUME_DESCRIPTOR_POINTER)?;
         let next = ExtentAd::parse(buf, 20)?;
         Some(Self { next })
     }
@@ -224,10 +215,7 @@ impl Lvd {
     /// out of range.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_LOGICAL_VOLUME {
-            return None;
-        }
+        Tag::expect(buf, TAG_LOGICAL_VOLUME)?;
         let logical_volume_identifier = cs0::decode_dstring(buf.get(84..212)?);
         let logical_block_size = u32_le(buf, 212)?;
         // LogicalVolumeContentsUse (offset 248) is a long_ad to the FSD.
@@ -267,10 +255,7 @@ impl PartitionDescriptor {
     /// Descriptor (id 5) or a field is out of range.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_PARTITION {
-            return None;
-        }
+        Tag::expect(buf, TAG_PARTITION)?;
         let partition_number = u16_le(buf, 22)?;
         let starting_location = u32_le(buf, 188)?;
         let length = u32_le(buf, 192)?;
@@ -293,10 +278,7 @@ impl Fsd {
     /// (id 256) or the root-directory ICB is out of range.
     #[must_use]
     pub fn parse(buf: &[u8]) -> Option<Self> {
-        let tag = Tag::parse(buf, 0)?;
-        if tag.identifier != TAG_FILE_SET {
-            return None;
-        }
+        Tag::expect(buf, TAG_FILE_SET)?;
         let root_directory_icb = LongAd::parse(buf, 400)?;
         Some(Self { root_directory_icb })
     }

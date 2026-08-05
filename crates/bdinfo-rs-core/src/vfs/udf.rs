@@ -159,6 +159,22 @@ impl Tag {
         }
         Some(Self { identifier })
     }
+
+    /// Parses the tag at the **start** of `buf` and requires it to be
+    /// `identifier`, yielding `None` otherwise — the preamble of every
+    /// fixed-identifier descriptor parser (see [`descriptor`]), each of which
+    /// reads a whole descriptor from a buffer beginning at its tag.
+    ///
+    /// A caller walking descriptors at running offsets (a File Identifier
+    /// sequence) calls [`parse`](Self::parse) with its own offset instead.
+    #[must_use]
+    pub fn expect(buf: &[u8], identifier: u16) -> Option<Self> {
+        let tag = Self::parse(buf, 0)?;
+        if tag.identifier != identifier {
+            return None;
+        }
+        Some(tag)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +427,18 @@ mod tests {
         // Corrupt a non-checksum byte so the stored checksum no longer matches.
         tag[0] = tag[0].wrapping_add(1);
         assert_eq!(Tag::parse(&tag, 0), None);
+    }
+
+    #[test]
+    fn tag_expect_requires_the_named_identifier() {
+        let tag = fix_tag_checksum([2, 0, 3, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(
+            Tag::expect(&tag, TAG_ANCHOR_VOLUME_POINTER),
+            Some(Tag { identifier: TAG_ANCHOR_VOLUME_POINTER })
+        );
+        assert_eq!(Tag::expect(&tag, super::TAG_LOGICAL_VOLUME), None);
+        // A buffer that is not a tag at all fails before the identifier test.
+        assert_eq!(Tag::expect(&[], TAG_ANCHOR_VOLUME_POINTER), None);
     }
 
     #[test]
