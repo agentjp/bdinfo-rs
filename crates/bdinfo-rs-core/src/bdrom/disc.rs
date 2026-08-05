@@ -1898,26 +1898,7 @@ fn merge_stream(dst: &mut TsStream, src: &TsStream) {
 /// description values the `streams` diff level emits, plus the report-table
 /// columns (alternate codec name, language code, audio channel detail).
 fn stream_summary(stream: &TsStream) -> StreamSummary {
-    let (codec_short_name, codec_name, description) = match stream {
-        TsStream::Video(video) => (
-            video.codec_short_name().to_owned(),
-            video.codec_name().to_owned(),
-            video.description(),
-        ),
-        TsStream::Audio(audio) => (
-            audio.codec_short_name().to_owned(),
-            audio.codec_name().to_owned(),
-            audio.description(),
-        ),
-        TsStream::Graphics(graphics) => (
-            graphics.codec_short_name().to_owned(),
-            graphics.codec_name().to_owned(),
-            graphics.description(),
-        ),
-        TsStream::Text(text) => {
-            (text.codec_short_name().to_owned(), text.codec_name().to_owned(), text.description())
-        }
-    };
+    let description = stream.description();
     let (channel_description, sample_rate, bit_depth, channel_count) = match stream {
         TsStream::Audio(audio) => {
             (audio.channel_description(), audio.sample_rate, audio.bit_depth, audio.channel_count)
@@ -1931,8 +1912,8 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
     StreamSummary {
         pid: stream.pid(),
         stream_type: stream.stream_type(),
-        codec_short_name,
-        codec_name,
+        codec_short_name: stream.codec_short_name().to_owned(),
+        codec_name: stream.codec_name().to_owned(),
         codec_alt_name: stream.codec_alt_name(),
         bitrate: 0,
         active_bitrate: 0,
