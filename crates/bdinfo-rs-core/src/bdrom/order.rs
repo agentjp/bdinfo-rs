@@ -310,39 +310,14 @@ mod tests {
         presentation_cmp, presentation_groups, presentation_order, selection_order,
         selection_stream_files, table_rows,
     };
-    use crate::bdrom::disc::{ClipSummary, PlaylistSummary};
+    use crate::bdrom::disc::{PlaylistSummary, fixtures};
 
     /// A playlist summary carrying only what the presentation order reads:
     /// name, total length, loop flag, and its clip names.
     fn playlist(name: &str, total_length: f64, has_loops: bool, clips: &[&str]) -> PlaylistSummary {
         PlaylistSummary {
-            name: name.to_owned(),
-            total_length,
-            file_size: 0,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
             has_loops,
-            streams: Vec::new(),
-            clips: clips
-                .iter()
-                .map(|clip| ClipSummary {
-                    name: (*clip).to_owned(),
-                    display_name: (*clip).to_owned(),
-                    file_size: 0,
-                    interleaved_file_size: 0,
-                    angle_index: 0,
-                    relative_time_in: 0.0,
-                    length: total_length,
-                    payload_bytes: 0,
-                    packet_count: 0,
-                    packet_seconds: 0.0,
-                    file_seconds: 0.0,
-                    streams: Vec::new(),
-                })
-                .collect(),
-            chapters: Vec::new(),
+            ..fixtures::playlist(name, total_length, fixtures::clips(clips, total_length))
         }
     }
 

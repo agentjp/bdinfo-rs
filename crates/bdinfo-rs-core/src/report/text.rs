@@ -864,7 +864,9 @@ mod tests {
         render_with, secondary_audio, time_h, time_hh, time_hh_short, time_parts,
     };
     use crate::bdrom::chapters::{ChapterSummary, seconds_to_ticks};
-    use crate::bdrom::disc::{BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary};
+    use crate::bdrom::disc::{
+        BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary, fixtures,
+    };
     use crate::error::{BdError, ScanError, ScanStage};
     use crate::primitives::Pid;
     use crate::stream::TsStreamType;
@@ -910,39 +912,20 @@ mod tests {
         assert_eq!(super::forums_audio_cell(&s), "DTS-HD MA 5.1 768 kbps");
     }
 
-    /// A measured clip row.
+    /// A measured clip row: the demux attributed `packet_count` packets to it
+    /// and its whole file is the clip's own length.
     fn clip(name: &str, length: f64, packet_count: u64) -> ClipSummary {
         ClipSummary {
-            name: name.to_owned(),
-            display_name: name.to_owned(),
-            file_size: 0,
-            interleaved_file_size: 0,
-            angle_index: 0,
-            relative_time_in: 0.0,
-            length,
-            payload_bytes: 0,
             packet_count,
             packet_seconds: length,
             file_seconds: length,
-            streams: Vec::new(),
+            ..fixtures::clip(name, length)
         }
     }
 
     /// A playlist with no streams, clips, or chapters.
     fn playlist(name: &str, total_length: f64) -> PlaylistSummary {
-        PlaylistSummary {
-            name: name.to_owned(),
-            total_length,
-            file_size: 0,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
-            has_loops: false,
-            streams: Vec::new(),
-            clips: Vec::new(),
-            chapters: Vec::new(),
-        }
+        fixtures::playlist(name, total_length, Vec::new())
     }
 
     /// A bare disc carrying `playlists` and no feature flags.

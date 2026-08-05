@@ -457,7 +457,7 @@ pub fn hidden_playlists(
 
 #[cfg(test)]
 mod tests {
-    use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary};
+    use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, fixtures};
     use bdinfo_rs_core::bdrom::order::{PlaylistFilter, table_rows};
 
     use super::{
@@ -467,27 +467,9 @@ mod tests {
     };
     use crate::settings::Settings;
 
-    /// A `ClipSummary` carrying just a name + length (the fields the view-model
-    /// reads); the measured tallies stay zero.
-    fn sample_clip(name: &str, length: f64) -> ClipSummary {
-        ClipSummary {
-            name: name.to_owned(),
-            display_name: name.to_owned(),
-            file_size: 0,
-            interleaved_file_size: 0,
-            angle_index: 0,
-            relative_time_in: 0.0,
-            length,
-            payload_bytes: 0,
-            packet_count: 0,
-            packet_seconds: 0.0,
-            file_seconds: 0.0,
-            streams: Vec::new(),
-        }
-    }
-
     /// A `PlaylistSummary` carrying just what the view-model reads: name, length,
-    /// the two file sizes, and its clip names.
+    /// the two file sizes, and its clip names (each clip as long as the
+    /// playlist).
     fn sample_playlist(
         name: &str,
         total_length: f64,
@@ -496,17 +478,9 @@ mod tests {
         clips: &[&str],
     ) -> PlaylistSummary {
         PlaylistSummary {
-            name: name.to_owned(),
-            total_length,
             file_size,
             interleaved_file_size,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count: 0,
-            has_loops: false,
-            streams: Vec::new(),
-            clips: clips.iter().map(|clip| sample_clip(clip, total_length)).collect(),
-            chapters: Vec::new(),
+            ..fixtures::playlist(name, total_length, fixtures::clips(clips, total_length))
         }
     }
 

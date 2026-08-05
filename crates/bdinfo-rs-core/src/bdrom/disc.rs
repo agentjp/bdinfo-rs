@@ -304,6 +304,66 @@ impl ClipSummary {
     }
 }
 
+/// Test constructors for [`PlaylistSummary`] and [`ClipSummary`].
+///
+/// Both are wide plain-data structs — 11 and 12 public fields — while a test
+/// usually cares about two or three. Each function takes those few and zeroes
+/// the rest, so a test spells only its own intent and a field added to either
+/// struct changes one body here instead of every construction site.
+///
+/// Other crates reach these through the off-by-default `test-fixtures` feature;
+/// inside this crate `cfg(test)` alone brings them in.
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures {
+    use super::{ClipSummary, PlaylistSummary};
+
+    /// A clip named `name` — its display name too — `length` seconds long,
+    /// with no sizes and nothing measured.
+    #[must_use]
+    pub fn clip(name: &str, length: f64) -> ClipSummary {
+        ClipSummary {
+            name: name.to_owned(),
+            display_name: name.to_owned(),
+            file_size: 0,
+            interleaved_file_size: 0,
+            angle_index: 0,
+            relative_time_in: 0.0,
+            length,
+            payload_bytes: 0,
+            packet_count: 0,
+            packet_seconds: 0.0,
+            file_seconds: 0.0,
+            streams: Vec::new(),
+        }
+    }
+
+    /// One [`clip`] per name in `names`, each `length` seconds long — the clip
+    /// sequence of a playlist that plays those files.
+    #[must_use]
+    pub fn clips(names: &[&str], length: f64) -> Vec<ClipSummary> {
+        names.iter().map(|name| clip(name, length)).collect()
+    }
+
+    /// A single-angle, non-looping playlist named `name`, `total_length`
+    /// seconds long, presenting `clips` and no streams, chapters or sizes.
+    #[must_use]
+    pub fn playlist(name: &str, total_length: f64, clips: Vec<ClipSummary>) -> PlaylistSummary {
+        PlaylistSummary {
+            name: name.to_owned(),
+            total_length,
+            file_size: 0,
+            interleaved_file_size: 0,
+            chapter_count: 0,
+            stream_count: 0,
+            angle_count: 0,
+            has_loops: false,
+            streams: Vec::new(),
+            clips,
+            chapters: Vec::new(),
+        }
+    }
+}
+
 /// One stream's whole-file measured tallies within one clip's stream file.
 ///
 /// Carries the demuxed payload byte and transport packet counts for that PID,
@@ -2217,7 +2277,7 @@ mod tests {
         PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanProgress,
         ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
         build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
-        clip_has_50hz_video, clip_stem, collect_backups, has_aacs_key_file, merge_stream,
+        clip_has_50hz_video, clip_stem, collect_backups, fixtures, has_aacs_key_file, merge_stream,
         rate_over, read_disc_title, read_file, read_file_capped, resolve_playlist_streams,
         scan_stream_files, scan_total, select_reference, stream_content_encrypted, stream_summary,
         unit_shows_encryption, walked_disc_root,
@@ -3530,18 +3590,10 @@ mod tests {
     /// per-stream tallies.
     fn clip_summary(angle_index: i32, time_in: f64, length: f64, packets: u64) -> ClipSummary {
         ClipSummary {
-            name: "00000.M2TS".to_owned(),
-            display_name: "00000.M2TS".to_owned(),
-            file_size: 0,
-            interleaved_file_size: 0,
             angle_index,
             relative_time_in: time_in,
-            length,
-            payload_bytes: 0,
             packet_count: packets,
-            packet_seconds: 0.0,
-            file_seconds: 0.0,
-            streams: Vec::new(),
+            ..fixtures::clip("00000.M2TS", length)
         }
     }
 
@@ -3551,19 +3603,7 @@ mod tests {
         angle_count: usize,
         clips: Vec<ClipSummary>,
     ) -> PlaylistSummary {
-        PlaylistSummary {
-            name: "00000.MPLS".to_owned(),
-            total_length,
-            file_size: 0,
-            interleaved_file_size: 0,
-            chapter_count: 0,
-            stream_count: 0,
-            angle_count,
-            has_loops: false,
-            streams: Vec::new(),
-            clips,
-            chapters: Vec::new(),
-        }
+        PlaylistSummary { angle_count, ..fixtures::playlist("00000.MPLS", total_length, clips) }
     }
 
     #[test]

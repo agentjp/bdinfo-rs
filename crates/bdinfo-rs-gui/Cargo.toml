@@ -80,6 +80,12 @@ rfd = { version = "0.16", default-features = false, features = ["xdg-portal", "t
 log = "0.4"
 
 [dev-dependencies]
+# The analyzer library again, with the feature that exposes its summary
+# constructors (`bdinfo_rs_core::bdrom::disc::fixtures`) to the tests here.
+# Deliberately PATH-ONLY, unlike the [dependencies] entry above: cargo drops a
+# dev-dependency that carries no version when it packages the crate, so this one
+# never becomes a published requirement.
+bdinfo-rs-core = { path = "../bdinfo-rs-core", features = ["test-fixtures"] }
 # Drive the real `view()` headlessly — click by text, drain the messages back
 # through `update` — and pin key states as tiny-skia RGBA snapshot hashes: the
 # Tier-B verification layer (Posture C's analogue of the wasm crate's
