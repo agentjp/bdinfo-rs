@@ -7,30 +7,27 @@
 //! (`/media/<user>/MY_DISC`) use — but a physical disc or mounted image at a
 //! bare Windows drive root (`J:\`) has no such name: the disc root resolves to
 //! the drive root, whose path carries no final component, so the label degrades
-//! to the drive-root string itself (`"J:\"`). That is wrong in the report's
-//! `Disc Label:` line, the info box, and the `BDINFO.<label>.txt` save name
-//! (whose *characters* [`bdinfo_rs_core::report::file_name`] already sanitizes
-//! — this module fixes the label's SOURCE).
+//! to the drive-root string itself (`"J:\"`). That is wrong wherever the label
+//! is shown, and with its `:` and separator it would be an illegal
+//! `BDINFO.<label>.txt` file name (issue: "Cannot save report from physical
+//! disc") — whose *characters* [`crate::report::file_name`] already sanitizes
+//! for every label; this module repairs the label's SOURCE.
 //!
 //! [`resolve_folder_label`] replaces a nameless-drive-root label with the real
 //! UDF volume label — read off the raw volume device (`\\.\J:`) through the
-//! same `UdfSource` core the `.iso` path uses (no doc link: the import is
-//! Windows-only, so the name only resolves there), the identical string Windows
-//! Explorer and classic `BDInfo` show — falling back to the drive letter when
-//! that read is unavailable. The scan seam applies it to every folder scan
-//! (`scan::open`), so the structural listing and the measured report agree.
-//!
-//! Replicates the CLI's `volume` module (`crates/bdinfo-rs/src/volume.rs`),
-//! which must resolve the same label for the same disc — the crates share no
-//! code, so keep the two in lock-step.
+//! same [`UdfSource`](crate::vfs::udf::source::UdfSource) core the `.iso` path
+//! uses, the identical string Windows Explorer and classic `BDInfo` show —
+//! falling back to the drive letter when that read is unavailable. A folder
+//! backend's caller applies it to the scanned label; an `.iso` scan already
+//! reads the genuine UDF label and needs no repair.
 
 #[cfg(any(windows, test))]
 use std::io::{self, Read, Seek, SeekFrom};
 
 #[cfg(any(windows, test))]
-use bdinfo_rs_core::vfs::ReadSeek;
+use crate::vfs::ReadSeek;
 #[cfg(windows)]
-use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
+use crate::vfs::udf::source::{IsoReader, UdfSource};
 
 /// The uppercase drive letter of a bare Windows drive-root label — `"J:\"`,
 /// `"k:/"`, or `"k:"` all yield `'J'`/`'K'` — or `None` for any real name.
@@ -484,7 +481,9 @@ mod tests {
     }
 
     mod prop {
-        use proptest::prelude::*;
+        use proptest::prelude::{any, prop_assert_eq, proptest};
+
+        use super::super::{drive_root_letter, resolve_with};
 
         proptest! {
             // The resolution contract over arbitrary labels: a drive-root
@@ -493,8 +492,8 @@ mod tests {
             // resolution can never corrupt a real name.
             #[test]
             fn resolution_is_identity_off_the_drive_root(label in any::<String>()) {
-                let resolved = super::super::resolve_with(&label, |_| None);
-                if let Some(letter) = super::super::drive_root_letter(&label) {
+                let resolved = resolve_with(&label, |_| None);
+                if let Some(letter) = drive_root_letter(&label) {
                     prop_assert_eq!(resolved, letter.to_string());
                 } else {
                     prop_assert_eq!(resolved, label);

@@ -12,7 +12,8 @@
 //! real UDF volume label. The one exception is a folder scan whose disc root is
 //! a nameless Windows drive root (`J:\`): the directory name is unusable there,
 //! so the label is recovered from the raw volume device's UDF descriptor — the
-//! same real label — falling back to the drive letter (see [`volume`]).
+//! same real label — falling back to the drive letter (see
+//! [`bdinfo_rs_core::vfs::volume`]).
 //!
 //! `REPORT_DEST` is the folder the disc report is written to, as
 //! `BDINFO.{volume label}.txt`. It defaults to `BD_PATH` and is required when
@@ -90,6 +91,7 @@ use bdinfo_rs_core::report;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
+use bdinfo_rs_core::vfs::volume;
 use clap::error::ErrorKind;
 use crossterm::style::Stylize as _;
 use crossterm::{Command as _, cursor, terminal};
@@ -102,7 +104,6 @@ use crossterm::{Command as _, cursor, terminal};
 include!("cli.rs");
 
 mod banner;
-mod volume;
 
 fn main() -> ExitCode {
     match Cli::try_parse() {

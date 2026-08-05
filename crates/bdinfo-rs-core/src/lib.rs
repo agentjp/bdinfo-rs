@@ -16,6 +16,12 @@
 // job. Workspace lints can't target a single crate, so this is crate-scoped on
 // top of `[lints] workspace = true`; the `bdinfo-rs` CLI keeps `println!`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
+// Under `cargo llvm-cov` on nightly (the `cov` gate step), enable the
+// `#[coverage(off)]` attribute so the raw volume-device reads in `vfs::volume`
+// — which no deterministic test can drive — can opt out of the 100% floor.
+// Inert on stable (the cfg is set only by cargo-llvm-cov), and the cfg itself is
+// registered in the workspace `check-cfg` lint.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod bdrom;
 pub mod bitstream;

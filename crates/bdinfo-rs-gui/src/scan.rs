@@ -24,8 +24,7 @@ use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::vfs::fs::FsDir;
 use bdinfo_rs_core::vfs::udf::source::{PathIso, UdfSource};
-
-use crate::volume;
+use bdinfo_rs_core::vfs::volume;
 
 /// The disc the user picked: a Blu-ray **folder** or a single `.iso` image.
 ///
