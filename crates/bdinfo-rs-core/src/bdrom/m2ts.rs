@@ -285,7 +285,7 @@ struct SectionAssembler {
 impl SectionAssembler {
     /// Builds an idle assembler accepting `table_id` sections with a
     /// `header`-byte section header.
-    fn new(table_id: u8, header: u8) -> Self {
+    const fn new(table_id: u8, header: u8) -> Self {
         Self {
             table_id,
             header,
@@ -1337,7 +1337,10 @@ impl TsStreamFile {
             parser.packet_length = parser.packet_length.wrapping_sub(1);
             // The PAT header ends with `last_section_number` and carries no
             // table-specific fields, so position 0 starts the body copy.
-            if let SectionByte::Header(0) = parser.pat_assembler.header_byte(byte_at(buffer, *i)) {
+            if matches!(
+                parser.pat_assembler.header_byte(byte_at(buffer, *i)),
+                SectionByte::Header(0)
+            ) {
                 parser.pat_assembler.transfer_state = true;
             }
         }
