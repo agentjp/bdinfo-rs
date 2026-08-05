@@ -22,7 +22,7 @@
 //! contributes one mask byte.
 
 use crate::bitstream::TsStreamBuffer;
-use crate::codec::dts;
+use crate::codec::{self, dts};
 use crate::stream::{TsAudioMode, TsAudioStream, TsStreamType};
 
 /// The DTS-HD extension-substream sync word scanned for in the access unit
@@ -76,31 +76,13 @@ pub fn scan(
         return;
     }
 
-    let mut sync_found = false;
-    let mut sync: u32 = 0;
-    // A bounded byte-at-a-time scan for the sync over the whole buffer.
-    for _ in 0..buffer.length() {
-        sync = sync.wrapping_shl(8).wrapping_add(u32::from(buffer.read_byte(false)));
-        if sync == DTS_HD_SYNC {
-            sync_found = true;
-            break;
-        }
-    }
-
-    if !sync_found {
+    if !buffer.find_sync32(DTS_HD_SYNC) {
         *tag = Some("CORE".to_owned());
-        if stream.core_stream.is_none() {
-            // Seed the embedded DTS core stream on first sight.
-            let mut core = TsAudioStream::default();
-            core.base.stream_type = TsStreamType::DtsAudio;
-            stream.core_stream = Some(Box::new(core));
-        }
-        if let Some(core) = stream.core_stream.as_mut()
-            && !core.base.is_initialized
-        {
-            buffer.begin_read();
-            dts::scan(core, buffer, bitrate, tag);
-        }
+        // The DTS core hunts for its own sync word, so it must see the access
+        // unit from the start — the rewind inside this call restores it.
+        codec::scan_embedded_core(stream, buffer, TsStreamType::DtsAudio, |core, buf| {
+            dts::scan(core, buf, bitrate, tag);
+        });
         return;
     }
 

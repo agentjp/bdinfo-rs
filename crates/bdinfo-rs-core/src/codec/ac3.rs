@@ -11,6 +11,14 @@
 //!
 //! The `f64`→`i64` bit-rate conversion truncates toward zero. A buffer too short
 //! for a header read returns early and leaves the stream untouched.
+//!
+//! Alone among the audio scanners, this one requires its `0x0B77` sync word at
+//! the **head** of the access unit — it compares the first two bytes rather than
+//! hunting for the word the way [`crate::codec::dts`], [`crate::codec::dts_hd`]
+//! and [`crate::codec::truehd`] do. The likeliest reason is BDAV frame
+//! alignment — an AC-3 access unit assembled from a PES payload begins at a
+//! frame boundary — and it is why `truehd` rewinds the buffer before
+//! delegating here.
 
 use crate::bitstream::{SeekOrigin, TsStreamBuffer};
 use crate::stream::{TsAudioMode, TsAudioStream, TsStreamType};

@@ -16,7 +16,7 @@
 //! non-finite value that simply fails the `> 14` test).
 
 use crate::bitstream::TsStreamBuffer;
-use crate::codec::ac3;
+use crate::codec::{self, ac3};
 use crate::stream::{TsAudioStream, TsStreamType};
 
 /// The MLP major-sync signature scanned for in the access unit (`0xF8726FBA`).
@@ -41,10 +41,9 @@ fn scale_peak_bitrate(peak_bitrate: u32, sample_rate: i32) -> u32 {
 /// With no MLP major sync the embedded AC-3 core is scanned (and `tag` set to
 /// `"CORE"`); with one, the `TrueHD` header is read (`tag` set to `"HD"`).
 /// `stream` is marked initialized only when its core also is.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one linear major-sync header parse; the 13 channel-assignment reads are clearest inline"
-)]
+// The 13 channel-assignment reads stay spelled out one per line: the header
+// transcribes a fixed field order, and a table would hide which bit contributes
+// which channel count.
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
     if stream.base.is_initialized
         && stream.core_stream.as_ref().is_some_and(|c| c.base.is_initialized)
@@ -52,31 +51,13 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
         return;
     }
 
-    let mut sync_found = false;
-    let mut sync: u32 = 0;
-    // A bounded byte-at-a-time scan for the sync over the whole buffer.
-    for _ in 0..buffer.length() {
-        sync = sync.wrapping_shl(8).wrapping_add(u32::from(buffer.read_byte(false)));
-        if sync == TRUEHD_MAJOR_SYNC {
-            sync_found = true;
-            break;
-        }
-    }
-
-    if !sync_found {
+    if !buffer.find_sync32(TRUEHD_MAJOR_SYNC) {
         *tag = Some("CORE".to_owned());
-        if stream.core_stream.is_none() {
-            // Seed the embedded AC-3 core stream on first sight.
-            let mut core = TsAudioStream::default();
-            core.base.stream_type = TsStreamType::Ac3Audio;
-            stream.core_stream = Some(Box::new(core));
-        }
-        if let Some(core) = stream.core_stream.as_mut()
-            && !core.base.is_initialized
-        {
-            buffer.begin_read();
-            ac3::scan(core, buffer, tag);
-        }
+        // The AC-3 core requires its sync word at the head of the access unit
+        // (see [`crate::codec::ac3`]), which the rewind inside this call restores.
+        codec::scan_embedded_core(stream, buffer, TsStreamType::Ac3Audio, |core, buf| {
+            ac3::scan(core, buf, tag);
+        });
         return;
     }
 

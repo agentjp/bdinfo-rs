@@ -63,17 +63,7 @@ pub fn scan(
         return;
     }
 
-    let mut sync_found = false;
-    let mut sync: u32 = 0;
-    // A bounded byte-at-a-time scan for the sync over the whole buffer.
-    for _ in 0..buffer.length() {
-        sync = sync.wrapping_shl(8).wrapping_add(u32::from(buffer.read_byte(false)));
-        if sync == DTS_SYNC {
-            sync_found = true;
-            break;
-        }
-    }
-    if !sync_found {
+    if !buffer.find_sync32(DTS_SYNC) {
         return;
     }
 

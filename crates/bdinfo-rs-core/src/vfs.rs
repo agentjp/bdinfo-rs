@@ -159,9 +159,36 @@ pub fn find_files(dir: &dyn BdDir, kind: BdFileKind) -> io::Result<Vec<Box<dyn B
     Ok(out)
 }
 
+/// The extension of `name` *including* the leading dot (e.g. `.SSIF`), or the
+/// empty string when `name` holds no `.`. The text after the last `.` is
+/// returned verbatim (a lone `.` for a trailing-dot name like `00000.`); no
+/// further normalization is applied.
+///
+/// Both backends derive [`BdFile::extension`] through this one function, and
+/// that agreement is load-bearing: the disc-size total skips an interleaved
+/// stream by matching this string against `.ssif`
+/// ([`crate::bdrom::disc`]), so a folder and the same disc as an `.iso` would
+/// report different sizes if two lookalike derivations disagreed on a name.
+#[must_use]
+pub(crate) fn extension_of_name(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((_, ext)) => format!(".{ext}"),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::SearchOption;
+    use super::{SearchOption, extension_of_name};
+
+    #[test]
+    fn extension_of_name_handles_dotted_and_bare_names() {
+        assert_eq!(extension_of_name("00000.MPLS"), ".MPLS");
+        assert_eq!(extension_of_name("a.b.ssif"), ".ssif");
+        assert_eq!(extension_of_name("README"), "");
+        assert_eq!(extension_of_name("trailing."), ".");
+        assert_eq!(extension_of_name(".hidden"), ".hidden");
+    }
 
     #[test]
     fn search_option_is_debug_and_eq() {
