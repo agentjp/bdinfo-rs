@@ -14,6 +14,11 @@ name: repo
 # are the caller's — so it can never fire on its own and never needs a paths
 # filter.
 #
+# Two further callers assert ONE area each on a daily schedule, because the two
+# scanners they name have verdicts that change without the repository changing:
+# zizmor.yml (a newly-disclosed vulnerable action) and link-check.yml (an
+# external page that moved). They reach the identical job definitions here.
+#
 # Every job here scans the tree rather than producing an artifact from it, so
 # every verdict is arch-invariant and each job runs on `ubuntu-24.04-arm`
 # (rationale in core.yml).
@@ -151,9 +156,9 @@ jobs:
   # finding, like the other quality gates. The only accepted residuals live in
   # .github/zizmor.yml (the cargo-dist-generated v-release.yml, which cannot be
   # hand-edited) and inline (the two architecturally-required workflow_run triggers);
-  # every hand-maintained workflow is fixed in place, not suppressed. This is the
-  # PR/push leg; the daily cron leg (newly-disclosed action vulns surface between
-  # pushes) stays in zizmor.yml.
+  # every hand-maintained workflow is fixed in place, not suppressed. zizmor.yml
+  # calls this job daily as well, since a newly-disclosed action vulnerability
+  # surfaces between pushes.
   zizmor:
     name: zizmor (workflow security)
     if: inputs.workflows == 'true'
@@ -179,9 +184,9 @@ jobs:
   # Cargo/audit metadata, and the doc-comment URLs in src). Cheap: lychee caches
   # its results and only re-checks day-old links; a residual rate-limit (429) is
   # accepted rather than failed, so an external host can't red-X an unrelated
-  # push. This is the PR/push leg (`docs` = any .md or .rs, since doc-comments
-  # carry links); the daily cron leg (links rot after merge without touching our
-  # code) stays in link-check.yml.
+  # push. The `links` area is any .md or .rs, since doc-comments carry links.
+  # link-check.yml calls this job daily as well, since links rot after merge
+  # without touching our code.
   # typos reads the whole working tree (minus files.extend-exclude in
   # typos.toml), so prose changes reach it while changing no Rust source. It is
   # its own job rather than a step of `lint` for that reason: the rest of that

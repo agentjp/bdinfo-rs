@@ -5,13 +5,14 @@ name: zizmor
 # unpinned/impostor actions, cache poisoning, dangerous triggers, credential
 # persistence, and more), daily — zizmor floats at latest and the audits are
 # partly ONLINE (impostor-commit / known-vulnerable-actions via the GitHub
-# API), so a newly-disclosed vulnerable action surfaces between pushes. The
-# PR/push leg is the identically-named job in repo.yml, plan-gated on the
-# `workflows` area; the daily sweep re-runs that leg ungated too. The only accepted
-# residuals live in .github/zizmor.yml (the cargo-dist-generated v-release.yml,
-# which cannot be hand-edited) and inline (the two architecturally-required
-# workflow_run triggers); every hand-maintained workflow is fixed in place, not
-# suppressed.
+# API), so a newly-disclosed vulnerable action surfaces between pushes.
+#
+# The job itself is repo.yml's `zizmor`, invoked here with only the `workflows`
+# area asserted so the other four scanners in that reusable report `skipped`.
+# The PR/push leg is the same job, invoked by ci.yml with the areas its plan
+# computed; the daily sweep re-runs that leg ungated. One definition, three
+# callers — the audit set, the pinned action digests and the accepted residuals
+# cannot drift between them.
 
 on:
   schedule:
@@ -27,26 +28,10 @@ concurrency:
 
 jobs:
   zizmor:
-    name: zizmor (workflow security)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # `fallback: none`: install only from install-action's checksummed manifest,
-      # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
-      - name: Install zizmor (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
-        with:
-          tool: zizmor
-          fallback: none
-
-      # Audit every workflow at full strength. The token enables the online audits
-      # (impostor-commit, known-vulnerable-actions); .github/zizmor.yml is
-      # auto-discovered for the accepted v-release.yml residuals. zizmor exits
-      # non-zero when any finding remains, which fails the gate.
-      - name: Audit the workflows
-        run: zizmor .github/workflows
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: ./.github/workflows/repo.yml
+    with:
+      yaml: "false"
+      toml: "false"
+      workflows: "true"
+      typos: "false"
+      links: "false"

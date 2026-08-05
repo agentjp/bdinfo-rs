@@ -4,11 +4,13 @@ name: link-check
 # relative/file link across the repo (README, CHANGELOG, DIFFERENCES,
 # CONTRIBUTING, the issue templates, the Cargo/audit metadata, and the
 # doc-comment URLs in src), daily — external pages move without touching our
-# code, so links rot after merge. The PR/push leg is the identically-named job
-# in repo.yml, plan-gated on the `links` area. Cheap: lychee caches its results
-# and only re-checks day-old links; a residual rate-limit
-# (429) is accepted rather than failed, so an external host can't red-X an
-# unrelated run.
+# code, so links rot after merge.
+#
+# The job itself is repo.yml's `links`, invoked here with only the `links` area
+# asserted so the other four scanners in that reusable report `skipped`. The
+# PR/push leg is the same job, invoked by ci.yml with the areas its plan
+# computed; the daily sweep re-runs that leg ungated. One definition, three
+# callers — the exclusion list and the accepted 429 cannot drift between them.
 
 on:
   schedule:
@@ -24,42 +26,10 @@ concurrency:
 
 jobs:
   links:
-    name: Check links
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # Persist lychee's response cache so reruns only re-check day-old links.
-      - name: Restore the lychee cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .lycheecache
-          key: lychee-${{ github.run_id }}
-          restore-keys: lychee-
-
-      - name: Check links
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
-        with:
-          # Whole repo; skip the generated lockfile and the binary fuzz seed
-          # corpus (the binary disc fixtures are skipped automatically by their
-          # non-text extensions). The golden disc reports are byte-exact BDInfo
-          # output: the two URLs they carry (cinemasquid/avsforum) are part of
-          # the locked format and reproduce a defunct tool's text verbatim, so
-          # they're pinned, not maintainable link surface — exclude them.
-          # Accept 429 so an external host's rate-limit can't fail the gate;
-          # fail:true turns any broken link into a failure.
-          args: >-
-            --cache
-            --max-cache-age 1d
-            --no-progress
-            --accept 200..=299,429
-            --exclude-path Cargo.lock
-            --exclude-path fuzz/corpus
-            --exclude-path crates/bdinfo-rs/tests/fixtures/golden
-            --exclude-path crates/bdinfo-rs-wasm/tests/golden_report.txt
-            .
-          fail: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    uses: ./.github/workflows/repo.yml
+    with:
+      yaml: "false"
+      toml: "false"
+      workflows: "false"
+      typos: "false"
+      links: "true"
