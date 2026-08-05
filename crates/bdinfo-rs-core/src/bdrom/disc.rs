@@ -2415,6 +2415,12 @@ mod tests {
             let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
             let mut root = std::env::temp_dir();
             root.push(format!("bdinfo-rs-disc-{}-{unique}", std::process::id()));
+            // The name repeats across runs — the operating system reuses process
+            // ids — and a run killed before `Drop` leaves its directory behind, so
+            // clear any leftover first. `create_dir_all` would adopt it silently,
+            // and a disc built to lack a directory would then be handed the files
+            // of whichever test held this name last.
+            let _ = std::fs::remove_dir_all(&root).is_ok();
             std::fs::create_dir_all(&root).expect("create root");
             for dir in dirs {
                 std::fs::create_dir_all(root.join(dir)).expect("create dir");

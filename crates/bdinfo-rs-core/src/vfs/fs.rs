@@ -394,6 +394,11 @@ mod tests {
             let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
             let mut root = std::env::temp_dir();
             root.push(format!("bdinfo-rs-vfs-{}-{unique}", std::process::id()));
+            // The name repeats across runs (reused process ids) and a run killed
+            // before `Drop` leaves its directory behind, so clear any leftover:
+            // the listing assertions below count entries, and adopted files add to
+            // them.
+            let _ = std::fs::remove_dir_all(&root).is_ok();
 
             let bdmv = root.join("bdmv"); // lowercase on purpose
             let playlist = bdmv.join("PlayList"); // mixed case on purpose
