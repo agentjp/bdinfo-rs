@@ -1,0 +1,26 @@
+# Cargo aliases for the INDEPENDENT in-browser wasm workspace. Cargo merges
+# config files from the invocation directory upward, so running inside this
+# directory also picks up the repo-root .cargo/config.toml; the aliases below
+# shadow the root ones of the same name, which are spelled for the root
+# workspace (`--workspace`, core coverage floors) and are wrong for this crate.
+#
+# These spellings are the SINGLE home for what the wasm gate runs — the tracked
+# .github/workflows/wasm.yml invokes them, so a flag added here reaches CI. They
+# only apply when cargo runs with this directory as its working directory.
+
+[alias]
+# Lint on the SHIPPED wasm32 target with warnings promoted to errors.
+ltw = "clippy --target wasm32-unknown-unknown --all-targets --release --locked -- -D warnings"
+# Lint the NATIVE build: the rlib the parity test links must be warning-clean,
+# which catches the dead_code / unused-import a cfg gate would orphan.
+lt = "clippy --all-targets --locked -- -D warnings"
+# rustdoc with warnings = errors (RUSTDOCFLAGS is set by the caller) on wasm32:
+# doc comments intra-doc-link to items that are cfg'd out on native.
+dc = "doc --target wasm32-unknown-unknown --no-deps --document-private-items --locked"
+# Unused-dependency sweep (regex pass).
+mc = "machete"
+# Unused-dependency sweep, AST-based (complementary to machete).
+sh = "shear"
+# Supply-chain audit: advisories + bans + licenses + sources, per this
+# workspace's own deny.toml (cargo-deny finds it from the workspace root).
+dn = "deny check"
