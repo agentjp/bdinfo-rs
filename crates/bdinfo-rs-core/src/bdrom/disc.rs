@@ -1518,11 +1518,7 @@ fn resolve_playlist_streams(playlist: &mut TsPlaylistFile, metas: &[ClipMeta<'_>
         {
             streams.insert(MVC_PID, mvc.ts_clone());
         }
-        for (pid, src) in &file.streams {
-            if let Some(dst) = streams.get_mut(pid) {
-                merge_stream(dst, src);
-            }
-        }
+        merge_matching(&mut streams, &file.streams, |_| true);
     }
 
     let angle_count = usize::try_from(playlist.angle_count).unwrap_or(0);
@@ -1547,14 +1543,9 @@ fn resolve_playlist_streams(playlist: &mut TsPlaylistFile, metas: &[ClipMeta<'_>
 /// detail, but the quick pass skips the PGS payloads — only the full pass
 /// counts captions. Non-graphics streams keep their quick-merged detail.
 fn remerge_graphics_detail(playlist: &mut TsPlaylistFile, scanned: &BTreeMap<u16, TsStream>) {
-    for (pid, src) in scanned {
-        if !matches!(src, TsStream::Graphics(_)) {
-            continue;
-        }
-        if let Some(dst) = playlist.streams.get_mut(pid) {
-            merge_stream(dst, src);
-        }
-    }
+    merge_matching(&mut playlist.streams, scanned, |stream| {
+        matches!(stream, TsStream::Graphics(_))
+    });
 }
 
 /// Zeroes every clip's demux tallies across `playlists` — the reset between
@@ -1762,25 +1753,14 @@ fn build_sorted_streams(
 ) -> Vec<StreamSummary> {
     let mut streams = clip_streams.clone();
     if let Some(scanned) = scanned {
-        for (pid, src) in scanned {
-            if let Some(dst) = streams.get_mut(pid) {
-                merge_stream(dst, src);
-            }
-        }
+        merge_matching(&mut streams, scanned, |_| true);
     }
-    // Graphics detail (the PGS caption tallies and dimensions) only exists
-    // after the full pass — the quick merge above carries none — so the rows
-    // take it from the resolved presented streams, which
-    // [`remerge_graphics_detail`] refreshed when the full pass finished (the
-    // classic GUI shows the full scan's counts).
-    for (pid, dst) in &mut streams {
-        if !matches!(dst, TsStream::Graphics(_)) {
-            continue;
-        }
-        if let Some(src) = playlist.streams.get(pid) {
-            merge_stream(dst, src);
-        }
-    }
+    // Graphics detail only exists after the full pass, which
+    // [`remerge_graphics_detail`] merged into the resolved presented streams —
+    // so the rows take it from there rather than from the quick merge above.
+    merge_matching(&mut streams, &playlist.streams, |stream| {
+        matches!(stream, TsStream::Graphics(_))
+    });
     // The interleaved dependent view: when the clip info omits the MVC PID but
     // the resolution presented it from the demuxed file (see
     // [`resolve_playlist_streams`]), it gets a row of its own — never marked
@@ -1800,37 +1780,47 @@ fn build_sorted_streams(
         // A presented clip stream the playlist's Stream-Number table never
         // declared is hidden — the clip carries it, the playlist hides it.
         let is_hidden = !ssif_only && !playlist.playlist_streams.contains_key(pid);
-        let mut row = stream_summary(stream);
-        row.is_hidden = is_hidden;
-        row.ssif_only = ssif_only;
-        set_measured_rates(&mut row, playlist.streams.get(pid));
-        row.full_description = full_description(stream, &row);
-        rows.push(row);
+        rows.push(stream_row(stream, 0, is_hidden, ssif_only, playlist.streams.get(pid)));
         if stream.base().is_video_stream() {
             for index in 0..angle_count {
-                let mut row = stream_summary(stream);
-                row.is_hidden = is_hidden;
-                row.ssif_only = ssif_only;
-                row.angle_index = index.saturating_add(1);
-                set_measured_rates(
-                    &mut row,
+                rows.push(stream_row(
+                    stream,
+                    index.saturating_add(1),
+                    is_hidden,
+                    ssif_only,
                     playlist.angle_streams.get(index).and_then(|angle| angle.get(pid)),
-                );
-                row.full_description = full_description(stream, &row);
-                rows.push(row);
+                ));
             }
         }
     }
     rows
 }
 
-/// Copies the measured bitrates from the playlist's resolved `stream` (when
-/// the playlist is resolved) into the report `row`.
-const fn set_measured_rates(row: &mut StreamSummary, stream: Option<&TsStream>) {
-    if let Some(stream) = stream {
-        row.bitrate = stream.base().bit_rate;
-        row.active_bitrate = stream.base().active_bit_rate;
+/// One report row for the presented `stream`: its [`stream_summary`] fields,
+/// the presentation flags (`angle_index` `0` for the main row, `1..` for an
+/// angle clone), the measured bitrates copied from the playlist's resolved
+/// `measured` stream when the playlist is resolved, and the full description
+/// composed last — it reads the rates this row just took.
+///
+/// The one home for what a report row carries: a main row and an angle row of
+/// the same stream differ only in the two arguments.
+fn stream_row(
+    stream: &TsStream,
+    angle_index: usize,
+    is_hidden: bool,
+    ssif_only: bool,
+    measured: Option<&TsStream>,
+) -> StreamSummary {
+    let mut row = stream_summary(stream);
+    row.is_hidden = is_hidden;
+    row.ssif_only = ssif_only;
+    row.angle_index = angle_index;
+    if let Some(measured) = measured {
+        row.bitrate = measured.base().bit_rate;
+        row.active_bitrate = measured.base().active_bit_rate;
     }
+    row.full_description = full_description(stream, &row);
+    row
 }
 
 /// Composes the `row`'s full description from `stream`: an audio stream with
@@ -1846,6 +1836,28 @@ fn full_description(stream: &TsStream, row: &StreamSummary) -> String {
         }
         TsStream::Video(video) => video.full_description(),
         _ => row.description.clone(),
+    }
+}
+
+/// Merges every `src` stream `keep` selects into the `dst` stream of the same
+/// PID (a PID `dst` does not carry is skipped) — the walk both scan passes and
+/// the summary pass share.
+///
+/// `keep` reads the source stream; because [`merge_stream`] is a no-op on a
+/// type mismatch, filtering by stream kind selects the same pairs whichever
+/// side it reads.
+fn merge_matching(
+    dst: &mut BTreeMap<u16, TsStream>,
+    src: &BTreeMap<u16, TsStream>,
+    keep: fn(&TsStream) -> bool,
+) {
+    for (pid, stream) in src {
+        if !keep(stream) {
+            continue;
+        }
+        if let Some(dst) = dst.get_mut(pid) {
+            merge_stream(dst, stream);
+        }
     }
 }
 
@@ -2614,6 +2626,8 @@ mod tests {
         };
         let mut scanned_video = TsVideoStream::default();
         scanned_video.set_video_format(TsVideoFormat::Videoformat2160p);
+        // Detail a whole-map merge WOULD copy, so the graphics filter has teeth.
+        scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
         let scanned = BTreeMap::from([
             (0x1200_u16, TsStream::Graphics(scanned_pgs)),
             // A non-graphics source is skipped (the quick-merged detail
@@ -2628,8 +2642,8 @@ mod tests {
         // detail (non-graphics sources are not re-merged).
         let graphics = stream_summary(playlist.streams.get(&0x1200).unwrap());
         assert_eq!(graphics.description, "1920x1080 / 837 Captions");
-        let video = stream_summary(playlist.streams.get(&0x1011).unwrap());
-        assert_eq!(video.height, 0, "non-graphics sources are not re-merged");
+        let video = as_video(playlist.streams.get(&0x1011).unwrap()).unwrap();
+        assert!(video.encoding_profile.is_none(), "non-graphics sources are not re-merged");
         assert!(!playlist.streams.contains_key(&0x1300));
     }
 
