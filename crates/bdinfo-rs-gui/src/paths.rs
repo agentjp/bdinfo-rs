@@ -162,5 +162,4 @@ mod tests {
         // A bare relative file name has no usable parent — no destination.
         assert_eq!(super::autosave_dir(&Input::Iso(PathBuf::from("disc.iso"))), None);
     }
-
 }

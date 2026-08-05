@@ -2374,8 +2374,11 @@ impl App {
         }
 
         if let Some(size) = self.flow.disc_size() {
-            let value =
-                format!("{} bytes ({})", report::text::group(u128::from(size)), format_file_size(size));
+            let value = format!(
+                "{} bytes ({})",
+                report::text::group(u128::from(size)),
+                format_file_size(size)
+            );
             lines = lines.push(info_line(p, "Disc Size:", value, true));
         }
 
