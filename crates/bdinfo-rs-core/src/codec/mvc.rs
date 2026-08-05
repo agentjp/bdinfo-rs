@@ -32,16 +32,8 @@ mod tests {
     use proptest::prelude::{any, prop_assert, proptest};
 
     use super::scan;
-    use crate::bitstream::TsStreamBuffer;
+    use crate::bitstream::bits::buf;
     use crate::stream::{TsStreamType, TsVideoFormat, TsVideoStream};
-
-    /// A rewound buffer holding `data`.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
-        let mut b = TsStreamBuffer::new();
-        b.add(data, 0, data.len());
-        b.begin_read();
-        b
-    }
 
     /// A fresh MVC video stream.
     fn stream() -> TsVideoStream {

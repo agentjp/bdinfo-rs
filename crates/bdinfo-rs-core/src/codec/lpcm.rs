@@ -128,16 +128,8 @@ mod tests {
     use proptest::prelude::{any, proptest};
 
     use super::scan;
-    use crate::bitstream::TsStreamBuffer;
+    use crate::bitstream::bits::buf;
     use crate::stream::{TsAudioStream, TsStreamType};
-
-    /// A rewound buffer holding `data`.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
-        let mut b = TsStreamBuffer::new();
-        b.add(data, 0, data.len());
-        b.begin_read();
-        b
-    }
 
     /// Builds a ≥5-byte LPCM access unit whose `flags` word packs the channel,
     /// sample-rate, and bit-depth fields (the third/fourth header bytes). The

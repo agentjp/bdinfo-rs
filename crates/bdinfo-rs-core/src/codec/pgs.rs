@@ -137,16 +137,8 @@ mod tests {
     use proptest::prelude::{any, prop_assert, proptest};
 
     use super::{Frame, read_ods, read_pcs, scan};
-    use crate::bitstream::TsStreamBuffer;
+    use crate::bitstream::bits::buf;
     use crate::stream::{TsGraphicsStream, TsStreamType};
-
-    /// A rewound buffer holding `data`.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
-        let mut b = TsStreamBuffer::new();
-        b.add(data, 0, data.len());
-        b.begin_read();
-        b
-    }
 
     /// Runs [`scan`] over `data` against `stream`, returning the resulting tag.
     fn run(stream: &mut TsGraphicsStream, data: &[u8]) -> Option<String> {

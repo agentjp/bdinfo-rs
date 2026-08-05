@@ -2223,8 +2223,10 @@ mod tests {
         unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
+    use crate::bdrom::clpi::clips::build_clpi;
     use crate::bdrom::interleaved::{MemBdFile, TsInterleavedFile};
     use crate::bdrom::m2ts::packets::{packet, pat_payload, pes_dts, pes_pts, pmt_payload};
+    use crate::bdrom::mpls::playlists::{build_item_codec, build_mpls, chapter_entry, pl_stream};
     use crate::discovery::BdmvDir;
     use crate::primitives::Pid;
     use crate::stream::{
@@ -2235,26 +2237,14 @@ mod tests {
     use crate::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
 
     // ── synthetic metadata builders (minimal valid `*.clpi` / `*.mpls`) ──────
+    //
+    // Convenience wrappers only: the on-disc byte layouts live once, in the
+    // parsers' own `clpi::clips` and `mpls::playlists` builders.
 
     /// A valid `*.clpi`: `HDMV0300`, `ProgramInfo` at offset 16, one program
     /// sequence, one entry per `(pid, coding_type, 4-byte payload)`.
     fn clpi(entries: &[(u16, u8, [u8; 4])]) -> Vec<u8> {
-        let mut clip_data = vec![0_u8, 1]; // reserved + num_prog = 1
-        clip_data.extend_from_slice(&[0_u8; 6]); // spn start + program_map_pid
-        clip_data.push(u8::try_from(entries.len()).unwrap()); // stream count at 8
-        clip_data.push(0); // 9: num_groups; stream entries start at 10
-        for &(pid, coding_type, payload) in entries {
-            clip_data.extend_from_slice(&pid.to_be_bytes());
-            clip_data.push(5); // coding-info length (type + 4 payload)
-            clip_data.push(coding_type);
-            clip_data.extend_from_slice(&payload);
-        }
-        let mut buf = b"HDMV0300".to_vec();
-        buf.extend_from_slice(&[0_u8; 4]); // 8..12
-        buf.extend_from_slice(&16_u32.to_be_bytes()); // 12..16 ProgramInfo addr
-        buf.extend_from_slice(&u32::try_from(clip_data.len()).unwrap().to_be_bytes());
-        buf.extend_from_slice(&clip_data);
-        buf
+        build_clpi(*b"HDMV0300", entries)
     }
 
     /// A valid single-item `*.mpls` with no extra camera angles (the common case).
@@ -2262,8 +2252,8 @@ mod tests {
         mpls_angles(item_name, in_t, out_t, &[], chapters)
     }
 
-    /// A valid single-item `*.mpls` like [`mpls_full`], with an empty
-    /// Stream-Number table.
+    /// A valid single-item `*.mpls` with `angle_names` extra camera angles and an
+    /// empty Stream-Number table.
     fn mpls_angles(
         item_name: &str,
         in_t: u32,
@@ -2315,106 +2305,31 @@ mod tests {
         declared_audio: &[u16],
         chapters: &[(u8, u16, u32)],
     ) -> Vec<u8> {
-        let mut items = Vec::new();
-        for item_name in item_names {
-            let mut body = Vec::new();
-            let mut name = item_name.as_bytes().to_vec();
-            name.resize(5, 0);
-            body.extend_from_slice(&name); // +2..7
-            body.extend_from_slice(&codec); // +7..11
-            body.push(0); // +11
-            body.push(if angle_names.is_empty() { 0 } else { 0x10 }); // +12 multiangle flag
-            body.push(0); // +13
-            body.extend_from_slice(&in_t.to_be_bytes()); // +14..18
-            body.extend_from_slice(&out_t.to_be_bytes()); // +18..22
-            body.extend_from_slice(&[0_u8; 12]); // +22..34
-            if !angle_names.is_empty() {
-                body.push(u8::try_from(angle_names.len().wrapping_add(1)).unwrap()); // angle count
-                body.push(0); // reserved
-                for angle in angle_names {
-                    let mut angle_bytes = angle.as_bytes().to_vec();
-                    angle_bytes.resize(5, 0);
-                    body.extend_from_slice(&angle_bytes); // angle name (5)
-                    body.extend_from_slice(&codec); // angle type (4)
-                    body.push(0); // reserved (1)
-                }
-            }
-            body.extend_from_slice(&[0_u8; 2]); // stream-info length
-            body.extend_from_slice(&[0_u8; 2]); // reserved
-            body.push(0); // video count
-            body.push(u8::try_from(declared_audio.len()).unwrap()); // audio count
-            body.extend_from_slice(&[0_u8; 5]); // remaining 5 stream counts (all zero)
-            body.extend_from_slice(&[0_u8; 5]); // reserved
-            for pid in declared_audio {
-                body.push(3); // header length (type + PID)
-                body.push(1); // header type 1: the PID follows directly
-                body.extend_from_slice(&pid.to_be_bytes());
-                body.push(5); // stream length (type byte + format + language)
-                body.push(0x81); // AC3 audio
-                body.push(0x61); // 5.1 / 48 kHz
-                body.extend_from_slice(b"eng");
-            }
-            items.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
-            items.extend_from_slice(&body);
+        // Each declared PID becomes one AC3 5.1 / 48 kHz English entry, so the
+        // counts array names audio alone.
+        let mut stream_bytes = Vec::new();
+        for &pid in declared_audio {
+            stream_bytes.extend(pl_stream(1, pid, 0x81, [0x61, b'e', b'n', b'g']));
         }
-
-        let playlist_offset: usize = 0x3C;
-        let mut playlist = Vec::new();
-        playlist.extend_from_slice(&[0_u8; 4]); // PlayList length
-        playlist.extend_from_slice(&[0_u8; 2]); // reserved
-        playlist.extend_from_slice(&u16::try_from(item_names.len()).unwrap().to_be_bytes());
-        playlist.extend_from_slice(&[0_u8; 2]); // sub-item count
-        playlist.extend_from_slice(&items);
-        let chapters_offset = playlist_offset.wrapping_add(playlist.len());
-
-        let mut mark = Vec::new();
-        mark.extend_from_slice(&[0_u8; 4]); // PlayListMark length
-        mark.extend_from_slice(&u16::try_from(chapters.len()).unwrap().to_be_bytes());
-        for &(chapter_type, file_index, tick) in chapters {
-            let mut entry = vec![0_u8, chapter_type];
-            entry.extend_from_slice(&file_index.to_be_bytes());
-            entry.extend_from_slice(&tick.to_be_bytes());
-            entry.resize(14, 0);
-            mark.extend_from_slice(&entry);
-        }
-
-        let mut buf = b"MPLS0300".to_vec();
-        buf.extend_from_slice(&u32::try_from(playlist_offset).unwrap().to_be_bytes());
-        buf.extend_from_slice(&u32::try_from(chapters_offset).unwrap().to_be_bytes());
-        buf.extend_from_slice(&[0_u8; 4]); // extensions offset
-        buf.resize(0x38, 0);
-        buf.push(0); // misc flags at 0x38
-        buf.resize(playlist_offset, 0);
-        buf.extend_from_slice(&playlist);
-        buf.extend_from_slice(&mark);
-        buf
+        let counts = [0, u8::try_from(declared_audio.len()).unwrap(), 0, 0, 0, 0, 0];
+        // An empty angle list is a single-angle item, not a multi-angle one with
+        // no extra angles — the two differ in the item's multiangle flag.
+        let angles = (!angle_names.is_empty()).then_some(angle_names);
+        let items: Vec<Vec<u8>> = item_names
+            .iter()
+            .map(|name| build_item_codec(name, codec, in_t, out_t, angles, counts, &stream_bytes))
+            .collect();
+        let marks: Vec<Vec<u8>> = chapters
+            .iter()
+            .map(|&(chapter_type, file_index, tick)| chapter_entry(chapter_type, file_index, tick))
+            .collect();
+        build_mpls(0, &items, &marks)
     }
 
     /// A valid `*.mpls` with zero play items — its `stream_clips` are empty, so
     /// the reference-clip selection finds nothing.
     fn empty_mpls() -> Vec<u8> {
-        let playlist_offset: usize = 0x3C;
-        let mut playlist = Vec::new();
-        playlist.extend_from_slice(&[0_u8; 4]); // PlayList length
-        playlist.extend_from_slice(&[0_u8; 2]); // reserved
-        playlist.extend_from_slice(&0_u16.to_be_bytes()); // item count = 0
-        playlist.extend_from_slice(&[0_u8; 2]); // sub-item count
-        let chapters_offset = playlist_offset.wrapping_add(playlist.len());
-
-        let mut mark = Vec::new();
-        mark.extend_from_slice(&[0_u8; 4]); // PlayListMark length
-        mark.extend_from_slice(&0_u16.to_be_bytes()); // zero marks
-
-        let mut buf = b"MPLS0300".to_vec();
-        buf.extend_from_slice(&u32::try_from(playlist_offset).unwrap().to_be_bytes());
-        buf.extend_from_slice(&u32::try_from(chapters_offset).unwrap().to_be_bytes());
-        buf.extend_from_slice(&[0_u8; 4]); // extensions offset
-        buf.resize(0x38, 0);
-        buf.push(0); // misc flags at 0x38
-        buf.resize(playlist_offset, 0);
-        buf.extend_from_slice(&playlist);
-        buf.extend_from_slice(&mark);
-        buf
+        build_mpls(0, &[], &[])
     }
 
     /// `bdmt_eng.xml` with the given title in the `discinfo` namespace.

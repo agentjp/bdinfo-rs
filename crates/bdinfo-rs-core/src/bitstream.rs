@@ -513,19 +513,74 @@ impl TsStreamBuffer {
     }
 }
 
+/// Bit-level builders shared by this module's, [`crate::codec`]'s and the
+/// thirteen codec scanners' tests.
+///
+/// A readable [`TsStreamBuffer`] over a byte slice, and a field-by-field bit
+/// packer for spelling out synthetic frames.
 #[cfg(test)]
-mod tests {
-    use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
-
-    use super::{BUFFER_SIZE, SeekOrigin, TsStreamBuffer};
+pub mod bits {
+    use super::TsStreamBuffer;
 
     /// Builds a buffer holding `data`, rewound for reading.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
+    pub(crate) fn buf(data: &[u8]) -> TsStreamBuffer {
         let mut b = TsStreamBuffer::new();
         b.add(data, 0, data.len());
         b.begin_read();
         b
     }
+
+    /// Packs `(value, bit_width)` fields MSB-first into bytes; a trailing partial
+    /// byte is left-aligned (low bits zero), matching how the bit reader consumes
+    /// them. Lets each scanner test spell its frame out field-by-field.
+    pub(crate) fn pack(fields: &[(u64, u32)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut cur: u8 = 0;
+        let mut nbits: u32 = 0;
+        for &(val, width) in fields {
+            let mut b = width;
+            while b > 0 {
+                b = b.wrapping_sub(1);
+                let bit = u8::try_from(val.wrapping_shr(b) & 1).unwrap_or(0);
+                cur = cur.wrapping_shl(1).wrapping_add(bit);
+                nbits = nbits.wrapping_add(1);
+                if nbits == 8 {
+                    bytes.push(cur);
+                    cur = 0;
+                    nbits = 0;
+                }
+            }
+        }
+        if nbits > 0 {
+            bytes.push(cur.wrapping_shl(8_u32.wrapping_sub(nbits)));
+        }
+        bytes
+    }
+
+    #[test]
+    fn pack_handles_aligned_and_partial_inputs() {
+        // 16 bits → exactly two whole bytes (the trailing-partial push is skipped).
+        assert_eq!(pack(&[(0xABCD, 16)]), vec![0xAB, 0xCD]);
+        // 12 bits → one whole byte plus a left-aligned partial byte.
+        assert_eq!(pack(&[(0xABC, 12)]), vec![0xAB, 0xC0]);
+    }
+
+    #[test]
+    fn buf_is_readable_from_its_first_byte() {
+        // `begin_read` is what makes the difference: without it the buffer's read
+        // cursor sits past the data every caller wants to parse.
+        let mut b = buf(&[0xAB, 0xCD]);
+        assert_eq!(b.length(), 2);
+        assert_eq!(b.read_bits4(16, false), 0xABCD);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
+
+    use super::bits::buf;
+    use super::{BUFFER_SIZE, SeekOrigin, TsStreamBuffer};
 
     /// Packs `bits` MSB-first into bytes; a trailing partial byte is left-aligned
     /// (low bits padded with zero), matching how the readers consume them.
