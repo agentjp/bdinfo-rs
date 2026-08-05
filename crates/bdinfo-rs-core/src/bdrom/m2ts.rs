@@ -235,6 +235,175 @@ struct TsStreamState {
     stream_kind: StreamKind,
 }
 
+/// Who owned a byte stepped through [`SectionAssembler::header_byte`].
+enum SectionByte {
+    /// The pointer-field, length-prefix, or a shared header step consumed it.
+    Taken,
+    /// A section-header byte at this post-decrement countdown position; the
+    /// table's own walk owns the positions below `last_section_number`'s, and
+    /// the decision to start the body copy.
+    Header(u8),
+    /// No section is in progress — inter-section padding, consumed unread.
+    Idle,
+}
+
+/// One MPEG-2 PSI section-assembly state machine (ISO 13818-1 §2.4.4):
+/// pointer-field skip, the 3-byte length prefix with its table-id check and
+/// `> 1021` reject, the section-header countdown, and the body copy into a
+/// section buffer. The PAT and PMT walks each drive one instance. The buffer
+/// lives with the caller — the PMT keys its buffers by PID — and so do the
+/// completed-table entry walks, whose layouts are per-table.
+struct SectionAssembler {
+    /// The only accepted `table_id` (`0x00` PAT, `0x02` PMT); any other value
+    /// at the length-prefix step rejects the section.
+    table_id: u8,
+    /// Length of the section header behind the 3-byte prefix. Both table
+    /// headers open with the same five bytes (table-id extension, version,
+    /// `section_number`, `last_section_number`), so the shared header
+    /// positions sit a fixed distance below this value.
+    header: u8,
+    /// Whether the next byte is the pointer field.
+    section_start: bool,
+    /// Remaining pointer-field bytes to skip.
+    pointer_field: u8,
+    /// Write cursor into the caller's section buffer.
+    offset: u32,
+    /// Countdown over the 3-byte section-length prefix.
+    length_parse: u8,
+    /// Remaining section bytes.
+    section_length: u16,
+    /// Countdown over the section header.
+    section_parse: u8,
+    /// Whether the section body is being copied.
+    transfer_state: bool,
+    /// Current section number.
+    section_number: u8,
+    /// Final section number.
+    last_section_number: u8,
+}
+
+impl SectionAssembler {
+    /// Builds an idle assembler accepting `table_id` sections with a
+    /// `header`-byte section header.
+    const fn new(table_id: u8, header: u8) -> Self {
+        Self {
+            table_id,
+            header,
+            section_start: false,
+            pointer_field: 0,
+            offset: 0,
+            length_parse: 0,
+            section_length: 0,
+            section_parse: 0,
+            transfer_state: false,
+            section_number: 0,
+            last_section_number: 0,
+        }
+    }
+
+    /// Steps the pre-body walk with one byte: pointer field, length prefix,
+    /// then section header. The shared header positions (`section_number`
+    /// with its section-0 buffer reset, `last_section_number`) are applied
+    /// here; every header position is also reported back so the table's own
+    /// walk can read its tail fields.
+    fn header_byte(&mut self, b: u8) -> SectionByte {
+        if self.section_start {
+            self.pointer_field = b;
+            if self.pointer_field == 0 {
+                self.length_parse = 3;
+            }
+            self.section_start = false;
+            SectionByte::Taken
+        } else if self.pointer_field > 0 {
+            self.pointer_field = self.pointer_field.wrapping_sub(1);
+            if self.pointer_field == 0 {
+                self.length_parse = 3;
+            }
+            SectionByte::Taken
+        } else if self.length_parse > 0 {
+            self.length_parse = self.length_parse.wrapping_sub(1);
+            match self.length_parse {
+                2 => {
+                    // A wrong table id abandons the section, leaving the
+                    // machine idle until the next payload-unit start. Classic
+                    // BDInfo checks only the PMT's id and assembles a
+                    // mislabeled PAT — see DIFFERENCES.md.
+                    if b != self.table_id {
+                        self.length_parse = 0;
+                    }
+                }
+                1 => self.section_length = u16::from(b & 0xF).wrapping_shl(8),
+                // The 3-byte prefix countdown only ever reaches 0 here.
+                _ => {
+                    self.section_length = self.section_length.wrapping_add(u16::from(b));
+                    if self.section_length > 1021 {
+                        self.section_length = 0;
+                    } else {
+                        self.section_parse = self.header;
+                    }
+                }
+            }
+            SectionByte::Taken
+        } else if self.section_parse > 0 {
+            self.section_length = self.section_length.wrapping_sub(1);
+            self.section_parse = self.section_parse.wrapping_sub(1);
+            if self.section_parse == self.header.wrapping_sub(4) {
+                self.section_number = b;
+                if b == 0 {
+                    self.offset = 0;
+                }
+            } else if self.section_parse == self.header.wrapping_sub(5) {
+                self.last_section_number = b;
+            }
+            SectionByte::Header(self.section_parse)
+        } else {
+            SectionByte::Idle
+        }
+    }
+
+    /// Copies section-body bytes from `buffer` (cursor `*i`, chunk length
+    /// `bl`) into `section`, bounded by the remaining section, chunk, and
+    /// packet bytes; `*offset` reports the count and `*i` lands on the last
+    /// byte consumed. Returns whether this run completed the table (the final
+    /// section finished) — the caller's cue to walk the assembled entries.
+    fn transfer(
+        &mut self,
+        buffer: &[u8],
+        section: &mut [u8],
+        i: &mut i64,
+        bl: i64,
+        offset: &mut i64,
+        packet_length: &mut u8,
+    ) -> bool {
+        // The PAT and PMT copies of this clamp compared the remaining chunk
+        // with `>` and `>=` respectively — equality-identical, since at
+        // equality both branches produce the same offset. `.min` keeps the
+        // unified form free of that idempotent-comparison mutant.
+        *offset =
+            i64::from(self.section_length).min(bl.wrapping_sub(*i)).min(i64::from(*packet_length));
+        let mut sink = 0_u8;
+        let mut k: i64 = 0;
+        while k < *offset {
+            let bb = byte_at(buffer, *i);
+            let po = usize::try_from(self.offset).unwrap_or(usize::MAX);
+            // A malformed section overflowing the 1024-byte buffer writes to a
+            // discard sink rather than panicking.
+            *section.get_mut(po).unwrap_or(&mut sink) = bb;
+            self.offset = self.offset.wrapping_add(1);
+            *i = i.wrapping_add(1);
+            self.section_length = self.section_length.wrapping_sub(1);
+            *packet_length = packet_length.wrapping_sub(1);
+            k = k.wrapping_add(1);
+        }
+        *i = i.wrapping_sub(1);
+        if self.section_length == 0 {
+            self.transfer_state = false;
+            return self.section_number == self.last_section_number;
+        }
+        false
+    }
+}
+
 /// The whole-file packet parser — the fields the core demux reads (write-only
 /// diagnostics are omitted, see the module note).
 ///
@@ -269,48 +438,17 @@ struct TsPacketParser {
     variable_packet_end: bool,
     /// The discovered PMT PID.
     pmt_pid: u16,
+    /// PAT section assembly (5-byte header: through `last_section_number`).
+    pat_assembler: SectionAssembler,
     /// PAT section-assembly buffer.
     pat: Vec<u8>,
-    /// Whether the next byte is the PAT pointer field.
-    pat_section_start: bool,
-    /// Remaining PAT pointer-field bytes to skip.
-    pat_pointer_field: u8,
-    /// Write cursor into [`pat`](Self::pat).
-    pat_offset: u32,
-    /// Countdown over the 3-byte PAT section-length prefix.
-    pat_section_length_parse: u8,
-    /// Remaining PAT section bytes.
-    pat_section_length: u16,
-    /// Countdown over the 5-byte PAT section header.
-    pat_section_parse: u32,
-    /// Whether the PAT section body is being copied.
-    pat_transfer_state: bool,
-    /// Current PAT section number.
-    pat_section_number: u8,
-    /// Final PAT section number.
-    pat_last_section_number: u8,
+    /// PMT section assembly (9-byte header: the shared five bytes, then the
+    /// PCR PID and `program_info_length` pairs).
+    pmt_assembler: SectionAssembler,
     /// PMT section-assembly buffers keyed by PID.
     pmt: BTreeMap<u16, Vec<u8>>,
-    /// Whether the next byte is the PMT pointer field.
-    pmt_section_start: bool,
     /// Remaining PMT program-info bytes.
     pmt_program_info_length: u16,
-    /// Remaining PMT pointer-field bytes to skip.
-    pmt_pointer_field: u8,
-    /// Write cursor into the current PMT buffer.
-    pmt_offset: u32,
-    /// Countdown over the 3-byte PMT section-length prefix.
-    pmt_section_length_parse: u32,
-    /// Remaining PMT section bytes.
-    pmt_section_length: u16,
-    /// Countdown over the 9-byte PMT section header.
-    pmt_section_parse: u32,
-    /// Whether the PMT section body is being copied.
-    pmt_transfer_state: bool,
-    /// Current PMT section number.
-    pmt_section_number: u8,
-    /// Final PMT section number.
-    pmt_last_section_number: u8,
     /// Smallest DTS seen across video streams, for the clip length.
     pts_first: i128,
     /// Largest DTS seen across video streams, for the clip length.
@@ -337,27 +475,11 @@ impl TsPacketParser {
             adaption_field_parse: 0,
             variable_packet_end: false,
             pmt_pid: 0xFFFF,
+            pat_assembler: SectionAssembler::new(0x00, 5),
             pat: vec![0_u8; SECTION_SIZE],
-            pat_section_start: false,
-            pat_pointer_field: 0,
-            pat_offset: 0,
-            pat_section_length_parse: 0,
-            pat_section_length: 0,
-            pat_section_parse: 0,
-            pat_transfer_state: false,
-            pat_section_number: 0,
-            pat_last_section_number: 0,
+            pmt_assembler: SectionAssembler::new(0x02, 9),
             pmt: BTreeMap::new(),
-            pmt_section_start: false,
             pmt_program_info_length: 0,
-            pmt_pointer_field: 0,
-            pmt_offset: 0,
-            pmt_section_length_parse: 0,
-            pmt_section_length: 0,
-            pmt_section_parse: 0,
-            pmt_transfer_state: false,
-            pmt_section_number: 0,
-            pmt_last_section_number: 0,
             pts_first: i128::from(u64::MAX),
             pts_last: 0,
             stream_present: false,
@@ -815,9 +937,9 @@ impl TsStreamFile {
                             }
                             if parser.payload_unit_start_indicator == 1 {
                                 if parser.pid == 0 {
-                                    parser.pat_section_start = true;
+                                    parser.pat_assembler.section_start = true;
                                 } else if parser.pid == parser.pmt_pid {
-                                    parser.pmt_section_start = true;
+                                    parser.pmt_assembler.section_start = true;
                                 } else {
                                     let ts = self
                                         .stream_states
@@ -1187,95 +1309,39 @@ impl TsStreamFile {
         bl: i64,
         offset: &mut i64,
     ) {
-        if parser.pat_transfer_state {
-            if (bl.wrapping_sub(*i)) > i64::from(parser.pat_section_length) {
-                *offset = i64::from(parser.pat_section_length);
-            } else {
-                *offset = bl.wrapping_sub(*i);
-            }
-            if i64::from(parser.packet_length) <= *offset {
-                *offset = i64::from(parser.packet_length);
-            }
-            let mut sink = 0_u8;
-            let mut k: i64 = 0;
-            while k < *offset {
-                let bb = byte_at(buffer, *i);
-                let po = usize::try_from(parser.pat_offset).unwrap_or(usize::MAX);
-                // A malformed section overflowing the 1024-byte buffer writes to a
-                // discard sink rather than panicking.
-                *parser.pat.get_mut(po).unwrap_or(&mut sink) = bb;
-                parser.pat_offset = parser.pat_offset.wrapping_add(1);
-                *i = i.wrapping_add(1);
-                parser.pat_section_length = parser.pat_section_length.wrapping_sub(1);
-                parser.packet_length = parser.packet_length.wrapping_sub(1);
-                k = k.wrapping_add(1);
-            }
-            *i = i.wrapping_sub(1);
-            if parser.pat_section_length == 0 {
-                parser.pat_transfer_state = false;
-                if parser.pat_section_number == parser.pat_last_section_number {
-                    let bound = i64::from(parser.pat_offset).wrapping_sub(4);
-                    let mut k: i64 = 0;
-                    while k < bound {
-                        let program_number = u32::from(byte_at(&parser.pat, k))
-                            .wrapping_shl(8)
-                            .wrapping_add(u32::from(byte_at(&parser.pat, k.wrapping_add(1))));
-                        let program_pid = u16::from(byte_at(&parser.pat, k.wrapping_add(2)) & 0x1F)
-                            .wrapping_shl(8)
-                            .wrapping_add(u16::from(byte_at(&parser.pat, k.wrapping_add(3))));
-                        if program_number == 1 {
-                            parser.pmt_pid = program_pid;
-                        }
-                        k = k.wrapping_add(4);
+        if parser.pat_assembler.transfer_state {
+            if parser.pat_assembler.transfer(
+                buffer,
+                &mut parser.pat,
+                i,
+                bl,
+                offset,
+                &mut parser.packet_length,
+            ) {
+                let bound = i64::from(parser.pat_assembler.offset).wrapping_sub(4);
+                let mut k: i64 = 0;
+                while k < bound {
+                    let program_number = u32::from(byte_at(&parser.pat, k))
+                        .wrapping_shl(8)
+                        .wrapping_add(u32::from(byte_at(&parser.pat, k.wrapping_add(1))));
+                    let program_pid = u16::from(byte_at(&parser.pat, k.wrapping_add(2)) & 0x1F)
+                        .wrapping_shl(8)
+                        .wrapping_add(u16::from(byte_at(&parser.pat, k.wrapping_add(3))));
+                    if program_number == 1 {
+                        parser.pmt_pid = program_pid;
                     }
+                    k = k.wrapping_add(4);
                 }
             }
         } else {
             parser.packet_length = parser.packet_length.wrapping_sub(1);
-            if parser.pat_section_start {
-                parser.pat_pointer_field = byte_at(buffer, *i);
-                if parser.pat_pointer_field == 0 {
-                    parser.pat_section_length_parse = 3;
-                }
-                parser.pat_section_start = false;
-            } else if parser.pat_pointer_field > 0 {
-                parser.pat_pointer_field = parser.pat_pointer_field.wrapping_sub(1);
-                if parser.pat_pointer_field == 0 {
-                    parser.pat_section_length_parse = 3;
-                }
-            } else if parser.pat_section_length_parse > 0 {
-                parser.pat_section_length_parse = parser.pat_section_length_parse.wrapping_sub(1);
-                let b = byte_at(buffer, *i);
-                match parser.pat_section_length_parse {
-                    1 => parser.pat_section_length = u16::from(b & 0xF).wrapping_shl(8),
-                    0 => {
-                        parser.pat_section_length =
-                            parser.pat_section_length.wrapping_add(u16::from(b));
-                        if parser.pat_section_length > 1021 {
-                            parser.pat_section_length = 0;
-                        } else {
-                            parser.pat_section_parse = 5;
-                        }
-                    }
-                    _ => {}
-                }
-            } else if parser.pat_section_parse > 0 {
-                parser.pat_section_length = parser.pat_section_length.wrapping_sub(1);
-                parser.pat_section_parse = parser.pat_section_parse.wrapping_sub(1);
-                let b = byte_at(buffer, *i);
-                match parser.pat_section_parse {
-                    1 => {
-                        parser.pat_section_number = b;
-                        if b == 0 {
-                            parser.pat_offset = 0;
-                        }
-                    }
-                    0 => {
-                        parser.pat_last_section_number = b;
-                        parser.pat_transfer_state = true;
-                    }
-                    _ => {}
-                }
+            // The PAT header ends with `last_section_number` and carries no
+            // table-specific fields, so position 0 starts the body copy.
+            if matches!(
+                parser.pat_assembler.header_byte(byte_at(buffer, *i)),
+                SectionByte::Header(0)
+            ) {
+                parser.pat_assembler.transfer_state = true;
             }
         }
     }
@@ -1283,10 +1349,6 @@ impl TsStreamFile {
     /// Walks one PMT byte (PID == `pmt_pid`): assembles the section, then on
     /// completion registers the elementary streams via
     /// [`create_stream`](Self::create_stream).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the PMT section/stream-entry walk is one sequential pass; splitting it would scatter the parser state"
-    )]
     fn parse_pmt(
         &mut self,
         parser: &mut TsPacketParser,
@@ -1296,133 +1358,83 @@ impl TsStreamFile {
         offset: &mut i64,
         is_full_scan: bool,
     ) {
-        if parser.pmt_transfer_state {
-            if (bl.wrapping_sub(*i)) >= i64::from(parser.pmt_section_length) {
-                *offset = i64::from(parser.pmt_section_length);
-            } else {
-                *offset = bl.wrapping_sub(*i);
-            }
-            if i64::from(parser.packet_length) <= *offset {
-                *offset = i64::from(parser.packet_length);
-            }
-            {
+        if parser.pmt_assembler.transfer_state {
+            let complete = {
                 let pmt = parser.pmt.entry(parser.pid).or_insert_with(|| vec![0_u8; SECTION_SIZE]);
-                let mut sink = 0_u8;
+                parser.pmt_assembler.transfer(buffer, pmt, i, bl, offset, &mut parser.packet_length)
+            };
+            if complete {
+                let bound = i64::from(parser.pmt_assembler.offset).wrapping_sub(4);
                 let mut k: i64 = 0;
-                while k < *offset {
-                    let bb = byte_at(buffer, *i);
-                    let po = usize::try_from(parser.pmt_offset).unwrap_or(usize::MAX);
-                    // Overflow of the 1024-byte buffer is discarded, not a panic.
-                    *pmt.get_mut(po).unwrap_or(&mut sink) = bb;
-                    parser.pmt_offset = parser.pmt_offset.wrapping_add(1);
-                    *i = i.wrapping_add(1);
-                    parser.pmt_section_length = parser.pmt_section_length.wrapping_sub(1);
-                    parser.packet_length = parser.packet_length.wrapping_sub(1);
-                    k = k.wrapping_add(1);
-                }
-            }
-            *i = i.wrapping_sub(1);
-            if parser.pmt_section_length == 0 {
-                parser.pmt_transfer_state = false;
-                if parser.pmt_section_number == parser.pmt_last_section_number {
-                    let bound = i64::from(parser.pmt_offset).wrapping_sub(4);
-                    let mut k: i64 = 0;
-                    while k < bound {
-                        let (stream_type, stream_pid, stream_info_length) = {
-                            let pmt = parser.pmt.get(&parser.pid);
-                            let st = pmt.map_or(0, |p| byte_at(p, k));
-                            let p1 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(1)));
-                            let p2 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(2)));
-                            let p3 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(3)));
-                            let p4 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(4)));
-                            let spid =
-                                u16::from(p1 & 0x1F).wrapping_shl(8).wrapping_add(u16::from(p2));
-                            let sil =
-                                u16::from(p3 & 0xF).wrapping_shl(8).wrapping_add(u16::from(p4));
-                            (st, spid, sil)
-                        };
-                        if !self.streams.contains_key(&stream_pid) {
-                            self.create_stream(stream_pid, stream_type);
-                            // An unrecognised type registers no stream, and the
-                            // walk steps over that entry: ISO 13818-1 makes each
-                            // entry self-delimiting through its ES_info_length,
-                            // so the stride below lands on the next entry
-                            // without interpreting the skipped one, and later
-                            // entries keep their streams. Classic BDInfo
-                            // dereferences the absent stream here instead.
-                            if let Some(s) = self.streams.get_mut(&stream_pid)
-                                && s.base().is_graphics_stream()
-                            {
-                                s.base_mut().is_initialized = !is_full_scan;
-                            }
+                while k < bound {
+                    let (stream_type, stream_pid, stream_info_length) = {
+                        let pmt = parser.pmt.get(&parser.pid);
+                        let st = pmt.map_or(0, |p| byte_at(p, k));
+                        let p1 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(1)));
+                        let p2 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(2)));
+                        let p3 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(3)));
+                        let p4 = pmt.map_or(0, |p| byte_at(p, k.wrapping_add(4)));
+                        let spid = u16::from(p1 & 0x1F).wrapping_shl(8).wrapping_add(u16::from(p2));
+                        let sil = u16::from(p3 & 0xF).wrapping_shl(8).wrapping_add(u16::from(p4));
+                        (st, spid, sil)
+                    };
+                    if !self.streams.contains_key(&stream_pid) {
+                        self.create_stream(stream_pid, stream_type);
+                        // An unrecognised type registers no stream, and the
+                        // walk steps over that entry: ISO 13818-1 makes each
+                        // entry self-delimiting through its ES_info_length,
+                        // so the stride below lands on the next entry
+                        // without interpreting the skipped one, and later
+                        // entries keep their streams. Classic BDInfo
+                        // dereferences the absent stream here instead.
+                        if let Some(s) = self.streams.get_mut(&stream_pid)
+                            && s.base().is_graphics_stream()
+                        {
+                            s.base_mut().is_initialized = !is_full_scan;
                         }
-                        k = k.wrapping_add(5).wrapping_add(i64::from(stream_info_length));
                     }
+                    k = k.wrapping_add(5).wrapping_add(i64::from(stream_info_length));
                 }
             }
         } else {
             parser.packet_length = parser.packet_length.wrapping_sub(1);
             let b = byte_at(buffer, *i);
-            if parser.pmt_section_start {
-                parser.pmt_pointer_field = b;
-                if parser.pmt_pointer_field == 0 {
-                    parser.pmt_section_length_parse = 3;
+            match parser.pmt_assembler.header_byte(b) {
+                // The PMT header's tail: the `program_info_length` pair, whose
+                // descriptors precede the stream entries; the body copy starts
+                // only once they are drained.
+                SectionByte::Header(1) => {
+                    parser.pmt_program_info_length = u16::from(b & 0xF).wrapping_shl(8);
                 }
-                parser.pmt_section_start = false;
-            } else if parser.pmt_pointer_field > 0 {
-                parser.pmt_pointer_field = parser.pmt_pointer_field.wrapping_sub(1);
-                if parser.pmt_pointer_field == 0 {
-                    parser.pmt_section_length_parse = 3;
-                }
-            } else if parser.pmt_section_length_parse > 0 {
-                parser.pmt_section_length_parse = parser.pmt_section_length_parse.wrapping_sub(1);
-                match parser.pmt_section_length_parse {
-                    2 => {
-                        if b != 0x2 {
-                            parser.pmt_section_length_parse = 0;
-                        }
-                    }
-                    1 => parser.pmt_section_length = u16::from(b & 0xF).wrapping_shl(8),
-                    // The 3-byte section-length prefix only ever reaches 0 here.
-                    _ => {
-                        parser.pmt_section_length =
-                            parser.pmt_section_length.wrapping_add(u16::from(b));
-                        if parser.pmt_section_length > 1021 {
-                            parser.pmt_section_length = 0;
-                        } else {
-                            parser.pmt_section_parse = 9;
-                        }
+                SectionByte::Header(0) => {
+                    parser.pmt_program_info_length =
+                        parser.pmt_program_info_length.wrapping_add(u16::from(b));
+                    if parser.pmt_program_info_length == 0 {
+                        parser.pmt_assembler.transfer_state = true;
                     }
                 }
-            } else if parser.pmt_section_parse > 0 {
-                parser.pmt_section_length = parser.pmt_section_length.wrapping_sub(1);
-                parser.pmt_section_parse = parser.pmt_section_parse.wrapping_sub(1);
-                match parser.pmt_section_parse {
-                    5 => {
-                        parser.pmt_section_number = b;
-                        if b == 0 {
-                            parser.pmt_offset = 0;
-                        }
-                    }
-                    4 => parser.pmt_last_section_number = b,
-                    1 => parser.pmt_program_info_length = u16::from(b & 0xF).wrapping_shl(8),
-                    0 => {
+                SectionByte::Idle => {
+                    // A body `if` spelled `!= 0`, not a `> 0` match guard: the
+                    // guard's replace-with-true mutant (like `> 0`'s `>= 0`)
+                    // is equivalent — at idle both countdowns are 0 and wrap
+                    // in lockstep, so a spurious drain fires only zero-length
+                    // pseudo-transfers that re-walk the stale section
+                    // idempotently — and so could never be killed. `!= 0`'s
+                    // `== 0` mutant dies on any descriptor-bearing PMT.
+                    if parser.pmt_program_info_length != 0 {
+                        // Program-info descriptors carry nothing the analysis
+                        // reads; only the byte consumption (positioning the
+                        // stream entries) matters.
+                        parser.pmt_assembler.section_length =
+                            parser.pmt_assembler.section_length.wrapping_sub(1);
                         parser.pmt_program_info_length =
-                            parser.pmt_program_info_length.wrapping_add(u16::from(b));
+                            parser.pmt_program_info_length.wrapping_sub(1);
                         if parser.pmt_program_info_length == 0 {
-                            parser.pmt_transfer_state = true;
+                            parser.pmt_assembler.transfer_state = true;
                         }
                     }
-                    _ => {}
                 }
-            } else if parser.pmt_program_info_length > 0 {
-                // Program-info descriptors carry nothing the analysis reads; only
-                // the byte consumption (positioning the stream entries) matters.
-                parser.pmt_section_length = parser.pmt_section_length.wrapping_sub(1);
-                parser.pmt_program_info_length = parser.pmt_program_info_length.wrapping_sub(1);
-                if parser.pmt_program_info_length == 0 {
-                    parser.pmt_transfer_state = true;
-                }
+                SectionByte::Taken | SectionByte::Header(_) => {}
             }
         }
     }
@@ -2633,6 +2645,29 @@ mod tests {
         let mut pls = [empty_playlist()];
         let file = scan("00000.m2ts", &bytes, &mut pls, true);
         assert!(file.streams.is_empty());
+    }
+
+    #[test]
+    fn a_pat_with_a_wrong_table_id_registers_nothing() {
+        // A PID-0 section whose table_id is not 0x00 is rejected at the
+        // length-prefix step, so the PMT PID it announces is never adopted and
+        // the PMT that follows registers nothing. Classic BDInfo assembles the
+        // mislabeled section unchecked — see DIFFERENCES.md; no conforming
+        // disc carries a wrong PAT table id.
+        let mut pat = pat_payload(0x0100);
+        *pat.get_mut(1).unwrap() = 0x05; // table_id (byte 1, behind the pointer field)
+        let mut bytes = packet(0, true, &pat);
+        bytes.extend(packet(0x0100, true, &pmt_payload(&[(0x1B, 0x1011)])));
+        let file = scan("00000.m2ts", &bytes, &mut [empty_playlist()], true);
+        assert!(file.streams.is_empty());
+
+        // The reject leaves the machine idle, not wedged: a correct PAT in the
+        // next payload unit parses, and the same PMT registers its stream.
+        let mut bytes = packet(0, true, &pat);
+        bytes.extend(packet(0, true, &pat_payload(0x0100)));
+        bytes.extend(packet(0x0100, true, &pmt_payload(&[(0x1B, 0x1011)])));
+        let file = scan("00000.m2ts", &bytes, &mut [empty_playlist()], true);
+        assert!(file.streams.contains_key(&0x1011));
     }
 
     #[test]

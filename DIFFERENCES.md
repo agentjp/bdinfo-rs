@@ -159,6 +159,11 @@ value is never rendered.
   (`I`/`P`/`B`/`BI`) is classified more correctly (SMPTE 421M field-pair collapse), but the
   tag is only ever used as a frame-present counter — its string is never rendered. The
   report is byte-identical.
+- **PAT `table_id` validation.** A PID-0 section is assembled only when its `table_id` is
+  0x00 (ISO 13818-1); a wrong id abandons the section, exactly as both tools already do for
+  a PMT whose `table_id` is not 0x02. BDInfo assembles the mislabeled section and adopts
+  whatever PMT PID it announces. No conforming disc carries a wrong PAT table id, so the
+  report is unchanged for every real disc.
 
 ---
 
