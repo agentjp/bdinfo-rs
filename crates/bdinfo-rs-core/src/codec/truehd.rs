@@ -148,48 +148,14 @@ mod tests {
     use proptest::prelude::{any, proptest};
 
     use super::scan;
-    use crate::bitstream::TsStreamBuffer;
+    use crate::bitstream::bits::{buf, pack};
     use crate::stream::{TsAudioStream, TsStreamType};
-
-    /// A rewound buffer holding `data`.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
-        let mut b = TsStreamBuffer::new();
-        b.add(data, 0, data.len());
-        b.begin_read();
-        b
-    }
 
     /// A fresh audio stream of `stream_type`.
     fn stream(stream_type: TsStreamType) -> TsAudioStream {
         let mut s = TsAudioStream::default();
         s.base.stream_type = stream_type;
         s
-    }
-
-    /// Packs `(value, bit_width)` fields MSB-first into bytes (trailing partial byte
-    /// left-aligned).
-    fn pack(fields: &[(u64, u32)]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut cur: u8 = 0;
-        let mut nbits: u32 = 0;
-        for &(val, width) in fields {
-            let mut b = width;
-            while b > 0 {
-                b = b.wrapping_sub(1);
-                let bit = u8::try_from(val.wrapping_shr(b) & 1).unwrap_or(0);
-                cur = cur.wrapping_shl(1).wrapping_add(bit);
-                nbits = nbits.wrapping_add(1);
-                if nbits == 8 {
-                    bytes.push(cur);
-                    cur = 0;
-                    nbits = 0;
-                }
-            }
-        }
-        if nbits > 0 {
-            bytes.push(cur.wrapping_shl(8_u32.wrapping_sub(nbits)));
-        }
-        bytes
     }
 
     /// The legacy AC-3 5.1 / 48 kHz / 640 kbps / DN -31 core frame the demux feeds

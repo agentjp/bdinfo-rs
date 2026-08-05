@@ -69,16 +69,8 @@ mod tests {
     use proptest::prelude::{any, proptest};
 
     use super::scan;
-    use crate::bitstream::TsStreamBuffer;
+    use crate::bitstream::bits::buf;
     use crate::stream::{TsAspectRatio, TsFrameRate, TsStreamType, TsVideoFormat, TsVideoStream};
-
-    /// A rewound buffer holding `data`.
-    fn buf(data: &[u8]) -> TsStreamBuffer {
-        let mut b = TsStreamBuffer::new();
-        b.add(data, 0, data.len());
-        b.begin_read();
-        b
-    }
 
     /// A fresh MPEG-2 video stream.
     fn stream() -> TsVideoStream {

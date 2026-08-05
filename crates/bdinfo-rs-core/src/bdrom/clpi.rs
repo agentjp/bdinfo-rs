@@ -161,24 +161,18 @@ fn build_clip_stream(
     build_coded_stream(clip_data, info.saturating_add(2), stream_type, Some(info.saturating_add(3)))
 }
 
+/// Synthetic `*.clpi` builders shared by this module's and the disc
+/// orchestration's tests.
+///
+/// The per-program header, one stream entry, and the envelope that wraps them.
+/// The on-disc layout is encoded here and nowhere else.
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use proptest::prelude::{any, proptest};
-
-    use super::{TsStreamClip, TsStreamClipFile};
-    use crate::primitives::Pid;
-    use crate::stream::{
-        TsAspectRatio, TsAudioStream, TsChannelLayout, TsFrameRate, TsGraphicsStream, TsStream,
-        TsStreamType, TsTextStream, TsVideoFormat, TsVideoStream,
-    };
-
+pub mod clips {
     /// One per-program 8-byte header: `spn_program_sequence_start` +
     /// `program_map_pid` + the stream count + `num_groups`. The fields around
     /// the count are non-zero filler, so an offset slip lands on visibly
     /// different bytes.
-    fn program_header(stream_count: usize) -> Vec<u8> {
+    pub(crate) fn program_header(stream_count: usize) -> Vec<u8> {
         let mut header = 0x0102_0304_u32.to_be_bytes().to_vec(); // spn start
         header.extend_from_slice(&0x0100_u16.to_be_bytes()); // program_map_pid
         header.push(u8::try_from(stream_count).unwrap());
@@ -188,7 +182,7 @@ mod tests {
 
     /// One stream entry: `[PID:2][len=5][coding_type][payload:4]`, where
     /// `payload` is the four bytes after the coding-type byte.
-    fn entry_bytes(pid: u16, coding_type: u8, payload: [u8; 4]) -> Vec<u8> {
+    pub(crate) fn entry_bytes(pid: u16, coding_type: u8, payload: [u8; 4]) -> Vec<u8> {
         let mut entry = pid.to_be_bytes().to_vec();
         entry.push(5); // coding-info length (coding_type + 4 payload bytes)
         entry.push(coding_type);
@@ -198,7 +192,7 @@ mod tests {
 
     /// Builds a minimal valid `*.clpi`: header → `ProgramInfo` at offset 16 →
     /// one program sequence carrying `entries`.
-    fn build_clpi(magic: [u8; 8], entries: &[(u16, u8, [u8; 4])]) -> Vec<u8> {
+    pub(crate) fn build_clpi(magic: [u8; 8], entries: &[(u16, u8, [u8; 4])]) -> Vec<u8> {
         let mut clip_data = vec![0_u8]; // index 0: reserved byte
         clip_data.push(1); // index 1: num_prog
         clip_data.extend(program_header(entries.len())); // 2..10; entries at 10
@@ -213,6 +207,21 @@ mod tests {
         buf.extend_from_slice(&clip_data); // 20..
         buf
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use proptest::prelude::{any, proptest};
+
+    use super::clips::{build_clpi, entry_bytes, program_header};
+    use super::{TsStreamClip, TsStreamClipFile};
+    use crate::primitives::Pid;
+    use crate::stream::{
+        TsAspectRatio, TsAudioStream, TsChannelLayout, TsFrameRate, TsGraphicsStream, TsStream,
+        TsStreamType, TsTextStream, TsVideoFormat, TsVideoStream,
+    };
 
     #[test]
     fn scan_parses_every_stream_kind() {

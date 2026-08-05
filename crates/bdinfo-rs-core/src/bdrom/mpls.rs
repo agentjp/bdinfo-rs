@@ -379,20 +379,23 @@ fn build_playlist_stream(
     build_coded_stream(data, coding, stream_type, None)
 }
 
+/// Synthetic `*.mpls` builders shared by this module's and the disc
+/// orchestration's tests.
+///
+/// Stream-Number-table entries, `PlayItem`s with or without extra camera angles,
+/// `PlayListMark` entries, and the envelope that wraps them. Parametric
+/// throughout — a caller spells out the counts and bytes it needs, so the
+/// on-disc layout is encoded here and nowhere else.
 #[cfg(test)]
-mod tests {
-    use proptest::prelude::{any, proptest};
-
-    use super::TsPlaylistFile;
-    use crate::primitives::Pid;
-    use crate::stream::{
-        TsAspectRatio, TsAudioStream, TsChannelLayout, TsFrameRate, TsStream, TsStreamType,
-        TsVideoFormat, TsVideoStream,
-    };
-
+pub mod playlists {
     /// One Stream-Number-table entry: a 9-byte header block (PID placed per
     /// `header_type`) + the stream length (5) + the coding type + 4 coding bytes.
-    fn pl_stream(header_type: u8, pid: u16, stream_type: u8, coding: [u8; 4]) -> Vec<u8> {
+    pub(crate) fn pl_stream(
+        header_type: u8,
+        pid: u16,
+        stream_type: u8,
+        coding: [u8; 4],
+    ) -> Vec<u8> {
         let [ph, pl] = pid.to_be_bytes();
         let mut header = vec![header_type];
         match header_type {
@@ -413,7 +416,7 @@ mod tests {
 
     /// One secondary-stream comb-info block: the ref count, a reserved byte,
     /// the 1-byte refs, and a pad byte when the count is odd.
-    fn comb_info(refs: &[u8]) -> Vec<u8> {
+    pub(crate) fn comb_info(refs: &[u8]) -> Vec<u8> {
         let mut block = vec![u8::try_from(refs.len()).unwrap(), 0];
         block.extend_from_slice(refs);
         if refs.len() % 2 == 1 {
@@ -425,7 +428,7 @@ mod tests {
     /// One `PlayItem`. `angles` is `None` for a single-angle item or `Some(names)`
     /// for a multi-angle one (`names.len()` extra angles). `counts` are the seven
     /// SN-table stream counts; `stream_bytes` is the concatenated entries.
-    fn build_item(
+    pub(crate) fn build_item(
         name: &str,
         in_time: u32,
         out_time: u32,
@@ -439,7 +442,7 @@ mod tests {
     /// [`build_item`] with the 4-byte codec id chosen by the caller — `*b"M2TS"`
     /// for an ordinary clip, `*b"FMTS"` for one whose stream file is `*.FMTS`.
     /// The codec id is written for both the item and each angle entry.
-    fn build_item_codec(
+    pub(crate) fn build_item_codec(
         name: &str,
         codec: [u8; 4],
         in_time: u32,
@@ -482,7 +485,7 @@ mod tests {
 
     /// A 14-byte `PlayListMark` entry: `chapter_type` at +1, `file_index` at +2,
     /// `chapter_time` at +4.
-    fn chapter_entry(chapter_type: u8, file_index: u16, chapter_time: u32) -> Vec<u8> {
+    pub(crate) fn chapter_entry(chapter_type: u8, file_index: u16, chapter_time: u32) -> Vec<u8> {
         let mut entry = vec![0, chapter_type];
         entry.extend_from_slice(&file_index.to_be_bytes());
         entry.extend_from_slice(&chapter_time.to_be_bytes());
@@ -492,7 +495,7 @@ mod tests {
 
     /// Wraps items + chapter entries in a valid MPLS envelope (`PlayList` at
     /// `0x3C`, then `PlayListMark`).
-    fn build_mpls(misc_flags: u8, items: &[Vec<u8>], chapters: &[Vec<u8>]) -> Vec<u8> {
+    pub(crate) fn build_mpls(misc_flags: u8, items: &[Vec<u8>], chapters: &[Vec<u8>]) -> Vec<u8> {
         let playlist_offset: usize = 0x3C;
         let mut playlist = Vec::new();
         playlist.extend_from_slice(&[0_u8; 4]); // PlayList length
@@ -521,6 +524,21 @@ mod tests {
         buf.extend_from_slice(&mark);
         buf
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::{any, proptest};
+
+    use super::TsPlaylistFile;
+    use super::playlists::{
+        build_item, build_item_codec, build_mpls, chapter_entry, comb_info, pl_stream,
+    };
+    use crate::primitives::Pid;
+    use crate::stream::{
+        TsAspectRatio, TsAudioStream, TsChannelLayout, TsFrameRate, TsStream, TsStreamType,
+        TsVideoFormat, TsVideoStream,
+    };
 
     /// The comprehensive two-item playlist exercised by several tests.
     fn comprehensive_mpls() -> Vec<u8> {
