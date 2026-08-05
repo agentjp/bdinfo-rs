@@ -2,7 +2,8 @@
 //!
 //! The model covers the enums, [`TsDescriptor`], and the
 //! `TsStream`/`TsVideoStream`/`TsAudioStream`/`TsGraphicsStream`/`TsTextStream`
-//! stream family.
+//! stream family. Which of those four a coding type maps to is [`StreamKind`],
+//! decided once by [`TsStreamType::kind`].
 //!
 //! The enum discriminants are fixed **verbatim** (`#[repr(u8)]`, the on-disc
 //! numeric values) because the parsers cast on-disc bytes straight into
@@ -95,6 +96,28 @@ pub enum TsStreamType {
     InteractiveGraphics = 0x91,
     /// Text subtitle (`TextST`).
     Subtitle = 0x92,
+}
+
+/// The family a [`TsStreamType`] belongs to — the four concrete [`TsStream`]
+/// variants plus the catch-all for a coding type the analyzer does not model.
+///
+/// [`TsStreamType::kind`] is the only partition of the coding types in this
+/// crate: the classifiers, both BDMV parsers, the demux registration and the
+/// demux's per-PID kind mirror all read it, so a new coding type is classified
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamKind {
+    /// A coding type with no modelled stream (`Unknown`).
+    #[default]
+    Unknown,
+    /// A video stream ([`TsVideoStream`]).
+    Video,
+    /// An audio stream ([`TsAudioStream`]).
+    Audio,
+    /// A graphics (PGS/IGS) stream ([`TsGraphicsStream`]).
+    Graphics,
+    /// A text-subtitle stream ([`TsTextStream`]).
+    Text,
 }
 
 /// Video resolution + scan code.
@@ -347,51 +370,81 @@ impl TsStreamBase {
 }
 
 impl TsStreamType {
+    /// The [`StreamKind`] this coding type belongs to — the authoritative
+    /// partition every other classifier in the crate defers to.
+    #[must_use]
+    pub const fn kind(self) -> StreamKind {
+        match self {
+            Self::Mpeg1Video
+            | Self::Mpeg2Video
+            | Self::AvcVideo
+            | Self::MvcVideo
+            | Self::Vc1Video
+            | Self::HevcVideo => StreamKind::Video,
+            Self::Mpeg1Audio
+            | Self::Mpeg2Audio
+            | Self::Mpeg2AacAudio
+            | Self::Mpeg4AacAudio
+            | Self::LpcmAudio
+            | Self::Ac3Audio
+            | Self::Ac3PlusAudio
+            | Self::Ac3PlusSecondaryAudio
+            | Self::Ac3TrueHdAudio
+            | Self::DtsAudio
+            | Self::DtsHdAudio
+            | Self::DtsHdSecondaryAudio
+            | Self::DtsHdMasterAudio => StreamKind::Audio,
+            Self::PresentationGraphics | Self::InteractiveGraphics => StreamKind::Graphics,
+            Self::Subtitle => StreamKind::Text,
+            Self::Unknown => StreamKind::Unknown,
+        }
+    }
+
+    /// A default-valued [`TsStream`] of this type's [`kind`](Self::kind), or
+    /// `None` for a kind with no modelled stream — the shape the M2TS demux
+    /// registers for a PID the PMT declares, with every field left for the
+    /// packet scan to fill.
+    ///
+    /// `MvcVideo` yields the video variant here while both BDMV parsers refuse
+    /// it, so a 3D disc's dependent view reaches the model only through the
+    /// demux, which `bdrom::disc`'s `resolve_playlist_streams` then presents
+    /// from the scanned file. The asymmetry follows classic `BDInfo`, whose
+    /// `TSStreamFile.CreateStream` groups MVC with the other video coding types
+    /// while its `TSStreamClipFile` and `TSPlaylistFile` leave their MVC case
+    /// unimplemented.
+    #[must_use]
+    pub fn default_stream(self) -> Option<TsStream> {
+        match self.kind() {
+            StreamKind::Video => Some(TsStream::Video(TsVideoStream::default())),
+            StreamKind::Audio => Some(TsStream::Audio(TsAudioStream::default())),
+            StreamKind::Graphics => Some(TsStream::Graphics(TsGraphicsStream::default())),
+            StreamKind::Text => Some(TsStream::Text(TsTextStream::default())),
+            StreamKind::Unknown => None,
+        }
+    }
+
     /// Whether this type is a video type.
     #[must_use]
     pub const fn is_video(self) -> bool {
-        matches!(
-            self,
-            Self::Mpeg1Video
-                | Self::Mpeg2Video
-                | Self::AvcVideo
-                | Self::MvcVideo
-                | Self::Vc1Video
-                | Self::HevcVideo
-        )
+        matches!(self.kind(), StreamKind::Video)
     }
 
     /// Whether this type is an audio type.
     #[must_use]
     pub const fn is_audio(self) -> bool {
-        matches!(
-            self,
-            Self::Mpeg1Audio
-                | Self::Mpeg2Audio
-                | Self::Mpeg2AacAudio
-                | Self::Mpeg4AacAudio
-                | Self::LpcmAudio
-                | Self::Ac3Audio
-                | Self::Ac3PlusAudio
-                | Self::Ac3PlusSecondaryAudio
-                | Self::Ac3TrueHdAudio
-                | Self::DtsAudio
-                | Self::DtsHdAudio
-                | Self::DtsHdSecondaryAudio
-                | Self::DtsHdMasterAudio
-        )
+        matches!(self.kind(), StreamKind::Audio)
     }
 
     /// Whether this type is a graphics (PGS/IGS) type.
     #[must_use]
     pub const fn is_graphics(self) -> bool {
-        matches!(self, Self::PresentationGraphics | Self::InteractiveGraphics)
+        matches!(self.kind(), StreamKind::Graphics)
     }
 
     /// Whether this type is a text-subtitle type.
     #[must_use]
     pub const fn is_text(self) -> bool {
-        matches!(self, Self::Subtitle)
+        matches!(self.kind(), StreamKind::Text)
     }
 }
 
@@ -1154,6 +1207,32 @@ impl TsStream {
         }
     }
 
+    /// The long codec label of the concrete kind (the per-kind `codec_name`).
+    ///
+    /// Borrowed rather than `'static`: an MPEG-1/2 or AAC audio stream returns
+    /// the codec-supplied [`ext_data`](TsAudioStream::ext_data) string it owns.
+    #[must_use]
+    pub fn codec_name(&self) -> &str {
+        match self {
+            Self::Video(s) => s.codec_name(),
+            Self::Audio(s) => s.codec_name(),
+            Self::Graphics(s) => s.codec_name(),
+            Self::Text(s) => s.codec_name(),
+        }
+    }
+
+    /// The per-stream description of the concrete kind (the per-kind
+    /// `description`).
+    #[must_use]
+    pub fn description(&self) -> String {
+        match self {
+            Self::Video(s) => s.description(),
+            Self::Audio(s) => s.description(),
+            Self::Graphics(s) => s.description(),
+            Self::Text(s) => s.description(),
+        }
+    }
+
     /// The alternate codec label some report tables print (e.g. the summary
     /// table's `AVC` / `DD AC3` / `DTS-HD Master` cells) — keyed by the stream
     /// type, with the Dolby/DTS extension upgrades (`Dolby Atmos`,
@@ -1416,9 +1495,9 @@ mod tests {
     use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        Pid, TsAspectRatio, TsAudioMode, TsAudioStream, TsChannelLayout, TsDescriptor, TsFrameRate,
-        TsGraphicsStream, TsSampleRate, TsStream, TsStreamBase, TsStreamType, TsTextStream,
-        TsVideoFormat, TsVideoStream,
+        Pid, StreamKind, TsAspectRatio, TsAudioMode, TsAudioStream, TsChannelLayout, TsDescriptor,
+        TsFrameRate, TsGraphicsStream, TsSampleRate, TsStream, TsStreamBase, TsStreamType,
+        TsTextStream, TsVideoFormat, TsVideoStream,
     };
 
     #[test]
@@ -1435,6 +1514,58 @@ mod tests {
         let mut text = TsTextStream::default();
         text.base.stream_type = TsStreamType::Subtitle;
         assert_eq!(TsStream::Text(text).codec_short_name(), "SUB");
+    }
+
+    #[test]
+    fn codec_name_and_description_delegate_to_every_concrete_kind() {
+        // One populated detail field per kind, so a delegation crossed between
+        // two kinds shows up in the description as well as the codec name.
+        let mut video = TsVideoStream::default();
+        video.base.stream_type = TsStreamType::AvcVideo;
+        video.set_video_format(TsVideoFormat::Videoformat1080p);
+        let video = TsStream::Video(video);
+        assert_eq!(video.codec_name(), "MPEG-4 AVC Video");
+        assert_eq!(video.description(), "1080p");
+
+        let mut audio = TsAudioStream::default();
+        audio.base.stream_type = TsStreamType::LpcmAudio;
+        audio.channel_count = 2;
+        let audio = TsStream::Audio(audio);
+        assert_eq!(audio.codec_name(), "LPCM Audio");
+        assert_eq!(audio.description(), "2.0");
+
+        let mut graphics = TsGraphicsStream::default();
+        graphics.base.stream_type = TsStreamType::PresentationGraphics;
+        graphics.captions = 3;
+        let graphics = TsStream::Graphics(graphics);
+        assert_eq!(graphics.codec_name(), "Presentation Graphics");
+        assert_eq!(graphics.description(), " / 3 Captions");
+
+        let mut text = TsTextStream::default();
+        text.base.stream_type = TsStreamType::Subtitle;
+        let text = TsStream::Text(text);
+        assert_eq!(text.codec_name(), "Subtitle");
+        assert_eq!(text.description(), "");
+    }
+
+    #[test]
+    fn default_stream_builds_the_variant_of_each_kind() {
+        // MVC gets the video variant here while both BDMV parsers return no
+        // stream for it — the asymmetry `default_stream`'s doc records.
+        let cases = [
+            (TsStreamType::AvcVideo, Some(TsStream::Video(TsVideoStream::default()))),
+            (TsStreamType::MvcVideo, Some(TsStream::Video(TsVideoStream::default()))),
+            (TsStreamType::Ac3Audio, Some(TsStream::Audio(TsAudioStream::default()))),
+            (
+                TsStreamType::PresentationGraphics,
+                Some(TsStream::Graphics(TsGraphicsStream::default())),
+            ),
+            (TsStreamType::Subtitle, Some(TsStream::Text(TsTextStream::default()))),
+            (TsStreamType::Unknown, None),
+        ];
+        for (ty, expected) in cases {
+            assert_eq!(ty.default_stream(), expected, "default stream for {ty:?}");
+        }
     }
 
     #[test]
@@ -1594,8 +1725,11 @@ mod tests {
         let graphics = [TsStreamType::PresentationGraphics, TsStreamType::InteractiveGraphics];
         let text = [TsStreamType::Subtitle];
 
+        // The lists above are the whole enum bar `Unknown`, so this pins every
+        // arm of the one kind table the predicates read.
         for &t in &video {
             let b = base_of(t);
+            assert_eq!(t.kind(), StreamKind::Video, "kind of {t:?}");
             assert!(b.is_video_stream(), "{t:?} should be video");
             assert!(!b.is_audio_stream());
             assert!(!b.is_graphics_stream());
@@ -1603,6 +1737,7 @@ mod tests {
         }
         for &t in &audio {
             let b = base_of(t);
+            assert_eq!(t.kind(), StreamKind::Audio, "kind of {t:?}");
             assert!(b.is_audio_stream(), "{t:?} should be audio");
             assert!(!b.is_video_stream());
             assert!(!b.is_graphics_stream());
@@ -1610,6 +1745,7 @@ mod tests {
         }
         for &t in &graphics {
             let b = base_of(t);
+            assert_eq!(t.kind(), StreamKind::Graphics, "kind of {t:?}");
             assert!(b.is_graphics_stream(), "{t:?} should be graphics");
             assert!(!b.is_video_stream());
             assert!(!b.is_audio_stream());
@@ -1617,12 +1753,16 @@ mod tests {
         }
         for &t in &text {
             let b = base_of(t);
+            assert_eq!(t.kind(), StreamKind::Text, "kind of {t:?}");
             assert!(b.is_text_stream(), "{t:?} should be text");
             assert!(!b.is_video_stream());
             assert!(!b.is_audio_stream());
             assert!(!b.is_graphics_stream());
         }
-        // Unknown is none of the four.
+        // Unknown is none of the four, and is the kind a default `StreamKind`
+        // carries.
+        assert_eq!(TsStreamType::Unknown.kind(), StreamKind::Unknown);
+        assert_eq!(StreamKind::default(), StreamKind::Unknown);
         let u = base_of(TsStreamType::Unknown);
         assert!(!u.is_video_stream());
         assert!(!u.is_audio_stream());

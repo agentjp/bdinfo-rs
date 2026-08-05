@@ -6,6 +6,10 @@
 //! the [`crate::stream`] data model, returning [`crate::error::BdError`] on
 //! malformed input.
 //!
+//! Both file kinds describe a stream entry with the same coding-info layout at
+//! their own offset, so both decode it through the one `build_coded_stream`
+//! here, beside the shared bounds-checked byte reads.
+//!
 //! The disc-level orchestration that wires these together — the [`disc`] scan
 //! plus the cross-clip resolution that feeds the [`m2ts`] demux — builds on
 //! these standalone parsers. Two presentation modules sit beside them, over
@@ -15,6 +19,10 @@
 
 use crate::bytes;
 use crate::error::BdError;
+use crate::stream::{
+    StreamKind, TsAspectRatio, TsAudioStream, TsChannelLayout, TsFrameRate, TsGraphicsStream,
+    TsSampleRate, TsStream, TsStreamType, TsTextStream, TsVideoFormat, TsVideoStream,
+};
 
 pub mod chapters;
 pub mod clpi;
@@ -60,6 +68,70 @@ pub(crate) fn u32_off(buf: &[u8], off: usize) -> Result<usize, BdError> {
 /// [`BdError::UnexpectedEof`].
 pub(crate) fn ascii(buf: &[u8], off: usize, count: usize) -> Result<String, BdError> {
     bytes::read_ascii(buf, off, count).ok_or(BdError::UnexpectedEof)
+}
+
+/// Builds the [`TsStream`] a `stream_coding_type` of `stream_type` describes,
+/// reading its coding info from `data` starting at `coding`, or `None` for a
+/// [`StreamKind::Unknown`] type.
+///
+/// The clip-information (`*.clpi`) and playlist (`*.mpls`) stream entries carry
+/// the same coding-info layout at their own offset — a format byte for video and
+/// audio, then a 3-byte ISO-639 language code for audio (at `coding + 1`),
+/// graphics (at `coding`) and text (at `coding + 1`, past a 1-byte unused code
+/// field). `aspect` names the byte holding the display aspect-ratio nibble of a
+/// video stream, which only the clip information carries; `None` leaves
+/// [`TsVideoStream::aspect_ratio`] at its default.
+///
+/// `MvcVideo` is *not* refused here — it is [`StreamKind::Video`] like every
+/// other video coding type, and both callers return `None` for it before
+/// dispatching. [`TsStreamType::default_stream`] documents why.
+pub(crate) fn build_coded_stream(
+    data: &[u8],
+    coding: usize,
+    stream_type: TsStreamType,
+    aspect: Option<usize>,
+) -> Result<Option<TsStream>, BdError> {
+    Ok(match stream_type.kind() {
+        StreamKind::Video => {
+            // The setters (deriving height/scan + the frame-rate ratio) run
+            // first, so the later `aspect_ratio` field write isn't a
+            // default-reassign.
+            let format = byte(data, coding)?;
+            let mut stream = TsVideoStream::default();
+            stream.set_video_format(TsVideoFormat::from_u8(format.wrapping_shr(4)));
+            stream.set_frame_rate(TsFrameRate::from_u8(format & 0x0F));
+            if let Some(aspect) = aspect {
+                stream.aspect_ratio = TsAspectRatio::from_u8(byte(data, aspect)?.wrapping_shr(4));
+            }
+            Some(TsStream::Video(stream))
+        }
+        StreamKind::Audio => {
+            let format = byte(data, coding)?;
+            let language = ascii(data, coding.saturating_add(1), 3)?;
+            let mut stream = TsAudioStream {
+                channel_layout: TsChannelLayout::from_u8(format.wrapping_shr(4)),
+                sample_rate: TsAudioStream::convert_sample_rate(TsSampleRate::from_u8(
+                    format & 0x0F,
+                )),
+                ..TsAudioStream::default()
+            };
+            stream.base.set_language_code(&language);
+            Some(TsStream::Audio(stream))
+        }
+        StreamKind::Graphics => {
+            let language = ascii(data, coding, 3)?;
+            let mut stream = TsGraphicsStream::default();
+            stream.base.set_language_code(&language);
+            Some(TsStream::Graphics(stream))
+        }
+        StreamKind::Text => {
+            let language = ascii(data, coding.saturating_add(1), 3)?;
+            let mut stream = TsTextStream::default();
+            stream.base.set_language_code(&language);
+            Some(TsStream::Text(stream))
+        }
+        StreamKind::Unknown => None,
+    })
 }
 
 #[cfg(test)]

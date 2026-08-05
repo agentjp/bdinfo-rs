@@ -26,13 +26,10 @@
 use std::collections::BTreeMap;
 
 use super::clpi::TsStreamClip;
-use super::{ascii, byte, u16_be, u32_be};
+use super::{ascii, build_coded_stream, byte, u16_be, u32_be};
 use crate::error::BdError;
 use crate::primitives::Pid;
-use crate::stream::{
-    TsAudioStream, TsChannelLayout, TsFrameRate, TsGraphicsStream, TsSampleRate, TsStream,
-    TsStreamType, TsTextStream, TsVideoFormat, TsVideoStream,
-};
+use crate::stream::{TsStream, TsStreamType};
 
 /// A parsed playlist file.
 ///
@@ -369,69 +366,17 @@ fn build_playlist_stream(
     coding: usize,
     stream_type: TsStreamType,
 ) -> Result<Option<TsStream>, BdError> {
-    Ok(match stream_type {
-        // MVC is a recognised coding type that yields no stream, kept as a
-        // distinct arm rather than folded into the Unknown default.
-        #[expect(
-            clippy::match_same_arms,
-            reason = "MVC is a recognised coding type, deliberately not the Unknown default"
-        )]
-        TsStreamType::MvcVideo => None,
-        TsStreamType::HevcVideo
-        | TsStreamType::AvcVideo
-        | TsStreamType::Mpeg1Video
-        | TsStreamType::Mpeg2Video
-        | TsStreamType::Vc1Video => {
-            // MPLS video attributes carry only format + rate; the next byte is
-            // dynamic_range_type/color_space on HEVC, not an aspect field
-            // (aspect lives in the CLPI stream-coding info), so it is not read.
-            let format = byte(data, coding)?;
-            let mut stream = TsVideoStream::default();
-            stream.set_video_format(TsVideoFormat::from_u8(format.wrapping_shr(4)));
-            stream.set_frame_rate(TsFrameRate::from_u8(format & 0x0F));
-            Some(TsStream::Video(stream))
-        }
-        TsStreamType::Ac3Audio
-        | TsStreamType::Ac3PlusAudio
-        | TsStreamType::Ac3PlusSecondaryAudio
-        | TsStreamType::Ac3TrueHdAudio
-        | TsStreamType::DtsAudio
-        | TsStreamType::DtsHdAudio
-        | TsStreamType::DtsHdMasterAudio
-        | TsStreamType::DtsHdSecondaryAudio
-        | TsStreamType::LpcmAudio
-        | TsStreamType::Mpeg1Audio
-        | TsStreamType::Mpeg2Audio
-        | TsStreamType::Mpeg2AacAudio
-        | TsStreamType::Mpeg4AacAudio => {
-            let format = byte(data, coding)?;
-            let language = ascii(data, coding.saturating_add(1), 3)?;
-            let mut stream = TsAudioStream {
-                channel_layout: TsChannelLayout::from_u8(format.wrapping_shr(4)),
-                sample_rate: TsAudioStream::convert_sample_rate(TsSampleRate::from_u8(
-                    format & 0x0F,
-                )),
-                ..TsAudioStream::default()
-            };
-            stream.base.set_language_code(&language);
-            Some(TsStream::Audio(stream))
-        }
-        TsStreamType::InteractiveGraphics | TsStreamType::PresentationGraphics => {
-            let language = ascii(data, coding, 3)?;
-            let mut stream = TsGraphicsStream::default();
-            stream.base.set_language_code(&language);
-            Some(TsStream::Graphics(stream))
-        }
-        TsStreamType::Subtitle => {
-            // A 1-byte code field (unused) precedes the language, so the
-            // language sits one byte past `coding`.
-            let language = ascii(data, coding.saturating_add(1), 3)?;
-            let mut stream = TsTextStream::default();
-            stream.base.set_language_code(&language);
-            Some(TsStream::Text(stream))
-        }
-        TsStreamType::Unknown => None,
-    })
+    // MVC is a recognised coding type that yields no playlist stream —
+    // deliberately not folded into the Unknown default.
+    // `TsStreamType::default_stream` documents why the demux accepts what this
+    // parser refuses.
+    if stream_type == TsStreamType::MvcVideo {
+        return Ok(None);
+    }
+    // No aspect byte: MPLS video attributes carry only format + rate, and the
+    // byte after the format is dynamic_range_type/color_space on HEVC, not an
+    // aspect field (aspect lives in the CLPI stream-coding info).
+    build_coded_stream(data, coding, stream_type, None)
 }
 
 #[cfg(test)]

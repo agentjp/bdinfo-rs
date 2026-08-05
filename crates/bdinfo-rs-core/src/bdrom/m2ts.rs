@@ -53,9 +53,7 @@ use super::mpls::TsPlaylistFile;
 use crate::bitstream::TsStreamBuffer;
 use crate::error::BdError;
 use crate::primitives::Pid;
-use crate::stream::{
-    TsAudioStream, TsGraphicsStream, TsStream, TsStreamType, TsTextStream, TsVideoStream,
-};
+use crate::stream::{StreamKind, TsStream, TsStreamType};
 
 /// Read-chunk size (5 MiB) for each underlying read. The packet state machine
 /// is chunk-boundary-agnostic, so the value affects only read granularity
@@ -232,22 +230,9 @@ struct TsStreamState {
     /// seam) so the per-byte loop needs no `streams` lookup.
     stream_initialized: bool,
     /// Mirror of the stream's kind (set at registration), for the same reason.
+    /// A PID with no registered stream keeps the [`StreamKind`] default, which
+    /// matches none of the three kinds the per-byte loop dispatches on.
     stream_kind: StreamKind,
-}
-
-/// The stream-kind mirror held in [`TsStreamState`] — the per-byte demux loop
-/// branches on the kind without a `streams` map lookup.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum StreamKind {
-    /// No registered stream, or one that is neither video, audio nor graphics.
-    #[default]
-    Other,
-    /// A video stream.
-    Video,
-    /// An audio stream.
-    Audio,
-    /// A graphics (PGS/IGS) stream.
-    Graphics,
 }
 
 /// The whole-file packet parser — the fields the core demux reads (write-only
@@ -1676,33 +1661,7 @@ impl TsStreamFile {
     /// list.
     fn create_stream(&mut self, stream_pid: u16, stream_type_byte: u8) {
         let stream_type = TsStreamType::from_u8(stream_type_byte);
-        let stream: Option<TsStream> = match stream_type {
-            TsStreamType::MvcVideo
-            | TsStreamType::AvcVideo
-            | TsStreamType::HevcVideo
-            | TsStreamType::Mpeg1Video
-            | TsStreamType::Mpeg2Video
-            | TsStreamType::Vc1Video => Some(TsStream::Video(TsVideoStream::default())),
-            TsStreamType::Ac3Audio
-            | TsStreamType::Ac3PlusAudio
-            | TsStreamType::Ac3PlusSecondaryAudio
-            | TsStreamType::Ac3TrueHdAudio
-            | TsStreamType::DtsAudio
-            | TsStreamType::DtsHdAudio
-            | TsStreamType::DtsHdMasterAudio
-            | TsStreamType::DtsHdSecondaryAudio
-            | TsStreamType::LpcmAudio
-            | TsStreamType::Mpeg1Audio
-            | TsStreamType::Mpeg2Audio
-            | TsStreamType::Mpeg2AacAudio
-            | TsStreamType::Mpeg4AacAudio => Some(TsStream::Audio(TsAudioStream::default())),
-            TsStreamType::InteractiveGraphics | TsStreamType::PresentationGraphics => {
-                Some(TsStream::Graphics(TsGraphicsStream::default()))
-            }
-            TsStreamType::Subtitle => Some(TsStream::Text(TsTextStream::default())),
-            TsStreamType::Unknown => None,
-        };
-        if let Some(mut stream) = stream {
+        if let Some(mut stream) = stream_type.default_stream() {
             // The caller registers a PID only once (`streams` is checked before
             // the call), so the order list records each PID exactly once;
             // `or_insert` keeps any existing entry and drops the duplicate.
@@ -1713,15 +1672,7 @@ impl TsStreamFile {
             let registered = self.streams.entry(stream_pid).or_insert(stream);
             // Mirror the kind/init flags into the per-PID state so the
             // per-byte demux loop reads them without a `streams` lookup.
-            let kind = if registered.base().is_video_stream() {
-                StreamKind::Video
-            } else if registered.base().is_audio_stream() {
-                StreamKind::Audio
-            } else if registered.base().is_graphics_stream() {
-                StreamKind::Graphics
-            } else {
-                StreamKind::Other
-            };
+            let kind = registered.stream_type().kind();
             let initialized = registered.base().is_initialized;
             let state = self.stream_states.entry(stream_pid).or_default();
             state.stream_kind = kind;
