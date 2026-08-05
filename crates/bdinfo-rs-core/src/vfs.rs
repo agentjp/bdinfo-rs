@@ -100,7 +100,9 @@ pub trait BdDir {
     /// Files matching `pattern`, optionally recursing into subdirectories.
     ///
     /// Matching is ASCII case-insensitive — one pass finds `*.mpls` and
-    /// `*.MPLS` spellings alike, no per-case retries needed.
+    /// `*.MPLS` spellings alike, no per-case retries needed. [`fs::glob_ci`] is
+    /// the rule both built-in backends apply; an implementor outside this crate
+    /// should call it rather than write a second matcher.
     ///
     /// # Errors
     /// Propagates the underlying IO error if the directory cannot be read.

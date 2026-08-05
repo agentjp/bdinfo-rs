@@ -8,17 +8,19 @@
 //! `description` is the same string the locked report prints — built by the core,
 //! reused verbatim here.
 
+use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary};
+use bdinfo_rs_core::report::text;
 
-use crate::model::{byte_cell, group_n0, table_length};
+use crate::model::byte_cell;
 
 /// One "Stream File" pane row: a clip of the selected playlist, pre-formatted.
 ///
 /// Columns: Stream File / Index / Length / Estimated Size / Measured Size — the
-/// same five `BDInfo` shows. `estimated` is the clip's on-disk size (the
-/// interleaved `*.ssif` when it has one, else the `*.m2ts`); `measured` is the
-/// packet-derived size the demux attributed to the clip. Either is `-` until it
-/// is known (no file on disk / nothing demuxed yet).
+/// same five `BDInfo` shows. `estimated` is the clip's on-disk size
+/// ([`ClipSummary::estimated_bytes`]); `measured` is the packet-derived size the
+/// demux attributed to the clip. Either is `-` until it is known (no file on
+/// disk / nothing demuxed yet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamFileRow {
     /// The clip's display name (the interleaved `*.ssif`, else the `*.m2ts`),
@@ -73,9 +75,8 @@ pub fn stream_file_rows(playlist: &PlaylistSummary, human_sizes: bool) -> Vec<St
 }
 
 /// Formats one clip into its stream-file row, mirroring `BDInfo`: an extra-angle
-/// clip gets a ` (N)` suffix; the estimated size prefers the interleaved
-/// `*.ssif` and falls back to the plain `*.m2ts`; a size that is not yet known
-/// (no file / nothing demuxed) shows as `-`.
+/// clip gets a ` (N)` suffix, and a size that is not yet known (no file /
+/// nothing demuxed) shows as `-`.
 fn stream_file_row(clip: &ClipSummary, index: usize, human_sizes: bool) -> StreamFileRow {
     let file = if clip.angle_index > 0 {
         format!("{} ({})", clip.display_name, clip.angle_index)
@@ -85,16 +86,10 @@ fn stream_file_row(clip: &ClipSummary, index: usize, human_sizes: bool) -> Strea
     StreamFileRow {
         file,
         index: index.to_string(),
-        length: table_length(clip.length),
-        estimated: size_cell(estimated_size(clip), human_sizes),
+        length: text::time_hh_short(seconds_to_ticks(clip.length)),
+        estimated: size_cell(clip.estimated_bytes().unwrap_or(0), human_sizes),
         measured: size_cell(clip.packet_size(), human_sizes),
     }
-}
-
-/// The clip's on-disk (estimated) size — the interleaved `*.ssif` when it has
-/// one, else the plain `*.m2ts` (`0` when neither is present).
-const fn estimated_size(clip: &ClipSummary) -> u64 {
-    if clip.interleaved_file_size > 0 { clip.interleaved_file_size } else { clip.file_size }
 }
 
 /// A byte-size cell — grouped or human-readable per the toggle — or `-` when
@@ -130,7 +125,7 @@ fn bitrate_cell(bits_per_second: i64) -> String {
     if kbps <= 0 {
         "-".to_owned()
     } else {
-        format!("{} kbps", group_n0(u64::try_from(kbps).unwrap_or(0)))
+        format!("{} kbps", text::group(u128::try_from(kbps).unwrap_or(0)))
     }
 }
 

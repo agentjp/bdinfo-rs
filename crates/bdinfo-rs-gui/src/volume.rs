@@ -9,8 +9,8 @@
 //! the drive root, whose path carries no final component, so the label degrades
 //! to the drive-root string itself (`"J:\"`). That is wrong in the report's
 //! `Disc Label:` line, the info box, and the `BDINFO.<label>.txt` save name
-//! (whose *characters* `paths::report_file_name` already sanitizes — this
-//! module fixes the label's SOURCE).
+//! (whose *characters* [`bdinfo_rs_core::report::file_name`] already sanitizes
+//! — this module fixes the label's SOURCE).
 //!
 //! [`resolve_folder_label`] replaces a nameless-drive-root label with the real
 //! UDF volume label — read off the raw volume device (`\\.\J:`) through the

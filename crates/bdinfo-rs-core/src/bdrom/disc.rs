@@ -151,6 +151,27 @@ impl PlaylistSummary {
         self.streams.iter().any(|stream| stream.is_hidden)
     }
 
+    /// The playlist's *estimated* (on-disk, unmeasured) size in bytes.
+    ///
+    /// The interleaved `*.ssif` total when the playlist has one, else the
+    /// `*.m2ts` total, else `None` — neither file is present, or none has a
+    /// size.
+    ///
+    /// The interleaved total wins because an `*.ssif` already contains its
+    /// playlist's `*.m2ts` bytes; adding the two would double-count. How an
+    /// absent size renders is the caller's choice (the classic table prints
+    /// `-`).
+    #[must_use]
+    pub const fn estimated_bytes(&self) -> Option<u64> {
+        if self.interleaved_file_size > 0 {
+            Some(self.interleaved_file_size)
+        } else if self.file_size > 0 {
+            Some(self.file_size)
+        } else {
+            None
+        }
+    }
+
     /// Per-angle measurement totals, one entry per extra camera angle (angle 1
     /// first; empty for a single-angle playlist).
     ///
@@ -192,6 +213,17 @@ impl PlaylistSummary {
         totals
     }
 }
+
+/// The footnote a playlist listing prints when any listed playlist reports
+/// [`PlaylistSummary::has_hidden_streams`].
+///
+/// The classic `BDInfo` wording, explaining the `*` those playlists are marked
+/// with.
+///
+/// A surface with no room for a footnote need not show it, but one that does
+/// must show this text: the mark and its explanation are one contract.
+pub const HIDDEN_STREAMS_NOTE: &str =
+    "(*) Some playlists on this disc have hidden tracks. These tracks are marked with an asterisk.";
 
 /// `size * 8 / seconds` rounded half-to-even as a bit rate, or `0` for a
 /// non-positive duration.
@@ -252,6 +284,23 @@ impl ClipSummary {
     #[must_use]
     pub fn packet_bit_rate(&self) -> u64 {
         rate_over(self.packet_size(), self.packet_seconds)
+    }
+
+    /// The clip's *estimated* (on-disk, unmeasured) size in bytes.
+    ///
+    /// The interleaved `*.ssif` size when the clip has one, else the `*.m2ts`
+    /// size, else `None` (the file is absent) — the per-clip form of
+    /// [`PlaylistSummary::estimated_bytes`], with the same preference and the
+    /// same reason for it.
+    #[must_use]
+    pub const fn estimated_bytes(&self) -> Option<u64> {
+        if self.interleaved_file_size > 0 {
+            Some(self.interleaved_file_size)
+        } else if self.file_size > 0 {
+            Some(self.file_size)
+        } else {
+            None
+        }
     }
 }
 
@@ -3605,6 +3654,28 @@ mod tests {
             clips,
             chapters: Vec::new(),
         }
+    }
+
+    #[test]
+    fn estimated_bytes_prefer_the_interleaved_size_then_the_m2ts_size() {
+        // Both sizes known: the interleaved total wins (it already contains the
+        // m2ts bytes). Only the m2ts: that. Neither: absent.
+        let sizes = |interleaved, m2ts| {
+            let clip = ClipSummary {
+                file_size: m2ts,
+                interleaved_file_size: interleaved,
+                ..clip_summary(0, 0.0, 0.0, 0)
+            };
+            let playlist = PlaylistSummary {
+                file_size: m2ts,
+                interleaved_file_size: interleaved,
+                ..playlist_summary(0.0, 0, Vec::new())
+            };
+            (playlist.estimated_bytes(), clip.estimated_bytes())
+        };
+        assert_eq!(sizes(2000, 500), (Some(2000), Some(2000)));
+        assert_eq!(sizes(0, 500), (Some(500), Some(500)));
+        assert_eq!(sizes(0, 0), (None, None));
     }
 
     #[test]

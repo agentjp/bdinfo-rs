@@ -10,8 +10,8 @@ use std::cmp::Ordering;
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
-use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, table_rows};
-use bdinfo_rs_core::report::text::RenderOptions;
+use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, presentation_cmp, table_rows};
+use bdinfo_rs_core::report::text::{self, RenderOptions};
 
 use crate::settings::Settings;
 
@@ -114,8 +114,8 @@ pub(crate) struct PlaylistRow {
     /// key behind the formatted `length` cell (hours wrap in the cell, ticks
     /// don't).
     pub(crate) length_ticks: i64,
-    /// Estimated bytes — interleaved `*.ssif` size, else `*.m2ts` size, else
-    /// `None` (the `-` cell).
+    /// Estimated bytes per [`PlaylistSummary::estimated_bytes`]; `None` is the
+    /// `-` cell.
     pub(crate) estimated_bytes: Option<u64>,
     /// Measured (packet-derived) bytes over all angle clips — `0` until the
     /// measured scan fills it.
@@ -167,49 +167,11 @@ pub struct SelectableRow {
     pub cells: TableRow,
 }
 
-/// `hh:mm:ss` from playlist seconds, truncated to the tick like the CLI table
-/// (hours wrap at 24; no day component).
-pub(crate) fn table_length(seconds: f64) -> String {
-    let total = seconds_to_ticks(seconds).max(0).checked_div(10_000_000).unwrap_or(0);
-    let h = total.checked_div(3600).and_then(|h| h.checked_rem(24)).unwrap_or(0);
-    let m = total.checked_div(60).and_then(|m| m.checked_rem(60)).unwrap_or(0);
-    let s = total.checked_rem(60).unwrap_or(0);
-    format!("{h:02}:{m:02}:{s:02}")
-}
-
-/// The estimated byte size shown for a playlist: the interleaved `*.ssif` size
-/// when known, else the `*.m2ts` size, else `None` (the `-` cell).
-const fn estimated_bytes(playlist: &PlaylistSummary) -> Option<u64> {
-    if playlist.interleaved_file_size > 0 {
-        Some(playlist.interleaved_file_size)
-    } else if playlist.file_size > 0 {
-        Some(playlist.file_size)
-    } else {
-        None
-    }
-}
-
-/// `N0` thousands grouping for a byte count (`1234567` → `1,234,567`) — the
-/// CLI table's byte-cell format.
-///
-/// Public so the binary's info box can group the exact disc-size byte count
-/// alongside its [`format_file_size`] short form.
-#[must_use]
-pub fn group_n0(value: u64) -> String {
-    let mut grouped = Vec::new();
-    for (position, digit) in value.to_string().chars().rev().enumerate() {
-        if position > 0 && position.checked_rem(3) == Some(0) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped.into_iter().rev().collect()
-}
-
 /// One byte-count cell body: the human-readable short form when the toggle is
-/// on (`BDInfo`'s `SizeFormatHR`), else the thousands-grouped exact count.
+/// on (`BDInfo`'s `SizeFormatHR`), else the report's thousands-grouped exact
+/// count.
 pub(crate) fn byte_cell(bytes: u64, human: bool) -> String {
-    if human { format_file_size(bytes) } else { group_n0(bytes) }
+    if human { format_file_size(bytes) } else { text::group(u128::from(bytes)) }
 }
 
 /// The `Estimated Bytes` cell: a [`byte_cell`] when known, else `-`.
@@ -249,7 +211,7 @@ pub fn format_file_size(bytes: u64) -> String {
     let whole = u64::try_from(hundredths.checked_div(100).unwrap_or(0)).unwrap_or(u64::MAX);
     let frac = hundredths.checked_rem(100).unwrap_or(0);
     let label = UNITS.get(unit).copied().unwrap_or("B");
-    format!("{}.{frac:02} {label}", group_n0(whole))
+    format!("{}.{frac:02} {label}", text::group(u128::from(whole)))
 }
 
 /// Builds the structured selection-table rows over the `filter`-kept set.
@@ -267,9 +229,9 @@ pub(crate) fn playlist_rows(
                 group,
                 name: playlist.name.clone(),
                 chapter_count: playlist.chapter_count,
-                length: table_length(playlist.total_length),
+                length: text::time_hh_short(seconds_to_ticks(playlist.total_length)),
                 length_ticks: seconds_to_ticks(playlist.total_length),
-                estimated_bytes: estimated_bytes(playlist),
+                estimated_bytes: playlist.estimated_bytes(),
                 measured_bytes: playlist.total_angle_packet_size(),
                 has_hidden_streams: playlist.has_hidden_streams(),
             })
@@ -486,12 +448,7 @@ pub fn hidden_playlists(
     if hidden.is_empty() {
         return None;
     }
-    hidden.sort_by(|a, b| {
-        b.total_length
-            .partial_cmp(&a.total_length)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    hidden.sort_by(|a, b| presentation_cmp(a, b));
     let short = filter.filter_short_playlists
         && hidden.iter().any(|playlist| filter.classify(playlist).contains(&HiddenRule::Short));
     let looping = filter.filter_looping_playlists
@@ -510,8 +467,8 @@ mod tests {
 
     use super::{
         PlaylistRow, Sort, SortColumn, TableRow, ViewSettings, any_hidden, byte_cell, compare,
-        display_rows, estimated_bytes, estimated_cell, format_file_size, group_n0,
-        hidden_playlists, playlist_display_name, playlist_rows, sort_rows, table_length,
+        display_rows, estimated_cell, format_file_size, hidden_playlists, playlist_display_name,
+        playlist_rows, sort_rows,
     };
     use crate::settings::Settings;
 
@@ -697,30 +654,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn table_length_truncates_and_wraps_the_day() {
-        assert_eq!(table_length(0.0), "00:00:00");
-        assert_eq!(table_length(3661.0), "01:01:01");
-        assert_eq!(table_length(-5.0), "00:00:00"); // a negative length clamps to zero
-        assert_eq!(table_length(90_061.0), "01:01:01"); // 25h01m01s wraps the day
-    }
-
-    #[test]
-    fn estimated_bytes_prefers_interleaved_then_m2ts_then_none() {
-        assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 500, 2000, &[])), Some(2000));
-        assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 500, 0, &[])), Some(500));
-        assert_eq!(estimated_bytes(&sample_playlist("X", 1.0, 0, 0, &[])), None);
-    }
-
-    #[test]
-    fn group_n0_groups_every_three_digits_from_the_right() {
-        assert_eq!(group_n0(0), "0");
-        assert_eq!(group_n0(7), "7");
-        assert_eq!(group_n0(1000), "1,000");
-        assert_eq!(group_n0(1_234_567), "1,234,567");
-        assert_eq!(group_n0(u64::MAX), "18,446,744,073,709,551,615");
     }
 
     #[test]
@@ -1029,38 +962,11 @@ mod tests {
         use proptest::prelude::*;
 
         use super::super::{
-            Sort, SortColumn, ViewSettings, display_rows, group_n0, playlist_rows, sort_rows,
-            table_length,
+            Sort, SortColumn, ViewSettings, display_rows, playlist_rows, sort_rows,
         };
         use super::sample_playlist;
 
         proptest! {
-            #[test]
-            fn group_n0_round_trips_and_commas_every_three(value: u64) {
-                let grouped = group_n0(value);
-                // Stripping the commas yields the plain decimal.
-                let plain: String = grouped.chars().filter(|&c| c != ',').collect();
-                prop_assert_eq!(&plain, &value.to_string());
-                // One comma for every full group of three past the first digit.
-                let digits = value.to_string().chars().count();
-                let commas = grouped.chars().filter(|&c| c == ',').count();
-                prop_assert_eq!(commas, digits.saturating_sub(1).checked_div(3).unwrap_or(0));
-            }
-
-            #[test]
-            fn table_length_is_well_formed_hms(seconds in 0.0_f64..1_000_000.0) {
-                let formatted = table_length(seconds);
-                let mut parts = formatted.split(':');
-                let hours = parts.next().and_then(|p| p.parse::<u64>().ok());
-                let minutes = parts.next().and_then(|p| p.parse::<u64>().ok());
-                let secs = parts.next().and_then(|p| p.parse::<u64>().ok());
-                prop_assert!(parts.next().is_none(), "exactly three segments");
-                prop_assert_eq!(formatted.chars().count(), 8); // NN:NN:NN
-                prop_assert!(hours.is_some_and(|h| h < 24));
-                prop_assert!(minutes.is_some_and(|m| m < 60));
-                prop_assert!(secs.is_some_and(|s| s < 60));
-            }
-
             // The whole table pipeline — build, format, sort — is total over
             // arbitrary disc shapes: it never panics, positions stay 1-based
             // and dense, every cell renders non-empty, and a sort is a true

@@ -18,10 +18,11 @@
 //! apply the presentation order on top.
 //!
 //! The projections every surface builds on that order live here too:
-//! [`table_rows`] (the grouped rows a selection table prints),
-//! [`selection_order`] and [`selection_stream_files`] (what a by-name
-//! selection renders and reads), and the [`HiddenRule`] classification behind
-//! the filter switches.
+//! [`table_rows`] (the grouped rows a selection table prints), the by-name
+//! selection family — [`normalize_playlist_name`] and [`named_selection`]
+//! (which names a request resolves to), [`selection_order`] and
+//! [`selection_stream_files`] (what that selection renders and reads) — and
+//! the [`HiddenRule`] classification behind the filter switches.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -124,10 +125,16 @@ impl PlaylistFilter {
 }
 
 /// Compares two playlists in presentation order: total length descending,
-/// then name ascending (ordinal byte order). A non-comparable length pair
-/// (NaN, impossible for parsed playlists) falls through to the name, mirroring
-/// a `>`-based three-way comparison.
-fn presentation_cmp(a: &PlaylistSummary, b: &PlaylistSummary) -> Ordering {
+/// then name ascending (ordinal byte order).
+///
+/// A non-comparable length pair (NaN, impossible for parsed playlists) falls
+/// through to the name, mirroring a `>`-based three-way comparison.
+///
+/// Public because a surface that lists playlists *outside* the presentation
+/// order — the hidden-playlist lines, which name what the filter withheld —
+/// must still list them in the order the table would have used.
+#[must_use]
+pub fn presentation_cmp(a: &PlaylistSummary, b: &PlaylistSummary) -> Ordering {
     b.total_length
         .partial_cmp(&a.total_length)
         .unwrap_or(Ordering::Equal)
@@ -229,13 +236,50 @@ pub fn selection_order(playlists: &[PlaylistSummary], selection: &[String]) -> V
         .collect()
 }
 
+/// Normalizes a user-typed playlist name to the spelling
+/// [`PlaylistSummary::name`] carries: upper-cased, with `.MPLS` appended when
+/// the name holds no `.` at all.
+///
+/// So `00800`, `00800.mpls` and `00800.MPLS` all name the same playlist. A name
+/// that already has *some* extension is only upper-cased, never re-suffixed —
+/// `feature.m2ts` normalizes to `FEATURE.M2TS` and then matches no playlist,
+/// which is the intended outcome for a name that is not a playlist file.
+#[must_use]
+pub fn normalize_playlist_name(name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    if upper.contains('.') { upper } else { format!("{upper}.MPLS") }
+}
+
+/// A by-name playlist selection: each requested name
+/// [normalized](normalize_playlist_name) and matched against `playlists`, in
+/// the given order, first occurrence winning.
+///
+/// A name that matches no playlist is skipped and a repeat is dropped, so the
+/// result is a duplicate-free subset of the disc's names — the classic
+/// selection behaviour, and unfiltered (any parsed playlist is addressable by
+/// name, whatever a [`PlaylistFilter`] would withhold).
+#[must_use]
+pub fn named_selection(playlists: &[PlaylistSummary], requested: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for raw in requested {
+        let name = normalize_playlist_name(raw);
+        if playlists.iter().any(|playlist| playlist.name == name) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        HiddenRule, PlaylistFilter, presentation_groups, presentation_order, selection_order,
-        selection_stream_files, table_rows,
+        HiddenRule, PlaylistFilter, named_selection, normalize_playlist_name, presentation_cmp,
+        presentation_groups, presentation_order, selection_order, selection_stream_files,
+        table_rows,
     };
     use crate::bdrom::disc::{ClipSummary, PlaylistSummary};
 
@@ -425,6 +469,44 @@ mod tests {
         let selection = ["00002.MPLS".to_owned(), "00000.MPLS".to_owned(), "00002.MPLS".to_owned()];
         assert_eq!(selection_order(&selection_disc(), &selection), [2, 0, 2]);
         assert_eq!(selection_order(&selection_disc(), &["99999.MPLS".to_owned()]), [0_usize; 0]);
+    }
+
+    #[test]
+    fn playlist_names_normalize_to_the_model_spelling() {
+        // Bare number, lower-cased and upper-cased `.mpls` all name one playlist.
+        assert_eq!(normalize_playlist_name("00800"), "00800.MPLS");
+        assert_eq!(normalize_playlist_name("00800.mpls"), "00800.MPLS");
+        assert_eq!(normalize_playlist_name("00800.MPLS"), "00800.MPLS");
+        // Some other extension is upper-cased, never re-suffixed.
+        assert_eq!(normalize_playlist_name("feature.m2ts"), "FEATURE.M2TS");
+    }
+
+    #[test]
+    fn named_selection_normalizes_dedupes_and_keeps_order() {
+        let disc = selection_disc();
+        let requested =
+            ["00002".to_owned(), "00000.mpls".to_owned(), "99999".to_owned(), "00002".to_owned()];
+        // Normalized, unknown skipped, repeat dropped, request order kept.
+        assert_eq!(named_selection(&disc, &requested), ["00002.MPLS", "00000.MPLS"]);
+        // A request naming nothing on the disc, and an empty request, select nothing.
+        assert!(named_selection(&disc, &["X".to_owned()]).is_empty());
+        assert!(named_selection(&disc, &[]).is_empty());
+    }
+
+    #[test]
+    fn presentation_cmp_orders_longest_first_then_by_name() {
+        let long = playlist("00010.MPLS", 100.0, false, &[]);
+        let short = playlist("00001.MPLS", 50.0, false, &[]);
+        let tie = playlist("00020.MPLS", 100.0, false, &[]);
+        assert_eq!(presentation_cmp(&long, &short), Ordering::Less);
+        assert_eq!(presentation_cmp(&short, &long), Ordering::Greater);
+        // Equal lengths fall through to the ordinal name…
+        assert_eq!(presentation_cmp(&long, &tie), Ordering::Less);
+        // …as does a non-comparable pair, which no parsed playlist produces:
+        // `00005` sorts ahead of `00010` however their lengths compare.
+        let nan = playlist("00005.MPLS", f64::NAN, false, &[]);
+        assert_eq!(presentation_cmp(&nan, &long), Ordering::Less);
+        assert_eq!(presentation_cmp(&nan, &nan), Ordering::Equal);
     }
 
     #[test]

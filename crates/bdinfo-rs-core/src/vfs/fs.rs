@@ -341,13 +341,18 @@ fn extension_of(path: &Path) -> String {
     }
 }
 
-/// ASCII case-insensitive glob match of `name` against `pattern`, where `*`
-/// matches any run (including empty) and `?` matches exactly one byte. One
+/// ASCII case-insensitive glob match of `name` against `pattern`.
+///
+/// `*` matches any run (including empty) and `?` matches exactly one byte. One
 /// case-folded pass finds `*.mpls` and `*.MPLS` spellings alike.
 ///
 /// Shared with the UDF backend ([`super::udf`]) so `.iso` and folder input
-/// match patterns identically.
-pub(crate) fn glob_ci(pattern: &[u8], name: &[u8]) -> bool {
+/// match patterns identically, and public so an out-of-crate
+/// [`BdDir`](crate::vfs::BdDir) backend — a browser file list, an in-memory
+/// tree — resolves [`get_files_pattern`](crate::vfs::BdDir::get_files_pattern)
+/// by the same rule rather than a lookalike of its own.
+#[must_use]
+pub fn glob_ci(pattern: &[u8], name: &[u8]) -> bool {
     match pattern.split_first() {
         None => name.is_empty(),
         Some((&b'*', rest)) => {

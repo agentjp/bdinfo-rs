@@ -33,13 +33,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanProgress};
 use bdinfo_rs_core::error::ScanError;
+use bdinfo_rs_core::report;
 use bdinfo_rs_gui::diagnostics::{self, LogErr as _};
 use bdinfo_rs_gui::flow::{self, Flow, ScanRequest, Stage};
-use bdinfo_rs_gui::model::{
-    SelectableRow, Sort, SortColumn, ViewSettings, format_file_size, group_n0,
-};
+use bdinfo_rs_gui::model::{SelectableRow, Sort, SortColumn, ViewSettings, format_file_size};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::{self, ProgressModel};
 use bdinfo_rs_gui::scan::{self, Input, Structural};
@@ -1863,14 +1862,14 @@ impl App {
 
     /// Writes the rendered report into `dir` as `BDINFO.{label}.txt`, bytes
     /// verbatim (the locked CRLF / UTF-8 no-BOM contract — never re-encode).
-    /// The label is disc-controlled, so the filename goes through the
-    /// sanitizer ([`paths::report_file_name`]) — the same name the CLI writes.
+    /// The label is disc-controlled, so the filename goes through the core's
+    /// sanitizer ([`report::file_name`]) — the same name the CLI writes.
     fn save_report(&mut self, dir: &std::path::Path) {
-        let (Some(report), Some(label)) = (self.flow.report(), self.flow.label()) else {
+        let (Some(rendered), Some(label)) = (self.flow.report(), self.flow.label()) else {
             return;
         };
-        let target = dir.join(paths::report_file_name(label));
-        self.status = match std::fs::write(&target, report.as_bytes()) {
+        let target = dir.join(report::file_name(label));
+        self.status = match std::fs::write(&target, rendered.as_bytes()) {
             Ok(()) => Some(format!("Report saved to: {}", target.display())),
             Err(err) => {
                 // The status line is transient; autosave in particular runs
@@ -2375,12 +2374,16 @@ impl App {
         }
 
         if let Some(size) = self.flow.disc_size() {
-            let value = format!("{} bytes ({})", group_n0(size), format_file_size(size));
+            let value = format!(
+                "{} bytes ({})",
+                report::text::group(u128::from(size)),
+                format_file_size(size)
+            );
             lines = lines.push(info_line(p, "Disc Size:", value, true));
         }
 
         if self.flow.show_hidden_note() {
-            lines = lines.push(text(HIDDEN_NOTE).size(ui::TEXT_XS).color(p.text_muted));
+            lines = lines.push(text(HIDDEN_STREAMS_NOTE).size(ui::TEXT_XS).color(p.text_muted));
         }
 
         // The indicator takes the slack the strip already has to the right of
@@ -2593,11 +2596,6 @@ impl App {
             .into()
     }
 }
-
-/// The CLI's hidden-tracks footer note, shown verbatim below the table when any
-/// listed playlist hides a stream.
-const HIDDEN_NOTE: &str =
-    "(*) Some playlists on this disc have hidden tracks. These tracks are marked with an asterisk.";
 
 /// The encrypted-disc indicator in the info box: a warning sign and the
 /// condition, spelled out rather than left to the glyph alone — the glyph is

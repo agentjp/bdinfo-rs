@@ -8,7 +8,10 @@
 //!
 //! The disc-level orchestration that wires these together — the [`disc`] scan
 //! plus the cross-clip resolution that feeds the [`m2ts`] demux — builds on
-//! these standalone parsers.
+//! these standalone parsers. Two presentation modules sit beside them, over
+//! the scanned model rather than the bytes: [`order`] (which playlists a
+//! surface lists, and in what order) and [`progress`] (how far along a running
+//! scan is).
 
 use crate::bytes;
 use crate::error::BdError;
@@ -20,6 +23,7 @@ pub mod interleaved;
 pub mod m2ts;
 pub mod mpls;
 pub mod order;
+pub mod progress;
 
 // Shared fallible reads: every byte access in the parsers goes through these
 // bounds-checked helpers, mapping an out-of-bounds read (a short/truncated

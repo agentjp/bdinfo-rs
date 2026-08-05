@@ -772,7 +772,12 @@ fn cents(hundredths: i64) -> String {
 
 /// Groups a non-negative integer with `,` thousands separators (the `N0`
 /// spelling).
-fn group(value: u128) -> String {
+///
+/// Public because the byte-count cells a surface prints beside the report —
+/// the playlist table's estimated/measured columns, a disc-size read-out —
+/// must group exactly as the report does.
+#[must_use]
+pub fn group(value: u128) -> String {
     let digits = value.to_string();
     let mut parts: Vec<&[u8]> = digits.as_bytes().rchunks(3).collect();
     parts.reverse();
@@ -840,8 +845,15 @@ fn time_hh(ticks: i64) -> String {
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
 
-/// `hh:mm:ss` — two-digit hours, the seconds-resolution spelling.
-fn time_hh_short(ticks: i64) -> String {
+/// `hh:mm:ss` — two-digit hours, the seconds-resolution spelling. Hours wrap at
+/// 24 and negative ticks clamp to zero (see [`time_parts`]).
+///
+/// Public because the playlist-length cell a surface prints beside the report
+/// is this spelling; feed it
+/// [`seconds_to_ticks`](crate::bdrom::chapters::seconds_to_ticks) of a
+/// [`PlaylistSummary::total_length`](crate::bdrom::disc::PlaylistSummary::total_length).
+#[must_use]
+pub fn time_hh_short(ticks: i64) -> String {
     let (h, m, s, _) = time_parts(ticks);
     format!("{h:02}:{m:02}:{s:02}")
 }
@@ -852,7 +864,7 @@ mod tests {
         RenderOptions, bytes_cell, cents, fixed_even, group, group_signed, kbps, render,
         render_with, secondary_audio, time_h, time_hh, time_hh_short, time_parts,
     };
-    use crate::bdrom::chapters::ChapterSummary;
+    use crate::bdrom::chapters::{ChapterSummary, seconds_to_ticks};
     use crate::bdrom::disc::{BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary};
     use crate::error::{BdError, ScanError, ScanStage};
     use crate::primitives::Pid;
@@ -1499,7 +1511,11 @@ Subtitle:       English / 19.12 kbps
     fn formatting_helpers_pin_their_edge_rules() {
         // `N0` grouping, signed and unsigned.
         assert_eq!(group(0), "0");
+        assert_eq!(group(7), "7");
+        assert_eq!(group(1_000), "1,000");
         assert_eq!(group(1_234_567), "1,234,567");
+        // The widest byte count a disc field can carry still groups.
+        assert_eq!(group(u128::from(u64::MAX)), "18,446,744,073,709,551,615");
         assert_eq!(group_signed(-1_234), "-1,234");
         // The two-decimal hundredths spelling clamps negatives to zero.
         assert_eq!(cents(637), "6.37");
@@ -1529,5 +1545,58 @@ Subtitle:       English / 19.12 kbps
         assert_eq!(time_hh(ticks), "02:03:24.567");
         assert_eq!(time_hh_short(ticks), "02:03:24");
         assert_eq!(time_parts(-1), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn the_seconds_resolution_spelling_reads_a_playlist_length() {
+        // The playlist-length cell: seconds through `seconds_to_ticks`, the
+        // form every surface's table column takes.
+        let cell = |seconds: f64| time_hh_short(seconds_to_ticks(seconds));
+        assert_eq!(cell(0.0), "00:00:00");
+        assert_eq!(cell(100.0), "00:01:40");
+        assert_eq!(cell(3661.0), "01:01:01");
+        assert_eq!(cell(93_600.0 + 65.0), "02:01:05");
+        // A negative length clamps to zero; 25 h 01 min 01 s wraps the day.
+        assert_eq!(cell(-5.0), "00:00:00");
+        assert_eq!(cell(90_061.0), "01:01:01");
+    }
+
+    // Both spellings render values a disc controls, so amplify the unit cases
+    // with property tests.
+    mod prop {
+        use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
+
+        use super::super::{group, time_hh_short};
+        use crate::bdrom::chapters::seconds_to_ticks;
+
+        proptest! {
+            #[test]
+            fn grouping_round_trips_and_commas_every_three(value in any::<u128>()) {
+                let grouped = group(value);
+                // Stripping the commas yields the plain decimal.
+                let plain: String = grouped.chars().filter(|&c| c != ',').collect();
+                prop_assert_eq!(&plain, &value.to_string());
+                // One comma for every full group of three past the first digit.
+                let digits = value.to_string().chars().count();
+                let commas = grouped.chars().filter(|&c| c == ',').count();
+                prop_assert_eq!(commas, digits.saturating_sub(1).checked_div(3).unwrap_or(0));
+            }
+
+            #[test]
+            fn the_seconds_resolution_spelling_is_well_formed(
+                seconds in 0.0_f64..1_000_000.0,
+            ) {
+                let formatted = time_hh_short(seconds_to_ticks(seconds));
+                let mut parts = formatted.split(':');
+                let hours = parts.next().and_then(|part| part.parse::<u64>().ok());
+                let minutes = parts.next().and_then(|part| part.parse::<u64>().ok());
+                let secs = parts.next().and_then(|part| part.parse::<u64>().ok());
+                prop_assert!(parts.next().is_none(), "exactly three segments");
+                prop_assert_eq!(formatted.chars().count(), 8); // NN:NN:NN
+                prop_assert!(hours.is_some_and(|value| value < 24));
+                prop_assert!(minutes.is_some_and(|value| value < 60));
+                prop_assert!(secs.is_some_and(|value| value < 60));
+            }
+        }
     }
 }
