@@ -139,7 +139,8 @@ impl TsPlaylistFile {
                 let angles = byte(data, pos_item)?;
                 pos_item = pos_item.saturating_add(2);
                 for angle in 0..angles.saturating_sub(1) {
-                    // angle name (5) + type (4) + 1 reserved byte. The angle clip is
+                    // angle name (5) + type (4) + `stc_id` (1, libbluray
+                    // `mpls_parse` `_parse_playitem`). The angle clip is
                     // named after its own `*.m2ts`, so the disc scan can resolve the
                     // angle's stream/clip files and fold its size into `file_size`.
                     let angle_name = ascii(data, pos_item, 5)?;
@@ -162,8 +163,11 @@ impl TsPlaylistFile {
                 angle_count = angle_count.max(extra_angles);
             }
 
-            // Stream-Number table: stream-info length (2) + reserved (2) + 7 count
-            // bytes + 5 reserved, then the per-stream entries.
+            // Stream-Number table: stream-info length (2) + reserved (2) + 8 count
+            // bytes + 4 reserved, then the per-stream entries. The 8th count is
+            // `num_dv` (Dolby Vision enhancement-layer entries, libbluray
+            // `mpls_parse` `_parse_stream_table`); those entries trail the ones
+            // walked here and are deliberately not parsed.
             // The length field is read (so truncation errors) but unused.
             u16_be(data, pos_item)?;
             let count_video = byte(data, pos_item.saturating_add(4))?;
@@ -221,8 +225,7 @@ impl TsPlaylistFile {
             let chapter_type = byte(data, chap_pos.saturating_add(1))?;
             if chapter_type == 1 {
                 let stream_file_index = usize::from(u16_be(data, chap_pos.saturating_add(2))?);
-                let chapter_time = f64::from(u32_be(data, chap_pos.saturating_add(4))?);
-                let chapter_seconds = chapter_time / 45_000.0;
+                let chapter_seconds = read_time(data, chap_pos.saturating_add(4))?;
                 // `chapter_clips` maps the file index to a clip slot; an
                 // out-of-range index (a corrupt mark) folds to `None` and the
                 // mark is skipped rather than failing the whole playlist.
@@ -670,6 +673,21 @@ mod tests {
         // Two chapters cleared the 1.0s gate; the type-2, gate-failing, and
         // out-of-range entries did not.
         assert_eq!(file.chapters, vec![0.0, 40.0]);
+    }
+
+    #[test]
+    fn chapter_mark_timestamps_are_masked_to_31_bits() {
+        // Bit 31 is not part of the 45 kHz timestamp, so the same mask that
+        // covers play-item in/out times covers marks. Unmasked, this mark reads
+        // as ~47 760 s, lands far past the playlist end, and fails the 1.0 s
+        // gate — so the chapter would vanish instead of landing at 0.0.
+        let v = pl_stream(1, 0x1011, 0x1B, [0x62, 0x30, 0, 0]);
+        let item = build_item("00000", 2_700_000, 4_500_000, None, [1, 0, 0, 0, 0, 0, 0], &v);
+        let marked = chapter_entry(1, 0, 2_700_000_u32.wrapping_add(0x8000_0000));
+        let file = TsPlaylistFile::scan("p.mpls", &build_mpls(0, &[item], &[marked])).unwrap();
+
+        assert_eq!(file.chapters, vec![0.0]);
+        assert_eq!(file.stream_clips.first().unwrap().chapters, vec![60.0]);
     }
 
     /// A two-item playlist where item 0 has 2 extra angles and item 1 has 1.

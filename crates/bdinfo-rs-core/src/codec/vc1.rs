@@ -3,8 +3,10 @@
 //! [`scan`] runs a byte-at-a-time start-code state machine over one assembled
 //! access-unit buffer: a sequence header (`00 00 01 0F`) fills the
 //! [`TsVideoStream`] `encoding_profile` (`"Advanced Profile N"` /
-//! `"Main Profile N"`) and the interlaced flag and marks the stream
-//! `is_vbr`/`is_initialized`; a frame header (`00 00 01 0D`) decodes the
+//! `"Main Profile N"`) and marks the stream `is_vbr`/`is_initialized`; the
+//! header's interlace flag is kept only for the duration of the call, to pick
+//! the picture-type coding below — `is_interlaced` on the stream is never
+//! written here. A frame header (`00 00 01 0D`) decodes the
 //! picture type into the `tag` (`P`/`B`/`I`/`BI`, or cleared). Resolution / frame
 //! rate / aspect ratio come from the CLPI/MPLS metadata.
 //!
