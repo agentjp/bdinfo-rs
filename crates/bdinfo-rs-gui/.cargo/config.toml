@@ -1,0 +1,35 @@
+# Cargo aliases for the INDEPENDENT native GUI workspace. Cargo merges config
+# files from the invocation directory upward, so running inside this directory
+# also picks up the repo-root .cargo/config.toml; the aliases below shadow the
+# root ones of the same name, which are spelled for the root workspace
+# (`--workspace`, core coverage floors) and are wrong for this crate.
+#
+# These spellings are the SINGLE home for what the GUI gate runs — the tracked
+# .github/workflows/gui.yml invokes them, so a flag added here reaches CI. They
+# only apply when cargo runs with this directory as its working directory.
+
+[alias]
+# Lint with warnings promoted to errors, across all targets (incl. tests).
+lt = "clippy --all-targets --locked -- -D warnings"
+# rustdoc with warnings = errors (RUSTDOCFLAGS is set by the caller); private
+# items too, so the internal links resolve.
+dc = "doc --no-deps --document-private-items --locked"
+# The suite minus the snapshot ties: unit + proptests, the golden ties, and the
+# iced_test interaction suite. --locked rejects a stale Cargo.lock;
+# --no-tests=fail makes an empty selection an error.
+#
+# The two nextest aliases are arrays because their `-E` filterset contains
+# spaces, and they are named `nx`/`snap` rather than the root's `nt` because
+# cargo refuses to merge an array alias over a string alias of the same name
+# ("expected array, but found string") — the repo-root .cargo/config.toml,
+# which cargo also reads here, spells `nt` as a string.
+nx = ["nextest", "run", "--locked", "--no-tests=fail", "-E", "not test(/^snapshots::/)"]
+# The tiny-skia snapshot ties alone, against the committed per-OS-family hashes.
+snap = ["nextest", "run", "--locked", "--no-tests=fail", "-E", "test(/^snapshots::/)"]
+# Unused-dependency sweep (regex pass).
+mc = "machete"
+# Unused-dependency sweep, AST-based (complementary to machete).
+sh = "shear"
+# Supply-chain audit: advisories + bans + licenses + sources, per this
+# workspace's own deny.toml (cargo-deny finds it from the workspace root).
+dn = "deny check"

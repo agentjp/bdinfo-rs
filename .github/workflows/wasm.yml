@@ -146,28 +146,30 @@ jobs:
 
       - name: Machete (unused deps)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo machete
+        run: cargo mc
 
       - name: Shear (unused deps, AST)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo shear
+        run: cargo sh
 
       # Supply-chain audit of the wasm crate's OWN dependency tree (js-sys /
       # wasm-bindgen / web-sys — compiled into the shipped `.wasm` but invisible to
       # the root audit, which `exclude`s this independent workspace). Uses the
       # crate-local crates/bdinfo-rs-wasm/deny.toml, which mirrors the root
       # allowlist + posture; cargo-deny discovers it from the target manifest's
-      # workspace root. Run from the repo root so the manifest path resolves.
+      # workspace root. Run from the crate directory, where the `dn` alias lives
+      # (.cargo/config.toml).
       - name: cargo-deny (wasm dep audit — advisories / licenses / bans / sources)
-        run: cargo deny --manifest-path crates/bdinfo-rs-wasm/Cargo.toml check
+        working-directory: crates/bdinfo-rs-wasm
+        run: cargo dn
 
       - name: Clippy (wasm32, calibrated, -D warnings)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo clippy --target wasm32-unknown-unknown --all-targets --release --locked -- -D warnings
+        run: cargo ltw
 
       - name: Clippy (native, -D warnings)
         working-directory: crates/bdinfo-rs-wasm
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo lt
 
       - name: Build (wasm32, release)
         working-directory: crates/bdinfo-rs-wasm
@@ -177,7 +179,7 @@ jobs:
         working-directory: crates/bdinfo-rs-wasm
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --target wasm32-unknown-unknown --no-deps --document-private-items --locked
+        run: cargo dc
 
       - name: Coverage (llvm-cov nextest, native — Tier A 100% lines/regions/functions)
         working-directory: crates/bdinfo-rs-wasm

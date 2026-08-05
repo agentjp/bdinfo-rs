@@ -117,7 +117,7 @@ jobs:
 
       - name: Clippy (calibrated, -D warnings)
         working-directory: crates/bdinfo-rs-gui
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo lt
 
       - name: Build
         working-directory: crates/bdinfo-rs-gui
@@ -125,7 +125,7 @@ jobs:
 
       - name: Test (unit + proptests + golden ties + iced_test interactions)
         working-directory: crates/bdinfo-rs-gui
-        run: cargo nextest run --locked --no-tests=fail -E 'not test(/^snapshots::/)'
+        run: cargo nx
 
       # The SHIPPED configuration — opt-level="s" + fat LTO + codegen-units=1 +
       # strip + (Windows) windows_subsystem — compiles on every shipped arch.
@@ -181,7 +181,7 @@ jobs:
       - name: Test (release mode)
         if: matrix.os == 'ubuntu-latest'
         working-directory: crates/bdinfo-rs-gui
-        run: cargo nextest run --release --locked --no-tests=fail -E 'not test(/^snapshots::/)'
+        run: cargo nx --release
 
       # BLOCKING per-arch: the tiny-skia snapshot ties against the committed
       # per-OS-family hashes (snapshots/{windows,unix}/ — the first 6-arch run
@@ -195,7 +195,7 @@ jobs:
       - name: Snapshot hashes (tiny-skia — per-OS-family pins)
         id: snapshots
         working-directory: crates/bdinfo-rs-gui
-        run: cargo nextest run --locked --no-tests=fail --no-fail-fast -E 'test(/^snapshots::/)'
+        run: cargo snap --no-fail-fast
 
       - name: Upload mismatched snapshot renders
         if: failure() && steps.snapshots.outcome == 'failure'
@@ -328,26 +328,29 @@ jobs:
 
       - name: Machete (unused deps)
         working-directory: crates/bdinfo-rs-gui
-        run: cargo machete
+        run: cargo mc
 
       - name: Shear (unused deps, AST)
         working-directory: crates/bdinfo-rs-gui
-        run: cargo shear
+        run: cargo sh
 
       # Supply-chain audit of the GUI crate's OWN dependency tree (iced / wgpu /
       # winit / cosmic-text — compiled into the shipped binary but invisible to
       # the root audit, which `exclude`s this independent workspace). Uses the
       # crate-local crates/bdinfo-rs-gui/deny.toml; deliberately deny-only — no
-      # cargo-vet for this leaf (the wasm precedent). Run from the repo root so
-      # the manifest path resolves.
+      # cargo-vet for this leaf (the wasm precedent). Run from the crate
+      # directory: cargo-deny discovers deny.toml from the target manifest's
+      # workspace root, and the `dn` alias lives in that directory's
+      # .cargo/config.toml.
       - name: cargo-deny (gui dep audit — advisories / licenses / bans / sources)
-        run: cargo deny --manifest-path crates/bdinfo-rs-gui/Cargo.toml check
+        working-directory: crates/bdinfo-rs-gui
+        run: cargo dn
 
       - name: Doc (warnings = errors)
         working-directory: crates/bdinfo-rs-gui
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --document-private-items --locked
+        run: cargo dc
 
       # Tier-A coverage at the 100% floor. main.rs + ui.rs are Tier B (the iced
       # shell and the style vocabulary, verified by the interaction suite +
