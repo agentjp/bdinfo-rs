@@ -713,16 +713,19 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 /// The filter the disc model is classified against: the standard rules with
 /// `short_seconds` as the length under which a playlist counts as short.
 ///
-/// An absent or non-positive `short_seconds` means the 20 s default, so a
-/// caller that does not care about the threshold passes `None` and gets the
-/// classic behaviour. Only the threshold is read downstream — no export filters
-/// the playlists any more — so the two switches keep their defaults.
+/// A present, finite, non-negative `short_seconds` is taken literally, so `0`
+/// leaves no playlist short and disables the short rule — the meaning the CLI's
+/// `--short-playlist-seconds 0` and the desktop app's threshold setting carry.
+/// An absent, negative or non-finite one means the 20 s default, so a caller
+/// that does not care about the threshold passes `None` and gets the classic
+/// behaviour. Only the threshold is read downstream — no export filters the
+/// playlists any more — so the two switches keep their defaults.
 #[cfg(any(target_arch = "wasm32", test))]
 fn classification_filter(short_seconds: Option<f64>) -> PlaylistFilter {
     let standard = PlaylistFilter::default();
     PlaylistFilter {
         short_playlist_seconds: short_seconds
-            .filter(|seconds| *seconds > 0.0)
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
             .unwrap_or(standard.short_playlist_seconds),
         ..standard
     }
@@ -1007,8 +1010,8 @@ pub fn scan_report(data: &[u8]) -> String {
 /// that withhold it in `hiddenBy`, so a caller renders the standard selection
 /// table by keeping the playlists whose `hiddenBy` is empty and re-applies
 /// either rule without scanning again. `short_playlist_seconds` sets the length
-/// under which a playlist counts as short — absent or non-positive means the
-/// 20 s default.
+/// under which a playlist counts as short, `0` leaving no playlist short;
+/// absent, negative or non-finite means the 20 s default.
 ///
 /// # Errors
 /// As [`scan_files`]: `paths`/`files` length mismatch, a non-`File` entry, an
@@ -1717,18 +1720,19 @@ mod tests {
 
         #[test]
         fn classification_filter_takes_the_threshold_and_falls_back_to_twenty_seconds() {
-            // A positive threshold is used as given; anything else — absent,
-            // zero, negative, NaN — leaves the default 20 s in force, so a
-            // caller that does not set one gets the classic classification.
-            // Whole filters are compared, so the two switches the exports no
-            // longer offer are pinned as left at their defaults.
+            // Any finite threshold from zero up is used as given; a value no
+            // caller can have meant — absent, negative, non-finite — leaves the
+            // default 20 s in force, so a caller that does not set one gets the
+            // classic classification. Whole filters are compared, so the two
+            // switches the exports do not offer are pinned at their defaults.
             for (short_seconds, in_force) in [
                 (Some(5.0), 5.0),
                 (Some(0.5), 0.5),
+                (Some(0.0), 0.0),
                 (None, 20.0),
-                (Some(0.0), 20.0),
                 (Some(-1.0), 20.0),
                 (Some(f64::NAN), 20.0),
+                (Some(f64::INFINITY), 20.0),
             ] {
                 assert_eq!(
                     classification_filter(short_seconds),
@@ -1759,6 +1763,23 @@ mod tests {
             assert!(classification_filter(Some(5.0)).classify(&short).is_empty());
             assert_eq!(
                 classification_filter(Some(5.0)).classify(&looping),
+                [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
+            );
+        }
+
+        #[test]
+        fn a_zero_threshold_leaves_no_playlist_short() {
+            // Nothing is strictly shorter than zero seconds, so a zero
+            // threshold is how a caller switches the short rule off — the
+            // looping rule keeps judging independently.
+            let brief = sample_playlist("00002.MPLS", 1.0, 100, 0, &["C.M2TS"]);
+            let looping = PlaylistSummary {
+                has_loops: true,
+                ..sample_playlist("00003.MPLS", 1.0, 0, 0, &[])
+            };
+            assert!(classification_filter(Some(0.0)).classify(&brief).is_empty());
+            assert_eq!(
+                classification_filter(Some(0.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
             );
         }
