@@ -139,7 +139,7 @@ exclude_re = [
     # is a u32 that the mutant only ever decrements from the wrapped u32::MAX, so
     # the acting arms (1, 0) are ~4 GiB of PID-0 bytes away, and the corrupted
     # pat_section_length is only read under those arms.
-    "m2ts\\.rs:1223:\\d+: replace > with >= in TsStreamFile::parse_pat",
+    "m2ts\\.rs:1277:\\d+: replace > with >= in TsStreamFile::parse_pat",
 
     # `parse_pmt` program-info guard `pmt_program_info_length > 0` vs `>=`: the dead
     # branch decrements pmt_section_length and the program-info countdown in
@@ -148,7 +148,7 @@ exclude_re = [
     # transfer is zero-length and the stale section re-walk is idempotent
     # (create_stream is keyed on contains_key). Traced and verified empirically
     # with a 357-padding-packet stream.
-    "m2ts\\.rs:1377:\\d+: replace > with >= in TsStreamFile::parse_pmt",
+    "m2ts\\.rs:1433:\\d+: replace > with >= in TsStreamFile::parse_pmt",
 
     # ── environment/platform probes no test process can observe ──────────────
 
