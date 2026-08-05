@@ -12,9 +12,6 @@
 //!
 //! `parse` is a rolling 32-bit start-code window, accumulated with `wrapping_*`
 //! (a hostile byte run shifts stale bits out harmlessly instead of overflowing).
-//! The picture-type masks/shifts (`& 0x80000000`, `>> 14`, …) run on the
-//! explicitly unsigned [`i32::cast_unsigned`] view so the right-shifts are
-//! logical — the sign bit must never smear into the extracted type bits.
 //! Picture-type coding depends on the frame-coding mode: progressive (FCM `0`)
 //! and interlace-frame (FCM `10`) headers carry a unary picture-type code, but an
 //! interlace-*field* header (FCM `11`) carries a fixed 3-bit FPTYPE that is mapped
@@ -32,23 +29,20 @@ use crate::stream::TsVideoStream;
 /// header is decoded on an already-initialised stream (nothing more can change). A
 /// buffer with no VC-1 start codes leaves `stream` untouched.
 pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    let mut parse: i32 = 0;
+    let mut parse: u32 = 0;
     let mut frame_header_parse: u8 = 0;
     let mut sequence_header_parse: u8 = 0;
     let mut is_interlaced = false;
 
     for _ in 0..buffer.length() {
-        parse = parse.wrapping_shl(8).wrapping_add(i32::from(buffer.read_byte(false)));
+        parse = parse.wrapping_shl(8).wrapping_add(u32::from(buffer.read_byte(false)));
 
         if parse == 0x0000_010D {
             frame_header_parse = 4;
         } else if frame_header_parse > 0 {
             frame_header_parse = frame_header_parse.wrapping_sub(1);
             if frame_header_parse == 0 {
-                // The picture-type bits are extracted from the unsigned `parse` view
-                // so the right-shifts are logical (no sign smear into the type bits).
-                let p = parse.cast_unsigned();
-                if is_interlaced && (p & 0xC000_0000) == 0xC000_0000 {
+                if is_interlaced && (parse & 0xC000_0000) == 0xC000_0000 {
                     // FCM = "11" (ILACE_FIELD): the field pair's type is signalled by a
                     // fixed 3-bit FPTYPE at bits 29..=27 (SMPTE 421M §9.1.1.5), not a
                     // unary code. Collapse the pair to its representative type exactly
@@ -59,7 +53,7 @@ pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut O
                     // counted as a frame-present marker and its string is never
                     // rendered. See DIFFERENCES.md "Correctness fixes with no effect on
                     // a normal disc".
-                    let fptype = (p & 0x3800_0000).wrapping_shr(27);
+                    let fptype = (parse & 0x3800_0000).wrapping_shr(27);
                     *tag = Some(
                         match ((fptype & 0x4) == 0, (fptype & 0x2) == 0) {
                             (true, true) => "I",
@@ -71,14 +65,14 @@ pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut O
                     );
                 } else {
                     let picture_type: u32 = if is_interlaced {
-                        if (p & 0x8000_0000) == 0 {
-                            (p & 0x7800_0000).wrapping_shr(13)
+                        if (parse & 0x8000_0000) == 0 {
+                            (parse & 0x7800_0000).wrapping_shr(13)
                         } else {
                             // FCM = "10" (ILACE_FRAME): unary picture type from bit 29.
-                            (p & 0x3C00_0000).wrapping_shr(12)
+                            (parse & 0x3C00_0000).wrapping_shr(12)
                         }
                     } else {
-                        (p & 0xF000_0000).wrapping_shr(14)
+                        (parse & 0xF000_0000).wrapping_shr(14)
                     };
 
                     if (picture_type & 0x2_0000) == 0 {

@@ -26,12 +26,12 @@ use crate::stream::TsVideoStream;
 /// picture is seen on an already-initialised stream (nothing more can change). A
 /// buffer with no MPEG-2 start codes leaves `stream` untouched.
 pub fn scan(stream: &mut TsVideoStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    let mut parse: i32 = 0;
+    let mut parse: u32 = 0;
     let mut picture_parse: i32 = 0;
     let mut sequence_header_parse: i32 = 0;
 
     for _ in 0..buffer.length() {
-        parse = parse.wrapping_shl(8).wrapping_add(i32::from(buffer.read_byte(false)));
+        parse = parse.wrapping_shl(8).wrapping_add(u32::from(buffer.read_byte(false)));
 
         if parse == 0x0000_0100 {
             picture_parse = 2;
