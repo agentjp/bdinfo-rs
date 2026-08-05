@@ -33,6 +33,7 @@ pub mod index;
 pub mod language_codes;
 pub mod primitives;
 pub mod report;
+pub mod scan;
 pub mod stream;
 pub mod vfs;
 

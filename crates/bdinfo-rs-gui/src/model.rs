@@ -10,7 +10,7 @@ use std::cmp::Ordering;
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
-use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, presentation_cmp, table_rows};
+use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, hidden_by, table_rows};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
 use crate::settings::Settings;
@@ -361,10 +361,9 @@ pub(crate) fn any_hidden(rows: &[PlaylistRow]) -> bool {
 /// What a [`PlaylistFilter`] withholds from the playlist table — the count,
 /// the rules that withheld it, and the withheld names.
 ///
-/// The two rules are judged **independently**, each against the whole disc
-/// ([`PlaylistFilter::classify`]): a playlist that is both short and looping
-/// is counted once and names both rules, and revealing it takes switching
-/// both off.
+/// The two rules are judged **independently**, each against the whole disc: a
+/// playlist that is both short and looping is counted once and names both
+/// rules, and revealing it takes switching both off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HiddenPlaylists {
     /// The withheld playlists' names, in the order the table would have listed
@@ -435,28 +434,24 @@ impl HiddenPlaylists {
 /// The playlists `filter` withholds from `playlists` — `None` when it
 /// withholds none (there is then no line to draw).
 ///
-/// A rule that is switched OFF never names itself: the short threshold keeps
-/// its configured value while its switch is off, so a looping playlist under
-/// that threshold must not be reported as short.
+/// One aggregate view of [`hidden_by`]: every withheld playlist counted once,
+/// and each rule named if it withheld anything. A rule that is switched OFF
+/// never names itself — the short threshold keeps its configured value while
+/// its switch is off, so a looping playlist under that threshold must not be
+/// reported as short.
 #[must_use]
 pub fn hidden_playlists(
     playlists: &[PlaylistSummary],
     filter: &PlaylistFilter,
 ) -> Option<HiddenPlaylists> {
-    let mut hidden: Vec<&PlaylistSummary> =
-        playlists.iter().filter(|playlist| !filter.keeps(playlist)).collect();
+    let hidden = hidden_by(playlists, filter);
     if hidden.is_empty() {
         return None;
     }
-    hidden.sort_by(|a, b| presentation_cmp(a, b));
-    let short = filter.filter_short_playlists
-        && hidden.iter().any(|playlist| filter.classify(playlist).contains(&HiddenRule::Short));
-    let looping = filter.filter_looping_playlists
-        && hidden.iter().any(|playlist| filter.classify(playlist).contains(&HiddenRule::Looping));
     Some(HiddenPlaylists {
-        names: hidden.iter().map(|playlist| playlist.name.clone()).collect(),
-        short,
-        looping,
+        names: hidden.iter().map(|(playlist, _)| playlist.name.clone()).collect(),
+        short: hidden.iter().any(|(_, rules)| rules.contains(&HiddenRule::Short)),
+        looping: hidden.iter().any(|(_, rules)| rules.contains(&HiddenRule::Looping)),
     })
 }
 

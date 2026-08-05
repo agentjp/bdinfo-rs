@@ -22,7 +22,8 @@
 //! selection family — [`normalize_playlist_name`] and [`named_selection`]
 //! (which names a request resolves to), [`selection_order`] and
 //! [`selection_stream_files`] (what that selection renders and reads) — and
-//! the [`HiddenRule`] classification behind the filter switches.
+//! the [`HiddenRule`] classification behind the filter switches, with
+//! [`hidden_by`] naming what a filter withheld and why.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -122,6 +123,34 @@ impl PlaylistFilter {
             HiddenRule::Looping => self.filter_looping_playlists,
         }
     }
+}
+
+/// What `filter` withholds from `playlists`: every playlist it drops, paired
+/// with the rules that dropped it, in presentation order (length descending,
+/// then name ascending).
+///
+/// A rule appears only when its switch is on, so the pairing is exactly "why
+/// this playlist is missing from the table". A playlist failing both rules
+/// appears once, naming both — a surface that reports per rule reads the list
+/// twice, one rule each; a surface that reports per playlist reads it once.
+/// Both then see the same set and the same order as [`table_rows`]'s
+/// complement.
+#[must_use]
+pub fn hidden_by<'a>(
+    playlists: &'a [PlaylistSummary],
+    filter: &PlaylistFilter,
+) -> Vec<(&'a PlaylistSummary, Vec<HiddenRule>)> {
+    let mut hidden: Vec<(&PlaylistSummary, Vec<HiddenRule>)> = playlists
+        .iter()
+        .map(|playlist| {
+            let rules =
+                filter.classify(playlist).into_iter().filter(|&rule| filter.drops(rule)).collect();
+            (playlist, rules)
+        })
+        .filter(|(_, rules): &(_, Vec<HiddenRule>)| !rules.is_empty())
+        .collect();
+    hidden.sort_by(|(a, _), (b, _)| presentation_cmp(a, b));
+    hidden
 }
 
 /// Compares two playlists in presentation order: total length descending,
@@ -277,9 +306,9 @@ mod tests {
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        HiddenRule, PlaylistFilter, named_selection, normalize_playlist_name, presentation_cmp,
-        presentation_groups, presentation_order, selection_order, selection_stream_files,
-        table_rows,
+        HiddenRule, PlaylistFilter, hidden_by, named_selection, normalize_playlist_name,
+        presentation_cmp, presentation_groups, presentation_order, selection_order,
+        selection_stream_files, table_rows,
     };
     use crate::bdrom::disc::{ClipSummary, PlaylistSummary};
 
@@ -548,6 +577,74 @@ mod tests {
         assert_eq!(HiddenRule::Looping.label(), "looping");
     }
 
+    /// The names `hidden_by` reports, in the order it reports them.
+    fn hidden_names(
+        hidden: &[(&PlaylistSummary, Vec<HiddenRule>)],
+    ) -> Vec<(String, Vec<HiddenRule>)> {
+        hidden.iter().map(|(playlist, rules)| (playlist.name.clone(), rules.clone())).collect()
+    }
+
+    #[test]
+    fn hidden_by_pairs_each_withheld_playlist_with_the_rules_that_dropped_it() {
+        // 00001 loops, 00090 is short AND loops, 00091 is short, 00013 passes.
+        // 00091 (10 s) precedes 00090 (5 s): length descending, as the table
+        // would have listed them.
+        let playlists = [
+            playlist("00001.MPLS", 5765.0, true, &["A.M2TS"]),
+            playlist("00013.MPLS", 3600.0, false, &["B.M2TS"]),
+            playlist("00090.MPLS", 5.0, true, &["C.M2TS"]),
+            playlist("00091.MPLS", 10.0, false, &["D.M2TS"]),
+        ];
+        assert_eq!(
+            hidden_names(&hidden_by(&playlists, &PlaylistFilter::default())),
+            [
+                ("00001.MPLS".to_owned(), vec![HiddenRule::Looping]),
+                ("00091.MPLS".to_owned(), vec![HiddenRule::Short]),
+                ("00090.MPLS".to_owned(), vec![HiddenRule::Short, HiddenRule::Looping]),
+            ]
+        );
+        // The withheld set is exactly the table's complement.
+        let listed: Vec<usize> = table_rows(&playlists, &PlaylistFilter::default())
+            .into_iter()
+            .map(|(_, i)| i)
+            .collect();
+        assert_eq!(listed, [1]);
+    }
+
+    #[test]
+    fn hidden_by_names_only_the_rules_whose_switch_is_on() {
+        // The threshold keeps its value while the short switch is off, so a
+        // looping playlist under it must not be reported as short.
+        let playlists = [playlist("00090.MPLS", 5.0, true, &["C.M2TS"])];
+        let looping_only =
+            PlaylistFilter { filter_short_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(
+            hidden_names(&hidden_by(&playlists, &looping_only)),
+            [("00090.MPLS".to_owned(), vec![HiddenRule::Looping])]
+        );
+        let short_only =
+            PlaylistFilter { filter_looping_playlists: false, ..PlaylistFilter::default() };
+        assert_eq!(
+            hidden_names(&hidden_by(&playlists, &short_only)),
+            [("00090.MPLS".to_owned(), vec![HiddenRule::Short])]
+        );
+    }
+
+    #[test]
+    fn hidden_by_withholds_nothing_when_no_rule_matches_or_is_on() {
+        let playlists = [
+            playlist("00001.MPLS", 5765.0, true, &["A.M2TS"]),
+            playlist("00090.MPLS", 5.0, false, &["C.M2TS"]),
+        ];
+        // Every switch off — nothing is withheld, whatever the classification.
+        assert!(hidden_by(&playlists, &PlaylistFilter::everything()).is_empty());
+        // A playlist of exactly the threshold length is not short, and a disc
+        // with nothing to hide hides nothing.
+        let edge = [playlist("00014.MPLS", 20.0, false, &["E.M2TS"])];
+        assert!(hidden_by(&edge, &PlaylistFilter::default()).is_empty());
+        assert!(hidden_by(&[], &PlaylistFilter::default()).is_empty());
+    }
+
     #[test]
     fn presentation_groups_exposes_the_group_boundaries() {
         // Same disc as the first-appearance test: A+B share a clip and form
@@ -635,6 +732,37 @@ mod tests {
             let dropped_short = filter_short && length < threshold;
             let dropped_looping = filter_looping && has_loops;
             prop_assert_eq!(filter.keeps(&subject), !(dropped_short || dropped_looping));
+        }
+
+        /// `hidden_by` and `presentation_order` partition the disc: every
+        /// playlist is either listed or withheld, never both and never neither.
+        #[test]
+        fn hidden_and_listed_partition_the_disc(
+            lengths in proptest::collection::vec(0.0_f64..40.0, 0..12),
+            loops in proptest::collection::vec(proptest::bool::ANY, 0..12),
+            filter_short in proptest::bool::ANY,
+            filter_looping in proptest::bool::ANY,
+        ) {
+            let playlists: Vec<PlaylistSummary> = lengths
+                .iter()
+                .zip(loops.iter().chain(std::iter::repeat(&false)))
+                .enumerate()
+                .map(|(i, (&len, &lp))| playlist(&format!("{i:05}.MPLS"), len, lp, &[]))
+                .collect();
+            let filter = PlaylistFilter {
+                filter_short_playlists: filter_short,
+                filter_looping_playlists: filter_looping,
+                ..PlaylistFilter::default()
+            };
+            let hidden = hidden_by(&playlists, &filter);
+            let listed = presentation_order(&playlists, &filter);
+            prop_assert_eq!(hidden.len().checked_add(listed.len()), Some(playlists.len()));
+            let withheld: Vec<&str> =
+                hidden.iter().map(|(playlist, _)| playlist.name.as_str()).collect();
+            for &index in &listed {
+                let name = playlists.get(index).map(|p| p.name.as_str());
+                prop_assert!(name.is_some_and(|name| !withheld.contains(&name)));
+            }
         }
 
         /// Deterministic: the same input always yields the same order.
