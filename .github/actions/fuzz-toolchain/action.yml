@@ -1,0 +1,137 @@
+# Everything a libFuzzer leg needs on disk before it can run a single unit:
+# the pinned nightly with the leg's target, the 32-bit C++ toolchain the i686
+# legs need, the build cache, the pinned cargo-fuzz binary, and the committed
+# fuzz lockfile check. Two callers reach exactly this point by exactly these
+# steps — core.yml's `replay` (the per-pull-request corpus regression gate) and
+# fuzz.yml's `deep` (the nightly and tag-time fresh-fuzz pass) — and a
+# divergence between them would mean the gate and the deep pass fuzz different
+# builds.
+#
+# What stays per caller: the rust-cache key shape (the two legs partition their
+# fuzz/target archives differently, each for a documented reason at the call
+# site) and the cargo-fuzz binary cache's OWNERSHIP, below.
+#
+# A COMPOSITE action rather than a reusable workflow (rationale in
+# .github/actions/pins).
+name: fuzz-toolchain
+description: >-
+  Install the pinned nightly, the leg's target, the 32-bit C++ toolchain and
+  the pinned cargo-fuzz, and verify the committed fuzz lockfile.
+
+inputs:
+  target:
+    description: >-
+      The libFuzzer target triple this leg builds — the gnu host at 64 bits
+      (the workspace default musl target cannot link libFuzzer's sanitizers),
+      or the i686 proxy for wasm32's pointer width.
+    required: true
+  cxx-multilib:
+    description: >-
+      `true` installs gcc-multilib / g++-multilib. libfuzzer-sys's build script
+      COMPILES libFuzzer's C++ sources with the cc crate, which for an i686
+      target invokes the host compiler with -m32 — so a 32-bit C++ toolchain is
+      the FIRST thing that blocks such a leg, before any Rust code is reached.
+      Without it the failure names `libfuzzer-sys` and reads like a Rust
+      problem.
+    required: false
+    default: 'false'
+  cargo-fuzz-cache:
+    description: >-
+      Who owns the cargo-fuzz binary cache entry. `save` reads AND writes it
+      (core.yml's replay job compiles the pinned version and owns the save on
+      master); `restore` only reads, and skips the read entirely on a tag run,
+      because restoring an EXECUTABLE is the one place cache poisoning would
+      matter. Both modes build the key from the same manifest value, so the two
+      callers must keep producing byte-identical keys.
+    required: true
+  cache-key:
+    description: >-
+      Swatinem/rust-cache `key` — an extra key component; empty leaves the
+      job-derived key alone.
+    required: false
+    default: ''
+  cache-shared-key:
+    description: >-
+      Swatinem/rust-cache `shared-key` — replaces the job-derived key, so
+      legs that build the same dependency graph share one archive.
+    required: false
+    default: ''
+  cache-lookup-only:
+    description: >-
+      Swatinem/rust-cache `lookup-only` — a release-adjacent run builds fresh
+      rather than consuming a build cache poisoned elsewhere.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - id: pins
+      uses: ./.github/actions/pins
+
+    # cargo-fuzz and libFuzzer need a nightly toolchain.
+    - name: Install pinned nightly
+      shell: bash
+      env:
+        NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        FUZZ_TARGET: ${{ inputs.target }}
+      run: |
+        rustup toolchain install "$NIGHTLY" --profile minimal
+        rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
+
+    - name: Install the 32-bit C++ toolchain
+      if: inputs.cxx-multilib == 'true'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
+
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        workspaces: fuzz
+        key: ${{ inputs.cache-key }}
+        shared-key: ${{ inputs.cache-shared-key }}
+        lookup-only: ${{ inputs.cache-lookup-only }}
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+
+    # cargo-fuzz is absent from taiki-e/install-action's manifest, and this repo
+    # runs that action with `fallback: none` so a manifest-missing tool fails
+    # loudly instead of resolving through its unpinned cargo-binstall fallback
+    # (rationale in core.yml). So compile the pinned version from crates.io once
+    # and cache the binary, the same lane cargo-vet uses.
+    # The key is NOT keyed by arch: cargo-fuzz is a HOST executable driving a
+    # cross-compile, identical for every leg. On a cold cache the legs miss
+    # together and save the same bytes; the losers log a reserve conflict and
+    # move on.
+    - name: Cache the pinned cargo-fuzz binary
+      id: fuzz-bin-rw
+      if: inputs.cargo-fuzz-cache == 'save'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/cargo-fuzz
+        key: cargo-fuzz-${{ runner.os }}-${{ steps.pins.outputs.CARGO_FUZZ }}
+
+    - name: Restore the pinned cargo-fuzz binary (non-tag runs)
+      id: fuzz-bin-ro
+      if: inputs.cargo-fuzz-cache == 'restore' && !startsWith(github.ref, 'refs/tags/')
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/cargo-fuzz
+        key: cargo-fuzz-${{ runner.os }}-${{ steps.pins.outputs.CARGO_FUZZ }}
+
+    # A skipped cache step reports no `cache-hit`, so naming both ids here is
+    # what makes one condition serve both modes AND the tag run that reads
+    # neither.
+    - name: Install the pinned cargo-fuzz (cache miss)
+      if: steps.fuzz-bin-rw.outputs.cache-hit != 'true' && steps.fuzz-bin-ro.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CARGO_FUZZ: ${{ steps.pins.outputs.CARGO_FUZZ }}
+      run: cargo install cargo-fuzz --version "$CARGO_FUZZ" --locked
+
+    - name: Verify the committed fuzz lockfile is in sync
+      # cargo-fuzz's `run` has no --locked flag (it forwards everything after
+      # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
+      # cargo command up front; this also pre-fetches the deps for the build.
+      shell: bash
+      env:
+        NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+      run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml

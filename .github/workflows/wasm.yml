@@ -117,23 +117,11 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/wasm-rules.ps1 -Check unsafe
 
-      - name: Format (nightly rustfmt)
-        working-directory: crates/bdinfo-rs-wasm
-        env:
-          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
-        run: cargo "+$NIGHTLY" fmt --check
-
-      - name: Typos
-        working-directory: crates/bdinfo-rs-wasm
-        run: typos
-
-      - name: Machete (unused deps)
-        working-directory: crates/bdinfo-rs-wasm
-        run: cargo mc
-
-      - name: Shear (unused deps, AST)
-        working-directory: crates/bdinfo-rs-wasm
-        run: cargo sh
+      # rustfmt / typos / machete / shear — the quartet gui.yml's checks job runs
+      # identically, in .github/actions/lint-crate.
+      - uses: ./.github/actions/lint-crate
+        with:
+          working-directory: crates/bdinfo-rs-wasm
 
       # Supply-chain audit of the wasm crate's OWN dependency tree (js-sys /
       # wasm-bindgen / web-sys — compiled into the shipped `.wasm` but invisible to
@@ -248,57 +236,29 @@ jobs:
         # the shell ($CHROMEWEBDRIVER); the ${{ env.* }} context resolves empty.
         run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" cargo test --target wasm32-unknown-unknown --release --locked --test parity
 
-  # The declared MSRV is enforced, not decorative: build with exactly the
-  # rust-version toolchain from crates/bdinfo-rs-wasm/Cargo.toml, read from the
-  # manifest at run time so an MSRV bump touches Cargo.toml ONLY (no version
-  # literals here to drift; the version also stays out of the job `name:` —
-  # static YAML can't interpolate step outputs there). This is what stops a
-  # dependency bump or a newer language feature from silently raising the real
-  # floor under a downstream user who pins the declared one. Build-only by
-  # design: rust-version is a claim about building the package, not about the
-  # dev-dependency tree (wasm-bindgen-test may float its own MSRV) — the gate
-  # job above runs the suites on the pinned stable. Both targets, because the
-  # crate SHIPS as wasm32: the native check is what `cargo check` covers on any
-  # host, and the wasm32 release build is the configuration published to npm, so
+  # The wasm crate's leg of the MSRV gate — the shared body, the rationale and
+  # the build-only posture live in .github/actions/msrv-check (dev-dependency
+  # here: wasm-bindgen-test may float its own MSRV; the gate job above runs the
+  # suites on the pinned stable). BOTH targets, because the crate SHIPS as
+  # wasm32: the native check is what `cargo check` covers on any host, and the
+  # wasm32 release build is the configuration published to npm, so
   # target-specific MSRV breakage in js-sys/web-sys/wasm-bindgen would otherwise
   # pass unnoticed. `msrv` in core.yml and `gui msrv` in gui.yml hold the same
   # bar for the other two shipping surfaces.
   msrv:
-    name: msrv
+    name: wasm msrv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Read the MSRV floor from Cargo.toml
-        id: msrv
-        # jq -e fails loudly if rust-version ever disappears from the manifest.
-        run: |
-          v="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-wasm/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-wasm") | .rust_version')"
-          echo "MSRV floor: $v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      - name: Install the MSRV toolchain with the wasm32 target
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: |
-          rustup toolchain install "$MSRV" --profile minimal
-          rustup target add wasm32-unknown-unknown --toolchain "$MSRV"
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: ./.github/actions/msrv-check
         with:
-          workspaces: crates/bdinfo-rs-wasm
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Check with the declared rust-version (native)
-        working-directory: crates/bdinfo-rs-wasm
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" check --locked
-
-      - name: Build with the declared rust-version (wasm32, release)
-        working-directory: crates/bdinfo-rs-wasm
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" build --target wasm32-unknown-unknown --release --locked
+          package: bdinfo-rs-wasm
+          manifest-path: crates/bdinfo-rs-wasm/Cargo.toml
+          working-directory: crates/bdinfo-rs-wasm
+          target: wasm32-unknown-unknown
+          check-args: --locked
+          build-args: --target wasm32-unknown-unknown --release --locked
+          cache-workspaces: crates/bdinfo-rs-wasm

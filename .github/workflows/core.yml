@@ -312,17 +312,10 @@ jobs:
           NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: cargo "+$NIGHTLY" llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 
-  # The declared MSRV is enforced, not decorative: build the whole root workspace
-  # with exactly the rust-version toolchain from Cargo.toml, read from the
-  # manifest at run time so an MSRV bump touches Cargo.toml ONLY (no version
-  # literals here to drift; the version also stays out of the job `name:` —
-  # static YAML can't interpolate step outputs there). This is what stops a
-  # dependency bump or a newer language feature from silently raising the real
-  # floor under a downstream user who pins the declared one. Build-only by
-  # design: rust-version is a claim about building the packages, not about the
-  # dev-dependency tree — the test suites run on the pinned stable in the
-  # build + test matrix above. `gui msrv` in gui.yml holds the same bar for the
-  # GUI crate, `msrv` in wasm.yml for the wasm crate.
+  # The root workspace's leg of the MSRV gate — the shared body, the rationale
+  # and the build-only posture live in .github/actions/msrv-check.
+  # `gui msrv` in gui.yml holds the same bar for the GUI crate and `wasm msrv`
+  # in wasm.yml for the wasm crate.
   msrv:
     name: msrv
     if: inputs.core == 'true'
@@ -332,30 +325,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Read the MSRV floor from Cargo.toml
-        id: msrv
-        # Both workspace members inherit `rust-version.workspace`, so the set of
-        # declared floors must be a single value — `unique | length == 1` asserts
-        # that rather than assuming it, and jq -er fails loudly if rust-version
-        # ever disappears from the manifest.
-        run: |
-          v="$(cargo metadata --no-deps --format-version 1 | jq -er '[.packages[].rust_version] | unique | if length == 1 then .[0] else error("the root workspace packages declare different rust-version floors") end')"
-          echo "MSRV floor: $v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      - name: Install the MSRV toolchain
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: rustup toolchain install "$MSRV" --profile minimal
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # No `package`: both members inherit `rust-version.workspace`, so the set
+      # of declared floors must be a single value, and the action asserts that
+      # rather than reading one member and assuming the other agrees.
+      - uses: ./.github/actions/msrv-check
         with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Build with the declared rust-version
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" build --workspace --locked
+          build-args: --workspace --locked
 
   # The ultimate real-world gate: do exactly what a user does — install bdinfo-rs
   # the traditional way (build it from source; no package managers), scan the
@@ -619,59 +594,22 @@ jobs:
       - id: pins
         uses: ./.github/actions/pins
 
-      - name: Install pinned nightly
-        env:
-          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
-        run: |
-          rustup toolchain install "$NIGHTLY" --profile minimal
-          rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
-
-      # libfuzzer-sys's build script COMPILES libFuzzer's C++ sources with the cc
-      # crate, which for an i686 target invokes the host compiler with -m32 — so a
-      # 32-bit C++ toolchain is the FIRST thing that blocks this leg, before any
-      # Rust code is reached. Without it the failure names `libfuzzer-sys` and
-      # reads like a Rust problem.
-      - name: Install the 32-bit C++ toolchain
-        if: matrix.arch == 'i686'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-multilib g++-multilib
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # Nightly + target, the 32-bit C++ toolchain, the build cache, cargo-fuzz
+      # and the fuzz lockfile check — the shared body fuzz.yml's deep pass runs
+      # too, in .github/actions/fuzz-toolchain.
+      - uses: ./.github/actions/fuzz-toolchain
         with:
-          workspaces: fuzz
+          target: ${{ matrix.triple }}
+          cxx-multilib: ${{ matrix.arch == 'i686' }}
+          # This job OWNS the cargo-fuzz binary cache entry: it compiles the
+          # pinned version and saves it on master, and fuzz.yml's deep legs
+          # restore what it wrote.
+          cargo-fuzz-cache: save
           # Per arch: rust-cache keys off the job id, which both legs share, and
           # the two build different target triples into different subtrees of
           # fuzz/target. One archive would hold whichever leg saved first and the
           # other would restore a miss dressed as a hit.
-          key: ${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      # cargo-fuzz is absent from taiki-e/install-action's manifest (101 tools at
-      # the revision pinned in this file), so with the binstall fallback disabled
-      # it has no prebuilt channel here. Compile the pinned version from crates.io
-      # once and cache the binary, the same lane cargo-vet uses.
-      # NOT keyed by matrix.arch: cargo-fuzz is a HOST executable driving a
-      # cross-compile, identical for both legs. On a cold cache both legs miss and
-      # both save the same bytes; the loser logs a reserve conflict and moves on.
-      - name: Cache the pinned cargo-fuzz binary
-        id: fuzz-bin
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-${{ runner.os }}-${{ steps.pins.outputs.CARGO_FUZZ }}
-
-      - name: Install the pinned cargo-fuzz (cache miss)
-        if: steps.fuzz-bin.outputs.cache-hit != 'true'
-        env:
-          CARGO_FUZZ: ${{ steps.pins.outputs.CARGO_FUZZ }}
-        run: cargo install cargo-fuzz --version "$CARGO_FUZZ" --locked
-
-      - name: Verify the committed fuzz lockfile is in sync
-        # cargo-fuzz's `run` has no --locked flag (it forwards everything after
-        # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
-        # cargo command up front; this also pre-fetches the deps for the build.
-        env:
-          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
-        run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
+          cache-key: ${{ matrix.arch }}
 
       # The target list comes from fuzz/targets.txt — the one place it lives,
       # read the same way by fuzz.yml and scripts/fuzz-docker.sh, so adding a
