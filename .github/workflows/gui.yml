@@ -322,23 +322,11 @@ jobs:
         shell: pwsh
         run: .github/scripts/gui-rules.ps1
 
-      - name: Format (nightly rustfmt)
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
-        run: cargo "+$NIGHTLY" fmt --check
-
-      - name: Typos
-        working-directory: crates/bdinfo-rs-gui
-        run: typos
-
-      - name: Machete (unused deps)
-        working-directory: crates/bdinfo-rs-gui
-        run: cargo mc
-
-      - name: Shear (unused deps, AST)
-        working-directory: crates/bdinfo-rs-gui
-        run: cargo sh
+      # rustfmt / typos / machete / shear — the quartet wasm.yml's gate runs
+      # identically, in .github/actions/lint-crate.
+      - uses: ./.github/actions/lint-crate
+        with:
+          working-directory: crates/bdinfo-rs-gui
 
       # Supply-chain audit of the GUI crate's OWN dependency tree (iced / wgpu /
       # winit / cosmic-text — compiled into the shipped binary but invisible to
@@ -382,13 +370,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ../../.github/scripts/cov-floor.ps1 -JsonPath $json -Label 'GUI coverage' -Include 'bdinfo-rs-gui[\\/]src[\\/]' -Exclude '[\\/]src[\\/](main|ui)\.rs$'
 
-  # The declared MSRV is enforced, not decorative: build with exactly the
-  # rust-version toolchain from Cargo.toml, read from the manifest at run time
-  # so an MSRV bump touches Cargo.toml ONLY (no version literals here to drift;
-  # the version also stays out of the job `name:` — static YAML can't
-  # interpolate step outputs there). Build-only by design: rust-version is a
-  # claim about building the package, not about the dev-dependency tree
-  # (iced_test may float its own MSRV).
+  # The GUI crate's leg of the MSRV gate — the shared body, the rationale and
+  # the build-only posture live in .github/actions/msrv-check. Build-only costs
+  # nothing here in particular: iced_test may float its own MSRV.
   msrv:
     name: gui msrv
     # One Linux runner, arch-invariant verdict — arm64 (rationale in core.yml).
@@ -398,29 +382,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Read the MSRV floor from Cargo.toml
-        id: msrv
-        # jq -e fails loudly if rust-version ever disappears from the manifest.
-        run: |
-          v="$(cargo metadata --no-deps --format-version 1 --manifest-path crates/bdinfo-rs-gui/Cargo.toml | jq -er '.packages[] | select(.name == "bdinfo-rs-gui") | .rust_version')"
-          echo "MSRV floor: $v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      - name: Install the MSRV toolchain
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: rustup toolchain install "$MSRV" --profile minimal
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: ./.github/actions/msrv-check
         with:
-          workspaces: crates/bdinfo-rs-gui
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-
-      - name: Build with the declared rust-version
-        working-directory: crates/bdinfo-rs-gui
-        env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" build --locked
+          package: bdinfo-rs-gui
+          manifest-path: crates/bdinfo-rs-gui/Cargo.toml
+          working-directory: crates/bdinfo-rs-gui
+          build-args: --locked
+          cache-workspaces: crates/bdinfo-rs-gui
 
   # The packaging smoke: assemble every distribution artifact shape on its
   # native runner with the SAME .github/scripts/gui-package-*.ps1 the

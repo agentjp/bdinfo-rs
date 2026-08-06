@@ -1,0 +1,64 @@
+# The four hygiene checks the two sibling crates run identically: nightly
+# rustfmt, typos, and the two unused-dependency detectors (cargo-machete reads
+# the manifest and the sources textually, cargo-shear the AST — they disagree
+# often enough that both are worth running). gui.yml's `checks` job and
+# wasm.yml's `gate` job ran these as four byte-identical steps differing only in
+# which crate directory they run from.
+#
+# The COMMAND SPELLINGS are not defined here: `mc` and `sh` are aliases in each
+# crate's own .cargo/config.toml, which is what `working-directory` selects, so
+# the local gate and CI invoke one definition. What this action removes is the
+# duplicated YAML wiring around them.
+#
+# The three binaries stay the CALLER's to install: both callers already pull
+# cargo-machete / cargo-shear / typos-cli from one pinned install-action step
+# alongside the tools their own remaining gate steps need, and splitting that
+# step would buy an extra install for no isolation.
+#
+# core.yml deliberately does NOT call this. It runs the same tools under
+# different step names, through the ROOT workspace's aliases, and without Typos
+# — the repository-wide typos check lives in repo.yml and already covers the
+# root sources. Folding it in would mean renaming its steps or bypassing its
+# aliases to save nothing.
+#
+# A COMPOSITE action rather than a reusable workflow (rationale in
+# .github/actions/pins).
+name: lint-crate
+description: >-
+  Run a sibling crate's hygiene quartet — nightly rustfmt, typos, and the two
+  unused-dependency detectors — from that crate's directory.
+
+inputs:
+  working-directory:
+    description: >-
+      The crate directory. It selects both the manifest the tools read and the
+      .cargo/config.toml the `mc` / `sh` aliases come from.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: pins
+      uses: ./.github/actions/pins
+
+    - name: Format (nightly rustfmt)
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      env:
+        NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+      run: cargo "+$NIGHTLY" fmt --check
+
+    - name: Typos
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      run: typos
+
+    - name: Machete (unused deps)
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      run: cargo mc
+
+    - name: Shear (unused deps, AST)
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      run: cargo sh

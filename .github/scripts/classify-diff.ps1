@@ -339,6 +339,27 @@ begin {
             Match      = { param($f) Test-Match $f @('.github/actions/mutate-crate/*') }
         },
         @{
+            Name       = 'msrv composite action'
+            Areas      = @('core', 'gui', 'wasm', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The msrv-check composite is the body of all three workspaces'' MSRV jobs, so a break in it is a break in each of them; action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
+            Match      = { param($f) Test-Match $f @('.github/actions/msrv-check/*') }
+        },
+        @{
+            Name       = 'fuzz toolchain composite action'
+            Areas      = @('fuzz', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The fuzz-toolchain composite installs the nightly, target and cargo-fuzz for core.yml''s corpus replay gate — the only pull-request job it reaches, and the fuzz area is what runs it — and for fuzz.yml''s deep pass, which runs on its own schedule.'
+            Match      = { param($f) Test-Match $f @('.github/actions/fuzz-toolchain/*') }
+        },
+        @{
+            Name       = 'crate lint composite action'
+            Areas      = @('gui', 'wasm', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The lint-crate composite runs the rustfmt/typos/machete/shear quartet for the two sibling crates'' gates. The root workspace runs those tools through its own steps and is unaffected.'
+            Match      = { param($f) Test-Match $f @('.github/actions/lint-crate/*') }
+        },
+        @{
             Name       = 'source rule script'
             Areas      = @('core')
             Structural = $true
@@ -551,6 +572,9 @@ end {
             @{ Path = '.github/pins.env'; Areas = 'core deps fuzz gui links pkg toml typos wasm yaml' }
             @{ Path = '.github/actions/pins/action.yml'; Areas = 'core deps fuzz gui links pkg toml typos wasm workflows yaml' }
             @{ Path = '.github/actions/wasm-build/action.yml'; Areas = 'links typos wasm workflows yaml' }
+            @{ Path = '.github/actions/msrv-check/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
+            @{ Path = '.github/actions/fuzz-toolchain/action.yml'; Areas = 'fuzz links typos workflows yaml' }
+            @{ Path = '.github/actions/lint-crate/action.yml'; Areas = 'gui links typos wasm workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }

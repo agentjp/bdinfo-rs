@@ -1,0 +1,132 @@
+# The declared MSRV is enforced, not decorative, on all three shipping surfaces:
+# build with exactly the rust-version toolchain from the manifest, READ FROM THE
+# MANIFEST AT RUN TIME so an MSRV bump touches Cargo.toml ONLY. No version
+# literal lives in any workflow to drift; the version also stays out of the job
+# `name:`, because static YAML cannot interpolate a step output there. This is
+# what stops a dependency bump or a newer language feature from silently raising
+# the real floor under a downstream user who pins the declared one.
+#
+# BUILD-ONLY BY DESIGN: rust-version is a claim about building the packages, not
+# about the dev-dependency tree — the suites run on the pinned stable in each
+# workspace's own build+test job, and a dev-dependency (iced_test,
+# wasm-bindgen-test) may float its own MSRV.
+#
+# The three callers differ only in what this action takes as inputs: which
+# manifest to query, whether the floor comes from one named package or from all
+# packages agreeing, which extra target to install, and what to build. Everything
+# else — the metadata read, the toolchain install, the cache — is one body here.
+#
+# A COMPOSITE action rather than a reusable workflow (rationale in
+# .github/actions/pins).
+name: msrv-check
+description: >-
+  Read a workspace's declared rust-version floor from its manifest, install
+  exactly that toolchain, and build the crate with it.
+
+inputs:
+  package:
+    description: >-
+      Package whose `rust_version` is the floor. Empty asserts instead that
+      EVERY package in the queried metadata declares the same floor and uses
+      that — the shape for a workspace whose members inherit
+      `rust-version.workspace`, where a single member drifting is itself the
+      failure.
+    required: false
+    default: ''
+  manifest-path:
+    description: >-
+      `cargo metadata --manifest-path`. Empty queries the manifest at the
+      repository root.
+    required: false
+    default: ''
+  target:
+    description: >-
+      An extra rustup target added to the MSRV toolchain, for a crate that
+      SHIPS as a cross-compiled artifact and would otherwise never see
+      target-specific MSRV breakage in its target-only dependencies.
+    required: false
+    default: ''
+  working-directory:
+    description: Directory the check and build commands run in.
+    required: false
+    default: .
+  check-args:
+    description: >-
+      `cargo check` arguments, run before the build. Empty skips the step —
+      only a crate with a second (host) configuration to verify needs it.
+    required: false
+    default: ''
+  build-args:
+    description: >-
+      `cargo build` arguments — the configuration whose buildability the
+      declared floor is a claim about.
+    required: true
+  cache-workspaces:
+    description: >-
+      Swatinem/rust-cache `workspaces` — a sibling crate points it at its own
+      directory; empty keeps the root default.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Read the MSRV floor from Cargo.toml
+      id: msrv
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MANIFEST_PATH: ${{ inputs.manifest-path }}
+      run: |
+        # `jq -e` fails loudly if rust-version ever disappears from the
+        # manifest, rather than yielding a null that would install a toolchain
+        # named "null" three steps later.
+        if [ -n "$PACKAGE" ]; then
+          query='.packages[] | select(.name == $p) | .rust_version'
+        else
+          query='[.packages[].rust_version] | unique | if length == 1 then .[0] else error("the queried workspace packages declare different rust-version floors") end'
+        fi
+        args=(--no-deps --format-version 1)
+        if [ -n "$MANIFEST_PATH" ]; then
+          args+=(--manifest-path "$MANIFEST_PATH")
+        fi
+        v="$(cargo metadata "${args[@]}" | jq -er --arg p "$PACKAGE" "$query")"
+        echo "MSRV floor: $v"
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+
+    - name: Install the MSRV toolchain
+      shell: bash
+      env:
+        MSRV: ${{ steps.msrv.outputs.version }}
+        TARGET: ${{ inputs.target }}
+      run: |
+        rustup toolchain install "$MSRV" --profile minimal
+        if [ -n "$TARGET" ]; then
+          rustup target add "$TARGET" --toolchain "$MSRV"
+        fi
+
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        workspaces: ${{ inputs.cache-workspaces }}
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+
+    - name: Check with the declared rust-version
+      if: inputs.check-args != ''
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      env:
+        MSRV: ${{ steps.msrv.outputs.version }}
+        CHECK_ARGS: ${{ inputs.check-args }}
+      run: |
+        # shellcheck disable=SC2086 # $CHECK_ARGS carries whole flags
+        cargo "+$MSRV" check $CHECK_ARGS
+
+    - name: Build with the declared rust-version
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      env:
+        MSRV: ${{ steps.msrv.outputs.version }}
+        BUILD_ARGS: ${{ inputs.build-args }}
+      run: |
+        # shellcheck disable=SC2086 # $BUILD_ARGS carries whole flags
+        cargo "+$MSRV" build $BUILD_ARGS
