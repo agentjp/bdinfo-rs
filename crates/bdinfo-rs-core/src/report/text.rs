@@ -274,7 +274,7 @@ fn forums_table(bdrom: &BdRom, playlist: &PlaylistSummary, rows: &[&StreamSummar
         time_hh_short(seconds_to_ticks(playlist.total_length)),
         group(u128::from(playlist.total_packet_size())),
         group(u128::from(bdrom.full_size())),
-        format!("{} Mbps", cents(round_long(u64_to_f64(playlist.total_bit_rate()) / 10_000.0))),
+        format!("{} Mbps", cents(round_long(bytes_to_f64(playlist.total_bit_rate()) / 10_000.0))),
         format!("{video_bitrate} Mbps"),
         audio1,
         audio2
@@ -335,7 +335,7 @@ fn playlist_report(playlist: &PlaylistSummary) -> String {
         out,
         "{:<16}{} Mbps\r\n",
         "Total Bitrate:",
-        cents(round_long(u64_to_f64(playlist.total_bit_rate()) / 10_000.0))
+        cents(round_long(bytes_to_f64(playlist.total_bit_rate()) / 10_000.0))
     );
     if playlist.angle_count > 0 {
         for (index, angle) in playlist.angle_totals().iter().enumerate() {
@@ -394,7 +394,7 @@ fn playlist_report(playlist: &PlaylistSummary) -> String {
             out,
             "{:<24}{} Mbps\r\n",
             "All Angles Bitrate:",
-            cents(round_long(u64_to_f64(playlist.total_angle_bit_rate()) / 10_000.0))
+            cents(round_long(bytes_to_f64(playlist.total_angle_bit_rate()) / 10_000.0))
         );
     }
     out
@@ -554,7 +554,7 @@ fn files_section(playlist: &PlaylistSummary) -> String {
     for clip in &playlist.clips {
         let bitrate = format!(
             "{:>6} kbps",
-            group_signed(round_long(u64_to_f64(clip.packet_bit_rate()) / 1000.0))
+            group_signed(round_long(bytes_to_f64(clip.packet_bit_rate()) / 1000.0))
         );
         let _ = write!(
             out,
@@ -747,7 +747,7 @@ fn quick_summary(
         out,
         "{:<16}{} Mbps\r\n",
         "Total Bitrate:",
-        cents(round_long(u64_to_f64(playlist.total_bit_rate()) / 10_000.0))
+        cents(round_long(bytes_to_f64(playlist.total_bit_rate()) / 10_000.0))
     );
     out.push_str(stream_lines);
     out
@@ -799,12 +799,6 @@ fn group_signed(value: i64) -> String {
 )]
 const fn int_to_f64(value: i64) -> f64 {
     value as f64
-}
-
-/// Widens a `u64` (a model byte/bit-rate count) to `f64` — exact for every
-/// value the demux can produce.
-const fn u64_to_f64(value: u64) -> f64 {
-    bytes_to_f64(value)
 }
 
 /// Formats `value` with exactly `decimals` fractional digits, rounding the

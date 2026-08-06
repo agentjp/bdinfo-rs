@@ -12,10 +12,12 @@
 //! The demux ends at the codec seam — the [`scan`](TsStreamFile::scan) point
 //! where each assembled access unit is handed to the per-codec analysers
 //! ([`crate::codec`]), which fill the stream's codec fields and its initialised
-//! flag. SSIF 3D interleaving is layered on this core via
-//! [`scan_source`](TsStreamFile::scan_source) + [`super::interleaved`]: a
-//! `*.ssif` is just packet-aligned base/dependent extents, so the same per-byte
-//! state machine de-interleaves them onto the shared PID/PES path.
+//! flag. SSIF 3D interleaving is layered on this core by the caller: the
+//! per-file scan in [`super::disc`] opens the interleaved `*.ssif`
+//! ([`super::interleaved`]) in preference to the plain `*.m2ts` and hands that
+//! reader to [`scan`](TsStreamFile::scan). A `*.ssif` is just packet-aligned
+//! base/dependent extents, so the same per-byte state machine de-interleaves
+//! them onto the shared PID/PES path.
 //!
 //! Implementation notes:
 //! * **`u64` everywhere for file scale** ([`size`](TsStreamFile::size)); the in-memory chunk index
@@ -502,10 +504,10 @@ pub struct TsStreamFile {
     pub size: u64,
     /// Presentation length in seconds.
     pub length: f64,
-    /// The interleaved 3D source (`*.ssif`), when this clip has one.
-    /// When present and SSIF reading is enabled,
-    /// [`scan_source`](Self::scan_source) streams it instead of the plain `*.m2ts`
-    /// (see [`super::interleaved`]).
+    /// The interleaved 3D source (`*.ssif`), when this clip has one. When
+    /// present, the per-file scan in [`super::disc`] opens it and streams it
+    /// through [`scan`](Self::scan) instead of the plain `*.m2ts` (see
+    /// [`super::interleaved`]).
     pub interleaved_file: Option<TsInterleavedFile>,
     /// The elementary streams keyed by PID, registered from the PMT.
     pub streams: BTreeMap<u16, TsStream>,
@@ -559,37 +561,6 @@ impl TsStreamFile {
         match &self.interleaved_file {
             Some(interleaved) if enable_ssif => interleaved.name(),
             _ => &self.name,
-        }
-    }
-
-    /// Streams and demuxes this clip's source — the interleaved `*.ssif` when
-    /// present and `enable_ssif`, else the plain `*.m2ts` from `reader` — into
-    /// `playlists`. The interleaved base/dependent extents are run through the
-    /// same [`scan`](Self::scan) packet state machine, which de-interleaves them
-    /// onto the shared PID/PES path so the 3D disc's streams register;
-    /// without reading the `*.ssif` the dependent-view streams would never be
-    /// seen at all.
-    ///
-    /// # Errors
-    /// Returns [`BdError::Io`] if opening the interleaved file or reading the stream
-    /// fails. Malformed packet data never errors: it is resynchronised on the next
-    /// `0x47`.
-    pub fn scan_source(
-        &mut self,
-        reader: &mut dyn Read,
-        playlists: &mut [TsPlaylistFile],
-        is_full_scan: bool,
-        enable_ssif: bool,
-    ) -> Result<(), BdError> {
-        // Open the interleaved source first (ending the borrow of `interleaved_file`
-        // before the `&mut self` scan), then demux whichever source was selected.
-        let interleaved = match &self.interleaved_file {
-            Some(interleaved) if enable_ssif => Some(interleaved.open_read().map_err(BdError::Io)?),
-            _ => None,
-        };
-        match interleaved {
-            Some(mut ssif) => self.scan(&mut *ssif, playlists, is_full_scan),
-            None => self.scan(reader, playlists, is_full_scan),
         }
     }
 
@@ -3971,66 +3942,6 @@ mod tests {
         // the two interleaved extents were kept apart, not merged.
         assert_eq!(base.peak_transfer_length, 60);
         assert_eq!(dependent.peak_transfer_length, 40);
-    }
-
-    /// A plain `.m2ts` announcing only PID 0x1099 (so it is distinguishable from the
-    /// 3D pair the synthetic `.ssif` carries).
-    fn plain_m2ts() -> Vec<u8> {
-        let mut bytes = packet(0, true, &pat_payload(0x0100));
-        bytes.extend(packet(0x0100, true, &pmt_payload(&[(0x1B, 0x1099)])));
-        bytes
-    }
-
-    #[test]
-    fn scan_source_reads_the_interleaved_ssif_when_enabled() {
-        let mut file = TsStreamFile::new("00000.m2ts");
-        file.interleaved_file = Some(TsInterleavedFile::new(Box::new(MemBdFile::new(
-            "00000.ssif",
-            interleaved_ssif(),
-            false,
-        ))));
-        let mut m2ts = Cursor::new(plain_m2ts());
-        file.scan_source(&mut m2ts, &mut [empty_playlist()], true, true).expect("scan ssif");
-
-        // The .ssif's 3D pair registered; the m2ts-only 0x1099 did not.
-        assert!(file.streams.contains_key(&0x1011));
-        assert!(file.streams.contains_key(&0x1012));
-        assert!(!file.streams.contains_key(&0x1099));
-    }
-
-    #[test]
-    fn scan_source_falls_back_to_the_m2ts() {
-        // enable_ssif = false → the m2ts is read even though an interleaved file is set.
-        let mut file = TsStreamFile::new("00000.m2ts");
-        file.interleaved_file = Some(TsInterleavedFile::new(Box::new(MemBdFile::new(
-            "00000.ssif",
-            interleaved_ssif(),
-            false,
-        ))));
-        let mut m2ts = Cursor::new(plain_m2ts());
-        file.scan_source(&mut m2ts, &mut [empty_playlist()], true, false).expect("scan m2ts");
-        assert!(file.streams.contains_key(&0x1099));
-        assert!(!file.streams.contains_key(&0x1012));
-
-        // No interleaved file → the m2ts is read even with SSIF enabled.
-        let mut file = TsStreamFile::new("00000.m2ts");
-        let mut m2ts = Cursor::new(plain_m2ts());
-        file.scan_source(&mut m2ts, &mut [empty_playlist()], true, true).expect("scan m2ts");
-        assert!(file.streams.contains_key(&0x1099));
-        assert!(!file.streams.contains_key(&0x1012));
-    }
-
-    #[test]
-    fn scan_source_propagates_an_ssif_open_error() {
-        let mut file = TsStreamFile::new("00000.m2ts");
-        file.interleaved_file = Some(TsInterleavedFile::new(Box::new(MemBdFile::new(
-            "00000.ssif",
-            vec![0x47; 192],
-            true, // open_read fails
-        ))));
-        let mut m2ts = Cursor::new(Vec::new());
-        let err = file.scan_source(&mut m2ts, &mut [empty_playlist()], true, true).unwrap_err();
-        assert_eq!(err.to_string(), "io error: injected ssif open failure");
     }
 
     #[test]

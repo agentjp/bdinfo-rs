@@ -96,20 +96,20 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
     }
 
     // Bit-depth code.
-    match (flags & 0xC0).wrapping_shr(6) {
-        1 => stream.bit_depth = 16,
-        2 => stream.bit_depth = 20,
-        3 => stream.bit_depth = 24,
-        _ => stream.bit_depth = 0,
-    }
+    stream.bit_depth = match (flags & 0xC0).wrapping_shr(6) {
+        1 => 16,
+        2 => 20,
+        3 => 24,
+        _ => 0,
+    };
 
     // Sample-rate nibble.
-    match (flags & 0xF00).wrapping_shr(8) {
-        1 => stream.sample_rate = 48_000,
-        4 => stream.sample_rate = 96_000,
-        5 => stream.sample_rate = 192_000,
-        _ => stream.sample_rate = 0,
-    }
+    stream.sample_rate = match (flags & 0xF00).wrapping_shr(8) {
+        1 => 48_000,
+        4 => 96_000,
+        5 => 192_000,
+        _ => 0,
+    };
 
     // `sample_rate * bit_depth * (channel_count + lfe)` — a wrapping product,
     // truncated through the unsigned 32-bit view, then widened to the i64 bit rate.

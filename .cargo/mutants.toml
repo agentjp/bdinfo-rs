@@ -104,18 +104,12 @@ exclude_re = [
     # `a_picture_started_inside_a_sequence_header_decodes_after_init`.
     "mpeg2\\.rs:\\d+:33: replace > with >= in scan",
 
-    # ── PES/PAT/PMT window guards proven equivalent ──────────────────────────
-    # These cannot be de-pinned to the bare fn name: parse_chunk, parse_pat, and
-    # parse_pmt each hold other `>` guards that are NOT equivalent and must stay
-    # killable, so a position disambiguates each exclusion. When the equivalent
-    # guard's operator column is unique within its function the pin uses only that
-    # column, which no edit above it can shift. Two are not unique: parse_pat's
-    # `pat_section_parse > 0` shares column 48 with the non-equivalent
-    # `pat_pointer_field > 0`, and parse_pmt's `pmt_program_info_length > 0` shares
-    # column 54 with `pmt_section_length > 1021`. A column-only pin there would
-    # SILENTLY exclude a real test gap, so those two also pin the operator's line
-    # and must be re-pinned to its current line when code above them in m2ts.rs
-    # shifts — a stale line pin surfaces loudly as a MISSED mutant.
+    # ── PES window guards proven equivalent ──────────────────────────────────
+    # Neither can be de-pinned to the bare fn name: `parse_chunk` holds eleven
+    # other `>` guards that are NOT equivalent and must stay killable, so the
+    # operator's own column disambiguates each exclusion. Both columns are unique
+    # within the function, so an edit above them cannot shift the pin (a LINE pin
+    # would go stale and silently stop excluding).
 
     # `parse_chunk` branch A guard `state.packet_length > 0` vs `>=`: a bounded
     # transfer closes the instant packet_length reaches 0 (transfer_state goes
@@ -130,25 +124,6 @@ exclude_re = [
     # whenever B's reach condition holds, the C-then-clamp fallback computes the
     # identical offset, so taking or skipping branch B changes nothing.
     "m2ts\\.rs:\\d+:57: replace > with (==|<|>=) in TsStreamFile::parse_chunk",
-
-    # `parse_pat` transfer window `>` vs `>=`: at `bl - i == section_length` both
-    # branches assign the same offset.
-    "m2ts\\.rs:\\d+:38: replace > with >= in TsStreamFile::parse_pat",
-
-    # `parse_pat` post-section guard `pat_section_parse > 0` vs `>=`: the countdown
-    # is a u32 that the mutant only ever decrements from the wrapped u32::MAX, so
-    # the acting arms (1, 0) are ~4 GiB of PID-0 bytes away, and the corrupted
-    # pat_section_length is only read under those arms.
-    "m2ts\\.rs:1277:\\d+: replace > with >= in TsStreamFile::parse_pat",
-
-    # `parse_pmt` program-info guard `pmt_program_info_length > 0` vs `>=`: the dead
-    # branch decrements pmt_section_length and the program-info countdown in
-    # LOCKSTEP from zero, so when the u16 wrap finally fires a transfer (64 KiB of
-    # padding later) the section length has wrapped back to exactly 0 — the
-    # transfer is zero-length and the stale section re-walk is idempotent
-    # (create_stream is keyed on contains_key). Traced and verified empirically
-    # with a 357-padding-packet stream.
-    "m2ts\\.rs:1433:\\d+: replace > with >= in TsStreamFile::parse_pmt",
 
     # ── environment/platform probes no test process can observe ──────────────
 

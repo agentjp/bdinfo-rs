@@ -8,9 +8,10 @@
 //! `scan` is also the SSIF (3D) de-interleaving engine: a `*.ssif` is just
 //! packet-aligned base/dependent extents demuxed by this very state machine, so
 //! this target covers the interleaved framing too (the `ssif_*` seed is a
-//! multi-extent packet stream). `TsStreamFile::scan_source` merely *selects* the
-//! `.ssif` over the `.m2ts` — it parses no bytes of its own — so the only untrusted
-//! parsing surface it reaches is exactly this `scan`.
+//! multi-extent packet stream). The disc scan's per-file step merely *selects* the
+//! `.ssif` over the `.m2ts` before handing over the reader — it parses no bytes of
+//! its own — so the only untrusted parsing surface it reaches is exactly this
+//! `scan`.
 //!
 //! The fuzz bytes are the packet stream; a single dummy playlist (with one clip
 //! named to match) lets the demux run its full state machine and the bitrate
