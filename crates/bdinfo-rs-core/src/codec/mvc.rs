@@ -4,8 +4,10 @@
 //! is deliberately a stub that only marks the stream `is_vbr`/`is_initialized` —
 //! the displayed resolution / frame rate / aspect ratio and the `Left Eye`/`Right
 //! Eye` base-view tag all come from the CLPI/MPLS metadata, not from decoding the
-//! bitstream. [`scan`] therefore reads nothing from `buffer` and never sets `tag`;
-//! both are present only to match the shared codec-scan signature.
+//! bitstream. [`scan`] therefore reads nothing from `buffer` and never sets `tag`
+//! — as in `TSCodecMVC.Scan`, which is the same stub. Both parameters are there to
+//! match the scanner signature [`crate::codec::scan_access_unit`] dispatches
+//! through, and its doc carries why that signature is uniform.
 
 use crate::bitstream::TsStreamBuffer;
 use crate::stream::TsVideoStream;
@@ -19,8 +21,7 @@ pub const fn scan(
     buffer: &mut TsStreamBuffer,
     tag: &mut Option<String>,
 ) {
-    // The shared codec-scan signature; MVC reads neither (a `pub fn` is exempt from
-    // `needless_pass_by_ref_mut`).
+    // The `let _`s silence the unused parameters without renaming them.
     let _ = buffer;
     let _ = tag;
     stream.base.is_vbr = true;

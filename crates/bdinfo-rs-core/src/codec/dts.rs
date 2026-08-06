@@ -49,15 +49,15 @@ const DCA_BITS_PER_SAMPLE: [i32; 7] = [16, 16, 20, 20, 0, 24, 24];
 /// A missing `0x7FFE8001` sync, a frame size below 95, or an out-of-range source
 /// PCM resolution leaves `stream` (largely) untouched (early returns).
 /// `bitrate` is the demux-measured rate (used only for the open-rate marker);
-/// `tag` is part of the shared codec-scan signature and is never set here.
+/// `tag` is never set here, as in `TSCodecDTS.Scan`; [`super::scan_access_unit`]
+/// carries why it is still a parameter.
 pub fn scan(
     stream: &mut TsAudioStream,
     buffer: &mut TsStreamBuffer,
     bitrate: i64,
     tag: &mut Option<String>,
 ) {
-    // `tag` is part of the shared codec-scan signature; the DTS core never sets it
-    // (a `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;

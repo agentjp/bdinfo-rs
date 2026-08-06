@@ -79,10 +79,25 @@ pub(crate) fn scan_embedded_core(
 /// `bitrate` is the demux's per-PES audio bitrate estimate (only the DTS scanners
 /// take it; the others ignore it). `is_full_scan` gates the PGS caption analysis:
 /// a quick scan marks Presentation Graphics initialised without decoding it.
-/// `tag` is the caller's per-stream frame marker: the scanners that recognise a
-/// frame in this access unit set it (the video codecs' picture type feeds the
-/// per-frame bitrate diagnostics); the others leave it as passed in — resetting
-/// between access units is the caller's job.
+/// `tag` is the caller's per-stream frame marker. The scanners that recognise a
+/// frame in this access unit set it: the video codecs write the picture type
+/// (`"I"`/`"P"`/`"B"`…), [`truehd`] and [`dts_hd`] write `"CORE"`/`"HD"`, and
+/// [`pgs`] writes `"F"`/`"N"`. The demux copies whatever the last completed PES
+/// left there into each bitrate window's
+/// [`crate::bdrom::m2ts::TsStreamDiagnostics::tag`], for video streams only —
+/// which is why the marker survives the access unit at all. The others leave it
+/// as passed in; resetting between access units is the caller's job.
+///
+/// Six scanners take `tag` and never write it — [`aac`], [`ac3`], [`dts`],
+/// [`lpcm`], [`mpa`] and [`mvc`]. That is the reference's shape, not an
+/// oversight: all 13 of classic BDInfo's `TSCodecXXX.Scan` methods declare a
+/// `ref string tag` parameter, and exactly those six leave it untouched there too
+/// (checked against the UniqProject fork on 2026-08-06; the writers are
+/// `TSCodecAVC`, `TSCodecMPEG2`, `TSCodecVC1`, `TSCodecHEVC`, `TSCodecTrueHD`,
+/// `TSCodecDTSHD` and `TSCodecPGS`, and the consumer is `TSStreamFile.ScanStream`
+/// storing it into `TSStreamDiagnostics.Tag`). The uniform signature is what lets
+/// every scanner here be read line-for-line against its C# counterpart, so the
+/// six no-op parameters stay.
 pub(crate) fn scan_access_unit(
     stream: &mut TsStream,
     buffer: &mut TsStreamBuffer,

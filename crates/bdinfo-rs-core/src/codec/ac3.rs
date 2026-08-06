@@ -63,15 +63,14 @@ const fn to_i64_trunc(x: f64) -> i64 {
 /// Scans one AC-3 / E-AC-3 access unit from `buffer` into `stream`.
 ///
 /// A non-AC-3 sync word, or a buffer too short to hold the header, leaves `stream`
-/// untouched (early returns). `tag` is part of the shared
-/// codec-scan signature; this codec never sets it.
+/// untouched (early returns). `tag` is never set here, as in `TSCodecAC3.Scan`;
+/// [`super::scan_access_unit`] carries why it is still a parameter.
 #[expect(
     clippy::too_many_lines,
     reason = "one linear bit-stream-information parse; splitting it would obscure the header layout"
 )]
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // The `let _` silences the unused parameter; a `pub fn` is exempt from
-    // `needless_pass_by_ref_mut`, so the `&mut` stays.
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;

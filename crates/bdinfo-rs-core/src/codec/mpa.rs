@@ -68,11 +68,11 @@ const MPA_CHANNELS: [i32; 4] = [2, 2, 2, 1];
 
 /// Scans one MPEG-audio access unit from `buffer` into `stream`.
 ///
-/// A non-`0x7FF` sync word leaves `stream` untouched (an early return). `tag`
-/// is part of the shared codec-scan signature and is never set here.
+/// A non-`0x7FF` sync word leaves `stream` untouched (an early return). `tag` is
+/// never set here, as in `TSCodecMPA.Scan`; [`super::scan_access_unit`] carries
+/// why it is still a parameter.
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; MPA never sets it (a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;

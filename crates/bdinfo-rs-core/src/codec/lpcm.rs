@@ -19,11 +19,10 @@ use crate::stream::TsAudioStream;
 /// Scans one LPCM access unit from `buffer` into `stream`.
 ///
 /// A buffer too short for the four-byte header leaves `stream` untouched (an
-/// early return). `tag` is part of the shared codec-scan signature and is never
-/// set here.
+/// early return). `tag` is never set here, as in `TSCodecLPCM.Scan`;
+/// [`super::scan_access_unit`] carries why it is still a parameter.
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; LPCM never sets it (a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;

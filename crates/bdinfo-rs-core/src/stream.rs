@@ -490,6 +490,8 @@ impl TsVideoStream {
     /// presents this stream (each presentation accumulates its own counters).
     #[must_use]
     pub fn ts_clone(&self) -> Self {
+        // Enumerated by hand so a field added to the struct must be consciously placed
+        // in or out of the reset-copy; `TsAudioStream::ts_clone` carries why.
         Self {
             base: self.base.reset_copy(),
             width: self.width,
@@ -752,6 +754,14 @@ impl TsAudioStream {
     /// their defaults in the copy.
     #[must_use]
     pub fn ts_clone(&self) -> Self {
+        // Every field is written out rather than filled from `..self.clone()` so that
+        // adding one to the struct stops compiling here until someone decides whether
+        // the reset-copy carries it. This body is the proof that pays: besides `base`,
+        // two fields diverge from a verbatim copy — `has_extensions` restarts at false
+        // and `core_stream` recurses through `ts_clone` — and struct-update syntax
+        // would have turned both decisions into silent defaults.
+        // `TsVideoStream::ts_clone` and `TsGraphicsStream::ts_clone` enumerate for
+        // the same reason.
         Self {
             base: self.base.reset_copy(),
             sample_rate: self.sample_rate,
@@ -1020,6 +1030,8 @@ impl TsGraphicsStream {
     /// with the demux counters back at their defaults.
     #[must_use]
     pub fn ts_clone(&self) -> Self {
+        // Enumerated by hand so a field added to the struct must be consciously placed
+        // in or out of the reset-copy; `TsAudioStream::ts_clone` carries why.
         Self {
             base: self.base.reset_copy(),
             width: self.width,
