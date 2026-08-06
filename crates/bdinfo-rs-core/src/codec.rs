@@ -90,9 +90,9 @@ pub(crate) fn scan_embedded_core(
 ///
 /// Six scanners take `tag` and never write it — [`aac`], [`ac3`], [`dts`],
 /// [`lpcm`], [`mpa`] and [`mvc`]. That is the reference's shape, not an
-/// oversight: all 13 of classic BDInfo's `TSCodecXXX.Scan` methods declare a
+/// oversight: all 13 `TSCodecXXX.Scan` methods in classic `BDInfo` declare a
 /// `ref string tag` parameter, and exactly those six leave it untouched there too
-/// (checked against the UniqProject fork on 2026-08-06; the writers are
+/// (checked against the `UniqProject/BDInfo` sources on 2026-08-06; the writers are
 /// `TSCodecAVC`, `TSCodecMPEG2`, `TSCodecVC1`, `TSCodecHEVC`, `TSCodecTrueHD`,
 /// `TSCodecDTSHD` and `TSCodecPGS`, and the consumer is `TSStreamFile.ScanStream`
 /// storing it into `TSStreamDiagnostics.Tag`). The uniform signature is what lets
