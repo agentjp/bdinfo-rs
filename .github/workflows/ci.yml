@@ -14,7 +14,9 @@ name: CI
 # prefixed (`core / build + test (…)`, `repo / lint YAML (action-validator +
 # ryl)`). The three mutation jobs stay HERE rather than inside a reusable: a
 # failure inside a called workflow reddens its caller and so reaches ci-ok,
-# which would silently promote an advisory job to a gating one.
+# which would silently promote an advisory job to a gating one. Their shared
+# body is the .github/actions/mutate-crate COMPOSITE action — a composite's
+# failure surfaces on the calling job itself, preserving that posture.
 #
 # A job fires if and only if the diff could change that job's verdict, so the
 # classifier asks what KIND of input a file is before it asks which directory
@@ -63,8 +65,8 @@ env:
   # compiled-tool caches, whose miss costs minutes of `cargo install` on the
   # pull-request path. Smaller archives also restore faster, on every job.
   #
-  # Jobs running cargo-mutants override CARGO_INCREMENTAL back to 1 — see the
-  # `mutants` job.
+  # Jobs running cargo-mutants override CARGO_INCREMENTAL back to 1 — the
+  # mutate-crate composite action does it for all of them.
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
@@ -146,7 +148,15 @@ jobs:
             # HEAD is the PR merge commit, so parent 1 is the up-to-date base
             # tip and this two-dot diff is exactly the PR's effective diff
             # against master.
-            $changed = @(git diff --name-only 'HEAD^1' HEAD)
+            #
+            # --no-renames on both name-only diffs here: rename detection
+            # (git's default) lists only the NEW path of a moved file, so a
+            # pure move-out-of-an-area diff would never fire the old area's
+            # gates. Listing both paths is fail-open — it can only classify
+            # MORE areas, never fewer. Measured 2026-08-05 on a pull request
+            # moving one source file between crates: the deleted path was
+            # absent with detection on, present with --no-renames.
+            $changed = @(git diff --name-only --no-renames 'HEAD^1' HEAD)
             if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
           }
           elseif ($env:EVENT -eq 'push') {
@@ -156,7 +166,7 @@ jobs:
               $mode = 'all'; $reason = 'no usable before SHA'
             }
             else {
-              $changed = @(git diff --name-only $env:BEFORE $env:AFTER)
+              $changed = @(git diff --name-only --no-renames $env:BEFORE $env:AFTER)
               if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
             }
           }
@@ -185,9 +195,10 @@ jobs:
   # Incremental mutation testing on the PR diff: every line a pull request
   # changes must be killed by a test that FAILS when the line is mutated. The
   # full-tree sweep (~hours) lives in sweep.yml (sharded, daily + release
-  # tags); this PR-scoped slice (cargo mutants --in-diff) is fast. It reads the tracked .cargo/mutants.toml
-  # policy and the `mutants` nextest profile (.config/nextest.toml) — both now
-  # published, so CI mutates exactly as the local gate does.
+  # tags); this PR-scoped slice (cargo mutants --in-diff, via the mutate-crate
+  # composite) is fast. It reads the tracked .cargo/mutants.toml policy and
+  # the `mutants` nextest profile (.config/nextest.toml) — both published, so
+  # CI mutates exactly as the local gate does.
   #
   # ADVISORY, by design: this job is intentionally NOT in branch protection's
   # required status checks AND NOT in ci-ok's `needs`. cargo-mutants --in-diff
@@ -208,165 +219,92 @@ jobs:
     # only), and `fallback: none` turns a missing prebuilt into a hard failure.
     # Same for gui-mutants and wasm-mutants below.
     runs-on: ubuntu-latest
-    env:
-      # cargo-mutants rebuilds the tree once per mutant, each rebuild differing
-      # from the last by one function body — exactly the case incremental
-      # compilation is built for, and the reason a mutation run is affordable
-      # at all. So every job that runs cargo-mutants overrides the
-      # workflow-level 0, trading a larger target/ for the rebuild time.
-      CARGO_INCREMENTAL: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
-      # Default save-if: the job is PR-only, so a master-gated save would never
-      # write; its own PR-scoped save is what speeds the next push to the same
-      # PR.
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      # `fallback: none` on every install-action step here: install only from the
-      # action's checksummed manifest, never its runtime-resolved cargo-binstall
-      # fallback (rationale in core.yml).
-      - name: Install mutation tools
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      # No marker inputs: the root workspace has no PR-side short-circuit, so
+      # every run diffs and mutates.
+      - uses: ./.github/actions/mutate-crate
         with:
-          tool: cargo-mutants,cargo-nextest
-          fallback: none
+          mode: pr-diff
 
-      - name: Mutate the PR diff
-        run: |
-          git diff "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
-          cargo mutants --no-shuffle --in-diff pr.diff
-
-  # Advisory in-diff mutation over the GUI crate on the PR path: mirrors
-  # the local `gui-compliance.ps1` gate's default mt scope — the diff is taken
-  # --relative from inside the crate so its paths match cargo-mutants' working
-  # directory, and --in-place because a temp copy would not carry the
-  # ../bdinfo-rs-core path dep. When the `gui` area fired via the core edge
-  # only, the crate's own diff is empty and there is nothing to mutate. Same
-  # ADVISORY posture and false-TIMEOUT rationale as `mutants` above: not
-  # required, not in ci-ok's needs, not inside a reusable. The authoritative
-  # full-crate 0-missed bar lives in sweep.yml (daily when the crate changed +
-  # release tags).
+  # Advisory in-diff mutation over the GUI crate on the PR path: mirrors the
+  # local gui gate's default mt scope. When the `gui` area fired via the core
+  # edge only, the crate's own diff is empty and the composite exits with
+  # nothing to mutate. Same ADVISORY posture and false-TIMEOUT rationale as
+  # `mutants` above: not required, not in ci-ok's needs, not inside a
+  # reusable. The authoritative full-crate 0-missed bar lives in sweep.yml
+  # (daily when the crate changed + release tags).
   #
   # The sweep's tree-hash marker short-circuits this job too, RESTORE-ONLY: a
   # marker hit means this byte-identical crate tree (+ toolchain) already
   # passed a green FULL sweep, which subsumes any diff slice of it — mutating
   # the slice again would re-verify unchanged inputs. Only a green full sweep
-  # ever writes the marker; this job must never save it (a diff slice proves
-  # nothing about the rest of the crate). The guard is what keeps a
-  # crate-sized PR diff (e.g. the branch that introduces a crate) from
-  # re-paying the ~50-min sweep on every push that leaves the crate untouched.
+  # ever writes the marker; this job must never save one (a diff slice proves
+  # nothing about the rest of the crate), so it leaves `save-marker` off. The
+  # marker prefix + paths are byte-identical to sweep.yml's gui-mutants call
+  # ON PURPOSE — the composite builds the key in one place, and matching
+  # inputs are what let a green sweep short-circuit this job. The guard is
+  # what keeps a crate-sized PR diff (e.g. the branch that introduces a
+  # crate) from re-paying the ~50-min sweep on every push that leaves the
+  # crate untouched.
   gui-mutants:
     name: gui mutation testing (PR diff)
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.gui == 'true'
     runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
-    env:
-      # The suite the mutants face includes the iced_test snapshot ties; the
-      # deterministic software backend is what makes them run on a GPU-less
-      # runner at all (same as gui.yml).
-      ICED_TEST_BACKEND: tiny-skia
-      CARGO_INCREMENTAL: "1"   # cargo-mutants' rebuild model — see the `mutants` job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
-      - name: Compute the full-sweep marker key (crate tree hash)
-        id: key
-        run: echo "key=gui-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-gui)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the full-sweep marker (restore-only)
-        id: marker
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/mutate-crate
         with:
-          path: .mutants-ok
-          key: ${{ steps.key.outputs.key }}
-
-      # Default save-if: PR-only job, so a master-gated save would never write;
-      # its own PR-scoped save speeds the next push to the same PR.
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        if: steps.marker.outputs.cache-hit != 'true'
-        with:
-          workspaces: crates/bdinfo-rs-gui
-
-      - name: Install mutation tools
-        if: steps.marker.outputs.cache-hit != 'true'
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
-        with:
-          tool: cargo-mutants,cargo-nextest
-          fallback: none
-
-      - name: Mutate the crate's PR diff
-        if: steps.marker.outputs.cache-hit != 'true'
-        working-directory: crates/bdinfo-rs-gui
-        run: |
-          git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
-          if [ ! -s "$RUNNER_TEMP/crate.diff" ]; then
-            echo "no gui-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
-            exit 0
-          fi
-          # --workspace so a diff touching the assets-gen member is mutated
-          # too (cargo-mutants otherwise scopes to the root package).
-          cargo mutants --in-place --no-shuffle --workspace --in-diff "$RUNNER_TEMP/crate.diff"
+          mode: pr-diff
+          working-directory: crates/bdinfo-rs-gui
+          marker-prefix: gui-mutants-ok
+          marker-paths: crates/bdinfo-rs-gui rust-toolchain.toml
+          # --in-place: the ../bdinfo-rs-core path dependency does not survive
+          # cargo-mutants' temp copy; --workspace: a diff touching the
+          # assets-gen member is mutated too (cargo-mutants otherwise scopes
+          # to the root package).
+          mutants-args: --in-place --workspace
+          # The suite the mutants face includes the iced_test snapshot ties;
+          # the deterministic software backend is what makes them run on a
+          # GPU-less runner at all (same as gui.yml).
+          extra-env: ICED_TEST_BACKEND=tiny-skia
+          cache-workspaces: crates/bdinfo-rs-gui
 
   # The wasm twin of gui-mutants: advisory in-diff mutation over the wasm
-  # crate's own PR diff (--relative + --in-place for the same path-dep reason;
-  # the crate-local .cargo/mutants.toml carries the Tier-B cfg(wasm32)
-  # exclusions), with the same restore-only full-sweep marker short-circuit.
-  # Not required, not in ci-ok's needs, not inside a reusable; the full-crate
-  # bar lives in sweep.yml.
+  # crate's own PR diff (--in-place for the same path-dep reason; the
+  # crate-local .cargo/mutants.toml carries the cfg(wasm32) exclusions), with
+  # the same restore-only full-sweep marker short-circuit and the same
+  # byte-identical marker inputs as sweep.yml's wasm-mutants call. Not
+  # required, not in ci-ok's needs, not inside a reusable; the full-crate bar
+  # lives in sweep.yml.
   wasm-mutants:
     name: wasm mutation testing (PR diff)
     needs: plan
     if: github.event_name == 'pull_request' && needs.plan.outputs.wasm == 'true'
     runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
-    env:
-      CARGO_INCREMENTAL: "1"   # cargo-mutants' rebuild model — see the `mutants` job
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
-      - name: Compute the full-sweep marker key (crate tree hash)
-        id: key
-        run: echo "key=wasm-mutants-ok-$(git rev-parse HEAD:crates/bdinfo-rs-wasm)-$(git rev-parse HEAD:rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the full-sweep marker (restore-only)
-        id: marker
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: ./.github/actions/mutate-crate
         with:
-          path: .mutants-ok
-          key: ${{ steps.key.outputs.key }}
-
-      # Default save-if: PR-only job (see gui-mutants).
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        if: steps.marker.outputs.cache-hit != 'true'
-        with:
-          workspaces: crates/bdinfo-rs-wasm
-
-      - name: Install mutation tools
-        if: steps.marker.outputs.cache-hit != 'true'
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
-        with:
-          tool: cargo-mutants,cargo-nextest
-          fallback: none
-
-      - name: Mutate the crate's PR diff
-        if: steps.marker.outputs.cache-hit != 'true'
-        working-directory: crates/bdinfo-rs-wasm
-        run: |
-          git diff --relative "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/crate.diff"
-          if [ ! -s "$RUNNER_TEMP/crate.diff" ]; then
-            echo "no wasm-crate changes in this PR (the area fired via the core edge) — nothing to mutate"
-            exit 0
-          fi
-          cargo mutants --in-place --no-shuffle --in-diff "$RUNNER_TEMP/crate.diff"
+          mode: pr-diff
+          working-directory: crates/bdinfo-rs-wasm
+          marker-prefix: wasm-mutants-ok
+          marker-paths: crates/bdinfo-rs-wasm rust-toolchain.toml
+          mutants-args: --in-place
+          cache-workspaces: crates/bdinfo-rs-wasm
 
   # The root-workspace gate: build + test, the quality gate, coverage, the
   # install + scan and FROM-scratch scans, the .deb/.rpm smoke, the two

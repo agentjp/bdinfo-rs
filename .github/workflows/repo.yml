@@ -35,7 +35,9 @@ on:
         required: true
         type: string
       workflows:
-        description: A workflow file or the zizmor suppression list changed.
+        description: >-
+          A workflow file, a composite action, or the zizmor suppression list
+          changed.
         required: true
         type: string
       typos:
@@ -58,12 +60,14 @@ env:
 
 jobs:
   # Lint the config YAML two ways, both with Rust tools. action-validator
-  # schema-checks the workflow files (catches schema errors + invalid-YAML traps
-  # like an unquoted colon in a step name). ryl (a Rust yamllint) style/syntax-
-  # lints EVERY tracked YAML against .yamllint.yml — duplicate keys, trailing
-  # whitespace, bad indentation, missing final newline, etc. — and covers the
-  # non-workflow YAML (dependabot, issue templates, scorecard) that
-  # action-validator's workflow-only schema can't read. Mirrors the local gate.
+  # schema-checks the workflow files and the composite action definitions
+  # under .github/actions (catches schema errors + invalid-YAML traps like an
+  # unquoted colon in a step name; it picks the action schema for files named
+  # action.yml). ryl (a Rust yamllint) style/syntax-lints EVERY tracked YAML
+  # against .yamllint.yml — duplicate keys, trailing whitespace, bad
+  # indentation, missing final newline, etc. — and covers the non-workflow
+  # YAML (dependabot, issue templates, scorecard) that action-validator's
+  # schemas can't read. Mirrors the local gate.
   yaml:
     name: lint YAML (action-validator + ryl)
     if: inputs.yaml == 'true'
@@ -106,9 +110,9 @@ jobs:
           cargo install action-validator --locked
           cargo install ryl --version 0.21.0 --locked
 
-      - name: Schema-validate the workflow YAML (action-validator)
+      - name: Schema-validate the workflow and action YAML (action-validator)
         run: |
-          for f in .github/workflows/*.yml; do
+          for f in .github/workflows/*.yml .github/actions/*/action.yml; do
             echo "validating $f"
             action-validator "$f"
           done
@@ -148,8 +152,9 @@ jobs:
       - name: Lint (taplo lint)
         run: taplo lint
 
-  # Static security analysis of the GitHub Actions workflows themselves (zizmor):
-  # template injection, token over-permissioning, unpinned/impostor actions, cache
+  # Static security analysis of the GitHub Actions workflows and the composite
+  # action definitions under .github/actions (zizmor audits both): template
+  # injection, token over-permissioning, unpinned/impostor actions, cache
   # poisoning, dangerous triggers, credential persistence, and more. Runs the FULL
   # audit set online — the GITHUB_TOKEN enables the impostor-commit /
   # known-vulnerable-actions checks that need the GitHub API — and hard-fails on any
@@ -174,8 +179,8 @@ jobs:
           tool: zizmor
           fallback: none
 
-      - name: Audit the workflows
-        run: zizmor .github/workflows
+      - name: Audit the workflows and composite actions
+        run: zizmor .github/workflows .github/actions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
