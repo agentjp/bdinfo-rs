@@ -3,7 +3,7 @@
 
 <#
 .SYNOPSIS
-    Helpers shared by the publish lanes.
+    Helpers shared by the CI scripts and the publish lanes.
 
 .DESCRIPTION
     Dot-source this file; every function below then runs in the caller's scope:
@@ -22,8 +22,9 @@
     scripts are built on reachable at all — with it left at $true a non-zero exit
     from a native command throws instead.
 
-    Consumers: the publish-gui-*.ps1 channel legs, cloudsmith-push.ps1, and the
-    inline pwsh steps of publish-crates.yml and publish-npm.yml.
+    Consumers: the publish-gui-*.ps1 channel legs, cloudsmith-push.ps1,
+    gui-package-linux.ps1, the pins composite action, and the inline pwsh steps
+    of publish-crates.yml, publish-npm.yml and version-freshness.yml.
 #>
 
 # Fail a publishing leg. Never a `throw`: these run as the whole body of a
@@ -34,6 +35,47 @@ function Stop-Leg {
 
     Write-Host "FAILED: $Why" -ForegroundColor Red
     exit 1
+}
+
+# The pin manifest (.github/pins.env) as an ordered name -> version map, in file
+# order. Every hand-maintained tool and toolchain version in this repository is
+# read through here or through the pins composite action, which calls this.
+#
+# A line that is neither blank, nor a `#` comment, nor `KEY=VALUE` in the shape
+# the manifest's header documents is a hard error rather than a skipped line: the
+# same file is `source`d by .github/build-linux-packages.sh and appended verbatim
+# to $GITHUB_OUTPUT, and both would take a malformed line silently.
+#
+# `throw`, not Stop-Leg: the callers include the local gate and a workflow step,
+# where the message plus a non-zero exit is what is wanted, not a publish leg's
+# one-line verdict.
+function Get-Pins {
+    param([string] $Path = (Join-Path $PSScriptRoot '..' 'pins.env'))
+
+    $pins = [ordered]@{}
+    $lineNo = 0
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $lineNo++
+        if ($line -match '^\s*(#|$)') { continue }
+        if ($line -notmatch '^([A-Z][A-Z0-9_]*)=(\S+)$') {
+            throw "pins.env line ${lineNo}: expected KEY=VALUE with no spaces or quotes, got: $line"
+        }
+        if ($pins.Contains($Matches[1])) { throw "pins.env line ${lineNo}: $($Matches[1]) is pinned twice" }
+        $pins[$Matches[1]] = $Matches[2]
+    }
+    if ($pins.Count -eq 0) { throw "no pins in $Path" }
+    return $pins
+}
+
+# One pin by name. Missing is an error: a caller silently installing an empty
+# version would resolve to whatever is latest, which is what the manifest exists
+# to prevent.
+function Get-Pin {
+    param([Parameter(Mandatory)] [string] $Name)
+
+    $pins = Get-Pins
+    if (-not $pins.Contains($Name)) { throw "no $Name pin in .github/pins.env" }
+    return $pins[$Name]
 }
 
 # Parse a SHA256SUMS file into a filename -> lower-case hex hash map, accepting

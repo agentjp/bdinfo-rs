@@ -1,0 +1,96 @@
+# Every hand-maintained tool and toolchain version in this repository lives in
+# .github/pins.env; this action is how a workflow reads one. A job adds
+#
+#     - id: pins
+#       uses: ./.github/actions/pins
+#
+# after its checkout (a local action needs the repository on disk), then spells
+# the version as `${{ steps.pins.outputs.NIGHTLY }}` where it used to carry a
+# literal. That expression is safe in `with:`, `env:` and a cache `key:`, but
+# route it through a step's `env:` before a `run:` block reads it — zizmor's
+# template-injection audit rejects any expansion inside a run block.
+#
+# STEP OUTPUTS, not $GITHUB_ENV, which would be the shorter spelling: zizmor's
+# github-env audit reports any write to the environment file from an action as a
+# HIGH finding (measured against zizmor 1.26.1, 2026-08-06), and findings in
+# hand-maintained files here are fixed rather than suppressed. The cost is that
+# each consuming step names the pins it uses, which reads as documentation.
+#
+# A COMPOSITE action rather than a reusable workflow: composites are callable
+# from inside core.yml / gui.yml / wasm.yml, which already sit at the four-level
+# workflow_call nesting ceiling (sweep.yml -> ci.yml -> the reusable), and a
+# composite's failure surfaces on the calling job instead of reddening its
+# caller.
+name: pins
+description: >-
+  Expose the versions in .github/pins.env as step outputs, so a workflow can
+  install a pinned tool without carrying a copy of its version.
+
+outputs:
+  NIGHTLY:
+    description: The nightly toolchain for the rustfmt and llvm-cov steps.
+    value: ${{ steps.read.outputs.NIGHTLY }}
+  CARGO_VET:
+    description: cargo-vet, compiled from crates.io and cached.
+    value: ${{ steps.read.outputs.CARGO_VET }}
+  CARGO_FUZZ:
+    description: cargo-fuzz, compiled from crates.io and cached.
+    value: ${{ steps.read.outputs.CARGO_FUZZ }}
+  CARGO_DEB:
+    description: cargo-deb, the .deb packager.
+    value: ${{ steps.read.outputs.CARGO_DEB }}
+  CARGO_GENERATE_RPM:
+    description: cargo-generate-rpm, the .rpm packager.
+    value: ${{ steps.read.outputs.CARGO_GENERATE_RPM }}
+  APPIMAGETOOL:
+    description: appimagetool, the GUI lane's AppImage packer.
+    value: ${{ steps.read.outputs.APPIMAGETOOL }}
+  RYL:
+    description: ryl, the YAML linter.
+    value: ${{ steps.read.outputs.RYL }}
+  TAPLO_CLI:
+    description: taplo-cli, the TOML formatter and linter.
+    value: ${{ steps.read.outputs.TAPLO_CLI }}
+  CONVCO:
+    description: convco, the conventional-commit checker.
+    value: ${{ steps.read.outputs.CONVCO }}
+  WASM_BINDGEN_CLI:
+    description: wasm-bindgen-cli, which must equal the wasm-bindgen crate version.
+    value: ${{ steps.read.outputs.WASM_BINDGEN_CLI }}
+  NODE:
+    description: The Node version the browser package builds and tests on.
+    value: ${{ steps.read.outputs.NODE }}
+  NPM:
+    description: The npm version the staged npm publish runs on.
+    value: ${{ steps.read.outputs.NPM }}
+  WRANGLER:
+    description: wrangler, which deploys the demo site to Cloudflare Pages.
+    value: ${{ steps.read.outputs.WRANGLER }}
+  KOMAC:
+    description: komac, which submits the WinGet manifests.
+    value: ${{ steps.read.outputs.KOMAC }}
+  CLOUDSMITH_CLI:
+    description: cloudsmith-cli, which pushes the .deb/.rpm packages.
+    value: ${{ steps.read.outputs.CLOUDSMITH_CLI }}
+
+runs:
+  using: composite
+  steps:
+    # pwsh, not bash: the same Get-Pins the PowerShell scripts and
+    # version-freshness.yml call, so the manifest has ONE parser and one
+    # definition of a malformed line. pwsh ships on every GitHub-hosted runner
+    # image, which this action is used from on all three.
+    #
+    # Get-Pins finds the manifest beside its own script directory, so this step
+    # does not depend on the working directory; the dot-source does, and composite
+    # run steps start in the workspace.
+    - name: Read the pin manifest
+      id: read
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        . ./.github/scripts/_common.ps1
+        foreach ($pin in (Get-Pins).GetEnumerator()) {
+          "$($pin.Key)=$($pin.Value)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        }
