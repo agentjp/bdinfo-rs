@@ -19,11 +19,10 @@ use crate::stream::TsAudioStream;
 /// Scans one LPCM access unit from `buffer` into `stream`.
 ///
 /// A buffer too short for the four-byte header leaves `stream` untouched (an
-/// early return). `tag` is part of the shared codec-scan signature and is never
-/// set here.
+/// early return). `tag` is never set here, as in `TSCodecLPCM.Scan`;
+/// [`super::scan_access_unit`] carries why it is still a parameter.
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; LPCM never sets it (a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;
@@ -96,20 +95,20 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
     }
 
     // Bit-depth code.
-    match (flags & 0xC0).wrapping_shr(6) {
-        1 => stream.bit_depth = 16,
-        2 => stream.bit_depth = 20,
-        3 => stream.bit_depth = 24,
-        _ => stream.bit_depth = 0,
-    }
+    stream.bit_depth = match (flags & 0xC0).wrapping_shr(6) {
+        1 => 16,
+        2 => 20,
+        3 => 24,
+        _ => 0,
+    };
 
     // Sample-rate nibble.
-    match (flags & 0xF00).wrapping_shr(8) {
-        1 => stream.sample_rate = 48_000,
-        4 => stream.sample_rate = 96_000,
-        5 => stream.sample_rate = 192_000,
-        _ => stream.sample_rate = 0,
-    }
+    stream.sample_rate = match (flags & 0xF00).wrapping_shr(8) {
+        1 => 48_000,
+        4 => 96_000,
+        5 => 192_000,
+        _ => 0,
+    };
 
     // `sample_rate * bit_depth * (channel_count + lfe)` — a wrapping product,
     // truncated through the unsigned 32-bit view, then widened to the i64 bit rate.

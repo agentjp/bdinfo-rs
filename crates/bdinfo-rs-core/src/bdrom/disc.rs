@@ -396,25 +396,6 @@ pub struct AngleTotals {
     pub timeline_packet_size: u64,
 }
 
-impl AngleTotals {
-    /// The angle's own bitrate in bits/s — [`packet_size`](Self::packet_size)
-    /// at 8 bits per byte over [`length`](Self::length), rounded half-to-even;
-    /// `0` when the angle has no length.
-    #[must_use]
-    pub fn bit_rate(&self) -> u64 {
-        rate_over(self.packet_size, self.length)
-    }
-
-    /// The angle's whole-timeline bitrate in bits/s —
-    /// [`timeline_packet_size`](Self::timeline_packet_size) over the
-    /// playlist's `total_length` (the timeline spans the whole playlist),
-    /// rounded half-to-even; `0` for a zero-length playlist.
-    #[must_use]
-    pub fn timeline_bit_rate(&self, total_length: f64) -> u64 {
-        rate_over(self.timeline_packet_size, total_length)
-    }
-}
-
 /// One presented stream's report fields.
 ///
 /// Carries the `streams` diff level's per-stream line group
@@ -2089,8 +2070,11 @@ fn scan_one_stream_file(
 ) -> Result<TsStreamFile, BdError> {
     let mut stream_file = TsStreamFile::new(file.name());
     stream_file.interleaved_file = interleaved.map(TsInterleavedFile::new);
-    // Select the demux source the way `scan_source` would (the interleaved
-    // 3D file when present), but wrapped so each read advances the progress.
+    // The interleaved 3D `*.ssif` is the demux source in preference to the plain
+    // `*.m2ts` whenever the clip has one: its base/dependent extents are just more
+    // source packets, and without reading it the dependent-view (MVC) streams
+    // never register. The selected reader is wrapped so each read advances the
+    // progress.
     let inner = match &stream_file.interleaved_file {
         Some(interleaved) => interleaved.open_read().map_err(BdError::Io)?,
         None => file.open_read()?,
@@ -3761,14 +3745,6 @@ mod tests {
 
         // No angles → no totals.
         assert!(playlist_summary(100.0, 0, Vec::new()).angle_totals().is_empty());
-
-        // The per-angle rates: angle 1's own clips over its own length
-        // (30 × 192 × 8 / 40 s = 1152), its timeline over the playlist length
-        // (50 × 192 × 8 / 100 s = 768); the clip-less angle 2 rates zero.
-        assert_eq!(one.bit_rate(), 1152);
-        assert_eq!(one.timeline_bit_rate(100.0), 768);
-        assert_eq!(two.bit_rate(), 0);
-        assert_eq!(two.timeline_bit_rate(0.0), 0);
     }
 
     #[test]

@@ -43,9 +43,9 @@
 //!
 //! Two parts of the state are excluded, and each is a hole in the proof:
 //!
-//! - `TsStreamFile::interleaved_file` — neither strategy reads or writes it. It
-//!   selects the source *before* a scan (`TsStreamFile::scan_source`) and is
-//!   `None` for a clip this harness builds.
+//! - `TsStreamFile::interleaved_file` — neither strategy reads or writes it. The
+//!   disc scan's per-file step consults it to select the source *before* a scan,
+//!   and it is `None` for a clip this harness builds.
 //! - `TsStreamFile`'s private per-PID demux scratch — unreachable from outside
 //!   the crate, not output (the crate releases it once a scan's outputs are
 //!   captured), and holding a PES reassembly window of up to 5 MiB per PID, so

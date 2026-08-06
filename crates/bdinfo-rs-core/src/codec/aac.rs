@@ -61,11 +61,11 @@ const fn get_aac_profile(profile_type: u16) -> &'static str {
 
 /// Scans one AAC access unit from `buffer` into `stream`.
 ///
-/// A non-`0xFFF` sync word leaves `stream` untouched (an early return). `tag`
-/// is part of the shared codec-scan signature and is never set here.
+/// A non-`0xFFF` sync word leaves `stream` untouched (an early return). `tag` is
+/// never set here, as in `TSCodecAAC.Scan`; [`super::scan_access_unit`] carries
+/// why it is still a parameter.
 pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut Option<String>) {
-    // `tag` is part of the shared codec-scan signature; AAC never sets it (a
-    // `pub fn` is exempt from `needless_pass_by_ref_mut`).
+    // The `let _` silences the unused parameter without renaming it.
     let _ = tag;
     if stream.base.is_initialized {
         return;

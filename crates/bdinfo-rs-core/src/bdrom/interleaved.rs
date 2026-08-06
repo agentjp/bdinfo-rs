@@ -9,9 +9,9 @@
 //! de-interleaves them transparently onto the same PID/PES path that registers the
 //! disc's elementary streams.
 //!
-//! [`TsStreamFile::scan_source`](super::m2ts::TsStreamFile::scan_source) selects
-//! this interleaved file over the plain `*.m2ts` when it is present and SSIF reading
-//! is enabled, so the dependent-view streams reach the demux at all.
+//! The per-file scan in [`super::disc`] opens this interleaved file in
+//! preference to the plain `*.m2ts` whenever the clip has one, so the
+//! dependent-view streams reach the demux at all.
 
 use core::fmt;
 use std::io;
