@@ -54,30 +54,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Add the wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+      - id: pins
+        uses: ./.github/actions/pins
 
-      # `fallback: none`: install only from install-action's checksummed manifest,
-      # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
-      - name: Install wasm-bindgen-cli (pinned to the crate version)
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      # The wasm32 target, the pinned wasm-bindgen CLI, the pinned Node, `npm ci`
+      # and `npm run build` — the same block wasm.yml gates with and
+      # publish-npm.yml publishes with, so the demo is the artifact the gate
+      # proved.
+      - uses: ./.github/actions/wasm-build
         with:
-          tool: wasm-bindgen-cli@0.2.126
-          fallback: none
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          # Keep in lockstep with wasm.yml + publish-npm.yml (version-freshness.yml
-          # cross-checks the three agree). The active Node line: 26 -> LTS Oct 2026.
-          node-version: "26.6.0"
-
-      - name: Install the web toolchain (binaryen / typescript / biome)
-        working-directory: crates/bdinfo-rs-wasm/web
-        run: npm ci
-
-      - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
-        working-directory: crates/bdinfo-rs-wasm/web
-        run: npm run build
+          web: build
 
       - name: Assemble the static site (index.html + icons + _headers + dist/ + pkg/)
         working-directory: crates/bdinfo-rs-wasm/web
@@ -95,13 +81,12 @@ jobs:
           Get-ChildItem -Recurse $site | ForEach-Object { $_.FullName }
 
       # Pages Direct Upload of the prebuilt site/. wrangler reads the token +
-      # account id from the env below; pinned to an EXACT version because it runs
-      # with the deploy token (the repo's pin-everything posture — bump it
-      # deliberately). --branch=master makes this the production deployment (the
-      # project's production branch must be `master`).
+      # account id from the env below. --branch=master makes this the production
+      # deployment (the project's production branch must be `master`).
       - name: Deploy to Cloudflare Pages (Direct Upload)
         working-directory: crates/bdinfo-rs-wasm/web
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@4.118.0 pages deploy site --project-name=bdinfo-rs --branch=master
+          WRANGLER: ${{ steps.pins.outputs.WRANGLER }}
+        run: npx --yes "wrangler@$WRANGLER" pages deploy site --project-name=bdinfo-rs --branch=master

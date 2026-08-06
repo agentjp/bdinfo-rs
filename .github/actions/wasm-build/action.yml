@@ -1,0 +1,60 @@
+# The toolchain the in-browser package is built with, in one place: the wasm32
+# target, the wasm-bindgen CLI that generates its JS glue, and the Node the web
+# tooling runs on. Three workflows need exactly this — wasm.yml (the gate),
+# publish-npm.yml (the tag-time npm publish) and deploy-pages.yml (the demo
+# deploy) — and all three must build the shipped artifact with the same tools,
+# so a divergence between them is a bug by construction.
+#
+# The two npm steps are optional because only their POSITION differs between the
+# callers: wasm.yml runs its whole gate between `npm ci` and `npm run build`, and
+# publish-npm.yml pins npm and verifies the tag against the manifests in between,
+# so neither can take the pair as one block.
+#
+# A COMPOSITE action rather than a reusable workflow (rationale in
+# .github/actions/pins).
+name: wasm-build
+description: >-
+  Install the wasm32 target, the pinned wasm-bindgen CLI and the pinned Node,
+  and optionally install and run the browser package's web build.
+
+inputs:
+  web:
+    description: >-
+      `install` also runs `npm ci` in the web directory; `build` also runs
+      `npm run build` after it; empty stops after the toolchain.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - id: pins
+      uses: ./.github/actions/pins
+
+    - name: Add the wasm32 target
+      shell: bash
+      run: rustup target add wasm32-unknown-unknown
+
+    # `fallback: none`: install only from install-action's checksummed manifest,
+    # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
+    - name: Install wasm-bindgen-cli (pinned to the crate version)
+      uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      with:
+        tool: wasm-bindgen-cli@${{ steps.pins.outputs.WASM_BINDGEN_CLI }}
+        fallback: none
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.pins.outputs.NODE }}
+
+    - name: Install the web toolchain (binaryen / biome / typescript / playwright-core)
+      if: inputs.web != ''
+      working-directory: crates/bdinfo-rs-wasm/web
+      shell: bash
+      run: npm ci
+
+    - name: Build the browser artifact (wasm-bindgen + wasm-opt -Oz + tsc)
+      if: inputs.web == 'build'
+      working-directory: crates/bdinfo-rs-wasm/web
+      shell: bash
+      run: npm run build

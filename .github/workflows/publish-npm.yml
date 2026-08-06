@@ -110,6 +110,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       # The release tag drives the version guard + npm dist-tag. On a tag push it
       # is the ref; on a manual dispatch it is the input, or `v<package.json
       # version>`. GitHub context is routed through env (never inlined into the
@@ -134,45 +137,27 @@ jobs:
           Write-Host "resolved release tag: $tag"
 
       - name: Install pinned nightly rustfmt
-        run: rustup toolchain install nightly-2026-07-06 --profile minimal --component rustfmt
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
 
-      - name: Add the wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+      # The wasm32 target, the pinned wasm-bindgen CLI and the pinned Node — the
+      # same block wasm.yml gates with and deploy-pages.yml deploys with, so the
+      # published artifact is built with the tools the gate proved. `npm ci` is
+      # NOT taken from it: the npm pin and the tag/version guards below have to
+      # run between setup-node and the install.
+      - uses: ./.github/actions/wasm-build
 
-      # `fallback: none`: install only from install-action's checksummed manifest,
-      # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
-      - name: Install wasm-bindgen-cli (pinned to the crate version)
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
-        with:
-          tool: wasm-bindgen-cli@0.2.126
-          fallback: none
-
-      # zizmor flags setup-node in this tag-triggered (publishing) workflow as a
-      # cache-poisoning vector, but no `cache:` input is set, so it neither restores
-      # nor saves any cache — there is nothing to poison. setup-node is required to
-      # get a modern Node/npm for OIDC, and the tag trigger is intrinsic to a
-      # publish workflow, so this is an unavoidable false positive (cf. the inline
-      # ref-version-mismatch ignore documented in .github/zizmor.yml).
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
-        with:
-          # The active Node line (26 -> LTS Oct 2026); kept in lockstep with
-          # wasm.yml + deploy-pages.yml (version-freshness.yml cross-checks the three).
-          node-version: "26.6.0"
-
-      # Staged publishing (`npm stage publish`) needs npm >= 11.15.0, and
-      # `--provenance` needs a working bundled `sigstore`. npm 12.0.0 shipped
-      # BROKEN here (`npm publish --provenance` died with `Cannot find module
-      # 'sigstore'`, npm/cli#9722 — the reason this pin sat on 11.18.0); 12.0.1
-      # ships the fix (npm/cli#9740), so the pin follows `latest` again. Pinning
-      # keeps the publish deterministic regardless of which npm a given Node 26.x
-      # bundles (the repo's pin-everything posture); the published wasm bytes are
-      # fixed by the pinned rustc / wasm-bindgen / binaryen, independent of npm.
+      # Installing an exact npm keeps the publish deterministic regardless of
+      # which npm a given Node 26.x bundles; the published wasm bytes are fixed by
+      # the pinned rustc / wasm-bindgen / binaryen and are independent of npm.
+      # What the version has to satisfy is recorded with it in .github/pins.env.
       # zizmor's adhoc-packages audit flags any runtime install; pinning npm (from
-      # the official registry) carries a scoped inline ignore. Keep this pin in
-      # lockstep with version-freshness.yml (its "behind latest" nag is the
-      # reminder to bump).
+      # the official registry) carries a scoped inline ignore.
       - name: Pin npm to a staged-publishing-capable version
-        run: npm install -g npm@12.0.2 # zizmor: ignore[adhoc-packages]
+        env:
+          NPM: ${{ steps.pins.outputs.NPM }}
+        run: npm install -g "npm@$NPM" # zizmor: ignore[adhoc-packages]
 
       - name: Verify Node >= 26 and npm >= 11.15.0
         shell: pwsh
