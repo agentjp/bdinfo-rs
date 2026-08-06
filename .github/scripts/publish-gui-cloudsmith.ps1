@@ -9,16 +9,11 @@
 #                  package metadata (name, version, architecture) via
 #                  dpkg-deb / rpm, and stage the bytes in -Payload — the
 #                  exact files the publish leg pushes.
-#   -Mode publish  for each file: query the public Cloudsmith API by filename
-#                  and SKIP if the version is already there (Cloudsmith
-#                  stores the packaging-revisioned version, e.g. 2.0.0-1, so
-#                  the match strips the trailing revision); push cleanly when
-#                  absent; fall back to --republish only when the state could
-#                  not be determined or a plain push raced another run — the
-#                  packages.yml deb/rpm idiom, unchanged.
+#   -Mode publish  hand the four staged files to cloudsmith-push.ps1, the same
+#                  idempotent preflight-and-push the CLI's packages.yml uses.
 #
-# Env: GH_TOKEN (prepare: gh release download), CLOUDSMITH_API_KEY (publish),
-# CLOUDSMITH_CLI_VERSION (the pipx pin; watched by version-freshness.yml).
+# Env: GH_TOKEN (prepare: gh release download); publish additionally needs what
+# cloudsmith-push.ps1 documents.
 
 [CmdletBinding()]
 param(
@@ -37,7 +32,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-$cloudsmithRepo = 'bdinfo-rs/bdinfo-rs'
+. "$PSScriptRoot/_common.ps1"
+
 $files = @(
     'bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb'
     'bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb'
@@ -45,19 +41,9 @@ $files = @(
     'bdinfo-rs-gui-aarch64-unknown-linux-gnu.rpm'
 )
 
-function Stop-Leg([string] $why) {
-    Write-Host "FAILED: $why" -ForegroundColor Red
-    exit 1
-}
-
 if ($Mode -eq 'prepare') {
     if (-not $Sums) { Stop-Leg 'prepare needs -Sums' }
-    # Not `$sums`: PowerShell variable names are case-insensitive, so that
-    # would overwrite the $Sums path parameter before the loop reads it.
-    $shaByName = @{}
-    foreach ($line in Get-Content -LiteralPath $Sums) {
-        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $shaByName[$Matches[2].Trim()] = $Matches[1] }
-    }
+    $shaByName = Get-Sha256Sums -Path $Sums
 
     New-Item -ItemType Directory -Force $Payload | Out-Null
     foreach ($name in $files) {
@@ -104,45 +90,6 @@ if ($Mode -eq 'prepare') {
 }
 
 # ── publish ──────────────────────────────────────────────────────────────────
-if (-not $env:CLOUDSMITH_API_KEY) { Stop-Leg 'CLOUDSMITH_API_KEY is not set' }
-if (-not $env:CLOUDSMITH_CLI_VERSION) { Stop-Leg 'CLOUDSMITH_CLI_VERSION is not set (the workflow pins it)' }
-pipx install "cloudsmith-cli==$env:CLOUDSMITH_CLI_VERSION" | Out-Null
-if ($LASTEXITCODE -ne 0) { Stop-Leg 'pipx install cloudsmith-cli failed' }
-
-$failed = @()
-foreach ($name in $files) {
-    $path = Join-Path $Payload $name
-    if (-not (Test-Path -LiteralPath $path)) { Stop-Leg "no prepared package at $path" }
-    $format = if ($name.EndsWith('.deb')) { 'deb' } else { 'rpm' }
-
-    # Preflight by exact filename via the anonymous public API, matching the
-    # version BASE (Cloudsmith stores the packaging-revisioned version, so a
-    # bare version:X.Y.Z query matches nothing). An empty count means the
-    # state could not be determined -> --republish, the safe fallback.
-    $count = ''
-    try {
-        $q = [uri]::EscapeDataString("filename:$name")
-        $json = Invoke-RestMethod -Uri "https://api.cloudsmith.io/v1/packages/$cloudsmithRepo/?query=$q&page_size=100"
-        $count = @($json | Where-Object { ($_.version -replace '-\d+$', '') -eq $Version }).Count
-    }
-    catch { $count = '' }
-
-    if ($count -is [int] -and $count -gt 0) {
-        Write-Host "$name $Version is already in Cloudsmith ($count) - skipping"
-        continue
-    }
-    if ($count -is [int]) {
-        cloudsmith push $format "$cloudsmithRepo/any-distro/any-version" $path
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host 'plain push failed - retrying idempotently with --republish'
-            cloudsmith push $format --republish "$cloudsmithRepo/any-distro/any-version" $path
-        }
-    }
-    else {
-        Write-Host 'could not query the Cloudsmith state - pushing with --republish (safe)'
-        cloudsmith push $format --republish "$cloudsmithRepo/any-distro/any-version" $path
-    }
-    if ($LASTEXITCODE -ne 0) { $failed += $name }
-}
-if ($failed.Count) { Stop-Leg "Cloudsmith push failed for: $($failed -join ', ')" }
+& "$PSScriptRoot/cloudsmith-push.ps1" -Version $Version -Path @($files | ForEach-Object { Join-Path $Payload $_ })
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "published the 4 packages to Cloudsmith ($Version)"

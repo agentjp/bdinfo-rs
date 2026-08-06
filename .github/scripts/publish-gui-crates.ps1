@@ -40,29 +40,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-function Stop-Leg([string] $why) {
-    Write-Host "FAILED: $why" -ForegroundColor Red
-    exit 1
-}
+. "$PSScriptRoot/_common.ps1"
 
-if ($Tag -notmatch '^gui-v(\d+\.\d+\.\d+)$') { Stop-Leg "tag '$Tag' is not a stable gui-vX.Y.Z tag" }
-$tagVersion = $Matches[1]
+$tagVersion = Get-GuiTagVersion $Tag
 if ($Mode -eq 'prepare' -and -not $Payload) { Stop-Leg 'prepare needs -Payload' }
 
 $crate = Join-Path $SrcDir 'crates/bdinfo-rs-gui'
 if (-not (Test-Path -LiteralPath (Join-Path $crate 'Cargo.toml'))) { Stop-Leg "no gui crate under $SrcDir" }
 
-# cargo publishes whatever version Cargo.toml carries, not the tag — fail
-# fast on a mismatch (the publish-crates.yml guard, on the gui crate's
-# [package] table).
-$inPackage = $false
-$crateVersion = $null
-foreach ($line in Get-Content -LiteralPath (Join-Path $crate 'Cargo.toml')) {
-    if ($line -match '^\[package\]') { $inPackage = $true; continue }
-    if ($line -match '^\[') { $inPackage = $false; continue }
-    if ($inPackage -and $line -match '^version\s*=\s*"([^"]+)"') { $crateVersion = $Matches[1]; break }
-}
-if (-not $crateVersion) { Stop-Leg 'no [package] version found in the gui Cargo.toml' }
+# cargo publishes whatever version the manifest carries, not the tag — fail
+# fast on a mismatch (the publish-crates.yml guard, on the gui crate).
+$crateVersion = Get-CrateVersion -Name 'bdinfo-rs-gui' -ManifestPath (Join-Path $crate 'Cargo.toml')
 if ($crateVersion -ne $tagVersion) { Stop-Leg "tag $Tag does not match the gui crate version $crateVersion" }
 
 Push-Location -LiteralPath $crate

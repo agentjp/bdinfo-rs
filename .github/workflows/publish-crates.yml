@@ -58,22 +58,24 @@ jobs:
 
       # cargo publishes whatever version is in Cargo.toml, not the tag — fail fast
       # if a tag was cut that does not match (mirrors the guard in docker.yml).
+      # The version it resolves is a step output, so the publish step below reads
+      # the value this step validated instead of re-deriving it.
       - name: Verify the tag matches the workspace version
+        id: version
         shell: pwsh
         run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          . ./.github/scripts/_common.ps1
+
           $tag = $env:GITHUB_REF_NAME
-          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
-            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
-          }
-          $base = $Matches['base']
-          $inWp = $false; $crate = $null
-          foreach ($line in (Get-Content Cargo.toml)) {
-            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
-            if ($line -match '^\[') { $inWp = $false; continue }
-            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $crate = $Matches[1]; break }
-          }
-          if (-not $crate) { throw 'No [workspace.package] version found in Cargo.toml' }
-          if ($base -ne $crate) { throw "Tag $tag (base $base) does not match workspace version $crate" }
+          $base = Get-ReleaseTagBase $tag
+          # Both crates inherit the version from [workspace.package], so either
+          # one reports it.
+          $crate = Get-CrateVersion -Name 'bdinfo-rs-core'
+          if ($base -ne $crate) { Stop-Leg "Tag $tag (base $base) does not match workspace version $crate" }
+          "version=$crate" | Add-Content -Path $env:GITHUB_OUTPUT
 
       - name: Authenticate to crates.io (Trusted Publishing / OIDC)
         id: auth
@@ -94,17 +96,9 @@ jobs:
         shell: pwsh
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # The published version is the [workspace.package] version (both crates
-          # inherit it via version.workspace = true) — the same value the tag guard
-          # above verified. Read it authoritatively from Cargo.toml.
-          $inWp = $false; $version = $null
-          foreach ($line in (Get-Content Cargo.toml)) {
-            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
-            if ($line -match '^\[') { $inWp = $false; continue }
-            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $version = $Matches[1]; break }
-          }
-          if (-not $version) { throw 'No [workspace.package] version found in Cargo.toml' }
+          $version = $env:VERSION
 
           # crates.io versions are immutable: re-publishing an existing version errors
           # cleanly with "already uploaded", which we tolerate as success. So we do NOT

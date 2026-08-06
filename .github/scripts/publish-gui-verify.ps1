@@ -35,27 +35,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-function Stop-Verify([string] $why) {
-    Write-Host "FAILED: $why" -ForegroundColor Red
-    exit 1
-}
+. "$PSScriptRoot/_common.ps1"
 
 $repo = $env:GITHUB_REPOSITORY
-if (-not $repo) { Stop-Verify 'GITHUB_REPOSITORY is not set' }
+if (-not $repo) { Stop-Leg 'GITHUB_REPOSITORY is not set' }
 
-# Stable releases only — a prerelease suffix never reaches a package manager
-# (the packages.yml gate's rule).
-if ($Tag -notmatch '^gui-v(\d+\.\d+\.\d+)$') {
-    Stop-Verify "tag '$Tag' is not a stable gui-vX.Y.Z tag"
-}
-$version = $Matches[1]
+$version = Get-GuiTagVersion $Tag
 
 $releaseJson = gh api "repos/$repo/releases/tags/$Tag" 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) { Stop-Verify "no release found for tag $Tag`: $releaseJson" }
+if ($LASTEXITCODE -ne 0) { Stop-Leg "no release found for tag $Tag`: $releaseJson" }
 $release = $releaseJson | ConvertFrom-Json
-if ($release.draft) { Stop-Verify "the release for $Tag is a draft" }
+if ($release.draft) { Stop-Leg "the release for $Tag is a draft" }
 if (-not $release.immutable) {
-    Stop-Verify "release $Tag is not immutable - its assets could change after this verification, so no channel may publish from it"
+    Stop-Leg "release $Tag is not immutable - its assets could change after this verification, so no channel may publish from it"
 }
 
 # The exact asset contract gui-release.yml publishes: 12 packages +
@@ -79,25 +71,23 @@ $actual = @($release.assets.name)
 $diff = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
 if ($diff.Count) {
     $diff | ForEach-Object { Write-Host "    $($_.SideIndicator) $($_.InputObject)" }
-    Stop-Verify "release $Tag does not carry exactly the expected asset set (<= missing, => unexpected)"
+    Stop-Leg "release $Tag does not carry exactly the expected asset set (<= missing, => unexpected)"
 }
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 gh release download $Tag --repo $repo --dir $OutDir
-if ($LASTEXITCODE -ne 0) { Stop-Verify "gh release download $Tag failed" }
+if ($LASTEXITCODE -ne 0) { Stop-Leg "gh release download $Tag failed" }
 
-# Every SHA256SUMS line must name one of the 12 packages, cover all 12, and
-# match the downloaded bytes.
-$sums = @{}
-foreach ($line in Get-Content -LiteralPath (Join-Path $OutDir 'SHA256SUMS')) {
-    if ($line -notmatch '^([0-9a-f]{64})\s+\*?(.+)$') { Stop-Verify "unparseable SHA256SUMS line: $line" }
-    $sums[$Matches[2].Trim()] = $Matches[1]
-}
+# Every SHA256SUMS line must name one of the 12 packages (-Strict), cover all
+# 12, and match the downloaded bytes. This is the run's only reading of the file
+# that proves it well-formed; the prepare legs look names up in the copy this
+# job publishes as an artifact.
+$sums = Get-Sha256Sums -Path (Join-Path $OutDir 'SHA256SUMS') -Strict
 $sumDiff = @(Compare-Object -ReferenceObject $packages -DifferenceObject @($sums.Keys))
-if ($sumDiff.Count) { Stop-Verify 'SHA256SUMS does not cover exactly the 12 packages' }
+if ($sumDiff.Count) { Stop-Leg 'SHA256SUMS does not cover exactly the 12 packages' }
 foreach ($name in $packages) {
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutDir $name)).Hash.ToLowerInvariant()
-    if ($hash -ne $sums[$name]) { Stop-Verify "checksum mismatch for $name (SHA256SUMS $($sums[$name]), downloaded $hash)" }
+    if ($hash -ne $sums[$name]) { Stop-Leg "checksum mismatch for $name (SHA256SUMS $($sums[$name]), downloaded $hash)" }
     Write-Host "    sha256 ok  $name"
 }
 
@@ -105,7 +95,7 @@ foreach ($name in $packages) {
 # release job attests the full set).
 foreach ($name in $expected) {
     gh attestation verify (Join-Path $OutDir $name) --repo $repo
-    if ($LASTEXITCODE -ne 0) { Stop-Verify "attestation verification failed for $name" }
+    if ($LASTEXITCODE -ne 0) { Stop-Leg "attestation verification failed for $name" }
 }
 
 # Channel matrix. AUR is armed by the AUR_ENABLED repo variable, like the
@@ -113,7 +103,7 @@ foreach ($name in $expected) {
 $selected = if ($Channels -eq 'all') { @('winget', 'homebrew', 'aur', 'cloudsmith', 'crates') } else { @($Channels) }
 if ($env:AUR_ENABLED -ne 'true' -and $selected -contains 'aur') {
     if ($Channels -eq 'aur') {
-        Stop-Verify 'AUR publishing is paused (repo variable AUR_ENABLED is not true); set it before an explicit aur dispatch'
+        Stop-Leg 'AUR publishing is paused (repo variable AUR_ENABLED is not true); set it before an explicit aur dispatch'
     }
     Write-Host '::warning::AUR publishing is paused (repo variable AUR_ENABLED is not true) - dropping the aur channel from this run.'
     $selected = @($selected | Where-Object { $_ -ne 'aur' })

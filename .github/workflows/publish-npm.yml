@@ -191,32 +191,22 @@ jobs:
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
         run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          . ./.github/scripts/_common.ps1
+
           $tag = $env:TAG
-          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$') {
-            throw "Tag '$tag' is not vMAJOR.MINOR.PATCH[-prerelease]"
-          }
-          $base = $Matches['base']
-          $inWp = $false; $ws = $null
-          foreach ($line in (Get-Content Cargo.toml)) {
-            if ($line -match '^\[workspace\.package\]') { $inWp = $true; continue }
-            if ($line -match '^\[') { $inWp = $false; continue }
-            if ($inWp -and $line -match '^version\s*=\s*"([^"]+)"') { $ws = $Matches[1]; break }
-          }
-          if (-not $ws) { throw 'No [workspace.package] version found in Cargo.toml' }
-          if ($base -ne $ws) { throw "Tag $tag (base $base) does not match workspace version $ws" }
+          $base = Get-ReleaseTagBase $tag
+          $ws = Get-CrateVersion -Name 'bdinfo-rs-core'
+          if ($base -ne $ws) { Stop-Leg "Tag $tag (base $base) does not match workspace version $ws" }
           $pkg = (Get-Content crates/bdinfo-rs-wasm/web/package.json -Raw | ConvertFrom-Json).version
-          if ($base -ne $pkg) { throw "Tag $tag (base $base) does not match web/package.json version $pkg" }
-          # The wasm crate is an excluded workspace with a literal [package] version
-          # (not version.workspace), so guard it too — `cargo set-version --workspace`
-          # does not reach it and a drifted literal would otherwise ship unnoticed.
-          $inPkg = $false; $wasm = $null
-          foreach ($line in (Get-Content crates/bdinfo-rs-wasm/Cargo.toml)) {
-            if ($line -match '^\[package\]') { $inPkg = $true; continue }
-            if ($line -match '^\[') { $inPkg = $false; continue }
-            if ($inPkg -and $line -match '^version\s*=\s*"([^"]+)"') { $wasm = $Matches[1]; break }
-          }
-          if (-not $wasm) { throw 'No [package] version in crates/bdinfo-rs-wasm/Cargo.toml' }
-          if ($base -ne $wasm) { throw "Tag $tag (base $base) does not match wasm crate version $wasm" }
+          if ($base -ne $pkg) { Stop-Leg "Tag $tag (base $base) does not match web/package.json version $pkg" }
+          # The wasm crate is an excluded workspace carrying its own version (not
+          # version.workspace), so guard it too — `cargo set-version --workspace`
+          # does not reach it and a drifted value would otherwise ship unnoticed.
+          $wasm = Get-CrateVersion -Name 'bdinfo-rs-wasm' -ManifestPath crates/bdinfo-rs-wasm/Cargo.toml
+          if ($base -ne $wasm) { Stop-Leg "Tag $tag (base $base) does not match wasm crate version $wasm" }
 
       - name: Install the web toolchain
         working-directory: crates/bdinfo-rs-wasm/web
