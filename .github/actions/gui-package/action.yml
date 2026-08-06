@@ -1,0 +1,192 @@
+# Assemble one OS family's GUI distribution artifacts from an already-built
+# release binary, assert their contents, install and launch them for real, and
+# upload them. The LOGIC is not here — it is the tracked
+# .github/scripts/gui-package-*.ps1 trio plus gui-package-check.ps1 and
+# gui-install-smoke.ps1, which both callers already shared. What this action
+# removes is the ~75 lines of YAML wiring around them that gui.yml's packaging
+# smoke and gui-release.yml's build job carried twice, down to byte-identical
+# argument strings and a pair of comments each pointing at the other file.
+#
+# The two callers are the same packaging on two different occasions: gui.yml
+# proves it on every gui-area pull request, gui-release.yml runs it at tag time
+# on six native legs. Their real differences ride as inputs; what stays OUTSIDE
+# is what is genuinely each caller's own — the release build itself, the
+# rust-cache posture (the smoke reads `gui build + test`'s archive read-only,
+# the release lane keeps its own `gui-release` lineage and refuses to restore
+# on a tag), and where the version comes from.
+#
+# A COMPOSITE action rather than a reusable workflow (rationale in
+# .github/actions/pins).
+name: gui-package
+description: >-
+  Package the built GUI binary for one OS family, assert the artifact contents,
+  install and launch it, and upload the result.
+
+inputs:
+  kind:
+    description: >-
+      Which artifact set to build: `linux` (AppImage + deb + rpm), `windows`
+      (zip + MSI), `windows-zip` (the zip alone — the release lane's
+      windows-11-arm leg has no WiX, so its MSI is authored on the x64 runner),
+      or `macos` (a .app in a dmg).
+    required: true
+  version:
+    description: >-
+      The crate version the artifacts are named and stamped with. Each caller
+      resolves it its own way — the smoke reads the manifest in the same job,
+      the release lane takes it from the guard job that checked it against the
+      tag.
+    required: true
+  triple:
+    description: The target triple the binary was built for.
+    required: true
+  artifact-name:
+    description: >-
+      Name of the uploaded artifact directory. It is a release-lane asset glob
+      on one side and a hand-testing bundle on the other, so it never merges.
+    required: true
+  install-packagers:
+    description: >-
+      Pre-install cargo-deb and cargo-generate-rpm at the release-pinned
+      versions, rather than letting gui-package-linux.ps1 compile them from
+      source. Purely a speed choice on `linux`, and the release lane
+      deliberately declines it: install-action's prebuilt cargo-deb links
+      glibc 2.39 and dies on the ubuntu-22.04 legs that lane builds on (glibc
+      2.35, the compatibility floor the app ships against), so it takes the
+      compile-from-source path instead — the same posture as
+      .github/build-linux-packages.sh inside the dist release. Ignored unless
+      `kind` is `linux`.
+    required: false
+    default: 'true'
+  assert-contents:
+    description: >-
+      Run gui-package-check.ps1 over the finished artifacts. The caller turns
+      it off for an artifact set that is only half of a pair, so the assertion
+      can run once over the whole pair later.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    # The check script's validators (desktop-file-validate, appstream-util,
+    # rpm -qp) — none preinstalled on the runner image.
+    - name: Install the Linux packaging validators
+      if: inputs.kind == 'linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends desktop-file-utils appstream-util rpm
+
+    - id: pins
+      if: inputs.kind == 'linux' && inputs.install-packagers == 'true'
+      uses: ./.github/actions/pins
+
+    # Both packagers at the exact versions gui-package-linux.ps1 would compile
+    # from source if they were missing — see the input's description for who
+    # takes which path and why.
+    # `fallback: none`: install only from install-action's checksummed
+    # manifest, never its runtime-resolved cargo-binstall fallback (rationale
+    # in core.yml).
+    - name: Install cargo-deb (release-pinned, prebuilt)
+      if: inputs.kind == 'linux' && inputs.install-packagers == 'true'
+      uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      with:
+        tool: cargo-deb@${{ steps.pins.outputs.CARGO_DEB }}
+        fallback: none
+
+    # cargo-generate-rpm is absent from taiki-e/install-action's manifest, so
+    # with the binstall fallback disabled it is compiled from crates.io once and
+    # cached, the lane core.yml's cargo-fuzz and cargo-vet use.
+    - name: Cache the pinned cargo-generate-rpm binary
+      if: inputs.kind == 'linux' && inputs.install-packagers == 'true'
+      id: rpm-bin
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/cargo-generate-rpm
+        key: cargo-generate-rpm-${{ runner.os }}-${{ steps.pins.outputs.CARGO_GENERATE_RPM }}
+
+    - name: Install cargo-generate-rpm (cache miss)
+      if: inputs.kind == 'linux' && inputs.install-packagers == 'true' && steps.rpm-bin.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CARGO_GENERATE_RPM: ${{ steps.pins.outputs.CARGO_GENERATE_RPM }}
+      run: cargo install --locked "cargo-generate-rpm@$CARGO_GENERATE_RPM"
+
+    # The four packaging invocations. Every step here is `shell: pwsh` — a
+    # composite step must name its shell, and pwsh is preinstalled on all three
+    # runner families, so the Linux and macOS legs call the script directly
+    # instead of shelling out to `pwsh script.ps1` from bash.
+    - name: Package (Linux — AppImage + deb + rpm)
+      if: inputs.kind == 'linux'
+      shell: pwsh
+      env:
+        VERSION: ${{ inputs.version }}
+        TRIPLE: ${{ inputs.triple }}
+      run: >
+        .github/scripts/gui-package-linux.ps1
+        -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui
+
+    - name: Package (Windows — zip + MSI)
+      if: inputs.kind == 'windows'
+      shell: pwsh
+      env:
+        VERSION: ${{ inputs.version }}
+        TRIPLE: ${{ inputs.triple }}
+      run: >
+        .github/scripts/gui-package-windows.ps1
+        -Exe crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+        -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui
+
+    - name: Package (Windows arm64 — zip; MSI authored on the x64 runner)
+      if: inputs.kind == 'windows-zip'
+      shell: pwsh
+      env:
+        VERSION: ${{ inputs.version }}
+        TRIPLE: ${{ inputs.triple }}
+      run: >
+        .github/scripts/gui-package-windows.ps1
+        -Exe crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui.exe
+        -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui -Artifacts zip
+
+    - name: Package (macOS — .app in a dmg)
+      if: inputs.kind == 'macos'
+      shell: pwsh
+      env:
+        VERSION: ${{ inputs.version }}
+        TRIPLE: ${{ inputs.triple }}
+      run: >
+        .github/scripts/gui-package-macos.ps1
+        -Binary crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui
+        -Version $env:VERSION -Triple $env:TRIPLE -OutDir dist-gui
+
+    - name: Assert the artifact contents
+      if: inputs.assert-contents == 'true'
+      shell: pwsh
+      env:
+        KIND: ${{ inputs.kind }}
+        TRIPLE: ${{ inputs.triple }}
+      run: .github/scripts/gui-package-check.ps1 -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE
+
+    # Real install + launch of what was just packaged (MSI /qn install + probe
+    # + uninstall, dpkg -i + probe + remove, AppImage extract-and-run, dmg
+    # mount + probe). It runs on the half-pair leg too: a zip that installs and
+    # launches is a verdict the follow-up job cannot produce, because the arm64
+    # binary cannot execute on the x64 runner that authors its MSI.
+    - name: Install-and-launch smoke
+      shell: pwsh
+      env:
+        KIND: ${{ inputs.kind }}
+        TRIPLE: ${{ inputs.triple }}
+        VERSION: ${{ inputs.version }}
+      run: >
+        .github/scripts/gui-install-smoke.ps1
+        -Kind $env:KIND -Dir dist-gui -Triple $env:TRIPLE -Version $env:VERSION
+
+    - name: Upload the packaged artifacts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: dist-gui/
+        retention-days: 7
+        if-no-files-found: error

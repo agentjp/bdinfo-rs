@@ -331,9 +331,9 @@ function Request-Foreground {
     return $false
 }
 
-function Send-Click([double]$Lx, [double]$Ly) {
-    $px = [int][math]::Round($origin.X + ($Lx * $scale))
-    $py = [int][math]::Round($origin.Y + ($Ly * $scale))
+function Send-Click([double[]]$Target) {
+    $px = [int][math]::Round($origin.X + ($Target[0] * $scale))
+    $py = [int][math]::Round($origin.Y + ($Target[1] * $scale))
     [void][GuiInput]::SetCursorPos($px, $py)
     Start-Sleep -Milliseconds 150
     # The precise no-blind-clicks guard: the top-level window that will
@@ -365,26 +365,18 @@ function Send-Click([double]$Lx, [double]$Ly) {
     Start-Sleep -Milliseconds 900   # let the resulting state render
 }
 
-# Logical client coordinates of the click targets at the default 880-wide
-# layout (dark theme, 100% UI scale) — measured from a pinned-geometry
-# capture. Top-anchored rows are fixed offsets; the bottom action bar and the
-# centred dialog buttons track the granted logical height (960 requested, but
-# a small runner display can clamp it — the macOS probe got 681).
-$SelectAll = @(111, 127)
-$LengthHeader = @(484, 170)
-$FirstRow = @(110, 206)
-$SettingsBtn = @(817, ($logicalH - 29))
-$DialogCancel = @(538, (($logicalH / 2) + 165))
-$ScanBtn = @(566, ($logicalH - 28))
+# The click targets, from the table all three injected legs share.
+. (Join-Path $PSScriptRoot '_gui-walk.ps1')
+$walk = Get-GuiWalkTargets -LogicalHeight $logicalH
 
 Save-Shot '00-listed'
 
-Send-Click @SelectAll; Save-Shot '01-select-all'
-Send-Click @LengthHeader; Save-Shot '02-sort-length'
-Send-Click @FirstRow; Save-Shot '03-row-activate'
-Send-Click @SettingsBtn; Save-Shot '04-settings-open'
-Send-Click @DialogCancel; Save-Shot '05-settings-cancel'
-Send-Click @ScanBtn
+Send-Click $walk.SelectAll; Save-Shot '01-select-all'
+Send-Click $walk.LengthHeader; Save-Shot '02-sort-length'
+Send-Click $walk.FirstRow; Save-Shot '03-row-activate'
+Send-Click $walk.SettingsBtn; Save-Shot '04-settings-open'
+Send-Click $walk.DialogCancel; Save-Shot '05-settings-cancel'
+Send-Click $walk.ScanBtn
 Start-Sleep -Milliseconds 1500
 Save-Shot '06-scanning'
 Write-Host '==> waiting for the measured scan'

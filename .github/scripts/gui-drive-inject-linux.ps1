@@ -3,10 +3,10 @@
 # walk" steps), Linux leg:
 # OS-LEVEL INPUT INJECTION with xdotool under xvfb (run this whole script via
 # `xvfb-run -a pwsh ...` so DISPLAY reaches the app, xdotool, and the capture
-# alike). Same walk, coordinates, and pixel-change assert as the Windows leg
-# (see gui-drive-inject-windows.ps1) — the logical layout is identical across
-# platforms (bundled fonts, pinned 880x960 geometry, dark theme, isolated
-# config), so one coordinate table serves both. Under bare Xvfb there is no
+# alike). Same walk, coordinates and pixel-change assert as the Windows leg
+# (see gui-drive-inject-windows.ps1); the targets come from the shared
+# _gui-walk.ps1, which carries why one table serves every leg. Under bare
+# Xvfb there is no
 # window manager: the window sits undecorated at its X11 position, and
 # `xdotool getwindowgeometry` gives the client origin directly.
 param(
@@ -64,29 +64,25 @@ function Save-Shot([string]$Name) {
     if ($LASTEXITCODE -ne 0) { Write-Host "!! capture failed for $Name" }
 }
 
-function Send-Click([double]$Lx, [double]$Ly) {
-    $px = [int][math]::Round($gx + ($Lx * $scale))
-    $py = [int][math]::Round($gy + ($Ly * $scale))
+function Send-Click([double[]]$Target) {
+    $px = [int][math]::Round($gx + ($Target[0] * $scale))
+    $py = [int][math]::Round($gy + ($Target[1] * $scale))
     & xdotool mousemove --sync $px $py click 1
     Start-Sleep -Milliseconds 900
 }
 
-# The shared logical coordinate table — see gui-drive-inject-windows.ps1.
-$SelectAll = @(111, 127)
-$LengthHeader = @(484, 170)
-$FirstRow = @(110, 206)
-$SettingsBtn = @(817, ($logicalH - 29))
-$DialogCancel = @(538, (($logicalH / 2) + 165))
-$ScanBtn = @(566, ($logicalH - 28))
+# The click targets, from the table all three injected legs share.
+. (Join-Path $PSScriptRoot '_gui-walk.ps1')
+$walk = Get-GuiWalkTargets -LogicalHeight $logicalH
 
 Save-Shot '00-listed'
 
-Send-Click @SelectAll; Save-Shot '01-select-all'
-Send-Click @LengthHeader; Save-Shot '02-sort-length'
-Send-Click @FirstRow; Save-Shot '03-row-activate'
-Send-Click @SettingsBtn; Save-Shot '04-settings-open'
-Send-Click @DialogCancel; Save-Shot '05-settings-cancel'
-Send-Click @ScanBtn
+Send-Click $walk.SelectAll; Save-Shot '01-select-all'
+Send-Click $walk.LengthHeader; Save-Shot '02-sort-length'
+Send-Click $walk.FirstRow; Save-Shot '03-row-activate'
+Send-Click $walk.SettingsBtn; Save-Shot '04-settings-open'
+Send-Click $walk.DialogCancel; Save-Shot '05-settings-cancel'
+Send-Click $walk.ScanBtn
 Start-Sleep -Milliseconds 1500
 Save-Shot '06-scanning'
 Write-Host '==> waiting for the measured scan'
