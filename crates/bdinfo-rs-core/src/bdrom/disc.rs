@@ -4296,14 +4296,6 @@ mod tests {
             }
         }
 
-        fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-            Ok(Vec::new())
-        }
-
-        fn get_files_pattern(&self, _pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-            Ok(Vec::new())
-        }
-
         fn get_files_pattern_option(
             &self,
             _pattern: &str,
@@ -4521,6 +4513,11 @@ mod tests {
             None
         }
 
+        // Both convenience methods are provided by `BdDir`; these overrides
+        // exist so this fake ticks its failure countdown once per call and
+        // lists every file whatever the pattern — the provided bodies would
+        // route through `get_files_pattern_option`, tick there instead, and
+        // filter by `collect_matching`'s exact-name rule.
         fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
             self.trip.tick()?;
             Ok(self.files.iter().cloned().map(|f| -> Box<dyn BdFile> { Box::new(f) }).collect())

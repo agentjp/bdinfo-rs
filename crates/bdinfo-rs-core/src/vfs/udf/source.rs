@@ -512,14 +512,6 @@ impl BdDir for UdfDir {
         dir_at(&self.inner, pidx).map(|d| -> Box<dyn BdDir> { Box::new(d) })
     }
 
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern("*")
-    }
-
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
-    }
-
     fn get_files_pattern_option(
         &self,
         pattern: &str,

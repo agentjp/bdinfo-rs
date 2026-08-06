@@ -142,14 +142,6 @@ impl<F: BdFile + Clone + 'static> BdDir for Node<F> {
         None
     }
 
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-        Ok(self.files.iter().map(|f| Box::new(f.clone()) as Box<dyn BdFile>).collect())
-    }
-
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
-    }
-
     fn get_files_pattern_option(
         &self,
         pattern: &str,

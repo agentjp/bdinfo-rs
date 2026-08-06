@@ -96,18 +96,31 @@ pub trait BdDir {
 
     /// Every file directly in this directory.
     ///
+    /// Provided as the match-everything pattern `*` handed to
+    /// [`get_files_pattern`](BdDir::get_files_pattern), so a backend writes
+    /// [`get_files_pattern_option`](BdDir::get_files_pattern_option) alone and
+    /// gets both convenience forms. Overriding stays open — for a listing
+    /// cheaper than a glob pass, or a fake that must fail at this call and not
+    /// at the glob one.
+    ///
     /// # Errors
     /// Propagates the underlying IO error if the directory cannot be read.
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>>;
+    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
+        self.get_files_pattern("*")
+    }
 
     /// Files in this directory matching `pattern`.
     ///
     /// `pattern` is an ASCII case-insensitive glob (`*` = any run, `?` = any one
-    /// character); see [`get_files_pattern_option`](BdDir::get_files_pattern_option).
+    /// character); this is provided as
+    /// [`get_files_pattern_option`](BdDir::get_files_pattern_option) with
+    /// [`SearchOption::TopDirectoryOnly`].
     ///
     /// # Errors
     /// Propagates the underlying IO error if the directory cannot be read.
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>>;
+    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
+        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
+    }
 
     /// Files matching `pattern`, optionally recursing into subdirectories.
     ///

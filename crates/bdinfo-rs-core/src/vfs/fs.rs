@@ -274,14 +274,6 @@ impl BdDir for FsDir {
         Some(Box::new(self.related(parent.to_path_buf())))
     }
 
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern("*")
-    }
-
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
-    }
-
     fn get_files_pattern_option(
         &self,
         pattern: &str,
