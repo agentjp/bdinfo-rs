@@ -40,14 +40,13 @@
 //! so a seed means the same disc to both harnesses. A missing or truncated
 //! section leaves its file empty (the resilient-open absence path).
 
-// `BdmvDir`/`SeekFrom` are named only by the web-path logic and the reader math
-// (`assemble_tree`/`seek_target`) — tested natively, but absent from a native
-// NON-test build, so gate them to where they live to stay dead-code-clean.
-// `BufRead`/`BufReader`/`Read`/`Seek`/`ReadSeek`/`JsCast`/`JsValue` are named
-// only by the wasm32 browser glue.
-use std::io;
+// `BdmvDir`/`SeekFrom`/`io`/`glob_ci`/`BdFile`/`SearchOption` are named only by
+// the web-path logic and the reader math (`Node`/`assemble_tree`/`seek_target`)
+// — tested natively, but absent from a native NON-test build, so gate them to
+// where they live to stay dead-code-clean. `BufRead`/`BufReader`/`Read`/`Seek`/
+// `ReadSeek`/`JsCast`/`JsValue` are named only by the wasm32 browser glue.
 #[cfg(any(target_arch = "wasm32", test))]
-use std::io::SeekFrom;
+use std::io::{self, SeekFrom};
 #[cfg(target_arch = "wasm32")]
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::sync::atomic::AtomicBool;
@@ -62,9 +61,12 @@ use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 #[cfg(target_arch = "wasm32")]
 use bdinfo_rs_core::vfs::ReadSeek;
+#[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::vfs::fs::glob_ci;
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
-use bdinfo_rs_core::vfs::{BdDir, BdFile, SearchOption, mem};
+use bdinfo_rs_core::vfs::{BdDir, mem};
+#[cfg(any(target_arch = "wasm32", test))]
+use bdinfo_rs_core::vfs::{BdFile, SearchOption};
 use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
@@ -92,7 +94,9 @@ const READ_WINDOW: usize = 1_048_576; // 1 MiB
 /// Production fills it with the file-backed [`WebFile`]; the native tests
 /// drive the same walk with the core in-memory file ([`mem::MemFile`]), so
 /// the directory walk, glob matching, and recursion behave identically
-/// whatever the bytes are backed by.
+/// whatever the bytes are backed by — hence the same
+/// `cfg(any(wasm32, test))` gate as the rest of the web-path logic.
+#[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone)]
 struct Node<F> {
     name: String,
@@ -101,12 +105,14 @@ struct Node<F> {
     files: Vec<F>,
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl<F> Node<F> {
     fn dir(name: &str, full: &str) -> Self {
         Self { name: name.to_owned(), full: full.to_owned(), dirs: Vec::new(), files: Vec::new() }
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl<F: BdFile + Clone + 'static> Node<F> {
     fn collect_pattern(&self, pattern: &str, recurse: bool, out: &mut Vec<Box<dyn BdFile>>) {
         for f in &self.files {
@@ -122,6 +128,7 @@ impl<F: BdFile + Clone + 'static> Node<F> {
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl<F: BdFile + Clone + 'static> BdDir for Node<F> {
     fn name(&self) -> &str {
         &self.name
@@ -160,6 +167,10 @@ impl<F: BdFile + Clone + 'static> BdDir for Node<F> {
 
 /// The extension *including* the leading dot, e.g. `.mpls`; the empty string
 /// when the name has no `.`.
+///
+/// Named only by [`WebFile::extension`] and its native test — the same
+/// `cfg(any(wasm32, test))` gate as the rest of the browser glue's helpers.
+#[cfg(any(target_arch = "wasm32", test))]
 fn extension_of(name: &str) -> &str {
     name.rfind('.').and_then(|i| name.get(i..)).unwrap_or("")
 }
