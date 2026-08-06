@@ -1,0 +1,250 @@
+# The one body shared by every cargo-mutants job: ci.yml's three advisory
+# PR-diff jobs and the full-sweep legs sweep-mutants.yml runs for sweep.yml.
+# A COMPOSITE action rather than a reusable workflow, deliberately: a failure
+# inside a called workflow reddens its caller, and ci.yml's callers sit in
+# ci-ok's `needs`, so packaging the advisory jobs' body as a reusable would
+# silently promote them to gating (ci.yml's header documents the posture). A
+# composite's failure surfaces on the calling job itself, which ci-ok never
+# reads.
+#
+# The skeleton: optional full-sweep marker short-circuit (compute key →
+# restore) → rust-cache → install cargo-mutants + cargo-nextest → run. The
+# real per-crate differences ride as inputs.
+#
+# Both run steps build with CARGO_INCREMENTAL=1: cargo-mutants rebuilds the
+# tree once per mutant, each rebuild differing from the last by one function
+# body — exactly the case incremental compilation is built for, and the
+# reason a mutation run is affordable at all. This overrides the
+# CARGO_INCREMENTAL=0 that ci.yml sets workflow-wide to keep archived caches
+# small, at exactly the steps that invoke cargo.
+name: mutate-crate
+description: >-
+  Run cargo-mutants over a crate — the pull request's diff or the full mutant
+  list — behind the shared marker/cache/install skeleton.
+
+inputs:
+  mode:
+    description: >-
+      `pr-diff` mutates the pull request's committed diff under
+      `working-directory` (needs a fetch-depth-0 checkout to reach the base
+      branch); `full` mutates the whole crate, or one `shard` of it.
+    required: true
+  working-directory:
+    description: >-
+      Directory cargo runs in — the repository root, or an excluded sibling
+      crate whose `../bdinfo-rs-core` path dependency requires `--in-place`
+      in `mutants-args` (cargo-mutants' default temp copy does not carry a
+      path dependency).
+    required: false
+    default: .
+  shard:
+    description: >-
+      A `k/N` value for `cargo mutants --shard` (`full` mode only); empty
+      runs unsharded.
+    required: false
+    default: ''
+  mutants-args:
+    description: >-
+      Extra cargo-mutants arguments — `--in-place` for the path-dependency
+      crates, `--workspace` where a workspace member's tests are the mutant
+      killers.
+    required: false
+    default: ''
+  extra-env:
+    description: >-
+      KEY=VALUE lines exported into the run step's environment, for what the
+      mutants' test suite needs (e.g. a deterministic software renderer on a
+      GPU-less runner).
+    required: false
+    default: ''
+  marker-prefix:
+    description: >-
+      Full-sweep marker key prefix (e.g. `gui-mutants-ok`); empty disables
+      the marker short-circuit. A marker hit means the byte-identical tree
+      already passed a green full sweep, which subsumes both a re-run and any
+      diff slice — every later step is skipped.
+    required: false
+    default: ''
+  marker-paths:
+    description: >-
+      Space-separated repository paths whose committed object hashes form the
+      marker key — everything that can change the crate's mutants verdict.
+    required: false
+    default: ''
+  marker-fold:
+    description: >-
+      `sha256` folds the hash list through sha256sum to keep a many-path key
+      short; empty joins the hashes with `-` verbatim.
+    required: false
+    default: ''
+  save-marker:
+    description: >-
+      `true` writes and saves the marker after a green run. Only a job whose
+      run covers the WHOLE crate may pass it — a diff slice proves nothing
+      about the rest of the crate, so the PR-diff jobs stay restore-only, and
+      the sharded sweep legs save through their caller's fan-in job instead,
+      after ALL shards ran green.
+    required: false
+    default: 'false'
+  cache-workspaces:
+    description: >-
+      Swatinem/rust-cache `workspaces` — the sibling-crate jobs point it at
+      their crate; empty keeps the root default.
+    required: false
+    default: ''
+  cache-shared-key:
+    description: >-
+      Swatinem/rust-cache `shared-key` — the sweep legs share one lineage per
+      crate so N shards' identical baselines do not save N multi-GB archives
+      into the repository's least-recently-used cache budget.
+    required: false
+    default: ''
+  cache-lookup-only:
+    description: >-
+      Swatinem/rust-cache `lookup-only` — the sweep's tag legs build fresh so
+      a cache poisoned elsewhere cannot taint a release-adjacent run.
+    required: false
+    default: 'false'
+  cache-save-if:
+    description: >-
+      Swatinem/rust-cache `save-if`. The default always saves — right for the
+      PR-diff jobs, which are PR-only (a master-gated save would never write,
+      and their own PR-scoped save speeds the next push to the same PR); the
+      sweep legs gate it to master.
+    required: false
+    default: 'true'
+
+outputs:
+  marker-key:
+    description: >-
+      The computed full-sweep marker key; empty when `marker-prefix` is
+      empty.
+    value: ${{ steps.key.outputs.key }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute the full-sweep marker key
+      id: key
+      if: inputs.marker-prefix != ''
+      shell: bash
+      env:
+        PREFIX: ${{ inputs.marker-prefix }}
+        PATHS: ${{ inputs.marker-paths }}
+        FOLD: ${{ inputs.marker-fold }}
+      run: |
+        # ONE construction site on purpose: the sweep's full legs and ci.yml's
+        # advisory PR-diff jobs must produce byte-identical keys for the same
+        # tree — a green full sweep saves the marker, the PR jobs
+        # short-circuit on it — so both sides reach this step with the same
+        # inputs and the key format lives nowhere else. Keep both formats
+        # stable: a changed key orphans every saved marker silently.
+        specs=""
+        for p in $PATHS; do
+          specs="$specs HEAD:$p"
+        done
+        # shellcheck disable=SC2086 # word-splitting $specs is the point
+        hashes=$(git rev-parse $specs)
+        echo "$hashes"
+        if [ "$FOLD" = sha256 ]; then
+          key="$PREFIX-$(echo "$hashes" | sha256sum | cut -d' ' -f1)"
+        else
+          key="$PREFIX-$(printf '%s' "$hashes" | tr '\n' '-')"
+        fi
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+
+    # Restore-only: whether and where the marker gets SAVED is the caller's
+    # decision (`save-marker`, or a fan-in job after a sharded run).
+    - name: Restore the full-sweep marker
+      id: marker
+      if: inputs.marker-prefix != ''
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .mutants-ok
+        key: ${{ steps.key.outputs.key }}
+
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      if: steps.marker.outputs.cache-hit != 'true'
+      with:
+        workspaces: ${{ inputs.cache-workspaces }}
+        shared-key: ${{ inputs.cache-shared-key }}
+        lookup-only: ${{ inputs.cache-lookup-only }}
+        save-if: ${{ inputs.cache-save-if }}
+
+    # `fallback: none`: install only from the action's checksummed manifest,
+    # never its runtime-resolved cargo-binstall fallback (rationale in
+    # core.yml).
+    - name: Install mutation tools
+      if: steps.marker.outputs.cache-hit != 'true'
+      uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      with:
+        tool: cargo-mutants,cargo-nextest
+        fallback: none
+
+    - name: Mutate the PR diff
+      if: inputs.mode == 'pr-diff' && steps.marker.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CARGO_INCREMENTAL: '1'   # cargo-mutants' rebuild model — see the header
+        WORK_DIR: ${{ inputs.working-directory }}
+        MUTANTS_ARGS: ${{ inputs.mutants-args }}
+        EXTRA_ENV: ${{ inputs.extra-env }}
+      run: |
+        while IFS= read -r kv; do
+          [ -n "$kv" ] && export "$kv"
+        done <<< "$EXTRA_ENV"
+        cd "$WORK_DIR"
+        # HEAD is the PR merge commit, so this three-dot diff is exactly the
+        # pull request's effective diff against its base. --relative both
+        # scopes the diff to this directory and makes its paths match
+        # cargo-mutants' working directory (a no-op at the repository root).
+        #
+        # --no-renames is LOAD-BEARING: with rename detection on (git's
+        # default), a moved file becomes a `rename from/to` hunk carrying
+        # only the lines that changed relative to the old path, and
+        # `cargo mutants --in-diff` (27.1.0) then produces NO mutants for the
+        # WHOLE diff — logging only "No mutants to filter" and exiting 0, so
+        # a move-heavy PR's mutation check passes having tested nothing.
+        # Measured 2026-08-05 on a pull request moving one source file
+        # between crates: 19 mutants with --no-renames, 0 without.
+        git diff --relative --no-renames "origin/${GITHUB_BASE_REF}...HEAD" --output "$RUNNER_TEMP/pr.diff"
+        if [ ! -s "$RUNNER_TEMP/pr.diff" ]; then
+          echo "no changes under $WORK_DIR in this PR — nothing to mutate"
+          exit 0
+        fi
+        # shellcheck disable=SC2086 # $MUTANTS_ARGS carries whole flags
+        cargo mutants --no-shuffle --in-diff "$RUNNER_TEMP/pr.diff" $MUTANTS_ARGS
+
+    - name: Mutate the crate
+      if: inputs.mode == 'full' && steps.marker.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CARGO_INCREMENTAL: '1'   # cargo-mutants' rebuild model — see the header
+        WORK_DIR: ${{ inputs.working-directory }}
+        SHARD: ${{ inputs.shard }}
+        MUTANTS_ARGS: ${{ inputs.mutants-args }}
+        EXTRA_ENV: ${{ inputs.extra-env }}
+      run: |
+        while IFS= read -r kv; do
+          [ -n "$kv" ] && export "$kv"
+        done <<< "$EXTRA_ENV"
+        cd "$WORK_DIR"
+        # --in-place: each leg owns its runner's checkout, so the temp copy
+        # buys nothing, and the path-dependency crates cannot use one anyway;
+        # --no-shuffle keeps a shard partition deterministic.
+        # shellcheck disable=SC2086 # $MUTANTS_ARGS carries whole flags
+        cargo mutants --in-place --no-shuffle ${SHARD:+--shard "$SHARD"} $MUTANTS_ARGS
+
+    - name: Write the marker
+      if: inputs.save-marker == 'true' && steps.marker.outputs.cache-hit != 'true'
+      shell: bash
+      run: echo ok > .mutants-ok
+
+    # Reached only when every prior step succeeded, so the save attests a
+    # green run.
+    - name: Save the marker (green run only)
+      if: inputs.save-marker == 'true' && steps.marker.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: .mutants-ok
+        key: ${{ steps.key.outputs.key }}

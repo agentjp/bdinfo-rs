@@ -1,0 +1,168 @@
+name: sweep-mutants
+
+# The full-crate cargo-mutants leg of the daily sweep, one workflow_call per
+# crate from sweep.yml: a shard-matrix `mutate` job wrapping the mutate-crate
+# composite action, plus a `marker` fan-in that saves the crate's tree-hash
+# marker once every shard ran green. One call per crate keeps the rolling
+# failure issue's granularity — each caller job reddens on its own crate's
+# legs alone.
+#
+# Called only from sweep.yml, and it must stay a LEAF: workflow_call nesting
+# is capped at 4 connected levels and sweep.yml → ci.yml → core.yml already
+# uses 3, so a reusable reached from any deeper caller would sit at the
+# ceiling. The advisory PR-diff mutation jobs must never move in here either
+# — a failure inside a called workflow reddens its caller, which for ci.yml
+# means silently promoting an advisory job to a gating one (ci.yml's header);
+# they share the composite action instead.
+
+on:
+  workflow_call:
+    inputs:
+      shards:
+        description: >-
+          JSON array of `k/N` values for `cargo mutants --shard`, one matrix
+          leg each; the default single empty string runs the crate unsharded
+          in one leg.
+        required: false
+        type: string
+        default: '[""]'
+      working-directory:
+        description: Directory cargo runs in (see the composite's input).
+        required: false
+        type: string
+        default: .
+      marker-prefix:
+        description: >-
+          Full-sweep marker key prefix. The composite builds the key, so a
+          caller that passes the same prefix and paths gets the byte-identical
+          key — which is how ci.yml's advisory PR-diff jobs short-circuit on a
+          marker saved here.
+        required: true
+        type: string
+      marker-paths:
+        description: >-
+          Space-separated repository paths whose committed object hashes form
+          the marker key (see the composite's input).
+        required: true
+        type: string
+      marker-fold:
+        description: >-
+          `sha256` folds the hash list; empty joins it verbatim (see the
+          composite's input).
+        required: false
+        type: string
+        default: ''
+      marker-save:
+        description: >-
+          `fan-in` saves the marker from the `marker` job after ALL shards ran
+          green; `inline` lets the single unsharded leg save its own marker and
+          skips the fan-in.
+        required: false
+        type: string
+        default: fan-in
+      mutants-args:
+        description: Extra cargo-mutants arguments (see the composite's input).
+        required: false
+        type: string
+        default: ''
+      extra-env:
+        description: >-
+          KEY=VALUE lines the mutants' test suite needs (see the composite's
+          input).
+        required: false
+        type: string
+        default: ''
+      cache-workspaces:
+        description: Swatinem/rust-cache `workspaces` (see the composite's input).
+        required: false
+        type: string
+        default: ''
+      cache-shared-key:
+        description: >-
+          Swatinem/rust-cache `shared-key` — one lineage per crate, shared by
+          all its shards (see the composite's input).
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  # Line tables instead of full DWARF, to hold down the target/ the legs
+  # archive through rust-cache (ci.yml carries the full rationale). Declared
+  # here because a called workflow inherits none of its caller's env. No
+  # CARGO_INCREMENTAL: the composite sets it to 1 itself.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  mutate:
+    name: mutants${{ matrix.shard != '' && format(' (shard {0})', matrix.shard) || '' }}
+    # x64: taiki-e/install-action's cargo-mutants manifest carries no aarch64
+    # Linux asset (ci.yml's `mutants` job documents the gap).
+    runs-on: ubuntu-latest
+    outputs:
+      # Identical across legs (each computes it from the same HEAD), so the
+      # matrix-output last-writer-wins rule is harmless; the fan-in reuses it
+      # instead of recomputing.
+      key: ${{ steps.mutate.outputs.marker-key }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(inputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Mutate
+        id: mutate
+        uses: ./.github/actions/mutate-crate
+        with:
+          mode: full
+          shard: ${{ matrix.shard }}
+          working-directory: ${{ inputs.working-directory }}
+          marker-prefix: ${{ inputs.marker-prefix }}
+          marker-paths: ${{ inputs.marker-paths }}
+          marker-fold: ${{ inputs.marker-fold }}
+          mutants-args: ${{ inputs.mutants-args }}
+          extra-env: ${{ inputs.extra-env }}
+          cache-workspaces: ${{ inputs.cache-workspaces }}
+          cache-shared-key: ${{ inputs.cache-shared-key }}
+          # Tag legs build fresh and never save: a cache poisoned elsewhere
+          # must not taint a release-adjacent run. Schedule runs execute on
+          # master, so their saves seed every pull request.
+          cache-lookup-only: ${{ startsWith(github.ref, 'refs/tags/') }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
+          save-marker: ${{ inputs.marker-save == 'inline' }}
+
+  # The marker fan-in for sharded calls: runs only when every leg succeeded
+  # (default `needs` semantics), so the one saved marker attests the WHOLE
+  # crate passed. Probes first: on a marker hit the legs all short-circuited
+  # and the key already exists — saving it again would only warn. An
+  # `inline`-saving call skips this job, and a skipped job counts as success
+  # for the caller.
+  marker:
+    name: marker
+    needs: [mutate]
+    if: inputs.marker-save == 'fan-in'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe for an existing marker
+        id: marker
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ needs.mutate.outputs.key }}
+          lookup-only: true
+
+      - name: Write the marker
+        if: steps.marker.outputs.cache-hit != 'true'
+        run: echo ok > .mutants-ok
+
+      - name: Save the marker (all shards green)
+        if: steps.marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mutants-ok
+          key: ${{ needs.mutate.outputs.key }}

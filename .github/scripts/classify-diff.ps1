@@ -295,6 +295,13 @@ begin {
             Match      = { param($f) $f -eq '.github/zizmor.yml' }
         },
         @{
+            Name       = 'mutation composite action'
+            Areas      = @('core', 'gui', 'wasm', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The mutate-crate composite is the body of the three advisory PR-diff mutation jobs, which the core, gui and wasm areas gate; action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
+            Match      = { param($f) Test-Match $f @('.github/actions/mutate-crate/*') }
+        },
+        @{
             Name       = 'source rule script'
             Areas      = @('core')
             Structural = $true
@@ -501,7 +508,9 @@ end {
             @{ Path = '.github/workflows/core.yml'; Areas = 'core deps dist fuzz links pkg typos workflows yaml' }
             @{ Path = '.github/workflows/repo.yml'; Areas = 'links toml typos workflows yaml' }
             @{ Path = '.github/workflows/gui.yml'; Areas = 'gui links typos workflows yaml' }
+            @{ Path = '.github/workflows/sweep-mutants.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/workflows/docker.yml'; Areas = 'links typos workflows yaml' }
+            @{ Path = '.github/actions/mutate-crate/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }

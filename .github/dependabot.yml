@@ -38,7 +38,14 @@ updates:
       include: scope
 
   - package-ecosystem: github-actions
-    directory: "/"
+    # "/" reaches the workflow files under .github/workflows plus a root-level
+    # action.yml only — pinned `uses:` inside the composite actions under
+    # .github/actions/*/action.yml sit outside it and need their directories
+    # listed (GitHub's dependabot.yml reference, checked 2026-08-06). The glob
+    # covers every composite, present and future, without further edits here.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: daily
     groups:
