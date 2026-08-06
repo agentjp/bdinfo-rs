@@ -360,6 +360,13 @@ begin {
             Match      = { param($f) Test-Match $f @('.github/actions/lint-crate/*') }
         },
         @{
+            Name       = 'gui packaging composite action'
+            Areas      = @('gui', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The gui-package composite is the body of gui.yml''s packaging smoke, the only pull-request job that runs it; the gui-release.yml lane shares it but runs on a tag or a dispatch. action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
+            Match      = { param($f) Test-Match $f @('.github/actions/gui-package/*') }
+        },
+        @{
             Name       = 'source rule script'
             Areas      = @('core')
             Structural = $true
@@ -370,8 +377,8 @@ begin {
             Name       = 'gui gate scripts'
             Areas      = @('gui')
             Structural = $true
-            Why        = 'The gui workflow runs these directly. The publishing helpers are named publish-gui-* so that this pattern cannot reach them.'
-            Match      = { param($f) (Test-Match $f @('.github/scripts/gui-*.ps1')) }
+            Why        = 'The gui workflow runs these directly, and _gui-walk.ps1 is the click-target table its three injected drive legs dot-source. The publishing helpers are named publish-gui-* so that this pattern cannot reach them.'
+            Match      = { param($f) (Test-Match $f @('.github/scripts/gui-*.ps1', '.github/scripts/_gui-walk.ps1')) }
         },
         @{
             Name       = 'wasm gate script'
@@ -575,7 +582,9 @@ end {
             @{ Path = '.github/actions/msrv-check/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
             @{ Path = '.github/actions/fuzz-toolchain/action.yml'; Areas = 'fuzz links typos workflows yaml' }
             @{ Path = '.github/actions/lint-crate/action.yml'; Areas = 'gui links typos wasm workflows yaml' }
+            @{ Path = '.github/actions/gui-package/action.yml'; Areas = 'gui links typos workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
+            @{ Path = '.github/scripts/_gui-walk.ps1'; Areas = 'gui links typos' }
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }

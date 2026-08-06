@@ -89,19 +89,26 @@ else {
     $title = 28.0
     $scale = $gw / 880.0
     $logicalH = ($gh - $title) / $scale
-    function Send-Click([double]$Lx, [double]$Ly) {
-        $px = [int][math]::Round($gx + ($Lx * $scale))
-        $py = [int][math]::Round($gy + $title + ($Ly * $scale))
+    function Send-Click([double[]]$Target) {
+        $px = [int][math]::Round($gx + ($Target[0] * $scale))
+        $py = [int][math]::Round($gy + $title + ($Target[1] * $scale))
         $out = & cliclick "c:$px,$py" 2>&1
         if ($LASTEXITCODE -ne 0) { $script:failures += "cliclick c:${px},${py}: $out"; Write-Host "!! $out" }
         Start-Sleep -Milliseconds 900
     }
+    # The click targets, from the table all three injected legs share. This leg
+    # deliberately walks a SHORTER route than the other two — it stops before
+    # the measured scan and never uses FirstRow or ScanBtn — because the point
+    # here is to record where the Accessibility wall is, not to complete the
+    # walk. Its pixel-change assert therefore compares 02-sort-length against
+    # 04-settings-open, with no 03-row-activate between them.
+    . (Join-Path $PSScriptRoot '_gui-walk.ps1')
+    $walk = Get-GuiWalkTargets -LogicalHeight $logicalH
     Save-Shot '00-listed'
-    # The shared logical coordinate table — see gui-drive-inject-windows.ps1.
-    Send-Click 111 127; Save-Shot '01-select-all'
-    Send-Click 484 170; Save-Shot '02-sort-length'
-    Send-Click 817 ($logicalH - 29); Save-Shot '04-settings-open'
-    Send-Click 538 (($logicalH / 2) + 165); Save-Shot '05-settings-cancel'
+    Send-Click $walk.SelectAll; Save-Shot '01-select-all'
+    Send-Click $walk.LengthHeader; Save-Shot '02-sort-length'
+    Send-Click $walk.SettingsBtn; Save-Shot '04-settings-open'
+    Send-Click $walk.DialogCancel; Save-Shot '05-settings-cancel'
     # Same hard assert as the other legs: the Settings click must change the
     # window pixels vs the shot before it. Now robust — the shots are cropped
     # to the window rect, so the menu-bar clock is out of frame.
