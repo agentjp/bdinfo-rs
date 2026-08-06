@@ -93,9 +93,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # cargo-fuzz needs nightly. Keep in lockstep with core.yml NIGHTLY and
-  # $script:Nightly in scripts/_common.ps1.
-  NIGHTLY: nightly-2026-07-06
   # Per-unit guards (mirror scripts/fuzz-docker.sh): -timeout bounds a single
   # unit's wall time (non-termination guard); -rss_limit_mb bounds its memory
   # (allocation-amplification guard). Both turn a hang or an allocation blow-up
@@ -208,7 +205,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
+      # cargo-fuzz and libFuzzer need a nightly toolchain.
       - name: Install pinned nightly
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           rustup toolchain install "$NIGHTLY" --profile minimal
           rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
@@ -245,8 +248,8 @@ jobs:
       # runs that action with `fallback: none` so a manifest-missing tool fails
       # loudly instead of resolving through its unpinned cargo-binstall fallback
       # (rationale in core.yml). core.yml's replay job compiles the pinned version
-      # and OWNS the save of this cache entry on master; both keys must stay
-      # identical, as must the pin — version-freshness.yml enforces the pin.
+      # and OWNS the save of this cache entry on master; both keys are built from
+      # the same manifest value and must stay identical.
       # Restoring an EXECUTABLE is the one place cache poisoning would matter, so
       # tag runs skip the restore and compile it, exactly as before.
       - name: Restore the pinned cargo-fuzz binary (non-tag runs)
@@ -255,16 +258,20 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-${{ runner.os }}-0.13.2
+          key: cargo-fuzz-${{ runner.os }}-${{ steps.pins.outputs.CARGO_FUZZ }}
 
-      - name: Install cargo-fuzz 0.13.2
+      - name: Install the pinned cargo-fuzz
         if: ${{ steps.fuzz-bin.outputs.cache-hit != 'true' }}
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        env:
+          CARGO_FUZZ: ${{ steps.pins.outputs.CARGO_FUZZ }}
+        run: cargo install cargo-fuzz --version "$CARGO_FUZZ" --locked
 
       - name: Verify the committed fuzz lockfile is in sync
         # cargo-fuzz's `run` has no --locked flag (it forwards everything after
         # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
         # cargo command up front; this also pre-fetches the deps for the build.
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
 
       # The accumulated corpus: everything earlier runs found that the committed
@@ -355,6 +362,8 @@ jobs:
       # finds would then be unattributable to the width.
       - name: Fresh-fuzz ${{ matrix.target }} (${{ matrix.arch }})
         id: run
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           flags=$(awk -v t="$TARGET" -v dir="$PWD/fuzz" '
             !/^[[:space:]]*#/ && $1 == t {
@@ -427,6 +436,8 @@ jobs:
       - name: Quarantine the crashing unit
         id: crash
         if: ${{ steps.run.outputs.rc != '0' }}
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           repro=$(find fuzz/artifacts -type f ! -name 'slow-unit-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
           find fuzz/artifacts -type f ! -name 'slow-unit-*' -print0 2>/dev/null | xargs -0 -r sha1sum | cut -c1-40 | sort -u > crash-hashes.txt
@@ -465,6 +476,8 @@ jobs:
       - name: Minimise and collect the new units
         id: collect
         if: ${{ !cancelled() }}
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           # Every corpus file whose bytes are not in the committed seed set.
           new_units() {

@@ -81,6 +81,15 @@ begin {
     # sources reach `core` alone.
     $script:CoreDependents = @('core', 'gui', 'wasm', 'fuzz')
 
+    # The areas whose jobs install a tool or toolchain named in .github/pins.env,
+    # and so change their verdict when a pin — or the machinery that reads one —
+    # changes: the nightly reaches core, gui, wasm and the corpus replay; cargo-vet
+    # reaches deps; the two Linux packagers reach pkg and the gui packaging smoke;
+    # ryl reaches the YAML lint and taplo the TOML lint. The remaining pins (npm,
+    # wrangler, komac, cloudsmith-cli, appimagetool) are read only by the tag and
+    # dispatch publishing lanes, which no pull-request job runs.
+    $script:PinConsumers = @('core', 'gui', 'wasm', 'fuzz', 'deps', 'pkg', 'yaml', 'toml')
+
     function Test-Match {
         param([string] $File, [string[]] $Patterns)
 
@@ -295,6 +304,34 @@ begin {
             Match      = { param($f) $f -eq '.github/zizmor.yml' }
         },
         @{
+            Name       = 'pin manifest'
+            Areas      = $script:PinConsumers
+            Structural = $true
+            Why        = 'The one home for every hand-maintained tool and toolchain version. A change here changes which compiler or tool those jobs install, so it has to reach all of them.'
+            Match      = { param($f) $f -eq '.github/pins.env' }
+        },
+        @{
+            Name       = 'pin composite action'
+            Areas      = $script:PinConsumers + @('workflows')
+            Structural = $true
+            Why        = 'Every job that installs a pinned tool reads the manifest through this action, so a break in it is a break in all of them; action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
+            Match      = { param($f) Test-Match $f @('.github/actions/pins/*') }
+        },
+        @{
+            Name       = 'wasm build composite action'
+            Areas      = @('wasm', 'yaml', 'workflows')
+            Structural = $true
+            Why        = 'The action installs the wasm32 target, the wasm-bindgen CLI and Node for the wasm gate; the npm publish and the demo deploy also use it, and neither runs on a pull request.'
+            Match      = { param($f) Test-Match $f @('.github/actions/wasm-build/*') }
+        },
+        @{
+            Name       = 'shared script helpers'
+            Areas      = $script:PinConsumers
+            Structural = $true
+            Why        = 'Get-Pins here is the manifest''s only parser, called by the pins action on behalf of every job that installs a pinned tool. Its other functions are shared by the publishing lanes, which no pull-request job runs.'
+            Match      = { param($f) $f -eq '.github/scripts/_common.ps1' }
+        },
+        @{
             Name       = 'mutation composite action'
             Areas      = @('core', 'gui', 'wasm', 'yaml', 'workflows')
             Structural = $true
@@ -386,8 +423,8 @@ begin {
             Name       = 'publishing helpers'
             Areas      = @()
             Structural = $true
-            Why        = 'Run only by the tag and dispatch publishing lanes, which the orchestrator never calls; their dry runs verify them. _common.ps1 carries what those legs share and cloudsmith-push.ps1 the package push both the CLI and the GUI lane call, so the two are named here as well as the publish-* legs.'
-            Match      = { param($f) Test-Match $f @('.github/scripts/publish-*.ps1', '.github/scripts/_common.ps1', '.github/scripts/cloudsmith-push.ps1') }
+            Why        = 'Run only by the tag and dispatch publishing lanes, which the orchestrator never calls; their dry runs verify them. cloudsmith-push.ps1 is the package push both the CLI and the GUI lane call, so it is named here as well as the publish-* legs.'
+            Match      = { param($f) Test-Match $f @('.github/scripts/publish-*.ps1', '.github/scripts/cloudsmith-push.ps1') }
         },
         @{
             Name       = 'banned-word and classifier scripts'
@@ -511,11 +548,14 @@ end {
             @{ Path = '.github/workflows/sweep-mutants.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/workflows/docker.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/actions/mutate-crate/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
+            @{ Path = '.github/pins.env'; Areas = 'core deps fuzz gui links pkg toml typos wasm yaml' }
+            @{ Path = '.github/actions/pins/action.yml'; Areas = 'core deps fuzz gui links pkg toml typos wasm workflows yaml' }
+            @{ Path = '.github/actions/wasm-build/action.yml'; Areas = 'links typos wasm workflows yaml' }
             @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }
-            @{ Path = '.github/scripts/_common.ps1'; Areas = 'links typos' }
+            @{ Path = '.github/scripts/_common.ps1'; Areas = 'core deps fuzz gui links pkg toml typos wasm yaml' }
             @{ Path = '.github/scripts/cloudsmith-push.ps1'; Areas = 'links typos' }
             @{ Path = 'packaging/aur/PKGBUILD.template'; Areas = 'links typos' }
             @{ Path = 'Dockerfile'; Areas = 'links typos' }

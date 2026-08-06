@@ -28,17 +28,21 @@ TRIPLES=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl)
 OUT=dist-extra
 mkdir -p "$OUT"
 
-# The pure-Rust packagers, compiled from source (dist runs this file as a plain
-# shell script inside build-global-artifacts, so taiki-e/install-action — a `uses:`
-# step — is not available here; `cargo install` is the fallback). PINNED, because
-# this compile runs INSIDE dist's fail-fast release: a broken or schema-changing
-# upstream release would abort the ENTIRE release (all six binaries + every
-# channel), and only at tag time. The pins are the versions that shipped the last
-# release; version-freshness.yml nags when a newer one ships so the bump stays a
-# deliberate, reviewed change. Skip if a cached copy is already on PATH (re-runs /
-# future dist caching).
+# The versions of every hand-maintained tool in this repository, as KEY=VALUE
+# lines (the file's own header documents the format). This is the one consumer
+# that sources it rather than reading it through .github/actions/pins: dist runs
+# this file as a plain shell script inside build-global-artifacts, where a
+# `uses:` step does not exist.
+. "$(dirname "$0")/pins.env"
+
+# The pure-Rust packagers, compiled from source (`cargo install` is the only
+# channel available here, for the same reason). PINNED, because this compile runs
+# INSIDE dist's fail-fast release: a broken or schema-changing upstream release
+# would abort the ENTIRE release (all six binaries + every channel), and only at
+# tag time. Skip if a cached copy is already on PATH (re-runs / future dist
+# caching).
 command -v cargo-deb >/dev/null 2>&1 && command -v cargo-generate-rpm >/dev/null 2>&1 \
-  || cargo install --locked cargo-deb@3.7.0 cargo-generate-rpm@0.21.0
+  || cargo install --locked "cargo-deb@$CARGO_DEB" "cargo-generate-rpm@$CARGO_GENERATE_RPM"
 
 for triple in "${TRIPLES[@]}"; do
   archive="target/distrib/bdinfo-rs-${triple}.tar.gz"

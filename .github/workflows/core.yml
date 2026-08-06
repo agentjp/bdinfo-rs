@@ -71,9 +71,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The nightly that backs the `fmt` step (rustfmt.toml has nightly-only options).
-  # Keep in lockstep with $script:Nightly in scripts/_common.ps1.
-  NIGHTLY: nightly-2026-07-06
   # Keep the cached target/ small: no incremental-compilation metadata, and line
   # tables instead of full DWARF (still enough for file:line in a test
   # backtrace). A called workflow inherits none of its caller's env, so these are
@@ -208,8 +205,13 @@ jobs:
           fetch-depth: 0   # semver-checks needs the v* baseline tag
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Install pinned nightly rustfmt
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component rustfmt
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -240,7 +242,9 @@ jobs:
         run: ./.github/scripts/source-rules.ps1
 
       - name: Format (nightly rustfmt)
-        run: cargo +${{ env.NIGHTLY }} fmt --all --check
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: cargo "+$NIGHTLY" fmt --all --check
 
       - name: Clippy (-D warnings, pedantic/nursery/restriction)
         run: cargo lt
@@ -285,8 +289,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Install pinned nightly with llvm-tools
-        run: rustup toolchain install ${{ env.NIGHTLY }} --profile minimal --component llvm-tools-preview
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: rustup toolchain install "$NIGHTLY" --profile minimal --component llvm-tools-preview
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
@@ -299,7 +308,9 @@ jobs:
           fallback: none
 
       - name: Coverage (100% lines/regions/functions)
-        run: cargo +${{ env.NIGHTLY }} llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: cargo "+$NIGHTLY" llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 
   # The declared MSRV is enforced, not decorative: build the whole root workspace
   # with exactly the rust-version toolchain from Cargo.toml, read from the
@@ -511,13 +522,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       # The committed imports.lock omits the `user-id` publisher field that
       # cargo-vet 0.10.0 still rejects; 0.10.1+ relaxed it. Only 0.10.0 ships a
       # prebuilt binary anywhere (mozilla's release page and the install-action
-      # manifest both stop there), so 0.10.2 is compiled from crates.io once and
-      # cached — keep the cache key in lockstep with the install pin below,
-      # which version-freshness.yml watches. Keep both in lockstep with the
-      # version that writes supply-chain/.
+      # manifest both stop there), so the pinned version is compiled from
+      # crates.io once and cached. It must also be a version that can write
+      # supply-chain/.
       # The key carries `runner.arch` because the entry holds an EXECUTABLE and
       # `runner.os` is `Linux` on both the x64 and the arm64 runners: without it
       # an x86_64 binary would restore onto an arm64 host and fail to run.
@@ -526,11 +539,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-vet
-          key: cargo-vet-${{ runner.os }}-${{ runner.arch }}-0.10.2
+          key: cargo-vet-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.CARGO_VET }}
 
-      - name: Install cargo-vet 0.10.2 (cache miss)
+      - name: Install the pinned cargo-vet (cache miss)
         if: steps.vet-bin.outputs.cache-hit != 'true'
-        run: cargo install cargo-vet --version 0.10.2 --locked
+        env:
+          CARGO_VET: ${{ steps.pins.outputs.CARGO_VET }}
+        run: cargo install cargo-vet --version "$CARGO_VET" --locked
 
       - name: Vet the dependency tree against the committed store
         run: cargo vet --locked
@@ -601,7 +616,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Install pinned nightly
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           rustup toolchain install "$NIGHTLY" --profile minimal
           rustup target add "$FUZZ_TARGET" --toolchain "$NIGHTLY"
@@ -628,8 +648,7 @@ jobs:
       # cargo-fuzz is absent from taiki-e/install-action's manifest (101 tools at
       # the revision pinned in this file), so with the binstall fallback disabled
       # it has no prebuilt channel here. Compile the pinned version from crates.io
-      # once and cache the binary, the same lane cargo-vet uses; keep the pin equal
-      # to fuzz.yml's, which version-freshness.yml enforces and watches.
+      # once and cache the binary, the same lane cargo-vet uses.
       # NOT keyed by matrix.arch: cargo-fuzz is a HOST executable driving a
       # cross-compile, identical for both legs. On a cold cache both legs miss and
       # both save the same bytes; the loser logs a reserve conflict and moves on.
@@ -638,16 +657,20 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-fuzz
-          key: cargo-fuzz-${{ runner.os }}-0.13.2
+          key: cargo-fuzz-${{ runner.os }}-${{ steps.pins.outputs.CARGO_FUZZ }}
 
-      - name: Install cargo-fuzz 0.13.2 (cache miss)
+      - name: Install the pinned cargo-fuzz (cache miss)
         if: steps.fuzz-bin.outputs.cache-hit != 'true'
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        env:
+          CARGO_FUZZ: ${{ steps.pins.outputs.CARGO_FUZZ }}
+        run: cargo install cargo-fuzz --version "$CARGO_FUZZ" --locked
 
       - name: Verify the committed fuzz lockfile is in sync
         # cargo-fuzz's `run` has no --locked flag (it forwards everything after
         # `--` to libFuzzer), so enforce the committed fuzz/Cargo.lock with a real
         # cargo command up front; this also pre-fetches the deps for the build.
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: cargo +"$NIGHTLY" fetch --locked --manifest-path fuzz/Cargo.toml
 
       # The target list comes from fuzz/targets.txt — the one place it lives,
@@ -658,6 +681,8 @@ jobs:
       # and -max_len DROPS an over-long seed rather than truncating it, which
       # would quietly shrink the regression set this job exists to hold.
       - name: Replay the committed corpus through every target
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: |
           targets=$(awk '!/^[[:space:]]*#/ && NF { print $1 }' fuzz/targets.txt)
           [ -n "$targets" ] || { echo "no targets in fuzz/targets.txt"; exit 1; }
@@ -726,36 +751,40 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       # build.rs writes the shell completions + man page into OUT_DIR during the build;
       # the host triple nests output under target/<triple>/ (mirroring what the release
       # archives carry). --locked keeps the smoke build honest against the lockfile.
       - name: Build the binary (generates completions + man page)
         run: cargo build --release --locked --target "$HOST" -p bdinfo-rs
 
-      # Both at the SAME versions build-linux-packages.sh pins — so the script's
+      # Both from the same manifest build-linux-packages.sh reads — so the script's
       # `command -v cargo-deb` guard finds them and skips its (slower) source compile,
       # and the smoke test packages with the exact release tools.
       - name: Install cargo-deb (release pin, prebuilt)
         uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
-          tool: cargo-deb@3.7.0
+          tool: cargo-deb@${{ steps.pins.outputs.CARGO_DEB }}
           fallback: none
 
       # cargo-generate-rpm is absent from taiki-e/install-action's manifest (101
       # tools at the revision pinned in this file), so with the binstall fallback
       # disabled it gets the same compile-once-and-cache lane as cargo-fuzz and
-      # cargo-vet. The `@0.21.0` pin is the one build-linux-packages.sh and gui.yml
-      # carry; version-freshness.yml cross-checks all three.
+      # cargo-vet.
       - name: Cache the pinned cargo-generate-rpm binary
         id: rpm-bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-generate-rpm
-          key: cargo-generate-rpm-${{ runner.os }}-0.21.0
+          key: cargo-generate-rpm-${{ runner.os }}-${{ steps.pins.outputs.CARGO_GENERATE_RPM }}
 
       - name: Install cargo-generate-rpm (cache miss)
         if: steps.rpm-bin.outputs.cache-hit != 'true'
-        run: cargo install --locked cargo-generate-rpm@0.21.0
+        env:
+          CARGO_GENERATE_RPM: ${{ steps.pins.outputs.CARGO_GENERATE_RPM }}
+        run: cargo install --locked "cargo-generate-rpm@$CARGO_GENERATE_RPM"
 
       # Synthesize the two dist archives the script consumes, in dist's exact
       # `<pkg>-<triple>/` layout, from the host build (binary stand-in + real assets).

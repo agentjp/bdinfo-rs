@@ -6,9 +6,10 @@
 # asset paths and their $auto/auto-req scans assume it). Shared by the gui.yml
 # packaging smoke and the gui-release.yml lane.
 #
-# cargo-deb / cargo-generate-rpm ride the same pins as the CLI's
-# .github/build-linux-packages.sh (version-freshness.yml cross-checks the two
-# files); appimagetool is pinned below with its own freshness watch. The
+# cargo-deb, cargo-generate-rpm and appimagetool are read from
+# .github/pins.env, the one home for every hand-maintained tool version here, so
+# this lane and the CLI's .github/build-linux-packages.sh package with the same
+# tools by construction. The
 # AppDir carries exactly what the spec mandates in its root — AppRun, ONE
 # .desktop, the icon named by its Icon= key, and .DirIcon — plus the usual
 # usr/ tree; nothing graphics/driver-adjacent is bundled (the binary has no C
@@ -32,10 +33,11 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
 # Pinned because a broken or schema-changing upstream release must not abort a
-# release run at tag time; version-freshness.yml nags when newer ones ship.
-$cargoDebVersion = '3.7.0'
-$cargoGenerateRpmVersion = '0.21.0'
-$appimagetoolVersion = '1.9.1'
+# release run at tag time.
+. "$PSScriptRoot/_common.ps1"
+$cargoDebVersion = Get-Pin CARGO_DEB
+$cargoGenerateRpmVersion = Get-Pin CARGO_GENERATE_RPM
+$appimagetoolVersion = Get-Pin APPIMAGETOOL
 
 $repo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..')).Path
 $crate = Join-Path $repo 'crates/bdinfo-rs-gui'
