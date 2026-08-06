@@ -1,85 +1,59 @@
 name: version-freshness
 
 # Several versions in this repo are pinned for reproducibility but rot SILENTLY —
-# nothing else watches them:
-#   - the Rust toolchains (rust-toolchain.toml stable + the NIGHTLY pin, which is
-#     hardcoded in core.yml + fuzz.yml + wasm.yml + gui.yml + publish-npm.yml and
-#     cross-checked for agreement here so a bump to one can't silently drift the
-#     rest),
-#   - cargo-dist (dist-workspace.toml `cargo-dist-version` AND the `DIST_VERSION`
-#     env in core.yml's release-yaml job, which downloads that release's prebuilt
-#     archive — the two must stay equal; the `DIST_SHA256` committed beside it is
-#     the archive's published digest, so it is re-checked against upstream here
-#     because a version bump that forgets it only fails on the next dist-area PR),
+# nothing else watches them. Most of them live in ONE file, .github/pins.env, and
+# are read from there by every consumer, so this job never has to check that
+# copies of a pin agree; it only asks whether each pin is behind upstream:
+#   - the pinned NIGHTLY (an age nag, not an upstream comparison — a nightly
+#     always has a newer one),
+#   - cargo-vet, cargo-fuzz, ryl, taplo, convco, cargo-deb, cargo-generate-rpm,
+#     wasm-bindgen-cli — hand-bumped tools with no Dependabot ecosystem behind
+#     them (cargo's ecosystem watches Cargo.toml dependencies, not `cargo install`
+#     lines or install-action `tool:` inputs),
+#   - appimagetool and komac, fetched over curl at a static version. komac's
+#     `releases/latest` is a normal semver tag; appimagetool's is the rolling
+#     `continuous` nightly, so its check reads the highest SEMVER tag instead,
+#   - Node, npm and wrangler — a setup-node input, an `npm install -g` and an npx
+#     invocation, none of them package.json dependencies, so Dependabot's npm scan
+#     cannot see any of the three,
+#   - cloudsmith-cli — a pipx pin, invisible to the cargo/npm/actions scans.
+# Pins that deliberately live outside the manifest are checked here too, and those
+# are where an AGREEMENT check is still needed, because the copy is real:
+#   - the stable toolchain in rust-toolchain.toml,
+#   - cargo-dist: `cargo-dist-version` in dist-workspace.toml AND the
+#     `DIST_VERSION` env in core.yml's release-yaml job, which downloads that
+#     release's prebuilt archive — the two must stay equal; the `DIST_SHA256`
+#     committed beside it is the archive's published digest, so it is re-checked
+#     against upstream because a version bump that forgets it only fails on the
+#     next dist-area PR,
 #   - the four action SHAs in dist-workspace.toml `[dist.github-action-commits]`
 #     (checkout, upload-/download-artifact, attest) — the SOURCE dist generates
 #     v-release.yml from, invisible to Dependabot (it bumps the GENERATED file,
 #     which then fails `dist generate --check`) — cross-checked against the
 #     hand-maintained workflows' pins for the same actions so the drift becomes
 #     a scheduled nag instead of a red X on an unrelated Dependabot PR,
-#   - cargo-vet (the `--version` pin in core.yml's vet job),
-#   - cargo-fuzz (the `--version` pins in core.yml's replay job and fuzz.yml — absent
-#     from taiki-e/install-action's manifest, so both compile it from crates.io and
-#     the two pins must stay equal),
-#   - ryl (the `cargo install ryl --version` pin in repo.yml's YAML-lint job),
-#   - taplo (the `tool: taplo-cli@X` pin in repo.yml's TOML job — a formatter, pinned like
-#     rustfmt so a new release can't reformat/relint the tree out from under a PR),
-#   - convco (the `tool: convco@X` pin in conventional.yml — pinned because its
-#     output drives a reproducible changelog/version format, like taplo/rustfmt),
-#   - wasm-bindgen-cli (the `wasm-bindgen-cli@X` pin in wasm.yml + publish-npm.yml
-#     + deploy-pages.yml — all three must equal the wasm-bindgen crate they
-#     generate glue for; wasm-pack is not
-#     used), and binaryen (the `"binaryen"` pin in web/package.json — wasm-opt's
-#     version is coupled to the committed wasm size budget),
-#   - the Node version (the `NODE_VERSION`/`node-version` pins in wasm.yml +
-#     deploy-pages.yml + publish-npm.yml — the three must AGREE; the active line is
-#     26 -> LTS Oct 2026; checked for same-major patch drift AND for a newer
-#     even/LTS-bound line), the npm pin (`npm install -g npm@X` in publish-npm.yml
-#     — the staged-publishing floor), and wrangler (`npx wrangler@X` in
-#     deploy-pages.yml) — the last two are npx/setup-node inputs, NOT package.json
-#     deps, so Dependabot's npm scan cannot see them,
-#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml) pins a
-#     TAGLESS repo's `master` — a moving `# master` comment tag Dependabot can't bump
-#     and zizmor's ref-version-mismatch would red-X a PR once it drifts, so it is
-#     nagged here when it drifts past the pinned SHA, keeping re-pinning deliberate,
-#   - komac (the `KOMAC_VERSION` pin in packages.yml — the WinGet job submits with
-#     komac DIRECTLY, fetched over curl at a static hand-bumped version invisible to
-#     Dependabot; checked against russellbanks/Komac's latest release),
-#   - cargo-deb + cargo-generate-rpm (the `cargo-deb@X` / `cargo-generate-rpm@X` pins
-#     in build-linux-packages.sh — the .deb/.rpm packagers are compiled from source
-#     INSIDE dist's fail-fast release, so they are version-pinned there so a broken
-#     upstream release can't abort the whole release; both checked vs crates.io, and
-#     both cross-checked against every other copy — core.yml's pkg job, the GUI
-#     packaging script (.github/scripts/gui-package-linux.ps1), and gui.yml's
-#     packaging smoke — which must all stay EQUAL so the PR smoke tests package
-#     with the exact release tools),
-#   - appimagetool (the `$appimagetoolVersion` curl-download pin in
-#     .github/scripts/gui-package-linux.ps1 — the GUI lane's AppImage packer,
-#     fetched at a static version invisible to Dependabot; checked vs the highest
-#     SEMVER tag AppImage/appimagetool has released, since its `releases/latest`
-#     is the rolling `continuous` nightly), and
-#     cloudsmith-cli (the CLOUDSMITH_CLI_VERSION pipx pin — a pip pin invisible to
-#     Dependabot's cargo/npm/actions scans; pinned once per publishing workflow,
-#     every occurrence checked to agree, then vs PyPI),
-# (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
-# binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
+#   - binaryen (the `"binaryen"` devDependency in web/package.json — wasm-opt's
+#     version is coupled to the committed wasm size budget, so it is re-checked
+#     here even though Dependabot does bump it),
+#   - biome.json's versioned schema URL, cross-checked against the @biomejs/biome
+#     version the lockfile installs (Dependabot moves the dep and leaves the URL),
+#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml), which pins
+#     a TAGLESS repo's `master` — a moving `# master` comment tag Dependabot can't
+#     bump and zizmor's ref-version-mismatch would red-X a PR once it drifts, so it
+#     is nagged here when it drifts past the pinned SHA, keeping re-pinning
+#     deliberate.
+# (Cargo deps/dev-deps, the rest of the web npm devDependencies — typescript /
+# biome / playwright-core — and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
-# NOT re-checked here, EXCEPT: the one tagless branch-pinned action noted above
-# that Dependabot cannot bump, the binaryen pin (re-checked anyway for its size-
-# budget coupling), the Node / npm / wrangler pins above (setup-node inputs and
-# npx invocations, invisible to Dependabot's package.json scan), and biome.json's
-# versioned schema URL (cross-checked against the bumped dep — Dependabot moves the
-# @biomejs/biome dep but leaves the schema URL behind). The remaining gate
-# tools — zizmor (a security linter, kept at
-# latest on purpose so new vuln checks land immediately), action-validator,
+# NOT re-checked here. The remaining gate tools — zizmor (a security linter, kept
+# at latest on purpose so new vuln checks land immediately), action-validator,
 # cargo-{machete,shear,semver-checks,llvm-cov,nextest,mutants,deny}, typos — are
 # installed at LATEST every run, so they self-update and have no pin to rot. The
 # Dockerfile is `FROM scratch`, so there is no build-base tag to track either.)
 #
 # This daily ~1-minute job compares each silently-rotting pin to its upstream
-# latest (and cross-checks the pins that must agree); when anything is stale or
-# inconsistent it opens (or refreshes) one tracking issue. The bump itself stays a
-# deliberate, human-reviewed change.
+# latest; when anything is stale or inconsistent it opens (or refreshes) one
+# tracking issue. The bump itself stays a deliberate, human-reviewed change.
 
 on:
   schedule:
@@ -104,7 +78,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # No Set-StrictMode here, unlike the publish legs: several upstream
+          # lookups below read a property off a pipeline that legitimately yields
+          # nothing (no release on the pinned Node major, say) and rely on getting
+          # $null back rather than a terminating error. The other two preamble
+          # lines are load-bearing — the second makes every `if ($LASTEXITCODE...)`
+          # check below reachable at all.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          . ./.github/scripts/_common.ps1
+
+          # Every version in .github/pins.env. Get-Pins refuses a malformed line
+          # and Get-Pin a missing key, so a pin that is renamed or dropped fails
+          # this job loudly instead of silently going unwatched.
+          $pins = Get-Pins
+
           $problems = @()
+          $summary = @()
 
           # Record one finding: $tag is a short package->version summary for the issue
           # TITLE, $line the full markdown bullet for the body.
@@ -112,23 +102,13 @@ jobs:
             $script:problems += [pscustomobject]@{ tag = $tag; line = $line }
           }
 
-          # First pin matched by $regex (group 1) in $path, or $null.
+          # First pin matched by $regex (group 1) in $path, or $null. Only the
+          # pins that live outside the manifest are read this way.
           function Read-Pin($path, $regex) {
             foreach ($line in (Get-Content $path)) {
               if ($line -match $regex) { return $Matches[1] }
             }
             return $null
-          }
-
-          # EVERY pin matched by $regex (group 1, one per line) in $path, in file
-          # order — for a pin that exists more than once in one file and must
-          # agree with itself (Read-Pin sees only the first occurrence).
-          function Read-AllPins($path, $regex) {
-            $found = @()
-            foreach ($line in (Get-Content $path)) {
-              if ($line -match $regex) { $found += $Matches[1] }
-            }
-            return , $found
           }
 
           # A SHA-pinned action reference (`<sha> # <tag>`), normalized, from a
@@ -217,37 +197,32 @@ jobs:
             catch { return $null }
           }
 
+          # One pin against one upstream version, and one line of the run's
+          # summary either way. A FAILED QUERY is reported, not skipped: a check
+          # that quietly stops comparing reads exactly like a fresh pin.
+          function Compare-Pin($name, $current, $upstream, $source, $fix) {
+            $script:summary += "${name}: $current (latest $upstream)"
+            if (-not $upstream) {
+              Add-Problem "$name (query failed)" "- could not query the latest $name release ($source)"
+              return
+            }
+            if ([version]$upstream -gt [version]$current) {
+              Add-Problem "$name $current->$upstream" "- $name pin ``$current`` is behind the latest release ``$upstream``$fix"
+            }
+          }
+
           # --- Rust stable: rust-toolchain.toml vs rust-lang/rust ---------------
           $stablePin = Read-Pin 'rust-toolchain.toml' '^channel\s*=\s*"([0-9.]+)"'
           if (-not $stablePin) { throw 'No pinned stable channel in rust-toolchain.toml' }
-          $stableLatest = Latest-Semver 'rust-lang/rust'
-          if (-not $stableLatest) {
-            Add-Problem 'Rust stable (query failed)' '- could not query the latest Rust stable release (rust-lang/rust)'
-          } elseif ([version]$stableLatest -gt [version]$stablePin) {
-            Add-Problem "Rust stable $stablePin->$stableLatest" "- stable Rust pin ``$stablePin`` (rust-toolchain.toml) is behind the latest release ``$stableLatest``"
-          }
+          Compare-Pin 'Rust stable' $stablePin (Latest-Semver 'rust-lang/rust') 'rust-lang/rust' ' (rust-toolchain.toml)'
 
-          # --- Rust nightly: age of the core.yml NIGHTLY pin -------------------
-          $nightlyPin = Read-Pin '.github/workflows/core.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
-          if (-not $nightlyPin) { throw 'No NIGHTLY pin in core.yml' }
+          # --- Rust nightly: the age of the NIGHTLY pin ------------------------
+          # A nightly always has a newer one, so the nag is age, not distance.
+          $nightlyPin = (Get-Pin NIGHTLY) -replace '^nightly-', ''
           $nightlyAgeDays = [int]((Get-Date) - [datetime]::ParseExact($nightlyPin, 'yyyy-MM-dd', $null)).TotalDays
+          $summary += "nightly: $nightlyPin ($nightlyAgeDays d)"
           if ($nightlyAgeDays -gt 30) {
-            Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` (core.yml NIGHTLY) is $nightlyAgeDays days old"
-          }
-          # The nightly is hardcoded in FIVE places (core.yml/fuzz.yml/wasm.yml/gui.yml
-          # NIGHTLY env + publish-npm.yml's rustup install) that Dependabot can't see,
-          # so a bump to one silently drifts the rest. Cross-check they AGREE (like
-          # the cargo-dist / wasm-bindgen-cli / Node pin agreements).
-          $nightlyFuzz = Read-Pin '.github/workflows/fuzz.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
-          $nightlyWasm = Read-Pin '.github/workflows/wasm.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
-          $nightlyGui  = Read-Pin '.github/workflows/gui.yml' 'NIGHTLY:\s*nightly-(\d{4}-\d{2}-\d{2})'
-          $nightlyNpm  = Read-Pin '.github/workflows/publish-npm.yml' 'install nightly-(\d{4}-\d{2}-\d{2})'
-          if (-not $nightlyFuzz) { throw 'No NIGHTLY pin in fuzz.yml' }
-          if (-not $nightlyWasm) { throw 'No NIGHTLY pin in wasm.yml' }
-          if (-not $nightlyGui)  { throw 'No NIGHTLY pin in gui.yml' }
-          if (-not $nightlyNpm)  { throw 'No nightly install pin in publish-npm.yml' }
-          if (($nightlyPin -ne $nightlyFuzz) -or ($nightlyPin -ne $nightlyWasm) -or ($nightlyPin -ne $nightlyGui) -or ($nightlyPin -ne $nightlyNpm)) {
-            Add-Problem 'nightly pins disagree' "- nightly pin mismatch: core.yml ``$nightlyPin`` / fuzz.yml ``$nightlyFuzz`` / wasm.yml ``$nightlyWasm`` / gui.yml ``$nightlyGui`` / publish-npm.yml ``$nightlyNpm`` — all must be identical"
+            Add-Problem "nightly-$nightlyPin ($nightlyAgeDays d old)" "- nightly pin ``nightly-$nightlyPin`` is $nightlyAgeDays days old"
           }
 
           # --- cargo-dist: two pins must agree, both vs axodotdev/cargo-dist ----
@@ -258,12 +233,7 @@ jobs:
           if ($distCfg -ne $distCi) {
             Add-Problem 'cargo-dist pins disagree' "- cargo-dist pin mismatch: dist-workspace.toml has ``$distCfg`` but core.yml installs ``$distCi`` — they must be identical"
           }
-          $distLatest = Latest-Semver 'axodotdev/cargo-dist'
-          if (-not $distLatest) {
-            Add-Problem 'cargo-dist (query failed)' '- could not query the latest cargo-dist release (axodotdev/cargo-dist)'
-          } elseif ([version]$distLatest -gt [version]$distCfg) {
-            Add-Problem "cargo-dist $distCfg->$distLatest" "- cargo-dist pin ``$distCfg`` (dist-workspace.toml + core.yml) is behind the latest release ``$distLatest`` — bump both pins, re-take DIST_SHA256 from the release's ``.sha256`` asset, then re-run ``dist generate``"
-          }
+          Compare-Pin 'cargo-dist' $distCfg (Latest-Semver 'axodotdev/cargo-dist') 'axodotdev/cargo-dist' " — bump dist-workspace.toml and core.yml together, re-take DIST_SHA256 from the release's ``.sha256`` asset, then re-run ``dist generate``"
 
           # --- DIST_SHA256: core.yml's committed digest vs the published .sha256 -
           # core.yml verifies the downloaded dist archive against this digest before
@@ -297,7 +267,7 @@ jobs:
           # docker.yml; the github-actions Dependabot group bumps all
           # hand-maintained workflows together, so any one file represents the
           # fleet). A drift line here turns the red-X surprise into a scheduled
-          # nag; the fix is unchanged (scripts/dist-sync.ps1 / dist generate).
+          # nag; the fix is unchanged (dist generate).
           $distActionSources = [ordered]@{
             'actions/checkout'          = '.github/workflows/ci.yml'
             'actions/upload-artifact'   = '.github/workflows/gui.yml'
@@ -311,190 +281,62 @@ jobs:
             if (-not $tomlPin) { throw "No $action pin in dist-workspace.toml [dist.github-action-commits]" }
             if (-not $wfPin) { throw "No $action pin in $wf" }
             if ($tomlPin -ne $wfPin) {
-              Add-Problem "$action dist pin drifted" "- dist-workspace.toml ``[dist.github-action-commits]`` pins ``$action`` at ``$tomlPin`` but $wf uses ``$wfPin`` — set the TOML pin to the workflow's value and re-run ``dist generate`` (scripts/dist-sync.ps1)"
+              Add-Problem "$action dist pin drifted" "- dist-workspace.toml ``[dist.github-action-commits]`` pins ``$action`` at ``$tomlPin`` but $wf uses ``$wfPin`` — set the TOML pin to the workflow's value and re-run ``dist generate``"
             }
           }
 
-          # --- cargo-vet: core.yml vs mozilla/cargo-vet ------------------------
-          $vetPin = Read-Pin '.github/workflows/core.yml' 'cargo-vet --version ([0-9.]+)'
-          if (-not $vetPin) { throw 'No cargo-vet --version pin in core.yml' }
-          $vetLatest = Latest-Semver 'mozilla/cargo-vet'
-          if (-not $vetLatest) {
-            Add-Problem 'cargo-vet (query failed)' '- could not query the latest cargo-vet release (mozilla/cargo-vet)'
-          } elseif ([version]$vetLatest -gt [version]$vetPin) {
-            Add-Problem "cargo-vet $vetPin->$vetLatest" "- cargo-vet pin ``$vetPin`` (core.yml) is behind the latest release ``$vetLatest``"
+          # --- the manifest pins whose upstream is a crates.io release ----------
+          # One shape, one loop: `cargo install <crate> --version X` and
+          # install-action's `tool: <crate>@X` both resolve against crates.io, and
+          # a crate may publish no GitHub release at all.
+          $cratesPins = [ordered]@{
+            CARGO_FUZZ         = @('cargo-fuzz', '')
+            RYL                = @('ryl', '')
+            TAPLO_CLI          = @('taplo-cli', '')
+            CONVCO             = @('convco', '')
+            CARGO_DEB          = @('cargo-deb', '')
+            CARGO_GENERATE_RPM = @('cargo-generate-rpm', '')
+            WASM_BINDGEN_CLI   = @('wasm-bindgen-cli', ' — bump the wasm-bindgen crate dependency with it; the two must be equal')
+          }
+          foreach ($key in $cratesPins.Keys) {
+            $crate = $cratesPins[$key][0]
+            Compare-Pin $crate $pins[$key] (Latest-CratesIo $crate) 'crates.io' $cratesPins[$key][1]
           }
 
-          # --- cargo-fuzz: core.yml + fuzz.yml pins vs crates.io ---------------
-          # taiki-e/install-action's manifest has no cargo-fuzz entry, so both the
-          # per-PR corpus replay (core.yml) and the tag-time fresh-fuzz pass
-          # (fuzz.yml) compile a pinned version from crates.io. The two must agree
-          # — a one-sided bump would fuzz the release tag with a different tool
-          # than the gate proved green.
-          $fuzzCi   = Read-Pin '.github/workflows/core.yml' 'cargo install cargo-fuzz --version ([0-9.]+)'
-          $fuzzTag  = Read-Pin '.github/workflows/fuzz.yml' 'cargo install cargo-fuzz --version ([0-9.]+)'
-          if (-not $fuzzCi)  { throw 'No `cargo install cargo-fuzz --version` pin in core.yml' }
-          if (-not $fuzzTag) { throw 'No `cargo install cargo-fuzz --version` pin in fuzz.yml' }
-          if ($fuzzCi -ne $fuzzTag) {
-            Add-Problem 'cargo-fuzz pins disagree' "- cargo-fuzz pin mismatch: core.yml ``$fuzzCi`` / fuzz.yml ``$fuzzTag`` — both must be identical"
+          # --- the manifest pins whose upstream is a GitHub release --------------
+          # komac is not published to any registry, and cargo-vet's own release
+          # page is where its prebuilt binaries and release notes are.
+          $releasePins = [ordered]@{
+            CARGO_VET = @('cargo-vet', 'mozilla/cargo-vet')
+            KOMAC     = @('komac', 'russellbanks/Komac')
           }
-          $fuzzLatest = Latest-CratesIo 'cargo-fuzz'
-          if (-not $fuzzLatest) {
-            Add-Problem 'cargo-fuzz (query failed)' '- could not query the latest cargo-fuzz release (crates.io)'
-          } elseif ([version]$fuzzLatest -gt [version]$fuzzCi) {
-            Add-Problem "cargo-fuzz $fuzzCi->$fuzzLatest" "- cargo-fuzz pin ``$fuzzCi`` (core.yml + fuzz.yml) is behind the latest release ``$fuzzLatest`` — bump both pins together"
+          foreach ($key in $releasePins.Keys) {
+            $repo = $releasePins[$key][1]
+            Compare-Pin $releasePins[$key][0] $pins[$key] (Latest-Semver $repo) $repo ''
           }
 
-          # --- ryl: repo.yml YAML-lint pin vs crates.io ------------------------
-          # ryl is pinned (`cargo install ryl --version X`) so the YAML lint stays
-          # reproducible; nothing else watches it, so check it here like cargo-vet.
-          $rylPin = Read-Pin '.github/workflows/repo.yml' 'cargo install ryl --version ([0-9.]+)'
-          if (-not $rylPin) { throw 'No `cargo install ryl --version` pin in repo.yml' }
-          $rylLatest = Latest-CratesIo 'ryl'
-          if (-not $rylLatest) {
-            Add-Problem 'ryl (query failed)' '- could not query the latest ryl release (crates.io)'
-          } elseif ([version]$rylLatest -gt [version]$rylPin) {
-            Add-Problem "ryl $rylPin->$rylLatest" "- ryl pin ``$rylPin`` (repo.yml) is behind the latest release ``$rylLatest``"
-          }
+          # --- appimagetool: highest semver tag, not `releases/latest` ----------
+          Compare-Pin 'appimagetool' $pins.APPIMAGETOOL (Latest-Semver-Listed 'AppImage/appimagetool') 'AppImage/appimagetool' ''
 
-          # --- taplo: repo.yml `tool: taplo-cli@X` pin vs crates.io -------------
-          # Pinned like ryl so the TOML format/lint stays reproducible; nothing
-          # else watches it.
-          $taploPin = Read-Pin '.github/workflows/repo.yml' 'tool:\s*taplo-cli@([0-9.]+)'
-          if (-not $taploPin) { throw 'No `tool: taplo-cli@<version>` pin in repo.yml' }
-          $taploLatest = Latest-CratesIo 'taplo-cli'
-          if (-not $taploLatest) {
-            Add-Problem 'taplo (query failed)' '- could not query the latest taplo release (crates.io taplo-cli)'
-          } elseif ([version]$taploLatest -gt [version]$taploPin) {
-            Add-Problem "taplo $taploPin->$taploLatest" "- taplo pin ``$taploPin`` (repo.yml) is behind the latest release ``$taploLatest``"
-          }
+          # --- the manifest pins whose upstream is the npm registry -------------
+          Compare-Pin 'npm' $pins.NPM (Latest-Npm 'npm') 'npm registry' ''
+          Compare-Pin 'wrangler' $pins.WRANGLER (Latest-Npm 'wrangler') 'npm registry' ''
 
-          # --- convco: conventional.yml `tool: convco@X` pin vs crates.io -------
-          # Pinned because its output drives a reproducible changelog/version
-          # format (like taplo/rustfmt); nothing else watches it.
-          $convcoPin = Read-Pin '.github/workflows/conventional.yml' 'tool:\s*convco@([0-9.]+)'
-          if (-not $convcoPin) { throw 'No `tool: convco@<version>` pin in conventional.yml' }
-          $convcoLatest = Latest-CratesIo 'convco'
-          if (-not $convcoLatest) {
-            Add-Problem 'convco (query failed)' '- could not query the latest convco release (crates.io)'
-          } elseif ([version]$convcoLatest -gt [version]$convcoPin) {
-            Add-Problem "convco $convcoPin->$convcoLatest" "- convco pin ``$convcoPin`` (conventional.yml) is behind the latest release ``$convcoLatest``"
-          }
-
-          # --- cargo-deb / cargo-generate-rpm: build-linux-packages.sh vs crates.io -
-          # The .deb/.rpm packagers are compiled from source INSIDE dist's fail-fast
-          # release (a shell script in build-global-artifacts, where a `uses:` install
-          # action is unavailable), so they are version-pinned there — a broken upstream
-          # release would otherwise abort the whole release. Nothing else watches them,
-          # so nag here like the other hand-bumped tools when a newer one ships.
-          $cargoDebPin = Read-Pin '.github/build-linux-packages.sh' 'cargo-deb@([0-9.]+)'
-          if (-not $cargoDebPin) { throw 'No cargo-deb@<version> pin in build-linux-packages.sh' }
-          $cargoDebLatest = Latest-CratesIo 'cargo-deb'
-          if (-not $cargoDebLatest) {
-            Add-Problem 'cargo-deb (query failed)' '- could not query the latest cargo-deb release (crates.io)'
-          } elseif ([version]$cargoDebLatest -gt [version]$cargoDebPin) {
-            Add-Problem "cargo-deb $cargoDebPin->$cargoDebLatest" "- cargo-deb pin ``$cargoDebPin`` (build-linux-packages.sh) is behind the latest release ``$cargoDebLatest``"
-          }
-          $cargoRpmPin = Read-Pin '.github/build-linux-packages.sh' 'cargo-generate-rpm@([0-9.]+)'
-          if (-not $cargoRpmPin) { throw 'No cargo-generate-rpm@<version> pin in build-linux-packages.sh' }
-          $cargoRpmLatest = Latest-CratesIo 'cargo-generate-rpm'
-          if (-not $cargoRpmLatest) {
-            Add-Problem 'cargo-generate-rpm (query failed)' '- could not query the latest cargo-generate-rpm release (crates.io)'
-          } elseif ([version]$cargoRpmLatest -gt [version]$cargoRpmPin) {
-            Add-Problem "cargo-generate-rpm $cargoRpmPin->$cargoRpmLatest" "- cargo-generate-rpm pin ``$cargoRpmPin`` (build-linux-packages.sh) is behind the latest release ``$cargoRpmLatest``"
-          }
-          # Both pins exist a SECOND time in core.yml's pkg job (`tool:
-          # cargo-deb@…,cargo-generate-rpm@…`) — deliberately equal so the PR
-          # smoke test packages with the exact release tools (the script's
-          # already-on-PATH guard then skips its source compile). A one-sided
-          # bump silently de-syncs the smoke test from the release path, so
-          # cross-check agreement like the NIGHTLY pins; freshness of the value
-          # itself is already covered above.
-          $cargoDebCi = Read-Pin '.github/workflows/core.yml' 'cargo-deb@([0-9.]+)'
-          $cargoRpmCi = Read-Pin '.github/workflows/core.yml' 'cargo-generate-rpm@([0-9.]+)'
-          if (-not $cargoDebCi) { throw 'No cargo-deb@<version> pin in core.yml (pkg job)' }
-          if (-not $cargoRpmCi) { throw 'No cargo-generate-rpm@<version> pin in core.yml (pkg job)' }
-          if ($cargoDebCi -ne $cargoDebPin) {
-            Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but core.yml's pkg job installs ``$cargoDebCi`` — they must be identical (the smoke test must use the exact release tools)"
-          }
-          if ($cargoRpmCi -ne $cargoRpmPin) {
-            Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but core.yml's pkg job installs ``$cargoRpmCi`` — they must be identical (the smoke test must use the exact release tools)"
-          }
-          # The GUI lane carries two MORE copies of the same two pins: the
-          # packaging script's source-compile pins (what the release legs run
-          # — their ubuntu-22.04 glibc floor rules out the prebuilt binaries)
-          # plus the taiki-e pre-install in gui.yml's packaging smoke. All
-          # must equal build-linux-packages.sh's, for the same
-          # smoke-packages-with-the-release-tools reason.
-          $guiPackagerHomes = [ordered]@{
-            '.github/scripts/gui-package-linux.ps1' = @("cargoDebVersion\s*=\s*'([0-9.]+)'", "cargoGenerateRpmVersion\s*=\s*'([0-9.]+)'")
-            '.github/workflows/gui.yml'             = @('cargo-deb@([0-9.]+)', 'cargo-generate-rpm@([0-9.]+)')
-          }
-          foreach ($file in $guiPackagerHomes.Keys) {
-            $debHere = Read-Pin $file $guiPackagerHomes[$file][0]
-            $rpmHere = Read-Pin $file $guiPackagerHomes[$file][1]
-            if (-not $debHere) { throw "No cargo-deb pin in $file" }
-            if (-not $rpmHere) { throw "No cargo-generate-rpm pin in $file" }
-            if ($debHere -ne $cargoDebPin) {
-              Add-Problem 'cargo-deb pins disagree' "- cargo-deb pin mismatch: build-linux-packages.sh has ``$cargoDebPin`` but $file pins ``$debHere`` — every copy must be identical"
-            }
-            if ($rpmHere -ne $cargoRpmPin) {
-              Add-Problem 'cargo-generate-rpm pins disagree' "- cargo-generate-rpm pin mismatch: build-linux-packages.sh has ``$cargoRpmPin`` but $file pins ``$rpmHere`` — every copy must be identical"
-            }
-          }
-
-          # --- appimagetool: gui-package-linux.ps1 pin vs AppImage/appimagetool ---
-          # The GUI lane's AppImage packer, fetched over curl at a static
-          # version — invisible to Dependabot, watched here like komac.
-          $appimagetoolPin = Read-Pin '.github/scripts/gui-package-linux.ps1' "appimagetoolVersion\s*=\s*'([0-9.]+)'"
-          if (-not $appimagetoolPin) { throw 'No appimagetoolVersion pin in gui-package-linux.ps1' }
-          $appimagetoolLatest = Latest-Semver-Listed 'AppImage/appimagetool'
-          if (-not $appimagetoolLatest) {
-            Add-Problem 'appimagetool (query failed)' '- could not query the latest appimagetool release (AppImage/appimagetool)'
-          } elseif ([version]$appimagetoolLatest -gt [version]$appimagetoolPin) {
-            Add-Problem "appimagetool $appimagetoolPin->$appimagetoolLatest" "- appimagetool pin ``$appimagetoolPin`` (gui-package-linux.ps1) is behind the latest release ``$appimagetoolLatest``"
-          }
-
-          # --- wasm-bindgen-cli: wasm.yml + publish-npm.yml pins vs crates.io ---
-          # The browser package builds with `wasm-bindgen-cli@X` (taiki-e); X MUST
-          # equal the wasm-bindgen crate it generates glue for, so it is pinned and
-          # nothing else watches it. (wasm-pack is NOT used — the build is plain
-          # cargo + the CLI + wasm-opt.) The two workflow pins must also agree.
-          $wbGate   = Read-Pin '.github/workflows/wasm.yml' 'wasm-bindgen-cli@([0-9.]+)'
-          $wbPub    = Read-Pin '.github/workflows/publish-npm.yml' 'wasm-bindgen-cli@([0-9.]+)'
-          $wbDeploy = Read-Pin '.github/workflows/deploy-pages.yml' 'wasm-bindgen-cli@([0-9.]+)'
-          if (-not $wbGate)   { throw 'No wasm-bindgen-cli pin in wasm.yml' }
-          if (-not $wbPub)    { throw 'No wasm-bindgen-cli pin in publish-npm.yml' }
-          if (-not $wbDeploy) { throw 'No wasm-bindgen-cli pin in deploy-pages.yml' }
-          if (($wbGate -ne $wbPub) -or ($wbGate -ne $wbDeploy)) {
-            Add-Problem 'wasm-bindgen-cli pins disagree' "- wasm-bindgen-cli pin mismatch: wasm.yml has ``$wbGate`` / publish-npm.yml has ``$wbPub`` / deploy-pages.yml has ``$wbDeploy`` — all three must be identical"
-          }
-          $wbLatest = Latest-CratesIo 'wasm-bindgen-cli'
-          if (-not $wbLatest) {
-            Add-Problem 'wasm-bindgen-cli (query failed)' '- could not query the latest wasm-bindgen-cli release (crates.io)'
-          } elseif ([version]$wbLatest -gt [version]$wbGate) {
-            Add-Problem "wasm-bindgen-cli $wbGate->$wbLatest" "- wasm-bindgen-cli pin ``$wbGate`` (wasm.yml + publish-npm.yml) is behind the latest release ``$wbLatest`` — bump both pins AND the wasm-bindgen crate dep together"
-          }
+          # --- cloudsmith-cli: a pip package -----------------------------------
+          Compare-Pin 'cloudsmith-cli' $pins.CLOUDSMITH_CLI (Latest-PyPI 'cloudsmith-cli') 'PyPI' ''
 
           # --- binaryen (wasm-opt): web/package.json pin vs npm ----------------
           # wasm-opt -Oz shrinks the shipped payload; its version is coupled to the
-          # committed size budget (wasm-size-budget.txt), so it is pinned (the
-          # devDependency + lockfile) and watched here like the other size/format
-          # tools.
+          # committed size budget (wasm-size-budget.txt), so it is watched here like
+          # the other size/format tools even though Dependabot bumps it.
           $binPin = Read-Pin 'crates/bdinfo-rs-wasm/web/package.json' '"binaryen"\s*:\s*"\^?([0-9.]+)"'
           if (-not $binPin) { throw 'No binaryen pin in crates/bdinfo-rs-wasm/web/package.json' }
-          $binLatest = Latest-Npm 'binaryen'
-          if (-not $binLatest) {
-            Add-Problem 'binaryen (query failed)' '- could not query the latest binaryen release (npm)'
-          } elseif ([version]$binLatest -gt [version]$binPin) {
-            Add-Problem "binaryen $binPin->$binLatest" "- binaryen pin ``$binPin`` (web/package.json) is behind the latest release ``$binLatest`` — bump it, rebuild, and re-check the wasm size budget"
-          }
+          Compare-Pin 'binaryen' $binPin (Latest-Npm 'binaryen') 'npm registry' ' — bump it, rebuild, and re-check the wasm size budget'
 
           # --- biome: biome.json $schema must match the installed @biomejs/biome -
           # Dependabot bumps the @biomejs/biome devDependency (npm ecosystem) but
           # cannot touch biome.json's versioned schema URL, so the two silently
-          # drift on a biome bump. Cross-check them (a consistency check, like the
-          # cargo-dist / wasm-bindgen / Node pin agreements); freshness itself stays
+          # drift on a biome bump. Cross-check them; freshness itself stays
           # Dependabot's job. Read the resolved version from the lockfile, not the
           # `^2` range. (`-AsHashtable`: npm lockfiles have a `""` root package key
           # that plain ConvertFrom-Json rejects.)
@@ -505,29 +347,19 @@ jobs:
             $biomeLock = (Get-Content -Raw 'crates/bdinfo-rs-wasm/web/package-lock.json' |
                 ConvertFrom-Json -AsHashtable).packages.'node_modules/@biomejs/biome'.version
           } catch { }
+          $summary += "biome-schema: $biomeSchema (dep $biomeLock)"
           if (-not $biomeLock) {
             Add-Problem 'biome (version unreadable)' '- could not read the @biomejs/biome version from web/package-lock.json'
           } elseif ($biomeSchema -ne $biomeLock) {
             Add-Problem "biome schema $biomeSchema vs $biomeLock" "- biome.json schema URL is pinned to ``$biomeSchema`` but the lockfile installs @biomejs/biome ``$biomeLock`` — bump the schema URL in biome.json to match"
           }
 
-          # --- Node: the 3 workflow pins must AGREE, vs nodejs.org/dist ----------
-          # Pinned in wasm.yml (NODE_VERSION), deploy-pages.yml + publish-npm.yml
-          # (node-version); setup-node consumes these, so Dependabot never sees them.
+          # --- Node: the manifest pin vs nodejs.org/dist ------------------------
           # Two nags: same-major patch drift (stay current on the chosen line), and
           # a newer even/LTS-bound major shipping (the cue to plan the next line, as
           # 26 was adopted ahead of its Oct-2026 LTS). Odd "Current" majors never
           # trigger the second nag — they are never LTS, so we do not chase them.
-          $nodeWasm = Read-Pin '.github/workflows/wasm.yml' 'NODE_VERSION:\s*"([0-9.]+)"'
-          $nodeDeploy = Read-Pin '.github/workflows/deploy-pages.yml' 'node-version:\s*"([0-9.]+)"'
-          $nodePub = Read-Pin '.github/workflows/publish-npm.yml' 'node-version:\s*"([0-9.]+)"'
-          if (-not $nodeWasm) { throw 'No NODE_VERSION pin in wasm.yml' }
-          if (-not $nodeDeploy) { throw 'No node-version pin in deploy-pages.yml' }
-          if (-not $nodePub) { throw 'No node-version pin in publish-npm.yml' }
-          if (($nodeWasm -ne $nodeDeploy) -or ($nodeWasm -ne $nodePub)) {
-            Add-Problem 'Node pins disagree' "- Node pin mismatch: wasm.yml ``$nodeWasm`` / deploy-pages.yml ``$nodeDeploy`` / publish-npm.yml ``$nodePub`` — they must be identical"
-          }
-          $nodePin = $nodeWasm
+          $nodePin = $pins.NODE
           $nodePinMajor = [int]($nodePin.Split('.')[0])
           $nodeLatestOnMajor = $null; $nodeNewestEven = $null
           $nodeRel = Get-NodeReleases
@@ -541,37 +373,14 @@ jobs:
               })
             $nodeLatestOnMajor = (@($nodeParsed | Where-Object { $_.major -eq $nodePinMajor }) | Sort-Object ver -Descending | Select-Object -First 1).ver
             if ($nodeLatestOnMajor -and [version]$nodePin -lt $nodeLatestOnMajor) {
-              Add-Problem "Node $nodePin->$nodeLatestOnMajor" "- Node pin ``$nodePin`` (wasm.yml + deploy-pages.yml + publish-npm.yml) is behind the latest $nodePinMajor.x release ``$nodeLatestOnMajor`` — bump all three pins together"
+              Add-Problem "Node $nodePin->$nodeLatestOnMajor" "- Node pin ``$nodePin`` is behind the latest $nodePinMajor.x release ``$nodeLatestOnMajor``"
             }
             $nodeNewestEven = (@($nodeParsed | Where-Object { $_.major % 2 -eq 0 }) | Sort-Object major -Descending | Select-Object -First 1).major
             if ($nodeNewestEven -and $nodeNewestEven -gt $nodePinMajor) {
-              Add-Problem "Node $nodeNewestEven.x available" "- a newer even (LTS-bound) Node line ``$nodeNewestEven.x`` has shipped; the pins are on ``$nodePinMajor.x`` — plan the move (update all three pins together)"
+              Add-Problem "Node $nodeNewestEven.x available" "- a newer even (LTS-bound) Node line ``$nodeNewestEven.x`` has shipped; the pin is on ``$nodePinMajor.x`` — plan the move"
             }
           }
-
-          # --- npm: publish-npm.yml `npm install -g npm@X` vs the npm registry ----
-          # An `npm install -g` line, not a package.json dep, so Dependabot is blind
-          # to it. The staged-publishing floor; pinned so the publish stays on a
-          # deterministic npm independent of which npm a given Node 26.x bundles.
-          $npmPin = Read-Pin '.github/workflows/publish-npm.yml' 'npm install -g npm@([0-9.]+)'
-          if (-not $npmPin) { throw 'No `npm install -g npm@<version>` pin in publish-npm.yml' }
-          $npmLatest = Latest-Npm 'npm'
-          if (-not $npmLatest) {
-            Add-Problem 'npm (query failed)' '- could not query the latest npm release (npm registry)'
-          } elseif ([version]$npmLatest -gt [version]$npmPin) {
-            Add-Problem "npm $npmPin->$npmLatest" "- npm pin ``$npmPin`` (publish-npm.yml) is behind the latest release ``$npmLatest``"
-          }
-
-          # --- wrangler: deploy-pages.yml `npx wrangler@X` vs the npm registry ----
-          # An npx invocation (not a package.json dep), so Dependabot can't bump it.
-          $wranglerPin = Read-Pin '.github/workflows/deploy-pages.yml' 'wrangler@([0-9.]+)'
-          if (-not $wranglerPin) { throw 'No `wrangler@<version>` pin in deploy-pages.yml' }
-          $wranglerLatest = Latest-Npm 'wrangler'
-          if (-not $wranglerLatest) {
-            Add-Problem 'wrangler (query failed)' '- could not query the latest wrangler release (npm)'
-          } elseif ([version]$wranglerLatest -gt [version]$wranglerPin) {
-            Add-Problem "wrangler $wranglerPin->$wranglerLatest" "- wrangler pin ``$wranglerPin`` (deploy-pages.yml) is behind the latest release ``$wranglerLatest``"
-          }
+          $summary += "node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)"
 
           # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
           # SHA-pinned to a TAGLESS repo's master branch, so Dependabot can't bump it
@@ -586,59 +395,9 @@ jobs:
           } elseif ($brewPin -ne $brewHead) {
             Add-Problem 'setup-homebrew SHA drifted' "- Homebrew/actions/setup-homebrew pin ``$($brewPin.Substring(0, 12))`` (install-smoke-test.yml) is behind master HEAD ``$($brewHead.Substring(0, 12))`` — re-pin deliberately (the repo ships no tags, so the SHA is frozen on purpose)"
           }
-          $brewPinShort = if ($brewPin) { $brewPin.Substring(0, 12) } else { '?' }
-          $brewHeadShort = if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }
+          $summary += "brew: $($brewPin.Substring(0, 12)) (head $(if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }))"
 
-          # --- komac: packages.yml KOMAC_VERSION vs russellbanks/Komac latest ------
-          # The WinGet job submits with komac DIRECTLY (winget-releaser's
-          # cargo-binstall@main bootstrap trips this repo's SHA-pinning policy), fetched
-          # over curl at a static hand-bumped KOMAC_VERSION invisible to Dependabot.
-          # Nothing else watches it, so nag here like the other hand-bumped tools
-          # (taplo/convco/ryl) when a newer komac ships; the winget-pkgs manifest schema
-          # is stable, so an occasional lag is harmless.
-          $komacPin = Read-Pin '.github/workflows/packages.yml' 'KOMAC_VERSION:\s*([0-9.]+)'
-          if (-not $komacPin) { throw 'No KOMAC_VERSION pin in packages.yml' }
-          # gui-publish.yml pins the same tool for the GUI's winget leg; the
-          # agreement check keeps that copy from rotting invisibly behind the
-          # freshness check on the packages.yml value below.
-          $komacGuiPin = Read-Pin '.github/workflows/gui-publish.yml' 'KOMAC_VERSION:\s*([0-9.]+)'
-          if (-not $komacGuiPin) { throw 'No KOMAC_VERSION pin in gui-publish.yml' }
-          if ($komacGuiPin -ne $komacPin) {
-            Add-Problem 'komac pins disagree' "- KOMAC_VERSION mismatch: packages.yml ``$komacPin`` vs gui-publish.yml ``$komacGuiPin`` — bump both together"
-          }
-          $komacLatest = Latest-Semver 'russellbanks/Komac'
-          if (-not $komacLatest) {
-            Add-Problem 'komac (query failed)' '- could not query the latest komac release (russellbanks/Komac)'
-          } elseif ([version]$komacLatest -gt [version]$komacPin) {
-            Add-Problem "komac $komacPin->$komacLatest" "- komac pin ``$komacPin`` (packages.yml KOMAC_VERSION) is behind the latest release ``$komacLatest``"
-          }
-
-          # --- cloudsmith-cli: the CLOUDSMITH_CLI_VERSION pins vs PyPI --------------
-          # The push legs install a pinned `cloudsmith-cli==X` with pipx, from the
-          # CLOUDSMITH_CLI_VERSION each workflow sets. A pip pin invisible to
-          # Dependabot's cargo/npm/actions scans, so a server-side API change could
-          # break the frozen client silently; nag here like the other hand-bumped
-          # tools when a newer client ships. The pin occurs once per publishing
-          # workflow — packages.yml for the CLI packages, gui-publish.yml for the
-          # GUI's — so read every occurrence and assert they agree; a
-          # first-match-only read validates one lane while the other drifts unseen.
-          $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'CLOUDSMITH_CLI_VERSION:\s*([0-9.]+)'
-          if (-not $cloudsmithPins.Count) { throw 'No CLOUDSMITH_CLI_VERSION pin in packages.yml' }
-          $cloudsmithGuiPin = Read-Pin '.github/workflows/gui-publish.yml' 'CLOUDSMITH_CLI_VERSION:\s*([0-9.]+)'
-          if (-not $cloudsmithGuiPin) { throw 'No CLOUDSMITH_CLI_VERSION pin in gui-publish.yml' }
-          $cloudsmithPins = @($cloudsmithPins) + $cloudsmithGuiPin
-          $cloudsmithPin = $cloudsmithPins[0]
-          if (@($cloudsmithPins | Sort-Object -Unique).Count -gt 1) {
-            Add-Problem 'cloudsmith-cli pins disagree' "- cloudsmith-cli pin mismatch across packages.yml / gui-publish.yml: ``$($cloudsmithPins -join '` / `')`` — every push job must pin the same version"
-          }
-          $cloudsmithLatest = Latest-PyPI 'cloudsmith-cli'
-          if (-not $cloudsmithLatest) {
-            Add-Problem 'cloudsmith-cli (query failed)' '- could not query the latest cloudsmith-cli release (PyPI)'
-          } elseif ([version]$cloudsmithLatest -gt [version]$cloudsmithPin) {
-            Add-Problem "cloudsmith-cli $cloudsmithPin->$cloudsmithLatest" "- cloudsmith-cli pin ``$cloudsmithPin`` (packages.yml) is behind the latest release ``$cloudsmithLatest``"
-          }
-
-          Write-Host "stable: $stablePin (latest $stableLatest)  nightly: $nightlyPin ($nightlyAgeDays d)  cargo-dist: $distCfg (latest $distLatest)  cargo-vet: $vetPin (latest $vetLatest)  cargo-fuzz: $fuzzCi (latest $fuzzLatest)  ryl: $rylPin (latest $rylLatest)  taplo: $taploPin (latest $taploLatest)  convco: $convcoPin (latest $convcoLatest)  wasm-bindgen-cli: $wbGate (latest $wbLatest)  binaryen: $binPin (latest $binLatest)  biome-schema: $biomeSchema (dep $biomeLock)  node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)  npm: $npmPin (latest $npmLatest)  wrangler: $wranglerPin (latest $wranglerLatest)  brew: $brewPinShort (head $brewHeadShort)  komac: $komacPin (latest $komacLatest)  cargo-deb: $cargoDebPin (latest $cargoDebLatest)  cargo-generate-rpm: $cargoRpmPin (latest $cargoRpmLatest)  appimagetool: $appimagetoolPin (latest $appimagetoolLatest)  cloudsmith-cli: $cloudsmithPin (latest $cloudsmithLatest)"
+          Write-Host ($summary -join '  ')
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
 
           $bodyLines = @($problems | ForEach-Object { $_.line })
@@ -649,19 +408,19 @@ jobs:
           # stays readable when several pins rot at once.
           $maxShown = 3
           if ($tags.Count -le $maxShown) {
-            $summary = $tags -join ', '
+            $summaryTags = $tags -join ', '
           }
           else {
-            $summary = (@($tags | Select-Object -First $maxShown) -join ', ') + " (+$($tags.Count - $maxShown) more)"
+            $summaryTags = (@($tags | Select-Object -First $maxShown) -join ', ') + " (+$($tags.Count - $maxShown) more)"
           }
-          $title = if ($tags.Count -eq 1) { "Stale pin: $summary" } else { "Stale pins: $summary" }
+          $title = if ($tags.Count -eq 1) { "Stale pin: $summaryTags" } else { "Stale pins: $summaryTags" }
 
           $body = @(
             'The daily version-freshness check found:'
             ''
             $bodyLines
             ''
-            'Bump deliberately: update the pin(s) in the file(s) named above, keep the five NIGHTLY pins (core.yml / fuzz.yml / wasm.yml / gui.yml / publish-npm.yml) identical, and after any cargo-dist bump re-take `DIST_SHA256` from the release''s `.sha256` asset and re-run `dist generate`. CI re-validates on the next push.'
+            'Bump deliberately: every tool and toolchain version above lives in `.github/pins.env` unless the line names another file, and after any cargo-dist bump re-take `DIST_SHA256` from the release''s `.sha256` asset and re-run `dist generate`. CI re-validates on the next push.'
           ) -join "`n"
 
           # One rolling issue, tracked by a stable label — the title varies with the
