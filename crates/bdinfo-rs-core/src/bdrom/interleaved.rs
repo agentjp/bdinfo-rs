@@ -79,9 +79,7 @@ impl MemBdFile {
     /// Builds an in-memory file named `name` over `bytes`; `fail` makes `open_read`
     /// error.
     pub(crate) fn new(name: &str, bytes: Vec<u8>, fail: bool) -> Self {
-        let extension =
-            name.rsplit_once('.').map_or_else(String::new, |(_, ext)| format!(".{ext}"));
-        Self { name: name.to_owned(), extension, bytes, fail }
+        Self { name: name.to_owned(), extension: crate::vfs::extension_of_name(name), bytes, fail }
     }
 }
 

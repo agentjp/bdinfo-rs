@@ -44,7 +44,8 @@
 // the web-path logic and the reader math (`Node`/`assemble_tree`/`seek_target`)
 // — tested natively, but absent from a native NON-test build, so gate them to
 // where they live to stay dead-code-clean. `BufRead`/`BufReader`/`Read`/`Seek`/
-// `ReadSeek`/`JsCast`/`JsValue` are named only by the wasm32 browser glue.
+// `ReadSeek`/`extension_of_name`/`JsCast`/`JsValue` are named only by the wasm32
+// browser glue.
 #[cfg(any(target_arch = "wasm32", test))]
 use std::io::{self, SeekFrom};
 #[cfg(target_arch = "wasm32")]
@@ -59,14 +60,14 @@ use bdinfo_rs_core::bdrom::order::{named_selection, selection_order, selection_s
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
-#[cfg(target_arch = "wasm32")]
-use bdinfo_rs_core::vfs::ReadSeek;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::vfs::fs::glob_ci;
 use bdinfo_rs_core::vfs::udf::source::{IsoReader, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, mem};
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::vfs::{BdFile, SearchOption};
+#[cfg(target_arch = "wasm32")]
+use bdinfo_rs_core::vfs::{ReadSeek, extension_of_name};
 use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
@@ -155,16 +156,6 @@ impl<F: BdFile + Clone + 'static> BdDir for Node<F> {
     fn get_directories(&self) -> io::Result<Vec<Box<dyn BdDir>>> {
         Ok(self.dirs.iter().map(|d| Box::new(d.clone()) as Box<dyn BdDir>).collect())
     }
-}
-
-/// The extension *including* the leading dot, e.g. `.mpls`; the empty string
-/// when the name has no `.`.
-///
-/// Named only by [`WebFile::extension`] and its native test — the same
-/// `cfg(any(wasm32, test))` gate as the rest of the browser glue's helpers.
-#[cfg(any(target_arch = "wasm32", test))]
-fn extension_of(name: &str) -> &str {
-    name.rfind('.').and_then(|i| name.get(i..)).unwrap_or("")
 }
 
 // ── in-memory backend (the `scan_report` framing path) ──────────────────────
@@ -289,12 +280,17 @@ impl Seek for WebReader {
 
 /// A file backed by a browser `File` handle — the [`BdFile`] backend for the
 /// `webkitdirectory` streaming path. Bytes are read on demand through
-/// [`WebReader`]; only metadata (name, full path, length) is held eagerly.
+/// [`WebReader`]; only metadata (name, full path, extension, length) is held
+/// eagerly.
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone)]
 struct WebFile {
     name: String,
     full: String,
+    /// Derived once at construction by the core seam's `extension_of_name`, the
+    /// rule every backend shares, and borrowed by [`BdFile::extension`] — which
+    /// returns a `&str`, so the owned `String` has to be stored.
+    extension: String,
     file: web_sys::File,
     length: u64,
 }
@@ -360,7 +356,7 @@ impl BdFile for WebFile {
     }
 
     fn extension(&self) -> &str {
-        extension_of(&self.name)
+        &self.extension
     }
 
     fn length(&self) -> u64 {
@@ -583,7 +579,13 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
         let file: web_sys::File =
             value.dyn_into().map_err(|_| JsValue::from_str("entry is not a File"))?;
         let length = file.size() as u64;
-        let web_file = WebFile { name: name.to_owned(), full: path.clone(), file, length };
+        let web_file = WebFile {
+            name: name.to_owned(),
+            full: path.clone(),
+            extension: extension_of_name(name),
+            file,
+            length,
+        };
         entries.push((comps, web_file));
     }
 
@@ -1058,8 +1060,8 @@ mod tests {
     use bdinfo_rs_core::vfs::mem::MemFile;
 
     use super::{
-        MAX_TREE_DEPTH, RenderOptions, TreeError, assemble_tree, extension_of, framed_tree,
-        path_components, read_window, seek_target,
+        MAX_TREE_DEPTH, RenderOptions, TreeError, assemble_tree, framed_tree, path_components,
+        read_window, seek_target,
     };
 
     /// Parses path strings into the `(components, id)` entries `assemble_tree`
@@ -1111,14 +1113,6 @@ mod tests {
         assert_eq!(path_components("BDMV\\STREAM\\00000.m2ts"), ["BDMV", "STREAM", "00000.m2ts"]);
         assert_eq!(path_components("//a///b//"), ["a", "b"]);
         assert!(path_components("").is_empty());
-    }
-
-    #[test]
-    fn extension_of_returns_the_dotted_suffix_or_empty() {
-        assert_eq!(extension_of("00000.mpls"), ".mpls");
-        assert_eq!(extension_of("archive.tar.gz"), ".gz");
-        assert_eq!(extension_of("noext"), "");
-        assert_eq!(extension_of(".hidden"), ".hidden");
     }
 
     #[test]

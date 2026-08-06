@@ -2261,10 +2261,10 @@ mod tests {
         PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanProgress,
         ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
         build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
-        clip_has_50hz_video, clip_stem, collect_backups, fixtures, has_aacs_key_file, merge_stream,
-        rate_over, read_disc_title, read_file, read_file_capped, resolve_playlist_streams,
-        scan_stream_files, scan_total, select_reference, stream_content_encrypted, stream_summary,
-        unit_shows_encryption, walked_disc_root,
+        clip_has_50hz_video, clip_stem, collect_backups, directory_size, fixtures,
+        has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
+        resolve_playlist_streams, scan_stream_files, scan_total, select_reference,
+        stream_content_encrypted, stream_summary, unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::clpi::clips::build_clpi;
@@ -2278,7 +2278,7 @@ mod tests {
         TsTextStream, TsVideoFormat, TsVideoStream,
     };
     use crate::vfs::fs::{FsDir, FsFile};
-    use crate::vfs::{BdDir, BdFile, ReadSeek, SearchOption};
+    use crate::vfs::{BdDir, BdFile, ReadSeek, SearchOption, extension_of_name};
 
     // ── synthetic metadata builders (minimal valid `*.clpi` / `*.mpls`) ──────
     //
@@ -4547,16 +4547,12 @@ mod tests {
     /// Builds a complete, valid mock disc (two playlists, all flag dirs) whose io
     /// operations all share `trip`.
     fn mock_disc(trip: &Trip) -> MockDir {
-        let file = |name: &str, bytes: Vec<u8>| {
-            let extension =
-                name.rsplit_once('.').map_or_else(String::new, |(_, ext)| format!(".{ext}"));
-            MockFile {
-                name: name.to_owned(),
-                extension,
-                bytes,
-                trip: trip.clone(),
-                fail_read: false,
-            }
+        let file = |name: &str, bytes: Vec<u8>| MockFile {
+            name: name.to_owned(),
+            extension: extension_of_name(name),
+            bytes,
+            trip: trip.clone(),
+            fail_read: false,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -4618,6 +4614,28 @@ mod tests {
             ],
             vec![],
         )
+    }
+
+    #[test]
+    fn directory_size_keeps_an_uppercase_ssif_out_of_the_disc_size() {
+        // `extension_of_name` returns the suffix verbatim, case included, so the
+        // interleaved split is what has to fold case: a disc naming its file
+        // `00000.SSIF` must reach the same two totals as the lowercase spelling.
+        let trip = Trip::new(usize::MAX);
+        let file = |name: &str, len: usize| MockFile {
+            name: name.to_owned(),
+            extension: extension_of_name(name),
+            bytes: vec![0; len],
+            trip: trip.clone(),
+            fail_read: false,
+        };
+        let dir = MockDir {
+            name: "SSIF".to_owned(),
+            dirs: Vec::new(),
+            files: vec![file("00000.SSIF", 10), file("00001.ssif", 20), file("00000.m2ts", 5)],
+            trip,
+        };
+        assert_eq!(directory_size(&dir).expect("mock listing is infallible"), (5, 30));
     }
 
     #[test]

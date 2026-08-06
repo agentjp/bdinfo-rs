@@ -180,17 +180,22 @@ pub fn find_files(dir: &dyn BdDir, kind: BdFileKind) -> io::Result<Vec<Box<dyn B
 }
 
 /// The extension of `name` *including* the leading dot (e.g. `.SSIF`), or the
-/// empty string when `name` holds no `.`. The text after the last `.` is
-/// returned verbatim (a lone `.` for a trailing-dot name like `00000.`); no
-/// further normalization is applied.
+/// empty string when `name` holds no `.`.
 ///
-/// Every built-in backend derives [`BdFile::extension`] through this one
-/// function, and that agreement is load-bearing: the disc-size total skips an
-/// interleaved stream by matching this string against `.ssif`
-/// ([`crate::bdrom::disc`]), so a folder and the same disc as an `.iso` would
-/// report different sizes if two lookalike derivations disagreed on a name.
+/// The text after the last `.` is returned verbatim — case included, and a lone
+/// `.` for a trailing-dot name like `00000.`; no further normalization is
+/// applied. Callers that need a case-insensitive answer compare case-insensitively.
+///
+/// Every backend derives [`BdFile::extension`] through this one function — the
+/// three in this crate ([`fs`], [`udf`], [`mem`]) and the browser file backend
+/// in `bdinfo-rs-wasm`, which is why this is public — and that agreement is
+/// load-bearing: the disc-size total keeps an interleaved stream out of the
+/// disc size by matching this string against `.ssif` with
+/// [`eq_ignore_ascii_case`](str::eq_ignore_ascii_case) ([`crate::bdrom::disc`]),
+/// so a folder and the same disc as an `.iso` would report different sizes if
+/// two lookalike derivations disagreed on a name.
 #[must_use]
-pub(crate) fn extension_of_name(name: &str) -> String {
+pub fn extension_of_name(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((_, ext)) => format!(".{ext}"),
         None => String::new(),
