@@ -58,8 +58,8 @@ name: version-freshness
 #     fetched at a static version invisible to Dependabot; checked vs the highest
 #     SEMVER tag AppImage/appimagetool has released, since its `releases/latest`
 #     is the rolling `continuous` nightly), and
-#     cloudsmith-cli (the `cloudsmith-cli==X` pipx pin in packages.yml — a pip pin
-#     invisible to Dependabot's cargo/npm/actions scans; pinned once per push job,
+#     cloudsmith-cli (the CLOUDSMITH_CLI_VERSION pipx pin — a pip pin invisible to
+#     Dependabot's cargo/npm/actions scans; pinned once per publishing workflow,
 #     every occurrence checked to agree, then vs PyPI),
 # (Cargo deps/dev-deps, the web npm devDependencies — typescript / biome /
 # binaryen / playwright-core — and GitHub Action SHAs are already auto-bumped by
@@ -613,18 +613,17 @@ jobs:
             Add-Problem "komac $komacPin->$komacLatest" "- komac pin ``$komacPin`` (packages.yml KOMAC_VERSION) is behind the latest release ``$komacLatest``"
           }
 
-          # --- cloudsmith-cli: packages.yml `pipx install` pin vs PyPI --------------
-          # The deb/rpm jobs push to Cloudsmith with a pinned `cloudsmith-cli==X`
-          # (pipx). A pip pin invisible to Dependabot's cargo/npm/actions scans, so a
-          # server-side API change could break the frozen client silently; nag here
-          # like the other hand-bumped tools when a newer client ships. The pin
-          # occurs once PER PUSH JOB (.deb and .rpm) in packages.yml plus as the
-          # CLOUDSMITH_CLI_VERSION env in gui-publish.yml, so read every
-          # occurrence and assert they agree — a first-match-only read validates
-          # one job while the others drift unseen — then run freshness on the
-          # agreed value.
-          $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'cloudsmith-cli==([0-9.]+)'
-          if (-not $cloudsmithPins.Count) { throw 'No `cloudsmith-cli==<version>` pin in packages.yml' }
+          # --- cloudsmith-cli: the CLOUDSMITH_CLI_VERSION pins vs PyPI --------------
+          # The push legs install a pinned `cloudsmith-cli==X` with pipx, from the
+          # CLOUDSMITH_CLI_VERSION each workflow sets. A pip pin invisible to
+          # Dependabot's cargo/npm/actions scans, so a server-side API change could
+          # break the frozen client silently; nag here like the other hand-bumped
+          # tools when a newer client ships. The pin occurs once per publishing
+          # workflow — packages.yml for the CLI packages, gui-publish.yml for the
+          # GUI's — so read every occurrence and assert they agree; a
+          # first-match-only read validates one lane while the other drifts unseen.
+          $cloudsmithPins = Read-AllPins '.github/workflows/packages.yml' 'CLOUDSMITH_CLI_VERSION:\s*([0-9.]+)'
+          if (-not $cloudsmithPins.Count) { throw 'No CLOUDSMITH_CLI_VERSION pin in packages.yml' }
           $cloudsmithGuiPin = Read-Pin '.github/workflows/gui-publish.yml' 'CLOUDSMITH_CLI_VERSION:\s*([0-9.]+)'
           if (-not $cloudsmithGuiPin) { throw 'No CLOUDSMITH_CLI_VERSION pin in gui-publish.yml' }
           $cloudsmithPins = @($cloudsmithPins) + $cloudsmithGuiPin

@@ -379,8 +379,8 @@ begin {
             Name       = 'publishing helpers'
             Areas      = @()
             Structural = $true
-            Why        = 'Run only by the tag and dispatch publishing lanes, which the orchestrator never calls; their dry runs verify them.'
-            Match      = { param($f) Test-Match $f @('.github/scripts/publish-*.ps1') }
+            Why        = 'Run only by the tag and dispatch publishing lanes, which the orchestrator never calls; their dry runs verify them. _common.ps1 carries what those legs share and cloudsmith-push.ps1 the package push both the CLI and the GUI lane call, so the two are named here as well as the publish-* legs.'
+            Match      = { param($f) Test-Match $f @('.github/scripts/publish-*.ps1', '.github/scripts/_common.ps1', '.github/scripts/cloudsmith-push.ps1') }
         },
         @{
             Name       = 'banned-word and classifier scripts'
@@ -506,6 +506,8 @@ end {
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }
+            @{ Path = '.github/scripts/_common.ps1'; Areas = 'links typos' }
+            @{ Path = '.github/scripts/cloudsmith-push.ps1'; Areas = 'links typos' }
             @{ Path = 'packaging/aur/PKGBUILD.template'; Areas = 'links typos' }
             @{ Path = 'Dockerfile'; Areas = 'links typos' }
             @{ Path = 'fuzz/fuzz_targets/mpls.rs'; Areas = 'fuzz links typos' }

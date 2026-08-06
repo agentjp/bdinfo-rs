@@ -61,17 +61,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
+. "$PSScriptRoot/_common.ps1"
+
 $packageId = 'agentjp.bdinfo-rs-gui'
 # Dots split publisher/package into directory levels: manifests/<first
 # letter>/<publisher>/<package>/<version>/ is winget-pkgs' tree shape.
 $pkgTree = 'repos/microsoft/winget-pkgs/contents/manifests/a/agentjp/bdinfo-rs-gui'
 $base = "https://github.com/agentjp/bdinfo-rs/releases/download/gui-v$Version"
 $msiUrls = @("$base/bdinfo-rs-gui-x86_64-pc-windows-msvc.msi", "$base/bdinfo-rs-gui-aarch64-pc-windows-msvc.msi")
-
-function Stop-Leg([string] $why) {
-    Write-Host "FAILED: $why" -ForegroundColor Red
-    exit 1
-}
 
 if (-not $env:GITHUB_TOKEN) { Stop-Leg 'GITHUB_TOKEN is not set (komac and the state probe both need it)' }
 if (-not $env:KOMAC_VERSION) { Stop-Leg 'KOMAC_VERSION is not set (the workflow pins it)' }

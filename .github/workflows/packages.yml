@@ -29,7 +29,7 @@ name: packages
 # Secrets required (configure before the first release, or the jobs fail):
 #   WINGET_TOKEN       - classic PAT (public_repo) on the bot account that forked winget-pkgs
 #   AUR_SSH_KEY        - private SSH key whose public half is on the aur.archlinux.org account
-#   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the active deb/rpm jobs)
+#   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the linux-packages job)
 #
 # These three publish secrets live on the `release` ENVIRONMENT (not as repo secrets), so
 # only a release run can read them — a workflow on any other branch is structurally locked
@@ -214,182 +214,111 @@ jobs:
           commit_message: Update to ${{ env.VERSION }}
           ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
 
-  # ── Debian/Ubuntu: .deb attached to the release (x64 + arm64) ──────────────
-  deb:
-    name: .deb (${{ matrix.triple }})
-    runs-on: ${{ matrix.os }}
+  # ── Linux packages attached to the release: .deb + .rpm, x64 + arm64 ───────
+  # One job over both formats. What actually differs between them is the install
+  # command and the Debian-only copyright assertion; download, contents check and
+  # Cloudsmith push are identical, so they are written once. The trade is that
+  # the release UI shows one check-run name per format+arch pair rather than a
+  # separate .deb / .rpm job — nothing gates on those names.
+  linux-packages:
+    name: .${{ matrix.format }} (${{ matrix.target.triple }})
+    runs-on: ${{ matrix.target.os }}
     environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
     needs: gate
     if: needs.gate.outputs.stable == 'true'
-    # contents: read (inherited) is enough — the .deb is already a release asset; this
-    # job downloads + verifies + pushes to Cloudsmith and uploads nothing back. (The
-    # old job needed contents: write for `gh release upload`; dropping it resolves the
-    # #78/#79 Token-Permissions residuals.)
+    # contents: read (inherited) is enough — the package is already a release asset;
+    # this job downloads + verifies + pushes to Cloudsmith and uploads nothing back.
+    # (The old job needed contents: write for `gh release upload`; dropping it
+    # resolves the #78/#79 Token-Permissions residuals.)
     env:
       VERSION: ${{ needs.gate.outputs.version }}
+      FILE: dl/bdinfo-rs-${{ matrix.target.triple }}.${{ matrix.format }}
+      # The pipx pin cloudsmith-push.ps1 installs. A pip pin invisible to
+      # Dependabot; version-freshness.yml watches it and asserts it agrees with
+      # gui-publish.yml's copy.
+      CLOUDSMITH_CLI_VERSION: 1.21.0
     strategy:
       fail-fast: false
       # One NATIVE runner per arch so the install test runs the arch-matching binary
       # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
       matrix:
-        include:
+        format: [deb, rpm]
+        target:
           - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
+      # For .github/scripts/cloudsmith-push.ps1 — the only thing this job needs
+      # out of the repository.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # The package was built + attached to the release by dist `extra-artifacts`
       # (.github/build-linux-packages.sh); just pull it back to verify + republish.
-      - name: Download the .deb attached to the release
+      - name: Download the package attached to the release
         shell: bash
-        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.deb" -D dl
+        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "$(basename "$FILE")" -D dl
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify the .deb (install + run + man/completions on the native arch)
+      - name: Install the .deb on the native arch
+        if: matrix.format == 'deb'
         shell: bash
         run: |
           set -euo pipefail
-          deb="dl/bdinfo-rs-${{ matrix.triple }}.deb"
-          echo "== $deb =="; dpkg-deb --contents "$deb"
-          sudo dpkg -i "$deb"
-          bdinfo-rs --version
-          # cargo-deb gzips the man page (.1.gz); cargo-generate-rpm keeps it (.1) — accept either.
-          ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
-          for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
-            test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
-          done
-          # Debian carries NO License field in control metadata — the license lives only in
-          # the DEP-5 copyright, which is what license scanners (Cloudsmith) read. Assert the
-          # copyright installed AND carries the machine-readable License short-name.
-          grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
-          echo "${{ matrix.triple }} .deb: installs, runs, and ships man + completions + DEP-5 copyright"
+          echo "== $FILE =="; dpkg-deb --contents "$FILE"
+          sudo dpkg -i "$FILE"
 
-      # Publish the SAME bytes to the Cloudsmith apt repo so users can `apt install
-      # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
-      # Debian-family distro).
-      #
-      # IDEMPOTENT by preflight (best practice, replacing the old unconditional
-      # `--republish`): a workflow_dispatch re-run / backfill must not re-upload a
-      # version that is already there. A plain re-push of an existing version uploads
-      # then FAILS mid-sync ("...already exists...This package should be deleted"),
-      # leaving a broken entry; `--republish` avoids that but needlessly re-uploads and
-      # is discouraged by Cloudsmith. So query the public API by filename (matching the
-      # version base — Cloudsmith stores it revisioned, e.g. 1.2.0-1) and SKIP if present;
-      # push cleanly (no `--republish`) only when absent. `--republish`
-      # is kept solely as the safe fallback for the two cases where a plain push would
-      # otherwise strand a broken entry: the preflight could not determine state, or the
-      # push races another run and hits "already exists".
-      - name: Publish the .deb to Cloudsmith
-        shell: bash
-        env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-        run: |
-          set -euo pipefail
-          pipx install cloudsmith-cli==1.21.0 >/dev/null
-          ver="${VERSION#v}"
-          repo=bdinfo-rs/bdinfo-rs
-          file="dl/bdinfo-rs-${{ matrix.triple }}.deb"
-          # Cloudsmith stores the packaging-revisioned version (e.g. 1.2.0-1), so a bare
-          # `version:${ver}` matches NOTHING. Query the anonymous public API by the exact
-          # filename and match the version BASE (strip the trailing -<revision>) — exact
-          # and revision-agnostic. count stays empty on any query error → --republish fallback.
-          count=""
-          if json=$(curl -sSf -G "https://api.cloudsmith.io/v1/packages/$repo/" --data-urlencode "query=filename:bdinfo-rs-${{ matrix.triple }}.deb" --data-urlencode "page_size=100" 2>/dev/null); then
-            count=$(printf '%s' "$json" | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || true)
-          fi
-          if [ -n "$count" ] && [ "$count" != "0" ]; then
-            echo "bdinfo-rs-${{ matrix.triple }}.deb ${ver} already in Cloudsmith (${count}) — skipping"
-          elif [ "$count" = "0" ]; then
-            cloudsmith push deb "$repo/any-distro/any-version" "$file" \
-              || { echo "plain push failed — retrying idempotently with --republish"; cloudsmith push deb --republish "$repo/any-distro/any-version" "$file"; }
-          else
-            echo "could not query Cloudsmith state — pushing with --republish (safe)"
-            cloudsmith push deb --republish "$repo/any-distro/any-version" "$file"
-          fi
-
-  # ── Fedora/RHEL: .rpm attached to the release (x64 + arm64) ────────────────
-  rpm:
-    name: .rpm (${{ matrix.triple }})
-    runs-on: ${{ matrix.os }}
-    environment: release # CLOUDSMITH_API_KEY is an env secret on `release` (see header)
-    needs: gate
-    if: needs.gate.outputs.stable == 'true'
-    # contents: read (inherited) is enough — see the .deb job; this uploads nothing back.
-    env:
-      VERSION: ${{ needs.gate.outputs.version }}
-    strategy:
-      fail-fast: false
-      # One NATIVE runner per arch so the install test runs the arch-matching binary
-      # (x64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) — no emulation/Docker.
-      matrix:
-        include:
-          - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
-          - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
-    steps:
-      # The package was built + attached to the release by dist `extra-artifacts`
-      # (.github/build-linux-packages.sh); just pull it back to verify + republish.
-      - name: Download the .rpm attached to the release
-        shell: bash
-        run: gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p "bdinfo-rs-${{ matrix.triple }}.rpm" -D dl
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify the .rpm (install + run + man/completions on the native arch)
+      - name: Install the .rpm on the native arch
+        if: matrix.format == 'rpm'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq rpm
           sudo rpm --initdb 2>/dev/null || true
-          rpmf="dl/bdinfo-rs-${{ matrix.triple }}.rpm"
-          echo "== $rpmf =="; rpm -qpl "$rpmf"
+          echo "== $FILE =="; rpm -qpl "$FILE"
           # rpm tool on Ubuntu lays the package's files onto the filesystem; --nodeps
           # (the binary is static, no deps) and --ignorearch (rpm's host-arch string
           # may not match the package arch label) keep it from balking.
-          sudo rpm -i --nodeps --ignorearch --force "$rpmf"
+          sudo rpm -i --nodeps --ignorearch --force "$FILE"
+
+      - name: Verify what the package installed
+        shell: bash
+        run: |
+          set -euo pipefail
           bdinfo-rs --version
           # cargo-deb gzips the man page (.1.gz); cargo-generate-rpm keeps it (.1) — accept either.
           ls /usr/share/man/man1/bdinfo-rs.1* >/dev/null 2>&1 || { echo "NOT INSTALLED: man page"; exit 1; }
           for f in /usr/bin/bdinfo-rs /usr/share/bash-completion/completions/bdinfo-rs /usr/share/zsh/site-functions/_bdinfo-rs /usr/share/fish/vendor_completions.d/bdinfo-rs.fish; do
             test -f "$f" || { echo "NOT INSTALLED: $f"; exit 1; }
           done
-          echo "${{ matrix.triple }} .rpm: installs (rpm -i), runs, and ships man + completions"
+          # Debian carries NO License field in control metadata — the license lives only
+          # in the DEP-5 copyright, which is what license scanners (Cloudsmith) read.
+          # Assert the copyright installed AND carries the machine-readable short-name.
+          # RPM has a License tag in its own metadata and ships no such file.
+          if [ "${{ matrix.format }}" = deb ]; then
+            grep -q '^License: LGPL-2.1-or-later' /usr/share/doc/bdinfo-rs/copyright || { echo "NOT INSTALLED: DEP-5 copyright License field"; exit 1; }
+          fi
+          echo "${{ matrix.target.triple }} .${{ matrix.format }}: installs, runs, and ships man + completions"
 
-      # Publish the SAME bytes to the Cloudsmith yum repo so users can `dnf install
-      # bdinfo-rs` by name (one `any-distro/any-version` upload serves every
-      # RPM-family distro). Preflight-skip-if-present, `--republish` only as the safe
-      # fallback — see the .deb job for the full rationale.
-      - name: Publish the .rpm to Cloudsmith
-        shell: bash
+      # Publish the SAME bytes to Cloudsmith so users can `apt install bdinfo-rs` /
+      # `dnf install bdinfo-rs` by name. The push is idempotent by preflight; the
+      # rationale lives in cloudsmith-push.ps1.
+      - name: Publish the package to Cloudsmith
+        shell: pwsh
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
         run: |
-          set -euo pipefail
-          pipx install cloudsmith-cli==1.21.0 >/dev/null
-          ver="${VERSION#v}"
-          repo=bdinfo-rs/bdinfo-rs
-          file="dl/bdinfo-rs-${{ matrix.triple }}.rpm"
-          # Match the version BASE via the anonymous public API — see the .deb job for why
-          # a bare `version:${ver}` misses Cloudsmith's revisioned version (e.g. 1.2.0-1).
-          count=""
-          if json=$(curl -sSf -G "https://api.cloudsmith.io/v1/packages/$repo/" --data-urlencode "query=filename:bdinfo-rs-${{ matrix.triple }}.rpm" --data-urlencode "page_size=100" 2>/dev/null); then
-            count=$(printf '%s' "$json" | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || true)
-          fi
-          if [ -n "$count" ] && [ "$count" != "0" ]; then
-            echo "bdinfo-rs-${{ matrix.triple }}.rpm ${ver} already in Cloudsmith (${count}) — skipping"
-          elif [ "$count" = "0" ]; then
-            cloudsmith push rpm "$repo/any-distro/any-version" "$file" \
-              || { echo "plain push failed — retrying idempotently with --republish"; cloudsmith push rpm --republish "$repo/any-distro/any-version" "$file"; }
-          else
-            echo "could not query Cloudsmith state — pushing with --republish (safe)"
-            cloudsmith push rpm --republish "$repo/any-distro/any-version" "$file"
-          fi
+          ./.github/scripts/cloudsmith-push.ps1 -Version ($env:VERSION -replace '^v', '') -Path $env:FILE
 
   # ── Verify the PUBLISHED Cloudsmith repo: install bdinfo-rs BY NAME and confirm
   # ── the binary + man + completions all land — on both arches, native runners, no
-  # ── Docker. Runs after `deb` has pushed; retries while the apt index propagates.
+  # ── Docker. Runs after linux-packages has pushed (both formats, since the two
+  # ── share one job); retries while the apt index propagates.
   cloudsmith-verify:
     name: verify Cloudsmith apt install (${{ matrix.triple }})
     runs-on: ${{ matrix.os }}
-    needs: [gate, deb]
+    needs: [gate, linux-packages]
     if: needs.gate.outputs.stable == 'true'
     strategy:
       fail-fast: false

@@ -30,29 +30,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-function Stop-Leg([string] $why) {
-    Write-Host "FAILED: $why" -ForegroundColor Red
-    exit 1
-}
+. "$PSScriptRoot/_common.ps1"
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..' '..')).Path
 
-# Not `$sums`: PowerShell variable names are case-insensitive, so that would
-# overwrite the $Sums path parameter before the loop reads it.
-$shaByName = @{}
-foreach ($line in Get-Content -LiteralPath $Sums) {
-    if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') { $shaByName[$Matches[2].Trim()] = $Matches[1] }
-}
+$shaByName = Get-Sha256Sums -Path $Sums
 $shaX64 = $shaByName['bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb']
 $shaArm64 = $shaByName['bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb']
 if (-not $shaX64 -or -not $shaArm64) { Stop-Leg 'SHA256SUMS carries no entry for one of the two .deb assets' }
 
-$template = Join-Path $repoRoot 'packaging/aur/PKGBUILD-gui.template'
-$pkgbuild = (Get-Content -LiteralPath $template -Raw).
-Replace('__PKGVER__', $Version).
-Replace('__SHA256_X86_64__', $shaX64).
-Replace('__SHA256_AARCH64__', $shaArm64)
-if ($pkgbuild -match '__[A-Z0-9_]+__') { Stop-Leg "an unreplaced placeholder survived the render: $($Matches[0])" }
+$pkgbuild = Expand-Template -Path (Join-Path $repoRoot 'packaging/aur/PKGBUILD-gui.template') -Values @{
+    '__PKGVER__'          = $Version
+    '__SHA256_X86_64__'   = $shaX64
+    '__SHA256_AARCH64__'  = $shaArm64
+}
 
 New-Item -ItemType Directory -Force $Payload | Out-Null
 $payloadDir = (Resolve-Path -LiteralPath $Payload).Path
