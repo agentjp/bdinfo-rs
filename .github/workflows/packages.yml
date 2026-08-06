@@ -101,18 +101,24 @@ jobs:
     if: needs.gate.outputs.stable == 'true'
     env:
       VERSION: ${{ needs.gate.outputs.version }}
-      # Komac release to pin — the tool the manual backfills use, and what
-      # winget-releaser wrapped internally. A submission tool (not output-coupled),
-      # so it is a static pin bumped by hand; the winget-pkgs manifest schema is
-      # stable, so an occasional lag is harmless.
-      KOMAC_VERSION: 2.16.0
     steps:
+      # Only for .github/pins.env below — this job submits from release assets and
+      # needs nothing else out of the repository.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: pins
+        uses: ./.github/actions/pins
+
       # Submit with komac DIRECTLY — the same tool winget-releaser wraps, but
       # without its `cargo-bins/cargo-binstall@main` bootstrap, which this repo's
       # `sha_pinning_required` + allowlist policy (correctly) rejects. komac has no
       # taiki-e/install-action entry, so fetch its pinned release binary over curl
       # (a `run:` step, so no action-allowlist involvement at all).
       - name: Install komac
+        env:
+          KOMAC_VERSION: ${{ steps.pins.outputs.KOMAC }}
         run: |
           url="https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           curl -fsSL "$url" -o komac.tar.gz
@@ -233,10 +239,6 @@ jobs:
     env:
       VERSION: ${{ needs.gate.outputs.version }}
       FILE: dl/bdinfo-rs-${{ matrix.target.triple }}.${{ matrix.format }}
-      # The pipx pin cloudsmith-push.ps1 installs. A pip pin invisible to
-      # Dependabot; version-freshness.yml watches it and asserts it agrees with
-      # gui-publish.yml's copy.
-      CLOUDSMITH_CLI_VERSION: 1.21.0
     strategy:
       fail-fast: false
       # One NATIVE runner per arch so the install test runs the arch-matching binary
@@ -247,11 +249,14 @@ jobs:
           - {triple: x86_64-unknown-linux-musl, os: ubuntu-latest}
           - {triple: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm}
     steps:
-      # For .github/scripts/cloudsmith-push.ps1 — the only thing this job needs
-      # out of the repository.
+      # For .github/scripts/cloudsmith-push.ps1 and .github/pins.env — the only
+      # things this job needs out of the repository.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - id: pins
+        uses: ./.github/actions/pins
 
       # The package was built + attached to the release by dist `extra-artifacts`
       # (.github/build-linux-packages.sh); just pull it back to verify + republish.
@@ -308,6 +313,7 @@ jobs:
         shell: pwsh
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_CLI_VERSION: ${{ steps.pins.outputs.CLOUDSMITH_CLI }}
         run: |
           ./.github/scripts/cloudsmith-push.ps1 -Version ($env:VERSION -replace '^v', '') -Path $env:FILE
 

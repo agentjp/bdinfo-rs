@@ -49,12 +49,15 @@ jobs:
       - name: Fetch full history without blobs
         run: git fetch --no-tags --filter=blob:none --unshallow origin
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       # `fallback: none`: install only from install-action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install convco (prebuilt, no from-source compile)
         uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
-          tool: convco@0.7.1
+          tool: convco@${{ steps.pins.outputs.CONVCO }}
           fallback: none
 
       # Prove the banned-word regex still rejects attribution and passes innocent

@@ -101,12 +101,6 @@ concurrency:
   group: gui-publish-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
-env:
-  # Tool pins, hand-bumped (invisible to Dependabot; version-freshness.yml
-  # watches them and asserts they agree with packages.yml's copies).
-  KOMAC_VERSION: 2.16.0
-  CLOUDSMITH_CLI_VERSION: 1.21.0
-
 jobs:
   # Resolve tag/channels/mode from either trigger (the packages.yml gate
   # pattern). The auto path proceeds only for a successful gui-release run
@@ -198,6 +192,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Download the verified SHA256SUMS
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -210,6 +207,7 @@ jobs:
         env:
           # komac and the winget-pkgs state probe only read public repos here.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KOMAC_VERSION: ${{ steps.pins.outputs.KOMAC }}
         run: >-
           .github/scripts/publish-gui-winget.ps1
           -Version $env:VERSION -Mode prepare -Payload payload
@@ -233,6 +231,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDSMITH_CLI_VERSION: ${{ steps.pins.outputs.CLOUDSMITH_CLI }}
         run: >-
           .github/scripts/publish-gui-cloudsmith.ps1
           -Version $env:VERSION -Tag $env:TAG -Mode prepare -Sums sums/SHA256SUMS -Payload payload
@@ -293,6 +292,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Download the validated payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -306,6 +308,7 @@ jobs:
           # The bot PAT komac forks microsoft/winget-pkgs under; also serves
           # the script's read-only state probe.
           GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_VERSION: ${{ steps.pins.outputs.KOMAC }}
         run: >-
           .github/scripts/publish-gui-winget.ps1
           -Version $env:VERSION -Mode publish -Payload payload
@@ -353,6 +356,7 @@ jobs:
         shell: pwsh
         env:
           CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          CLOUDSMITH_CLI_VERSION: ${{ steps.pins.outputs.CLOUDSMITH_CLI }}
         run: >-
           .github/scripts/publish-gui-cloudsmith.ps1
           -Version $env:VERSION -Tag $env:TAG -Mode publish -Payload payload

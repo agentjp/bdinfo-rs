@@ -77,12 +77,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       # Neither tool ships via taiki-e/install-action, so cache the compiled
       # binaries instead of paying the from-source compile every run. ryl is
-      # version-pinned (reproducible lint verdicts; watched by
-      # version-freshness.yml); action-validator deliberately floats at latest
-      # (a schema checker self-updates), so its half of the key tracks the
-      # latest crates.io release — a new release recompiles once, then caches.
+      # version-pinned (reproducible lint verdicts); action-validator deliberately
+      # floats at latest (a schema checker self-updates), so its half of the key
+      # tracks the latest crates.io release — a new release recompiles once, then
+      # caches.
       # A failed lookup salts the key with the run id: a guaranteed miss and a
       # fresh install rather than a silently stale binary.
       - name: Resolve the latest action-validator (cache key)
@@ -102,13 +105,15 @@ jobs:
           path: |
             ~/.cargo/bin/action-validator
             ~/.cargo/bin/ryl
-          key: yaml-tools-${{ runner.os }}-${{ runner.arch }}-av-${{ steps.av.outputs.version }}-ryl-0.21.0
+          key: yaml-tools-${{ runner.os }}-${{ runner.arch }}-av-${{ steps.av.outputs.version }}-ryl-${{ steps.pins.outputs.RYL }}
 
       - name: Install action-validator + ryl (cache miss)
         if: steps.yaml-tools.outputs.cache-hit != 'true'
+        env:
+          RYL: ${{ steps.pins.outputs.RYL }}
         run: |
           cargo install action-validator --locked
-          cargo install ryl --version 0.21.0 --locked
+          cargo install ryl --version "$RYL" --locked
 
       - name: Schema-validate the workflow and action YAML (action-validator)
         run: |
@@ -135,13 +140,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: pins
+        uses: ./.github/actions/pins
+
       - name: Install taplo (prebuilt, no from-source compile)
         uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
-          # Pinned (not latest) so a new taplo can't reformat/relint the tree and
-          # red-X an unrelated PR; version-freshness watches it against crates.io
-          # and the bump stays deliberate, like rustfmt's nightly pin.
-          tool: taplo-cli@0.10.0
+          tool: taplo-cli@${{ steps.pins.outputs.TAPLO_CLI }}
           fallback: none
 
       # taplo auto-discovers taplo.toml (include/exclude + formatting). --check
