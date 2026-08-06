@@ -5,6 +5,12 @@
 //! `std::fs` (folder input — see [`fs`]) or the UDF reader (`.iso` input — see
 //! [`udf`]). A ~12-method file/directory pair is all the parsers need.
 //!
+//! A third backend, [`mem`], serves no disc medium at all: it holds a
+//! synthetic disc as byte buffers in RAM, for harnesses — the browser export
+//! and the fuzz targets — whose input arrives as bytes rather than as a
+//! mounted folder or image. It also defines the section framing those
+//! harnesses share; see its module docs.
+//!
 //! Case-insensitive BDMV lookup is folded in here, done once and correctly and
 //! routed through [`crate::discovery`] — see [`find_directory`] and
 //! [`find_files`].
@@ -18,6 +24,7 @@ use std::io::{self, BufRead, Read, Seek};
 use crate::discovery::{BdFileKind, BdmvDir};
 
 pub mod fs;
+pub mod mem;
 pub mod udf;
 pub mod volume;
 
@@ -164,9 +171,9 @@ pub fn find_files(dir: &dyn BdDir, kind: BdFileKind) -> io::Result<Vec<Box<dyn B
 /// returned verbatim (a lone `.` for a trailing-dot name like `00000.`); no
 /// further normalization is applied.
 ///
-/// Both backends derive [`BdFile::extension`] through this one function, and
-/// that agreement is load-bearing: the disc-size total skips an interleaved
-/// stream by matching this string against `.ssif`
+/// Every built-in backend derives [`BdFile::extension`] through this one
+/// function, and that agreement is load-bearing: the disc-size total skips an
+/// interleaved stream by matching this string against `.ssif`
 /// ([`crate::bdrom::disc`]), so a folder and the same disc as an `.iso` would
 /// report different sizes if two lookalike derivations disagreed on a name.
 #[must_use]

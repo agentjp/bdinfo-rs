@@ -1510,7 +1510,7 @@ mod tests {
     /// The fixture disc scanned through the in-memory tree, mirrored under the
     /// standard 20 s classification.
     fn a_fixture_disc(mode: ScanMode) -> Disc {
-        let tree = crate::build_tree(&crate::tests::fixture_blob());
+        let tree = crate::framed_tree(&crate::tests::fixture_blob());
         let report = BdRom::open_resilient(&tree, mode).expect("the fixture disc opens");
         Disc::from_scan(
             &report.bdrom,
