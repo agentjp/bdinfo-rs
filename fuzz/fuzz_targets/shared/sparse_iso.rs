@@ -15,12 +15,6 @@
 //! descriptor content or its placement, and none of it is the zero padding a
 //! whole-image framing must carry to reach the anchor at all.
 
-use std::io::{self, Cursor};
-use std::sync::Arc;
-
-use bdinfo_rs_core::vfs::ReadSeek;
-use bdinfo_rs_core::vfs::udf::source::IsoReader;
-
 /// The logical sector every placement in the framing is scaled by — the
 /// 2048-byte bootstrap sector a UDF image is addressed in.
 pub const SECTOR: usize = 2048;
@@ -29,25 +23,6 @@ pub const SECTOR: usize = 2048;
 /// what a hostile size field can make the HARNESS allocate, and it sits above
 /// the 330 sectors the largest committed seed describes.
 pub const MAX_IMAGE_SECTORS: usize = 512;
-
-/// An in-memory [`IsoReader`] — each handle gets an independent cursor.
-#[derive(Debug)]
-pub struct MemIso {
-    data: Arc<[u8]>,
-}
-
-impl MemIso {
-    /// Wraps `image` as the reader factory an `.iso` entry point takes.
-    pub fn boxed(image: Vec<u8>) -> Box<dyn IsoReader> {
-        Box::new(Self { data: Arc::from(image) })
-    }
-}
-
-impl IsoReader for MemIso {
-    fn open(&self) -> io::Result<Box<dyn ReadSeek>> {
-        Ok(Box::new(Cursor::new(self.data.to_vec())))
-    }
-}
 
 /// Materialises the image `data` describes (see the module docs).
 ///

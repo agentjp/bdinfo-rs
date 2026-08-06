@@ -17,7 +17,7 @@
 
 use std::io::Read;
 
-use bdinfo_rs_core::vfs::udf::source::UdfSource;
+use bdinfo_rs_core::vfs::udf::source::{MemIso, UdfSource};
 use bdinfo_rs_core::vfs::{BdDir, SearchOption};
 use libfuzzer_sys::fuzz_target;
 
@@ -31,7 +31,7 @@ const READ_BUDGET: u64 = 1 << 20;
 
 fuzz_target!(|data: &[u8]| {
     let image = sparse_iso::build_image(data);
-    let Ok(source) = UdfSource::open(sparse_iso::MemIso::boxed(image)) else {
+    let Ok(source) = UdfSource::open(MemIso::boxed(image)) else {
         return;
     };
     // Walk the parsed volume: label, root, every directory, every file.

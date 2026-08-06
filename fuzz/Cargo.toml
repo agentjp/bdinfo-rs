@@ -15,7 +15,11 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-bdinfo-rs-core = { path = "../crates/bdinfo-rs-core" }
+# `test-fixtures` is what publishes `vfs::udf::source::MemIso`, the buffer-backed
+# `IsoReader` the two `.iso` targets hand their built images to. Declared here
+# because a feature is a package-level property: nothing else in this graph asks
+# for it, and a dependency that did could stop at any time.
+bdinfo-rs-core = { path = "../crates/bdinfo-rs-core", features = ["test-fixtures"] }
 # The browser package's own entry points. `run_report` / `run_iso_report` and
 # the `mirror::Disc` model are not `cfg(target_arch = "wasm32")`-gated, so a
 # native build reaches them; the six `#[wasm_bindgen]` exports around them are
