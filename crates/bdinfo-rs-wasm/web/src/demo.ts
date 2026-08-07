@@ -10,7 +10,8 @@
 // pure re-projections of the model the page already holds; only the
 // short-playlist threshold (a fresh `inspect`) and the two report sections (a
 // `renderReport` over the held disc) reach the WebAssembly module, and nothing
-// in the dialog ever repeats a measured scan.
+// in the dialog ever repeats a measured scan. The retention switch sends
+// nothing at all: it travels with the next measured scan the user starts.
 import {
   type BdmvFile,
   type Clip,
@@ -123,6 +124,7 @@ const optHumanSizes = el<HTMLInputElement>("opt-human-sizes");
 const optChapters = el<HTMLInputElement>("opt-chapters");
 const optDiagnostics = el<HTMLInputElement>("opt-diagnostics");
 const optSummary = el<HTMLInputElement>("opt-summary");
+const optKeepPartial = el<HTMLInputElement>("opt-keep-partial");
 const hiddenHint = el("hidden-hint");
 const encryptedNote = el("encrypted-note");
 
@@ -176,7 +178,7 @@ let activeName: string | null = null;
 
 // ── settings ─────────────────────────────────────────────────────────────────
 
-/** The dialog's settings, mirroring the desktop app's seven browser-relevant ones. */
+/** The dialog's settings, mirroring the desktop app's eight browser-relevant ones. */
 interface Settings {
   showShortPlaylists: boolean;
   showLoopingPlaylists: boolean;
@@ -190,6 +192,12 @@ interface Settings {
   reportStreamDiagnostics: boolean;
   /** Render the report's `QUICK SUMMARY:` section. */
   reportQuickSummary: boolean;
+  /**
+   * Keep what a scan measured of a stream file whose read failed partway. The
+   * one setting that reaches only the NEXT scan: it changes what a scan
+   * collects, so flipping it re-renders nothing the page already holds.
+   */
+  keepPartialScans: boolean;
 }
 
 /** Where the settings persist between visits. */
@@ -229,6 +237,7 @@ function loadSettings(): Settings {
     displayChapterCount: stored.displayChapterCount !== false,
     reportStreamDiagnostics: stored.reportStreamDiagnostics !== false,
     reportQuickSummary: stored.reportQuickSummary !== false,
+    keepPartialScans: stored.keepPartialScans !== false,
   };
 }
 
@@ -817,6 +826,7 @@ async function runScan(): Promise<void> {
       selection,
       signal: controller.signal,
       shortPlaylistSeconds: threshold,
+      keepPartial: settings.keepPartialScans,
       ...sections,
     });
     if (gen !== generation) {
@@ -1015,6 +1025,7 @@ optHumanSizes.checked = settings.humanReadableSizes;
 optChapters.checked = settings.displayChapterCount;
 optDiagnostics.checked = settings.reportStreamDiagnostics;
 optSummary.checked = settings.reportQuickSummary;
+optKeepPartial.checked = settings.keepPartialScans;
 
 settingsBtn.addEventListener("click", () => {
   settingsDialog.showModal();
@@ -1042,6 +1053,13 @@ for (const box of [optDiagnostics, optSummary]) {
     void applyReportSections();
   });
 }
+// Retention decides what a scan collects, not how the page shows it: the held
+// disc keeps whatever the scan that produced it collected, so the new value is
+// remembered and reaches the next scan.
+optKeepPartial.addEventListener("change", () => {
+  settings.keepPartialScans = optKeepPartial.checked;
+  saveSettings();
+});
 optShortSeconds.addEventListener("change", () => {
   void applyThreshold();
 });

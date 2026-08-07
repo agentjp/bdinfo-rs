@@ -19,37 +19,29 @@ import init, {
   inspect_files,
   inspect_iso,
   render_report,
+  type ScanOptions,
   scan_files,
   scan_iso,
 } from "../pkg/bdinfo_rs_wasm.js";
 
 /**
- * The playlist-classification threshold a scanning request carries: the length
- * under which a playlist counts as short. Absent means the wasm module's 20 s
- * default; zero switches the short rule off.
+ * The options object every request carries, built in `analyze.ts` and handed to
+ * the module as it stands. Each option is optional and each call reads the ones
+ * it names, so one shape serves every request here.
  */
-interface ClassifyOptions {
-  shortPlaylistSeconds: number | undefined;
-}
-
-/**
- * The optional report sections a rendering request carries. Both are `true`
- * unless the caller switched one off, which is the report the CLI writes.
- */
-interface ReportOptions {
-  streamDiagnostics: boolean;
-  quickSummary: boolean;
+interface WithOptions {
+  options: ScanOptions;
 }
 
 /** The whole disc model of the picked BDMV folder from a structural scan. */
-interface InspectRequest extends ClassifyOptions {
+interface InspectRequest extends WithOptions {
   kind: "inspect";
   paths: string[];
   files: File[];
 }
 
 /** The whole disc model of a single picked `.iso` from a structural scan. */
-interface InspectIsoRequest extends ClassifyOptions {
+interface InspectIsoRequest extends WithOptions {
   kind: "inspect-iso";
   file: File;
 }
@@ -58,7 +50,7 @@ interface InspectIsoRequest extends ClassifyOptions {
  * Measure the picked BDMV folder, answering with the report AND the model.
  * `selection` names the playlists to measure; empty is the `--whole` set.
  */
-interface ScanRequest extends ReportOptions, ClassifyOptions {
+interface ScanRequest extends WithOptions {
   kind: "scan";
   paths: string[];
   files: File[];
@@ -66,14 +58,14 @@ interface ScanRequest extends ReportOptions, ClassifyOptions {
 }
 
 /** Measure a single picked `.iso`, answering with the report AND the model. */
-interface ScanIsoRequest extends ReportOptions, ClassifyOptions {
+interface ScanIsoRequest extends WithOptions {
   kind: "scan-iso";
   file: File;
   selection: string[];
 }
 
 /** Re-render the report from a disc model a measured scan already produced. */
-interface RenderRequest extends ReportOptions {
+interface RenderRequest extends WithOptions {
   kind: "render";
   disc: Disc;
 }
@@ -95,49 +87,36 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       self.postMessage({ type: "progress", file, done, total });
     };
     switch (data.kind) {
+      // The two structural calls take the classification threshold on its own:
+      // a scan that reads no packets is unaffected by every other option.
       case "inspect":
         self.postMessage({
           type: "disc",
-          disc: inspect_files(data.paths, data.files, data.shortPlaylistSeconds),
+          disc: inspect_files(data.paths, data.files, data.options.shortPlaylistSeconds),
         });
         break;
       case "inspect-iso":
         self.postMessage({
           type: "disc",
-          disc: inspect_iso(data.file, data.shortPlaylistSeconds),
+          disc: inspect_iso(data.file, data.options.shortPlaylistSeconds),
         });
         break;
       case "scan":
         self.postMessage({
           type: "result",
-          result: scan_files(
-            data.paths,
-            data.files,
-            data.selection,
-            onProgress,
-            data.streamDiagnostics,
-            data.quickSummary,
-            data.shortPlaylistSeconds,
-          ),
+          result: scan_files(data.paths, data.files, data.selection, onProgress, data.options),
         });
         break;
       case "scan-iso":
         self.postMessage({
           type: "result",
-          result: scan_iso(
-            data.file,
-            data.selection,
-            onProgress,
-            data.streamDiagnostics,
-            data.quickSummary,
-            data.shortPlaylistSeconds,
-          ),
+          result: scan_iso(data.file, data.selection, onProgress, data.options),
         });
         break;
       case "render":
         self.postMessage({
           type: "done",
-          report: render_report(data.disc, data.streamDiagnostics, data.quickSummary),
+          report: render_report(data.disc, data.options),
         });
         break;
     }

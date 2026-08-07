@@ -175,7 +175,11 @@ async function main() {
     JSON.stringify(playlists.map((playlist) => [playlist.group, playlist.position]));
   const standard = inspect_files(shortPaths, shortFiles).playlists;
   const lowered = inspect_files(shortPaths, shortFiles, 5).playlists;
-  const measuredShort = scan_files(shortPaths, shortFiles, [], undefined, true, true, 5).disc;
+  const measuredShort = scan_files(shortPaths, shortFiles, [], undefined, {
+    streamDiagnostics: true,
+    quickSummary: true,
+    shortPlaylistSeconds: 5,
+  }).disc;
   const thresholdOk =
     classify(standard) === '["00000.MPLS:","00001.MPLS:short"]' &&
     // A zero threshold switches the short rule off: nothing is shorter than
@@ -200,8 +204,8 @@ async function main() {
   // model crossed to JavaScript and back without losing a value the report
   // prints. Switching a section off must then drop it and nothing else.
   const reRendered = Buffer.from(render_report(full.disc), "utf8");
-  const noDiagnostics = render_report(full.disc, false);
-  const noSummary = render_report(full.disc, true, false);
+  const noDiagnostics = render_report(full.disc, { streamDiagnostics: false });
+  const noSummary = render_report(full.disc, { quickSummary: false });
   const fullOk =
     full.disc.measured === true &&
     full.disc.playlists[0].streams[0].bitrateBps > 0 &&
@@ -210,6 +214,20 @@ async function main() {
     noDiagnostics.includes("QUICK SUMMARY:") &&
     noSummary.includes("STREAM DIAGNOSTICS:") &&
     !noSummary.includes("QUICK SUMMARY:");
+
+  // Retention is about a stream file that fails to read, which this healthy
+  // fixture never does — so switching it off must leave the locked bytes alone.
+  // What the switch does when a read DOES fail is pinned in the library.
+  const dropped = Buffer.from(
+    scan_files(paths, files, [], undefined, { keepPartial: false }).report,
+    "utf8",
+  );
+  const keepPartialOk = dropped.equals(golden);
+  if (!keepPartialOk) {
+    console.error(
+      `FAIL — keepPartial: false changed a healthy scan (${dropped.length} bytes vs golden ${golden.length}).`,
+    );
+  }
   if (!fullOk) {
     console.error(
       `FAIL — scan_files/render_report round trip: report ${full.report.length} B, re-rendered ${reRendered.length} B, golden ${golden.length} B, measured ${full.disc.measured}.`,
@@ -282,13 +300,14 @@ async function main() {
     tableOk &&
     thresholdOk &&
     fullOk &&
+    keepPartialOk &&
     isoOk &&
     isoSelOk &&
     isoInspectOk &&
     isoFullOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + selection + round trip + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + selection + round trip + retention + .iso OK.`,
     );
     process.exit(0);
   }

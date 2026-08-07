@@ -40,7 +40,7 @@
 pub mod common;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use common::{bdinfo_rs, real_fixture};
 
@@ -593,4 +593,89 @@ fn section_stripping_reports_whether_the_heading_was_there() {
     assert!(trimmed.contains(SUMMARY), "the other section stays");
     assert_eq!(without_section(&trimmed, DIAGNOSTICS), None, "nothing left to remove");
     assert_eq!(subtract(&trimmed, &[DIAGNOSTICS]), trimmed, "an absent heading subtracts nothing");
+}
+
+// --- The `--drop-partial` pair checks ------------------------------------------
+//
+// The retention toggle acts only when a stream file's read fails mid-demux — a
+// state no on-disk fixture can put the spawned binary in (a regular file's
+// reads end in EOF, never an error), so the keep-vs-drop report delta is
+// pinned where the failing read can be injected: the core's disc-level tests.
+// What the binary can prove end to end is the flag's neutrality everywhere
+// else: on this healthy disc, and on one damaged by an unparsable playlist
+// (recorded damage outside the toggle's scope), `--drop-partial` must change
+// nothing. A pair check rather than a sweep dimension, because doubling every
+// cell for that no-op would spend the wall clock the stride note above
+// budgets.
+
+/// Scans `disc` with `--whole` plus `switches` into a fresh `tag`-named
+/// destination, returning the exit code and the [`REPORT`] file it wrote.
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
+)]
+fn whole_scan(disc: &Path, tag: &str, switches: &[&str]) -> (Option<i32>, String) {
+    let dest =
+        std::env::temp_dir().join(format!("bdinfo-rs-droppartial-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest).is_ok();
+    std::fs::create_dir_all(&dest).expect("create the destination folder");
+    let output = bdinfo_rs()
+        .args([disc.as_os_str(), dest.as_os_str(), "--whole".as_ref()])
+        .args(switches)
+        .output()
+        .expect("spawn bdinfo-rs");
+    let report = std::fs::read_to_string(dest.join(REPORT)).expect("read the written report");
+    let _ = std::fs::remove_dir_all(&dest).is_ok();
+    (output.status.code(), report)
+}
+
+/// Copies the committed fixture disc to a fresh temp root still named
+/// [`DISC`] — the folder-derived label, and with it the report's name and
+/// bytes, must not change — and adds an unparsable playlist beside the real
+/// one. Returns the copy's root and the parent to remove for cleanup.
+#[expect(
+    clippy::expect_used,
+    reason = "test fixture setup; a failed copy or write should abort the test loudly"
+)]
+fn corrupt_playlist_copy(tag: &str) -> (PathBuf, PathBuf) {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create copy dir");
+        for entry in std::fs::read_dir(from).expect("list fixture") {
+            let entry = entry.expect("fixture entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("entry type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy fixture file");
+            }
+        }
+    }
+    let parent =
+        std::env::temp_dir().join(format!("bdinfo-rs-droppartial-{tag}-{}", std::process::id()));
+    let root = parent.join(DISC);
+    copy_tree(&real_fixture(DISC), &root);
+    std::fs::write(root.join("BDMV").join("PLAYLIST").join("00001.mpls"), b"XXXXjunk")
+        .expect("write the corrupt playlist");
+    (root, parent)
+}
+
+#[test]
+fn drop_partial_changes_no_byte_of_a_healthy_scan() {
+    let (code, report) = whole_scan(&real_fixture(DISC), "healthy", &["--drop-partial"]);
+    assert_eq!(code, Some(0), "a healthy scan exits 0 with the flag");
+    assert_eq!(report, GOLDEN, "the flagged report drifted from the golden");
+}
+
+#[test]
+fn drop_partial_changes_no_byte_of_a_metadata_damaged_scan() {
+    let (root, parent) = corrupt_playlist_copy("copy");
+    let (kept_code, kept) = whole_scan(&root, "keep", &[]);
+    let (dropped_code, dropped) = whole_scan(&root, "drop", &["--drop-partial"]);
+    let _ = std::fs::remove_dir_all(&parent).is_ok();
+
+    assert_eq!(kept_code, Some(3), "a damaged scan exits 3");
+    assert_eq!(dropped_code, Some(3), "the flag keeps the damaged-scan exit code");
+    assert!(kept.contains("WARNING: File errors"), "the damage is reported: {kept}");
+    assert!(kept.contains("PLAYLIST: 00000.MPLS"), "the healthy playlist still reports: {kept}");
+    assert_eq!(kept, dropped, "--drop-partial must not touch metadata-damage recovery");
 }

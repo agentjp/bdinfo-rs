@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanOptions, ScanProgress};
 use bdinfo_rs_core::bdrom::order::selection_order;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
@@ -120,21 +120,24 @@ pub struct Measured {
     pub playlists: Vec<PlaylistSummary>,
 }
 
-/// Opens `input` at the given scan depth through the core's path-based scan,
-/// which merges the backend's own recorded failures (filesystem enumeration,
-/// or `.iso` bad-sector recordings) into the scan's and repairs a folder's
-/// label. This dispatch is the whole of what the two input kinds do
-/// differently here.
+/// Opens `input` at the given scan depth, under `options`, through the core's
+/// path-based scan, which merges the backend's own recorded failures
+/// (filesystem enumeration, or `.iso` bad-sector recordings) into the scan's
+/// and repairs a folder's label. This dispatch is the whole of what the two
+/// input kinds do differently here.
 fn open(
     input: &Input,
     mode: ScanMode,
+    options: ScanOptions,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     let report = match input {
-        Input::Folder(path) => core_scan::open_folder(path, mode, scan_files, progress, cancel),
-        Input::Iso(path) => core_scan::open_iso(path, mode, scan_files, progress, cancel),
+        Input::Folder(path) => {
+            core_scan::open_folder(path, mode, options, scan_files, progress, cancel)
+        }
+        Input::Iso(path) => core_scan::open_iso(path, mode, options, scan_files, progress, cancel),
     }?;
     Ok((report.bdrom, report.errors))
 }
@@ -164,7 +167,12 @@ pub const fn no_progress(_: ScanProgress<'_>) {}
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
 pub fn scan_structural(input: &Input) -> Result<Structural, String> {
     let (bdrom, errors) = listing_scan(|mode| {
-        open(input, mode, None, &mut no_progress, &AtomicBool::new(false))
+        // Always the default (retain), never the user's setting: the
+        // partial-retention toggle scopes to the measured scan, which is the
+        // one that renders a report. A listing open that hits a mid-file read
+        // error therefore keeps that file's partial codec detail whatever the
+        // setting says, so the panes stay as full as the disc allows.
+        open(input, mode, ScanOptions::default(), None, &mut no_progress, &AtomicBool::new(false))
             .map_err(|err: BdError| err.to_string())
     })?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
@@ -205,8 +213,10 @@ fn listing_scan(open: impl Fn(ScanMode) -> Opened) -> Opened {
 /// both derived from
 /// the structural scan. The packet scan reads only `scan_files`, so an unselected
 /// (possibly multi-GB) playlist is never demuxed. `options` is the report's
-/// section switches at scan start. Runs on the iced shell's worker
-/// thread, where native demux keeps its `thread::scope` parallelism.
+/// section switches at scan start and `scan_options` the scan's own — the
+/// partial-retention switch reaches the report only from here. Runs on the
+/// iced shell's worker thread, where native demux keeps its `thread::scope`
+/// parallelism.
 ///
 /// `cancel` is the shell's Cancel affordance: set it (from the UI thread) and
 /// the demux aborts at its next read chunk, so the worker returns within
@@ -223,11 +233,13 @@ pub fn scan_measured(
     selection: &[String],
     scan_files: &BTreeSet<String>,
     options: RenderOptions,
+    scan_options: ScanOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<Measured, String> {
-    let (bdrom, errors) = open(input, ScanMode::Full, Some(scan_files), progress, cancel)
-        .map_err(|err| err.to_string())?;
+    let (bdrom, errors) =
+        open(input, ScanMode::Full, scan_options, Some(scan_files), progress, cancel)
+            .map_err(|err| err.to_string())?;
     let order = selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors, options);
     Ok(Measured {
@@ -298,7 +310,7 @@ mod tests {
 
     use bdinfo_rs_core::vfs::fs::FsDir;
 
-    use super::{BdRom, Input, ScanMode};
+    use super::{BdRom, Input, ScanMode, ScanOptions};
 
     /// A scratch directory under the crate's target dir (unique per test).
     fn scratch(name: &str) -> PathBuf {
@@ -449,6 +461,7 @@ mod tests {
             &[],
             &std::collections::BTreeSet::new(),
             bdinfo_rs_core::report::text::RenderOptions::default(),
+            ScanOptions::default(),
             &mut super::no_progress,
             &std::sync::atomic::AtomicBool::new(false),
         )

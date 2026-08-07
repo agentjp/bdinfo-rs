@@ -52,7 +52,13 @@ use std::io::{self, SeekFrom};
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::sync::atomic::AtomicBool;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanProgress, ScanReport};
+// The core scan switches are aliased because the browser API publishes a
+// `ScanOptions` of its own — `mirror::ScanOptions`, the object the scanning
+// exports take, which carries the retention switch this type holds plus the
+// report and classification choices a disc open knows nothing about.
+use bdinfo_rs_core::bdrom::disc::{
+    BdRom, ScanMode, ScanOptions as CoreScanOptions, ScanProgress, ScanReport,
+};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::order::{named_selection, selection_order, selection_stream_files};
@@ -81,7 +87,7 @@ pub mod mirror;
 // and by the measured-scan pairing (`measured_result`) those exports return —
 // which is target-agnostic, hence the same gate as the rest of that logic.
 #[cfg(any(target_arch = "wasm32", test))]
-use mirror::{Disc, ScanResult};
+use mirror::{Disc, ScanOptions, ScanResult};
 
 /// The read-ahead window each [`WebReader`] fill pulls from `FileReaderSync` in
 /// one go, so a front-to-back demux crosses the JS boundary once per MiB rather
@@ -663,6 +669,9 @@ impl std::fmt::Display for SelectionError {
 /// unfiltered — a short or looping playlist the `--whole` filter drops is still
 /// selectable by name.
 ///
+/// `options` governs the measured scan alone: the structural scan reads no
+/// packets, so no switch it carries can change what that scan finds.
+///
 /// # Errors
 /// [`SelectionError::Open`] if the structure is too damaged to scan, or
 /// [`SelectionError::NoMatch`] if `selection` names no playlist on the disc
@@ -672,6 +681,7 @@ impl std::fmt::Display for SelectionError {
 fn scan_selection(
     root: &dyn BdDir,
     selection: &[String],
+    options: CoreScanOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<Scan, SelectionError> {
     let structural = BdRom::open_resilient(root, ScanMode::Metadata)?;
@@ -689,6 +699,7 @@ fn scan_selection(
     let measured = BdRom::open_resilient_with(
         root,
         ScanMode::Full,
+        options,
         Some(&files),
         progress,
         &never_cancelled(),
@@ -735,9 +746,10 @@ impl Scan {
 /// order.
 ///
 /// This is the byte-for-byte core shared by every export and the native parity
-/// test: [`BdRom::open_resilient_with`] with the packet scan **on**, ordered by
-/// the standard filtered set ([`PlaylistFilter::default`], which drops playlists
-/// shorter than 20 s and looping ones). `progress` observes the demux.
+/// test: [`BdRom::open_resilient_with`] with the packet scan **on** and the
+/// scan's behaviour switches set by `options`, ordered by the standard filtered
+/// set ([`PlaylistFilter::default`], which drops playlists shorter than 20 s and
+/// looping ones). `progress` observes the demux.
 ///
 /// # Errors
 /// Returns the [`BdError`] from [`BdRom::open_resilient_with`] when the
@@ -745,15 +757,26 @@ impl Scan {
 /// the caller decides whether that is an empty disc or an error to report.
 fn scan_whole(
     root: &dyn BdDir,
+    options: CoreScanOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<Scan, BdError> {
-    let report =
-        BdRom::open_resilient_with(root, ScanMode::Full, None, progress, &never_cancelled())?;
+    let report = BdRom::open_resilient_with(
+        root,
+        ScanMode::Full,
+        options,
+        None,
+        progress,
+        &never_cancelled(),
+    )?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(Scan { report, order })
 }
 
 /// [`scan_whole`] rendered to the classic report with `options`.
+///
+/// The scan itself runs with [`CoreScanOptions::default`]: the report-only
+/// entries this serves ([`run_report`], [`run_iso_report`]) take no options, so
+/// they scan the way an unconfigured call does.
 ///
 /// # Errors
 /// As [`scan_whole`].
@@ -762,18 +785,31 @@ fn render_disc(
     options: RenderOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<String, BdError> {
-    Ok(scan_whole(root, progress)?.render(options))
+    Ok(scan_whole(root, CoreScanOptions::default(), progress)?.render(options))
 }
 
-/// The report sections to render: each option switches its own section off, and
-/// an absent option leaves it on — so a call passing neither renders the whole
-/// report, the locked bytes [`RenderOptions::default`] produces.
+/// The report sections `options` asks for: each option switches its own section
+/// off, and an absent option — or no options object at all — leaves it on, so a
+/// call that asks for neither renders the whole report, the locked bytes
+/// [`RenderOptions::default`] produces.
 #[cfg(any(target_arch = "wasm32", test))]
-fn render_options(stream_diagnostics: Option<bool>, quick_summary: Option<bool>) -> RenderOptions {
+fn render_options(options: Option<&ScanOptions>) -> RenderOptions {
     RenderOptions {
-        stream_diagnostics: stream_diagnostics.unwrap_or(true),
-        quick_summary: quick_summary.unwrap_or(true),
+        stream_diagnostics: options.and_then(|options| options.stream_diagnostics).unwrap_or(true),
+        quick_summary: options.and_then(|options| options.quick_summary).unwrap_or(true),
     }
+}
+
+/// The scan switches `options` asks for. An absent `keepPartial` — or no options
+/// object at all — leaves [`CoreScanOptions::default`] in force, which keeps the
+/// measured state of a stream file whose read fails partway.
+#[cfg(any(target_arch = "wasm32", test))]
+fn scan_options(options: Option<&ScanOptions>) -> CoreScanOptions {
+    let mut scan = CoreScanOptions::default();
+    if let Some(keep_partial) = options.and_then(|options| options.keep_partial) {
+        scan.keep_partial = keep_partial;
+    }
+    scan
 }
 
 /// Both outputs of one measured `scan`: the report rendered with `options`, and
@@ -806,13 +842,15 @@ fn measured_result(scan: &Scan, options: RenderOptions, filter: &PlaylistFilter)
 fn scan_root(
     root: &dyn BdDir,
     selection: &[String],
+    options: CoreScanOptions,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<Scan, JsValue> {
     if selection.is_empty() {
-        scan_whole(root, progress)
+        scan_whole(root, options, progress)
             .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
     } else {
-        scan_selection(root, selection, progress).map_err(|err| JsValue::from_str(&err.to_string()))
+        scan_selection(root, selection, options, progress)
+            .map_err(|err| JsValue::from_str(&err.to_string()))
     }
 }
 
@@ -940,10 +978,12 @@ pub fn inspect_iso(
 /// Renders the classic disc report from a [`Disc`] — no media, no rescan.
 ///
 /// Hand back a disc a measured scan produced and the report comes out again,
-/// with whichever optional sections `stream_diagnostics` and `quick_summary`
-/// ask for. Omitting an option renders its section, so `renderReport(disc)`
-/// alone reproduces the report the scan itself returned, byte for byte. This is
-/// what re-rendering with different sections costs: nothing but the render.
+/// with whichever optional sections `options` asks for. Omitting an option — or
+/// the whole object — renders its section, so `renderReport(disc)` alone
+/// reproduces the report the scan itself returned, byte for byte. This is what
+/// re-rendering with different sections costs: nothing but the render.
+///
+/// The options that govern what a scan reads are ignored here: nothing is read.
 ///
 /// The disc model carries every value the report prints, so this is a render
 /// rather than an approximation — but it is the only supported way to turn a
@@ -959,14 +999,10 @@ pub fn inspect_iso(
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 #[must_use]
-pub fn render_report(
-    disc: Disc,
-    stream_diagnostics: Option<bool>,
-    quick_summary: Option<bool>,
-) -> String {
+pub fn render_report(disc: Disc, options: Option<ScanOptions>) -> String {
     let (bdrom, errors) = disc.into_scan();
     let order = bdrom.presentation_order(&PlaylistFilter::default());
-    text::render_with(&bdrom, &order, &errors, render_options(stream_diagnostics, quick_summary))
+    text::render_with(&bdrom, &order, &errors, render_options(options.as_ref()))
 }
 
 /// The measured-scan entry point: a `webkitdirectory`-selected BDMV folder in,
@@ -982,11 +1018,11 @@ pub fn render_report(
 /// When `on_progress` is supplied it is called as `(file, done, total)` after
 /// each demux read. A non-empty `selection` names the playlists to measure (CLI
 /// `--mpls` semantics — unfiltered, in order); an empty `selection` measures the
-/// standard `--whole` set. `stream_diagnostics` and `quick_summary` choose the
-/// optional report sections, and omitting them renders every section.
-/// `short_playlist_seconds` sets the length under which a playlist counts as
-/// short for `disc.playlists`, exactly as in [`inspect_files`]; it does not
-/// change what is measured or rendered.
+/// standard `--whole` set. `options` carries the rest: the optional report
+/// sections, the short-playlist threshold `disc.playlists` is classified against
+/// (exactly as in [`inspect_files`]), and whether a stream file whose read fails
+/// partway keeps what was measured of it. Omitting an option, or the whole
+/// object, is what the classic report is rendered from.
 ///
 /// `result.disc.measured` is true: this scan measured the values, so a zero in
 /// it is a genuine zero. Re-render `result.disc` with other sections through
@@ -1005,17 +1041,15 @@ pub fn scan_files(
     files: js_sys::Array,
     selection: Vec<String>,
     on_progress: Option<js_sys::Function>,
-    stream_diagnostics: Option<bool>,
-    quick_summary: Option<bool>,
-    short_playlist_seconds: Option<f64>,
+    options: Option<ScanOptions>,
 ) -> Result<ScanResult, JsValue> {
     let root = build_web_tree(&paths, &files)?;
     let mut observe = |p: ScanProgress<'_>| notify(on_progress.as_ref(), &p);
-    let scan = scan_root(&root, &selection, &mut observe)?;
+    let scan = scan_root(&root, &selection, scan_options(options.as_ref()), &mut observe)?;
     Ok(measured_result(
         &scan,
-        render_options(stream_diagnostics, quick_summary),
-        &classification_filter(short_playlist_seconds),
+        render_options(options.as_ref()),
+        &classification_filter(options.and_then(|options| options.short_playlist_seconds)),
     ))
 }
 
@@ -1038,18 +1072,18 @@ pub fn scan_iso(
     file: web_sys::File,
     selection: Vec<String>,
     on_progress: Option<js_sys::Function>,
-    stream_diagnostics: Option<bool>,
-    quick_summary: Option<bool>,
-    short_playlist_seconds: Option<f64>,
+    options: Option<ScanOptions>,
 ) -> Result<ScanResult, JsValue> {
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    let scan = scan_root(&source.root(), &selection, &mut |p| notify(on_progress.as_ref(), &p))?;
+    let scan = scan_root(&source.root(), &selection, scan_options(options.as_ref()), &mut |p| {
+        notify(on_progress.as_ref(), &p);
+    })?;
     Ok(measured_result(
         &scan,
-        render_options(stream_diagnostics, quick_summary),
-        &classification_filter(short_playlist_seconds),
+        render_options(options.as_ref()),
+        &classification_filter(options.and_then(|options| options.short_playlist_seconds)),
     ))
 }
 
@@ -1345,14 +1379,15 @@ mod tests {
     fn one_measured_scan_yields_both_the_report_and_the_disc() {
         use bdinfo_rs_core::bdrom::disc::ScanProgress;
 
-        use super::{measured_result, scan_whole};
+        use super::{CoreScanOptions, measured_result, scan_whole};
 
         /// The pinned report for the fixture disc — what the report-only
         /// exports render from the same scan.
         const GOLDEN: &[u8] = include_bytes!("../tests/golden_report.txt");
 
         let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
-        let scan = scan_whole(&framed_tree(&fixture_blob()), &mut sink).expect("the fixture opens");
+        let scan = scan_whole(&framed_tree(&fixture_blob()), CoreScanOptions::default(), &mut sink)
+            .expect("the fixture opens");
         // One scan, both outputs: the report is the pinned bytes and the disc
         // is the same scan mirrored, neither derived from the other.
         let result =
@@ -1362,20 +1397,57 @@ mod tests {
         assert_eq!(result.disc.volume_label, "WASMDISC");
     }
 
+    /// An options object with every option left out — the base each test below
+    /// sets the one option it is about on.
+    fn no_options() -> super::ScanOptions {
+        super::ScanOptions {
+            stream_diagnostics: None,
+            quick_summary: None,
+            short_playlist_seconds: None,
+            keep_partial: None,
+        }
+    }
+
     #[test]
     fn an_omitted_report_option_leaves_its_section_on() {
-        use super::render_options;
+        use super::{ScanOptions, render_options};
 
-        assert_eq!(render_options(None, None), RenderOptions::default());
+        // No object at all and an object asking for nothing are the same call.
+        assert_eq!(render_options(None), RenderOptions::default());
+        assert_eq!(render_options(Some(&no_options())), RenderOptions::default());
         assert_eq!(
-            render_options(Some(false), None),
+            render_options(Some(&ScanOptions { stream_diagnostics: Some(false), ..no_options() })),
             RenderOptions { stream_diagnostics: false, quick_summary: true }
         );
         assert_eq!(
-            render_options(None, Some(false)),
+            render_options(Some(&ScanOptions { quick_summary: Some(false), ..no_options() })),
             RenderOptions { stream_diagnostics: true, quick_summary: false }
         );
-        assert_eq!(render_options(Some(true), Some(true)), RenderOptions::default());
+        assert_eq!(
+            render_options(Some(&ScanOptions {
+                stream_diagnostics: Some(true),
+                quick_summary: Some(true),
+                ..no_options()
+            })),
+            RenderOptions::default()
+        );
+    }
+
+    #[test]
+    fn an_omitted_keep_partial_keeps_a_partially_read_stream_file() {
+        use super::{ScanOptions, scan_options};
+
+        // Absent either way — no object, or an object that leaves it out.
+        assert!(scan_options(None).keep_partial);
+        assert!(scan_options(Some(&no_options())).keep_partial);
+        assert!(
+            !scan_options(Some(&ScanOptions { keep_partial: Some(false), ..no_options() }))
+                .keep_partial
+        );
+        assert!(
+            scan_options(Some(&ScanOptions { keep_partial: Some(true), ..no_options() }))
+                .keep_partial
+        );
     }
 
     #[test]
@@ -1568,7 +1640,7 @@ mod tests {
             use bdinfo_rs_core::vfs::mem::MemFile;
 
             use super::mem_entries;
-            use crate::{Node, assemble_tree, scan_selection};
+            use crate::{CoreScanOptions, Node, assemble_tree, scan_selection};
 
             const INDEX: &[u8] =
                 include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny/BDMV/index.bdmv");
@@ -1609,17 +1681,23 @@ mod tests {
             let whole = RenderOptions::default();
 
             // Selecting only the feature renders it and drops the short sibling.
-            let feature = scan_selection(&tree, &["00000.MPLS".to_owned()], &mut sink)
-                .expect("scan the feature")
-                .render(whole);
+            let feature = scan_selection(
+                &tree,
+                &["00000.MPLS".to_owned()],
+                CoreScanOptions::default(),
+                &mut sink,
+            )
+            .expect("scan the feature")
+            .render(whole);
             assert!(feature.contains("00000.MPLS"), "the selected feature must be rendered");
             assert!(!feature.contains("00001.MPLS"), "an unselected playlist must not be rendered");
 
             // Selecting the short playlist by name keeps it — unfiltered, unlike
             // `--whole`; and only the named playlist is rendered.
-            let short_only = scan_selection(&tree, &["00001".to_owned()], &mut sink)
-                .expect("scan the short")
-                .render(whole);
+            let short_only =
+                scan_selection(&tree, &["00001".to_owned()], CoreScanOptions::default(), &mut sink)
+                    .expect("scan the short")
+                    .render(whole);
             assert!(short_only.contains("00001.MPLS"), "a by-name short playlist is kept");
             assert!(!short_only.contains("00000.MPLS"), "only the named playlist is rendered");
 
@@ -1627,8 +1705,13 @@ mod tests {
             // formatted through SelectionError's Display (the same text the wasm
             // `scan_files` export emits — which is what reads the inner error).
             let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
-            let open_err = scan_selection(&empty, &["00000.MPLS".to_owned()], &mut sink)
-                .expect_err("a structure with no BDMV must error");
+            let open_err = scan_selection(
+                &empty,
+                &["00000.MPLS".to_owned()],
+                CoreScanOptions::default(),
+                &mut sink,
+            )
+            .expect_err("a structure with no BDMV must error");
             assert!(
                 open_err.to_string().starts_with("no readable Blu-ray structure"),
                 "the open failure formats as a structure error"
@@ -1636,8 +1719,13 @@ mod tests {
 
             // A non-empty selection that names no playlist on the disc errors like
             // the CLI's `--mpls`, rather than rendering a header-only report.
-            let no_match = scan_selection(&tree, &["99999.MPLS".to_owned()], &mut sink)
-                .expect_err("an all-unknown selection must error");
+            let no_match = scan_selection(
+                &tree,
+                &["99999.MPLS".to_owned()],
+                CoreScanOptions::default(),
+                &mut sink,
+            )
+            .expect_err("an all-unknown selection must error");
             assert_eq!(no_match.to_string(), "No matching playlists found on BD");
         }
     }

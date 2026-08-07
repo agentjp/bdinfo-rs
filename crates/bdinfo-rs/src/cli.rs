@@ -84,6 +84,8 @@ struct Cli {
         help = "Short-playlist cutoff (default: 20)"
     )]
     short_playlist_seconds: u32,
+    #[arg(long, help = "Discard partially scanned stream data")]
+    drop_partial: bool,
     #[arg(long, help = "Omit the STREAM DIAGNOSTICS sections")]
     no_stream_diagnostics: bool,
     #[arg(long, help = "Omit the QUICK SUMMARY blocks")]

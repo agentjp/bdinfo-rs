@@ -954,6 +954,8 @@ enum SettingsField {
     StreamDiagnostics,
     /// "Include quick text summary in report".
     QuickSummary,
+    /// "Keep partial data from failed stream reads".
+    KeepPartial,
 }
 
 /// Everything the UI can ask the runtime to do.
@@ -1371,6 +1373,7 @@ impl App {
                 SettingsField::Autosave => &mut draft.autosave_report,
                 SettingsField::StreamDiagnostics => &mut draft.report_stream_diagnostics,
                 SettingsField::QuickSummary => &mut draft.report_quick_summary,
+                SettingsField::KeepPartial => &mut draft.keep_partial,
             };
             *slot = !*slot;
         }
@@ -1776,7 +1779,8 @@ impl App {
     /// `thread::scope` parallelism) and streams its progress + result back as
     /// messages. The UI thread stays free — only the channel is polled here.
     fn start_scan(&mut self) -> Task<Message> {
-        let Some(ScanRequest { input, selection, scan_files, options }) = self.flow.scan_request()
+        let Some(ScanRequest { input, selection, scan_files, options, scan_options }) =
+            self.flow.scan_request()
         else {
             return Task::none();
         };
@@ -1838,6 +1842,7 @@ impl App {
                 &selection,
                 &scan_files,
                 options,
+                scan_options,
                 &mut on_progress,
                 &cancel,
             );
@@ -3131,9 +3136,10 @@ fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
 
 /// The Settings dialog card — `BDInfo`'s `FormSettings`, narrowed to what is
 /// safely in the GUI's own hands: the two playlist filters (+ the seconds
-/// threshold), the two display toggles, the two report-section toggles, and
-/// autosave, with OK / Cancel (Cancel discards the draft). The wording
-/// mirrors the original's checkboxes.
+/// threshold), the two display toggles, the two report-section toggles,
+/// partial-scan retention, and autosave, with OK / Cancel (Cancel discards
+/// the draft). The wording mirrors the original's checkboxes, except the
+/// retention line, which `BDInfo` has no setting for.
 fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message> {
     let seconds_field = text_input("20", &draft.seconds_text)
         .on_input(Message::SettingsSeconds)
@@ -3231,6 +3237,12 @@ fn settings_card<'a>(p: Palette, draft: &settings::Draft) -> Element<'a, Message
             "Include quick text summary in report",
             draft.report_quick_summary,
             SettingsField::QuickSummary,
+        ))
+        .push(setting_check(
+            p,
+            "Keep partial data from failed stream reads",
+            draft.keep_partial,
+            SettingsField::KeepPartial,
         ))
         .push(setting_check(
             p,

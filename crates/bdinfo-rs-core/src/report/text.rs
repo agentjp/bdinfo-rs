@@ -1255,6 +1255,29 @@ Subtitle:       English / 19.12 kbps
     }
 
     #[test]
+    fn a_damaged_scan_adds_only_the_warning_block_to_the_pinned_report() {
+        // A retained partial scan renders through the same cells as a
+        // complete one — [`full_disc`]'s second chapter row is already the
+        // all-zero shape a post-failure chapter takes — so recording its
+        // failure must add exactly the `WARNING` block between the notes and
+        // the first playlist banner, and not move a single other byte.
+        let errors = [ScanError {
+            file: "00001.M2TS".to_owned(),
+            stage: ScanStage::StreamFile,
+            reason: BdError::StructureNotFound,
+        }];
+        let bdrom = full_disc();
+        let damaged = render(&bdrom, &errors);
+        let block = format!(
+            "WARNING: File errors were encountered during scan:\r\n\r\n00001.M2TS\t{}\r\n",
+            BdError::StructureNotFound
+        );
+        let banner = "\r\n********************";
+        let expected = render(&bdrom, &[]).replacen(banner, format!("{block}{banner}").as_str(), 1);
+        assert_eq!(damaged, expected);
+    }
+
+    #[test]
     fn protection_prefers_bd_plus_over_uhd_and_defaults_to_aacs() {
         let mut bdrom = disc(Vec::new());
         assert!(render(&bdrom, &[]).contains("Protection:     AACS\r\n"));

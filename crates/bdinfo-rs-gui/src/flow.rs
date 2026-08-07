@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary};
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanOptions};
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, selection_order, selection_stream_files};
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
@@ -339,6 +339,8 @@ pub struct ScanRequest {
     pub scan_files: BTreeSet<String>,
     /// The report's section switches at scan start.
     pub options: RenderOptions,
+    /// The scan's own behaviour switches at scan start.
+    pub scan_options: ScanOptions,
 }
 
 /// The flow state — an opaque value the shell drives and projects.
@@ -844,6 +846,7 @@ impl Flow {
             selection,
             scan_files,
             options: listing.view.render_options(),
+            scan_options: listing.view.scan_options(),
         })
     }
 
@@ -1217,6 +1220,18 @@ mod tests {
         let one = flow.scan_request().expect("a request once a row is checked");
         assert_eq!(one.selection, ["00000.MPLS"]);
         assert_eq!(one.scan_files.into_iter().collect::<Vec<_>>(), ["A.M2TS"]);
+    }
+
+    #[test]
+    fn a_scan_request_carries_the_views_scan_options() {
+        // The request snapshots the retention switch the same way it snapshots
+        // the report sections — the worker reads neither from the settings.
+        assert!(listed().scan_request().expect("a scan-all request").scan_options.keep_partial);
+        let mut flow = listed();
+        flow.set_view(ViewSettings { keep_partial: false, ..ViewSettings::default() });
+        let request = flow.scan_request().expect("a scan-all request");
+        assert!(!request.scan_options.keep_partial);
+        assert!(request.options.stream_diagnostics, "the report switches are untouched");
     }
 
     #[test]

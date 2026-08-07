@@ -59,8 +59,10 @@ use crate::stream::{StreamKind, TsStream, TsStreamType};
 
 /// Read-chunk size (5 MiB) for each underlying read. The packet state machine
 /// is chunk-boundary-agnostic, so the value affects only read granularity
-/// (tests drive a small size to exercise the cross-chunk deferral paths).
-const DATA_SIZE: usize = 5_242_880;
+/// (tests drive a small size to exercise the cross-chunk deferral paths) —
+/// plus failure granularity: a read error voids only its own chunk, so the
+/// demux keeps everything up to the last completed chunk boundary.
+pub(crate) const DATA_SIZE: usize = 5_242_880;
 
 /// Size of the fixed `PAT`/`PMT` section-assembly buffers.
 const SECTION_SIZE: usize = 1024;

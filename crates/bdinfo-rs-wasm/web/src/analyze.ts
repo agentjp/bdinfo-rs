@@ -14,7 +14,7 @@
 // files, and resolves with the result — the rendered classic disc report being
 // the very bytes the native CLI writes to `BDINFO.<label>.txt`.
 
-import type { Disc, ScanResult } from "../pkg/bdinfo_rs_wasm.js";
+import type { Disc, ScanOptions as ModuleOptions, ScanResult } from "../pkg/bdinfo_rs_wasm.js";
 
 // The structured disc model is generated from the Rust types, so these
 // declarations and the values the WebAssembly module hands back have one source
@@ -108,6 +108,20 @@ export interface ScanOptions {
    */
   quickSummary?: boolean;
   /**
+   * Keep what the scan measured of a stream file whose read failed partway,
+   * defaulting to `true`.
+   *
+   * A kept partial file carries everything the scan accumulated up to the
+   * failing read, so the report's chapter rows and stream diagnostics — and the
+   * matching {@link Disc} values — cover the span before the failure and stay
+   * zero after it. Set it to `false` and that span is discarded, leaving those
+   * cells zero throughout. Either way the failure itself is reported in
+   * {@link Disc.errors}.
+   *
+   * Read by {@link scan}.
+   */
+  keepPartial?: boolean;
+  /**
    * An optional {@link AbortSignal} that cancels the call in progress: when it
    * aborts, the scan Worker is terminated and the returned promise rejects with
    * the signal's reason (an `AbortError`), so callers can tell a user cancel
@@ -150,26 +164,20 @@ function payload(files: BdmvFile[]): { paths: string[]; files: File[] } {
 }
 
 /**
- * The playlist-classification threshold a scanning request carries. An omitted
- * one is forwarded as `undefined`, which is how the WebAssembly module spells
- * "use the 20 s default" — zero means the caller switched the short rule off.
+ * The options object a request carries into the WebAssembly module — the
+ * options the module itself takes. The rest of {@link ScanOptions} stops here:
+ * the Worker factory and the abort signal drive this module and cannot be
+ * posted to a Worker at all, and `selection` travels as its own request field.
+ *
+ * Each option is forwarded as given, `undefined` included — that is how the
+ * module spells "left out", and the module is where the defaults live.
  */
-function classifyOptions(options?: ScanOptions): { shortPlaylistSeconds: number | undefined } {
-  return { shortPlaylistSeconds: options?.shortPlaylistSeconds };
-}
-
-/**
- * The two optional report sections a render request carries. Both default to
- * `true` — an omitted option renders its section, so a render with no options
- * reproduces the report the CLI writes.
- */
-function reportOptions(options?: ScanOptions): {
-  streamDiagnostics: boolean;
-  quickSummary: boolean;
-} {
+function moduleOptions(options?: ScanOptions): ModuleOptions {
   return {
-    streamDiagnostics: options?.streamDiagnostics ?? true,
-    quickSummary: options?.quickSummary ?? true,
+    streamDiagnostics: options?.streamDiagnostics,
+    quickSummary: options?.quickSummary,
+    shortPlaylistSeconds: options?.shortPlaylistSeconds,
+    keepPartial: options?.keepPartial,
   };
 }
 
@@ -272,9 +280,10 @@ function request<T>(
  * Everything runs locally: no bytes leave the page.
  */
 export function inspect(source: DiscSource, options?: ScanOptions): Promise<Disc> {
+  const forwarded = moduleOptions(options);
   const message = Array.isArray(source)
-    ? { kind: "inspect", ...payload(source), ...classifyOptions(options) }
-    : { kind: "inspect-iso", file: source, ...classifyOptions(options) };
+    ? { kind: "inspect", ...payload(source), options: forwarded }
+    : { kind: "inspect-iso", file: source, options: forwarded };
   return request(
     message,
     (reply) => (reply.type === "disc" ? { value: reply.disc } : null),
@@ -294,7 +303,9 @@ export function inspect(source: DiscSource, options?: ScanOptions): Promise<Disc
  * measures only the named playlists (the CLI's `--mpls`), defaulting to the
  * standard `--whole` set. `options.streamDiagnostics` and
  * `options.quickSummary` choose the report's optional sections, both rendered
- * unless switched off. `options.signal` cancels the scan.
+ * unless switched off. `options.keepPartial` decides what becomes of a stream
+ * file whose read fails partway: what was measured of it is kept unless
+ * switched off. `options.signal` cancels the scan.
  *
  * `result.disc.measured` is `true`, so a zero in it is a genuine zero. Keep
  * `result.disc` and {@link renderReport} re-renders the report from it with
@@ -307,8 +318,7 @@ export function scan(
   onProgress?: ProgressFn,
   options?: ScanOptions,
 ): Promise<ScanResult> {
-  const selection = options?.selection ?? [];
-  const shared = { selection, ...reportOptions(options), ...classifyOptions(options) };
+  const shared = { selection: options?.selection ?? [], options: moduleOptions(options) };
   const message = Array.isArray(source)
     ? { kind: "scan", ...payload(source), ...shared }
     : { kind: "scan-iso", file: source, ...shared };
@@ -341,7 +351,7 @@ export function scan(
  */
 export function renderReport(disc: Disc, options?: ScanOptions): Promise<string> {
   return request(
-    { kind: "render", disc, ...reportOptions(options) },
+    { kind: "render", disc, options: moduleOptions(options) },
     (reply) => (reply.type === "done" ? { value: reply.report } : null),
     options,
   );

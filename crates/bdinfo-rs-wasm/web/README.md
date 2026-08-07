@@ -128,6 +128,21 @@ the CLI writes. A `disc` from a `scan` with a `selection` holds every playlist
 but measured values only for the ones that scan named, so re-rendering it prints
 the rest at zero — scan again to measure them.
 
+### Stream files that cannot be read to the end
+
+A `scan` does not abandon a disc whose stream file fails partway through: it
+keeps what it measured up to the failing read, so the chapter rows, stream
+diagnostics and per-file seconds cover the span before the failure and stay zero
+after it, and it reports the failure in `disc.errors`.
+
+```ts
+const { disc } = await scan(picked, undefined, { keepPartial: false });
+```
+
+`keepPartial: false` discards that measured span instead, leaving those values
+zero throughout. The failure is reported in `disc.errors` either way, and a
+disc that reads cleanly produces the same bytes under both settings.
+
 ### Playlist filtering
 
 The classic report withholds playlists shorter than 20 seconds and looping

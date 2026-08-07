@@ -413,6 +413,11 @@ async function main() {
     await demoPage.locator("#opt-short-seconds").blur();
     await rowCountIs(3);
     const thresholdApplied = await readDemo();
+
+    // Retention travels with the next measured scan, so flipping it must post
+    // no request at all and leave everything the page holds where it is.
+    await demoPage.click("#opt-keep-partial");
+    const retentionOff = await readDemo();
     await demoPage.click("#settings-close");
 
     // A phone-width viewport must not scroll the page sideways — wide tables
@@ -433,6 +438,7 @@ async function main() {
       chapters: document.getElementById("opt-chapters").checked,
       diagnostics: document.getElementById("opt-diagnostics").checked,
       summary: document.getElementById("opt-summary").checked,
+      keepPartial: document.getElementById("opt-keep-partial").checked,
     }));
 
     demo = {
@@ -457,6 +463,7 @@ async function main() {
       restored2,
       afterRenders,
       thresholdApplied,
+      retentionOff,
       pageScrolls,
       persisted,
     };
@@ -746,7 +753,22 @@ async function main() {
   demoOk &= demoEq("threshold hides the report", demo.thresholdApplied.reportHidden, true);
   demoOk &= demoEq("the discard is visible", demo.thresholdApplied.discardHidden, false);
   demoOk &= demoEq("threshold keeps the active row", demo.thresholdApplied.active, "00000.MPLS");
+
+  // The retention switch: nothing was requested and nothing on the page moved.
+  demoOk &= demoEq(
+    "retention flip costs no wasm call",
+    demo.retentionOff.calls,
+    demo.thresholdApplied.calls,
+  );
+  demoOk &= demoEq("retention flip leaves the table", demo.retentionOff.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+    "00002.MPLS",
+  ]);
+
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
+  // Retention was switched off above, so the reload proves the stored `false`
+  // is read back rather than defaulted to on like an absent setting.
   demoOk &= demoEq("settings survive a reload", demo.persisted, {
     seconds: "5",
     short: false,
@@ -755,6 +777,7 @@ async function main() {
     chapters: true,
     diagnostics: true,
     summary: true,
+    keepPartial: false,
   });
   demoOk = Boolean(demoOk);
 
