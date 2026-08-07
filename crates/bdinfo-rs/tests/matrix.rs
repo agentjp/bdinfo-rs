@@ -602,7 +602,7 @@ fn section_stripping_reports_whether_the_heading_was_there() {
 // reads end in EOF, never an error), so the keep-vs-drop report delta is
 // pinned where the failing read can be injected: the core's disc-level tests.
 // What the binary can prove end to end is the flag's neutrality everywhere
-// else: on this healthy disc, and on one damaged by an unparseable playlist
+// else: on this healthy disc, and on one damaged by an unparsable playlist
 // (recorded damage outside the toggle's scope), `--drop-partial` must change
 // nothing. A pair check rather than a sweep dimension, because doubling every
 // cell for that no-op would spend the wall clock the stride note above
@@ -631,7 +631,7 @@ fn whole_scan(disc: &Path, tag: &str, switches: &[&str]) -> (Option<i32>, String
 
 /// Copies the committed fixture disc to a fresh temp root still named
 /// [`DISC`] — the folder-derived label, and with it the report's name and
-/// bytes, must not change — and adds an unparseable playlist beside the real
+/// bytes, must not change — and adds an unparsable playlist beside the real
 /// one. Returns the copy's root and the parent to remove for cleanup.
 #[expect(
     clippy::expect_used,
