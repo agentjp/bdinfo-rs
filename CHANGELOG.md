@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixes
 
 * Hardening against hostile disc images from the continuous fuzz campaign: the backup
-  index is used when the primary is unparseable (#245), unknown PMT stream types are
+  index is used when the primary is unparsable (#245), unknown PMT stream types are
   skipped instead of aborting the section (#249), UDF CS0 dstring used lengths are
   clamped (#250), chapter-mark timestamps are masked (#251), `read_bits4` zero-fills its
   past-window tail (#253), and a playlist summary's angle totals are bounded before
