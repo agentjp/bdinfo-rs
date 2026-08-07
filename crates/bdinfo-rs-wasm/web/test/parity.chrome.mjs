@@ -109,6 +109,7 @@ async function main() {
 
   let listings;
   let structured;
+  let surface;
   let isoStructured;
   let demo;
   try {
@@ -190,6 +191,24 @@ async function main() {
         report: scanned.report,
         reRendered: await window.__renderReport(scanned.disc),
         trimmed: await window.__renderReport(scanned.disc, { streamDiagnostics: false }),
+      };
+    });
+
+    // The rest of the option/API surface through the real Worker: an
+    // out-of-domain threshold rejects instead of defaulting, a codecs inspect
+    // deepens the stream descriptions while staying unmeasured, and the report
+    // save-file name comes back through the core sanitizer.
+    surface = await page.evaluate(async () => {
+      const rejected = await window.__inspect(window.__files, { shortPlaylistSeconds: -1 }).then(
+        () => null,
+        (error) => String(error.message ?? error),
+      );
+      const codecs = await window.__inspect(window.__files, { codecs: true });
+      return {
+        rejected,
+        codecsMeasured: codecs.measured,
+        codecsVideo: codecs.playlists[0].streams[0].fullDescription,
+        fileName: await window.__reportFileName("a/b:c"),
       };
     });
 
@@ -418,6 +437,18 @@ async function main() {
     // no request at all and leave everything the page holds where it is.
     await demoPage.click("#opt-keep-partial");
     const retentionOff = await readDemo();
+
+    // The threshold input accepts 0 — the committed "rule off" value: one more
+    // inspect re-classifies the table (nothing is short under 0 s either) and
+    // the stored setting becomes 0.
+    await demoPage.fill("#opt-short-seconds", "0");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await demoPage.waitForFunction(
+      (want) => window.__calls.length === want,
+      retentionOff.calls.length + 1,
+      { timeout: 30000 },
+    );
+    const zeroThreshold = await readDemo();
     await demoPage.click("#settings-close");
 
     // A phone-width viewport must not scroll the page sideways — wide tables
@@ -464,6 +495,7 @@ async function main() {
       afterRenders,
       thresholdApplied,
       retentionOff,
+      zeroThreshold,
       pageScrolls,
       persisted,
     };
@@ -549,6 +581,19 @@ async function main() {
     console.error(
       `FAIL — scan/renderReport: measured ${structured.measured}, first stream rate ${structured.rate}, trimmed ${structured.trimmed.length} B.`,
     );
+  }
+
+  // The new-surface checks: rejection, codecs depth, and the sanitized name.
+  const surfaceOk =
+    typeof surface.rejected === "string" &&
+    surface.rejected.includes("shortPlaylistSeconds") &&
+    surface.codecsMeasured === false &&
+    surface.codecsVideo.includes("High Profile 4.1") &&
+    surface.fileName === "BDINFO.a_b_c.txt";
+  if (surfaceOk) {
+    console.log("PASS — Worker rejection, codecs inspect and reportFileName behave.");
+  } else {
+    console.error(`FAIL — option/API surface: ${JSON.stringify(surface)}`);
   }
 
   // The same two calls handed a single `File` instead of a list, which is what
@@ -766,11 +811,25 @@ async function main() {
     "00002.MPLS",
   ]);
 
+  // The zero threshold: accepted as a committed value (one more inspect), and
+  // nothing on the disc is short under it.
+  demoOk &= demoEq("a zero threshold costs one inspect", demo.zeroThreshold.calls, [
+    ...demo.retentionOff.calls,
+    "inspect",
+  ]);
+  demoOk &= demoEq("a zero threshold leaves nothing short", demo.zeroThreshold.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+    "00002.MPLS",
+  ]);
+  demoOk &= demoEq("a zero threshold shows no short hint", demo.zeroThreshold.hintHidden, true);
+
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
   // Retention was switched off above, so the reload proves the stored `false`
-  // is read back rather than defaulted to on like an absent setting.
+  // is read back rather than defaulted to on like an absent setting; the
+  // stored 0 threshold likewise comes back as the committed 0, not the default.
   demoOk &= demoEq("settings survive a reload", demo.persisted, {
-    seconds: "5",
+    seconds: "0",
     short: false,
     looping: false,
     human: true,
@@ -781,7 +840,7 @@ async function main() {
   });
   demoOk = Boolean(demoOk);
 
-  process.exit(listOk && inspectOk && scanOk && isoStructuredOk && demoOk ? 0 : 1);
+  process.exit(listOk && inspectOk && scanOk && surfaceOk && isoStructuredOk && demoOk ? 0 : 1);
 }
 
 main().catch((err) => {
