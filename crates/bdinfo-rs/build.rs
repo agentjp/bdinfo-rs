@@ -82,7 +82,7 @@ const EXAMPLES: &str = "Examples:\n  \
 /// The man page's per-argument descriptions, keyed by the derive's argument id
 /// — the `Cli` field name. `mut_arg` panics on an id that no longer exists, so
 /// a renamed field fails this build rather than silently dropping its prose.
-const LONG_HELP: [(&str, &str); 13] = [
+const LONG_HELP: [(&str, &str); 14] = [
     (
         "bd_path",
         "The Blu-ray to analyze. This may be the disc root (the folder containing BDMV), the \
@@ -137,6 +137,14 @@ const LONG_HELP: [(&str, &str); 13] = [
          table hides, what the hidden-playlist line names, and therefore what --whole scans; \
          --show-short-playlists lists the short ones anyway. Playlists named with --mpls are \
          never filtered, so the cutoff does not reach them.",
+    ),
+    (
+        "drop_partial",
+        "Discard a stream file's partially measured data when a read error interrupts its scan, \
+         instead of keeping the measurements — the default, which fills the report's chapter and \
+         stream-diagnostics rows for the span read before the failure and leaves the rest zero. \
+         The failure is recorded in the report's WARNING block either way. Unreadable sectors of \
+         a .iso image are unaffected: they are zero-filled and the scan continues regardless.",
     ),
     (
         "no_stream_diagnostics",

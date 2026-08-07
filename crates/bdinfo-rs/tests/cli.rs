@@ -44,6 +44,7 @@ Options:
       --show-short-playlists              Also list short playlists
       --show-looping-playlists            Also list looping playlists
       --short-playlist-seconds <SECONDS>  Short-playlist cutoff (default: 20)
+      --drop-partial                      Discard partially scanned stream data
       --no-stream-diagnostics             Omit the STREAM DIAGNOSTICS sections
       --no-quick-summary                  Omit the QUICK SUMMARY blocks
       --no-banner                         Never print the banner

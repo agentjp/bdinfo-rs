@@ -181,12 +181,23 @@ const fn scan_mode(run_packet_scan: bool) -> ScanMode {
 /// packet scan, so no display fires.
 const fn no_progress(_: ScanProgress<'_>) {}
 
-/// Dispatches `path` to the `.iso` or folder scan. `scan_files` narrows the
-/// packet scan, `progress` observes it, and `cancel` aborts it (the library's
-/// `open_with` extras).
+/// The library's [`ScanOptions`] for the parsed command line: `--drop-partial`
+/// switches off the default retention of what a damaged stream file's scan
+/// measured before its failing read.
+fn scan_options(cli: &Cli) -> ScanOptions {
+    let mut options = ScanOptions::default();
+    options.keep_partial = !cli.drop_partial;
+    options
+}
+
+/// Dispatches `path` to the `.iso` or folder scan. `options` carries the
+/// behavior switches ([`scan_options`]), `scan_files` narrows the packet scan,
+/// `progress` observes it, and `cancel` aborts it (the library's `open_with`
+/// extras).
 fn scan_disc(
     path: &str,
     run_packet_scan: bool,
+    options: ScanOptions,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
@@ -194,9 +205,9 @@ fn scan_disc(
     let location = Path::new(path);
     let mode = scan_mode(run_packet_scan);
     let report = if is_iso(location) {
-        scan::open_iso(location, mode, ScanOptions::default(), scan_files, progress, cancel)
+        scan::open_iso(location, mode, options, scan_files, progress, cancel)
     } else {
-        scan::open_folder(location, mode, ScanOptions::default(), scan_files, progress, cancel)
+        scan::open_folder(location, mode, options, scan_files, progress, cancel)
     }?;
     Ok((report.bdrom, report.errors))
 }
@@ -237,14 +248,21 @@ fn run(cli: &Cli) -> u8 {
         )
     );
     println!("Please wait while we scan the disc...");
-    let (bdrom, errors) =
-        match scan_disc(&cli.bd_path, false, None, &mut no_progress, &AtomicBool::new(false)) {
-            Ok(scanned) => scanned,
-            Err(err) => {
-                eprintln!("error: {err}");
-                return 1;
-            }
-        };
+    let options = scan_options(cli);
+    let (bdrom, errors) = match scan_disc(
+        &cli.bd_path,
+        false,
+        options,
+        None,
+        &mut no_progress,
+        &AtomicBool::new(false),
+    ) {
+        Ok(scanned) => scanned,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return 1;
+        }
+    };
     if bdrom.is_aacs_encrypted {
         // One dry notice on stderr either way; only `--list` continues — its
         // output is entirely database-derived, so it is correct on an
@@ -305,7 +323,9 @@ fn run(cli: &Cli) -> u8 {
     print!("{}", analyze_preamble(&bdrom.playlists, &selection));
     let scan_files = selection_stream_files(&bdrom.playlists, &selection);
     scan_and_report(
-        &mut |progress, cancel| scan_disc(&cli.bd_path, true, Some(&scan_files), progress, cancel),
+        &mut |progress, cancel| {
+            scan_disc(&cli.bd_path, true, options, Some(&scan_files), progress, cancel)
+        },
         &dest,
         &selection,
         RenderOptions {
@@ -1014,7 +1034,8 @@ mod tests {
     use super::{
         BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, banner, compose_progress,
         compose_styled_progress, erase_sequence, finish_early, help_page, hidden_hint,
-        pick_playlists, redraw_sequence, report_parse_failure, row_names, run, selection_table,
+        pick_playlists, redraw_sequence, report_parse_failure, row_names, run, scan_options,
+        selection_table,
     };
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
@@ -1626,6 +1647,7 @@ Options:
       --show-short-playlists              Also list short playlists
       --show-looping-playlists            Also list looping playlists
       --short-playlist-seconds <SECONDS>  Short-playlist cutoff (default: 20)
+      --drop-partial                      Discard partially scanned stream data
       --no-stream-diagnostics             Omit the STREAM DIAGNOSTICS sections
       --no-quick-summary                  Omit the QUICK SUMMARY blocks
       --no-banner                         Never print the banner
@@ -1713,6 +1735,7 @@ Options:
             "Scan a ripped disc folder",
             "the .MPLS extension may be omitted",
             "authoring artefacts",
+            "the span read before the failure",
         ] {
             assert!(man.contains(prose), "the man page is missing {prose:?}");
         }
@@ -1872,6 +1895,16 @@ Options:
         for flag in ["-s", "-S"] {
             assert!(Cli::try_parse_from(["bdinfo-rs", "disc", flag]).is_err(), "{flag}");
         }
+    }
+
+    #[test]
+    fn drop_partial_turns_the_scan_options_retention_off() {
+        let cli = Cli::try_parse_from(["bdinfo-rs", "disc"]).expect("parse");
+        assert!(scan_options(&cli).keep_partial, "the default keeps partial stream scans");
+        let cli = Cli::try_parse_from(["bdinfo-rs", "disc", "--drop-partial"]).expect("parse");
+        assert!(!scan_options(&cli).keep_partial, "--drop-partial discards them");
+        // Long-only, like the other behavior switches.
+        assert!(Cli::try_parse_from(["bdinfo-rs", "disc", "-d"]).is_err());
     }
 
     #[test]
