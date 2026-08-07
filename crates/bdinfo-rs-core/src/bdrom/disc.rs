@@ -4612,11 +4612,12 @@ mod tests {
             if self.remaining == 0 {
                 return Err(io::Error::other("read failed"));
             }
+            // `min` keeps the split inside the buffer, and an in-memory cursor
+            // read is an infallible copy — `unwrap_or` spells its `Result`
+            // away without adding an uncoverable error arm.
             let cap = self.remaining.min(buf.len());
-            let Some(dst) = buf.get_mut(..cap) else {
-                return Ok(0);
-            };
-            let served = self.bytes.read(dst)?;
+            let (dst, _) = buf.split_at_mut(cap);
+            let served = self.bytes.read(dst).unwrap_or(0);
             self.remaining = self.remaining.saturating_sub(served);
             Ok(served)
         }
