@@ -734,7 +734,7 @@ mod tests {
             assert_eq!(byte_cell(bytes, true), human, "human-readable cell for {bytes} bytes");
             rows = rows.saturating_add(1);
         }
-        // A mis-parsed or truncated table would assert nothing and still pass.
+        // A badly parsed or truncated table would assert nothing and still pass.
         assert_eq!(rows, 14, "every vector in the shared table is asserted");
     }
 

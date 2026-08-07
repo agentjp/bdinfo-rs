@@ -251,7 +251,7 @@ async function main() {
 
   // The demo's size cells against the shared vector table, columns 4 and 5 (the
   // desktop app asserts columns 2 and 3 of the same rows). A row count is
-  // asserted too: a mis-parsed table would check nothing and still pass.
+  // asserted too: a badly parsed table would check nothing and still pass.
   const { sizeCell } = await import("../dist/format.js");
   const vectors = (await readFile(sizeVectorsPath, "utf8"))
     .split(/\r?\n/)
