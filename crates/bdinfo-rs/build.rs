@@ -220,8 +220,9 @@ fn man_command() -> clap::Command {
 fn exit_status_section() -> Vec<u8> {
     let mut roff = String::from(".SH EXIT STATUS\n");
     for (code, meaning) in EXIT_STATUS {
-        roff.push_str(".TP\n");
-        roff.push_str(&format!("\\fB{code}\\fR\n"));
+        roff.push_str(".TP\n\\fB");
+        roff.push_str(code);
+        roff.push_str("\\fR\n");
         roff.push_str(&roff_escape(meaning));
         roff.push('\n');
     }
