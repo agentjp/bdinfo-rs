@@ -4581,13 +4581,15 @@ mod tests {
 
         fn open_read(&self) -> io::Result<Box<dyn ReadSeek>> {
             self.trip.tick()?;
-            match self.fail_read_at {
-                Some(serve) => Ok(Box::new(ServeThenFail {
-                    bytes: Cursor::new(self.bytes.clone()),
-                    remaining: serve,
-                })),
-                None => Ok(Box::new(Cursor::new(self.bytes.clone()))),
-            }
+            Ok(self.fail_read_at.map_or_else(
+                || -> Box<dyn ReadSeek> { Box::new(Cursor::new(self.bytes.clone())) },
+                |serve| {
+                    Box::new(ServeThenFail {
+                        bytes: Cursor::new(self.bytes.clone()),
+                        remaining: serve,
+                    })
+                },
+            ))
         }
 
         fn open_text(&self) -> io::Result<Box<dyn BufRead>> {
