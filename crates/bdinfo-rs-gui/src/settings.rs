@@ -3,8 +3,9 @@
 //! The app's small memory between launches: the window geometry, the last
 //! opened source path, and every Settings-dialog preference — theme, UI
 //! scale, the table filters and their threshold, the size and chapter-count
-//! formatting, autosave, and the two optional report sections (see
-//! [`Settings`] for the full set) — stored as a flat
+//! formatting, autosave, the two optional report sections, and the
+//! partial-scan retention switch (see [`Settings`] for the full set) —
+//! stored as a flat
 //! `key = value` text file (hand-rolled parser + writer, pure std — this
 //! project hand-rolled a UDF reader; a key-value file is squarely in its
 //! idiom). The store is a **convenience, never a dependency**: unknown keys
@@ -35,6 +36,7 @@ const KEY_CHAPTER_COUNT: &str = "display-chapter-count";
 const KEY_AUTOSAVE: &str = "autosave-report";
 const KEY_REPORT_DIAGNOSTICS: &str = "report-stream-diagnostics";
 const KEY_REPORT_SUMMARY: &str = "report-quick-summary";
+const KEY_KEEP_PARTIAL: &str = "keep-partial-scans";
 const KEY_LAST_PATH: &str = "last-path";
 const KEY_THEME: &str = "theme";
 const KEY_UI_SCALE: &str = "ui-scale-percent";
@@ -178,6 +180,11 @@ pub struct Settings {
     /// Render the report's `QUICK SUMMARY` blocks (`BDInfo`'s
     /// `GenerateTextSummary`).
     pub report_quick_summary: bool,
+    /// Keep what the measured scan demuxed of a stream file whose read failed
+    /// partway, instead of dropping that file's measurements
+    /// ([`ScanOptions::keep_partial`](bdinfo_rs_core::bdrom::disc::ScanOptions::keep_partial)).
+    /// Only a damaged disc can tell the two settings apart.
+    pub keep_partial: bool,
 }
 
 impl Default for Settings {
@@ -207,6 +214,10 @@ impl Default for Settings {
             // default report bytes.
             report_stream_diagnostics: true,
             report_quick_summary: true,
+            // Retention on — the core's own ScanOptions default, and classic
+            // BDInfo's behaviour: a stream file that dies mid-read still
+            // contributes everything measured before the failing read.
+            keep_partial: true,
         }
     }
 }
@@ -282,6 +293,7 @@ impl Settings {
                     set_bool(&mut settings.report_stream_diagnostics, value);
                 }
                 KEY_REPORT_SUMMARY => set_bool(&mut settings.report_quick_summary, value),
+                KEY_KEEP_PARTIAL => set_bool(&mut settings.keep_partial, value),
                 // Unknown key — a newer version's setting (or a typo);
                 // ignored as ever, but reported (once per key) so the caller
                 // can say so. An EMPTY key is malformed junk, not a nameable
@@ -317,6 +329,7 @@ impl Settings {
             (KEY_AUTOSAVE, self.autosave_report.to_string()),
             (KEY_REPORT_DIAGNOSTICS, self.report_stream_diagnostics.to_string()),
             (KEY_REPORT_SUMMARY, self.report_quick_summary.to_string()),
+            (KEY_KEEP_PARTIAL, self.keep_partial.to_string()),
             (KEY_WINDOW_MAXIMIZED, self.window_maximized.to_string()),
         ];
         if let Some(path) = self.last_path.as_deref().and_then(Path::to_str)
@@ -453,6 +466,8 @@ pub struct Draft {
     pub report_stream_diagnostics: bool,
     /// The "Include quick text summary in report" checkbox.
     pub report_quick_summary: bool,
+    /// The "Keep partial data from failed stream reads" checkbox.
+    pub keep_partial: bool,
 }
 
 impl Draft {
@@ -471,6 +486,7 @@ impl Draft {
             autosave_report: settings.autosave_report,
             report_stream_diagnostics: settings.report_stream_diagnostics,
             report_quick_summary: settings.report_quick_summary,
+            keep_partial: settings.keep_partial,
         }
     }
 
@@ -488,6 +504,7 @@ impl Draft {
         settings.autosave_report = self.autosave_report;
         settings.report_stream_diagnostics = self.report_stream_diagnostics;
         settings.report_quick_summary = self.report_quick_summary;
+        settings.keep_partial = self.keep_partial;
         if let Some(seconds) = parse_seconds(&self.seconds_text) {
             settings.short_playlist_seconds = seconds;
         }
@@ -629,6 +646,8 @@ mod tests {
         // Both report sections on — the locked default report bytes.
         assert!(settings.report_stream_diagnostics);
         assert!(settings.report_quick_summary);
+        // Retention on, like the core's own scan default.
+        assert!(settings.keep_partial);
     }
 
     #[test]
@@ -648,6 +667,7 @@ mod tests {
             autosave_report: true,
             report_stream_diagnostics: false,
             report_quick_summary: false,
+            keep_partial: false,
         };
         let text = settings.render();
         assert_eq!(Settings::parse(&text), settings);
@@ -703,7 +723,8 @@ mod tests {
         let text = "filter-short-playlists = false\nshort-playlist-seconds = 45\n\
                     filter-looping-playlists = false\nhuman-readable-sizes = true\n\
                     display-chapter-count = false\nautosave-report = true\n\
-                    report-stream-diagnostics = false\nreport-quick-summary = false\n";
+                    report-stream-diagnostics = false\nreport-quick-summary = false\n\
+                    keep-partial-scans = false\n";
         let settings = Settings::parse(text);
         assert!(!settings.filter_short_playlists);
         assert_eq!(settings.short_playlist_seconds, 45);
@@ -713,6 +734,10 @@ mod tests {
         assert!(settings.autosave_report);
         assert!(!settings.report_stream_diagnostics);
         assert!(!settings.report_quick_summary);
+        assert!(!settings.keep_partial);
+        // Anything but the exact tokens keeps retention on.
+        assert!(Settings::parse("keep-partial-scans = off\n").keep_partial);
+        assert!(Settings::parse("keep-partial-scans = true\n").keep_partial);
     }
 
     #[test]
@@ -858,6 +883,7 @@ mod tests {
         assert!(draft.filter_short_playlists);
         assert!(draft.report_stream_diagnostics);
         assert!(draft.report_quick_summary);
+        assert!(draft.keep_partial);
         // Edit every field and apply: all of it lands.
         draft.theme = ThemeChoice::Dark;
         draft.ui_scale_percent = 150;
@@ -869,6 +895,7 @@ mod tests {
         draft.autosave_report = true;
         draft.report_stream_diagnostics = false;
         draft.report_quick_summary = false;
+        draft.keep_partial = false;
         draft.apply_to(&mut settings);
         assert_eq!(settings.theme, ThemeChoice::Dark);
         assert_eq!(settings.ui_scale_percent, 150);
@@ -880,6 +907,7 @@ mod tests {
         assert!(settings.autosave_report);
         assert!(!settings.report_stream_diagnostics);
         assert!(!settings.report_quick_summary);
+        assert!(!settings.keep_partial);
     }
 
     #[test]
@@ -1076,6 +1104,7 @@ mod tests {
                 (any::<bool>(), 0..=super::super::MAX_SHORT_SECONDS, any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
                 (any::<bool>(), any::<bool>(), any::<bool>()),
+                any::<bool>(),
             )
                 .prop_map(
                     |(
@@ -1087,6 +1116,7 @@ mod tests {
                         (filter_short_playlists, short_playlist_seconds, filter_looping_playlists),
                         (human_readable_sizes, display_chapter_count, autosave_report),
                         (report_stream_diagnostics, report_quick_summary, window_maximized),
+                        keep_partial,
                     )| {
                         Settings {
                             window_size,
@@ -1103,6 +1133,7 @@ mod tests {
                             autosave_report,
                             report_stream_diagnostics,
                             report_quick_summary,
+                            keep_partial,
                         }
                     },
                 )

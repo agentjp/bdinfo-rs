@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
-use bdinfo_rs_core::bdrom::disc::PlaylistSummary;
+use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanOptions};
 use bdinfo_rs_core::bdrom::order::{HiddenRule, PlaylistFilter, hidden_by, table_rows};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
@@ -18,10 +18,12 @@ use crate::settings::Settings;
 /// The table's presentation settings — the slice of the persisted
 /// [`Settings`] the view-model reads.
 ///
-/// The playlist filter switches and the two display toggles. It travels with
-/// the loaded disc (the flow's `Listing`), so a settings change re-derives
-/// the rows from the retained `BdRom` — no rescan, mirroring `BDInfo`'s
-/// `LoadPlaylists()` re-run.
+/// The playlist filter switches and the two display toggles, plus the
+/// switches the scan and the report render read off it
+/// ([`render_options`](Self::render_options), [`scan_options`](Self::scan_options)).
+/// It travels with the loaded disc (the flow's `Listing`), so a settings
+/// change re-derives the rows from the retained `BdRom` — no rescan,
+/// mirroring `BDInfo`'s `LoadPlaylists()` re-run.
 ///
 /// `Default` is the fresh-config table: the standard filter (on at 20 s),
 /// grouped-byte size cells, the chapter suffix shown.
@@ -45,6 +47,8 @@ pub struct ViewSettings {
     pub report_stream_diagnostics: bool,
     /// Render the report's `QUICK SUMMARY` blocks.
     pub report_quick_summary: bool,
+    /// Keep the measurements of a stream file whose read failed partway.
+    pub keep_partial: bool,
 }
 
 impl Default for ViewSettings {
@@ -65,6 +69,7 @@ impl ViewSettings {
             display_chapter_count: settings.display_chapter_count,
             report_stream_diagnostics: settings.report_stream_diagnostics,
             report_quick_summary: settings.report_quick_summary,
+            keep_partial: settings.keep_partial,
         }
     }
 
@@ -87,6 +92,19 @@ impl ViewSettings {
             stream_diagnostics: self.report_stream_diagnostics,
             quick_summary: self.report_quick_summary,
         }
+    }
+
+    /// The core scan options these settings build — the behaviour switches the
+    /// measured scan runs under.
+    ///
+    /// Built from the default rather than a struct literal: [`ScanOptions`] is
+    /// `#[non_exhaustive]`, so literal construction is crate-internal to the
+    /// core (and the default is `Default::default`, not a `const fn`).
+    #[must_use]
+    pub fn scan_options(&self) -> ScanOptions {
+        let mut options = ScanOptions::default();
+        options.keep_partial = self.keep_partial;
+        options
     }
 }
 
@@ -529,6 +547,7 @@ mod tests {
             display_chapter_count: false,
             report_stream_diagnostics: false,
             report_quick_summary: false,
+            keep_partial: false,
             ..Settings::default()
         };
         let view = ViewSettings::from_settings(&stored);
@@ -539,6 +558,7 @@ mod tests {
         assert!(!view.display_chapter_count);
         assert!(!view.report_stream_diagnostics);
         assert!(!view.report_quick_summary);
+        assert!(!view.keep_partial);
         let filter = view.filter();
         assert!(!filter.filter_short_playlists);
         assert!((filter.short_playlist_seconds - 45.0).abs() < f64::EPSILON);
@@ -558,6 +578,15 @@ mod tests {
         let bare = ViewSettings { report_quick_summary: false, ..ViewSettings::default() };
         assert!(bare.render_options().stream_diagnostics);
         assert!(!bare.render_options().quick_summary);
+    }
+
+    #[test]
+    fn scan_options_project_the_retention_switch() {
+        // The defaults keep a partially read stream file's measurements…
+        assert!(ViewSettings::default().scan_options().keep_partial);
+        // …and the switch off reaches the core options that drop them.
+        let dropping = ViewSettings { keep_partial: false, ..ViewSettings::default() };
+        assert!(!dropping.scan_options().keep_partial);
     }
 
     #[test]

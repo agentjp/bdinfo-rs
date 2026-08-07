@@ -44,6 +44,7 @@ fn list_select_all_and_measure(input: &Input) -> (String, String) {
         &request.selection,
         &request.scan_files,
         request.options,
+        request.scan_options,
         &mut scan::no_progress,
         &AtomicBool::new(false),
     )
@@ -66,6 +67,7 @@ fn a_cancelled_measured_scan_yields_no_report() {
         &request.selection,
         &request.scan_files,
         request.options,
+        request.scan_options,
         &mut scan::no_progress,
         &AtomicBool::new(true),
     )
@@ -105,6 +107,7 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
         &request.selection,
         &request.scan_files,
         request.options,
+        request.scan_options,
         &mut scan::no_progress,
         &AtomicBool::new(false),
     )
