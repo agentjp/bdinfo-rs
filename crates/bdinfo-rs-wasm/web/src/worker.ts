@@ -1,10 +1,12 @@
 /// <reference lib="webworker" />
 // The scan Worker: hosts the WebAssembly module OFF the main thread. It serves
 // every request in `analyze.ts` over the same module instance:
-//   - `inspect` / `inspect-iso`: the fast STRUCTURAL scan → the whole disc model.
+//   - `inspect` / `inspect-iso`: the STRUCTURAL scan (optionally deepened to
+//     the bounded codec pass by `options.codecs`) → the whole disc model.
 //   - `scan` / `scan-iso`: the FULL measured scan → the rendered report and the
 //     disc model, from one demux.
 //   - `render`: re-render the report from a disc model — no media touched.
+//   - `file-name`: the sanitized report save-file name for a disc label.
 // The wasm reads each file's bytes synchronously at byte offsets through
 // `FileReaderSync` (the reason this must be a Worker — that API exists only in a
 // Worker scope), so a multi-GB stream never has to fit in memory. Progress is
@@ -19,6 +21,7 @@ import init, {
   inspect_files,
   inspect_iso,
   render_report,
+  report_file_name,
   type ScanOptions,
   scan_files,
   scan_iso,
@@ -70,7 +73,19 @@ interface RenderRequest extends WithOptions {
   disc: Disc;
 }
 
-type Request = InspectRequest | InspectIsoRequest | ScanRequest | ScanIsoRequest | RenderRequest;
+/** The sanitized report save-file name for a disc label. */
+interface FileNameRequest extends WithOptions {
+  kind: "file-name";
+  label: string;
+}
+
+type Request =
+  | InspectRequest
+  | InspectIsoRequest
+  | ScanRequest
+  | ScanIsoRequest
+  | RenderRequest
+  | FileNameRequest;
 
 let ready: Promise<unknown> | null = null;
 
@@ -87,18 +102,16 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       self.postMessage({ type: "progress", file, done, total });
     };
     switch (data.kind) {
-      // The two structural calls take the classification threshold on its own:
-      // a scan that reads no packets is unaffected by every other option.
       case "inspect":
         self.postMessage({
           type: "disc",
-          disc: inspect_files(data.paths, data.files, data.options.shortPlaylistSeconds),
+          disc: inspect_files(data.paths, data.files, data.options),
         });
         break;
       case "inspect-iso":
         self.postMessage({
           type: "disc",
-          disc: inspect_iso(data.file, data.options.shortPlaylistSeconds),
+          disc: inspect_iso(data.file, data.options),
         });
         break;
       case "scan":
@@ -117,6 +130,12 @@ self.onmessage = async (event: MessageEvent<Request>) => {
         self.postMessage({
           type: "done",
           report: render_report(data.disc, data.options),
+        });
+        break;
+      case "file-name":
+        self.postMessage({
+          type: "file-name",
+          name: report_file_name(data.label),
         });
         break;
     }

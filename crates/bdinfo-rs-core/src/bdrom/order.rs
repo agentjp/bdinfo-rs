@@ -54,6 +54,21 @@ impl HiddenRule {
     }
 }
 
+/// The largest meaningful short-playlist threshold, in seconds — one full
+/// day, longer than any playlist a disc can hold.
+///
+/// The threshold contract every consumer of
+/// [`short_playlist_seconds`](PlaylistFilter::short_playlist_seconds) shares:
+/// a valid threshold lies in `0..=MAX_SHORT_PLAYLIST_SECONDS`, and `0`
+/// switches the short rule off (no playlist is strictly shorter than zero
+/// seconds). The filter itself judges whatever `f64` it is handed; holding an
+/// input to the domain — rejecting or clamping, as suits the input surface —
+/// is the caller's job at its own boundary.
+///
+/// `u32` because thresholds enter as whole seconds everywhere; the filter
+/// field converts losslessly through [`f64::from`].
+pub const MAX_SHORT_PLAYLIST_SECONDS: u32 = 86_400;
+
 /// The playlist filter switches for the presentation order. The defaults drop
 /// short and looping playlists — the standard report behaviour;
 /// [`PlaylistFilter::everything`] keeps both.
@@ -306,9 +321,9 @@ mod tests {
     use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        HiddenRule, PlaylistFilter, hidden_by, named_selection, normalize_playlist_name,
-        presentation_cmp, presentation_groups, presentation_order, selection_order,
-        selection_stream_files, table_rows,
+        HiddenRule, MAX_SHORT_PLAYLIST_SECONDS, PlaylistFilter, hidden_by, named_selection,
+        normalize_playlist_name, presentation_cmp, presentation_groups, presentation_order,
+        selection_order, selection_stream_files, table_rows,
     };
     use crate::bdrom::disc::{PlaylistSummary, fixtures};
 
@@ -544,6 +559,26 @@ mod tests {
         // raised 60 s threshold.
         let raised = PlaylistFilter { short_playlist_seconds: 60.0, ..PlaylistFilter::default() };
         assert_eq!(raised.classify(&playlist("B.MPLS", 50.0, false, &[])), [HiddenRule::Short]);
+    }
+
+    #[test]
+    fn the_threshold_ceiling_is_one_day_and_zero_disables_the_short_rule() {
+        // The ceiling value is a contract with the surfaces that duplicate it
+        // (the CLI parser and the demo page cannot name this constant), so an
+        // edit here must be deliberate.
+        assert_eq!(MAX_SHORT_PLAYLIST_SECONDS, 86_400);
+        // The two domain ends behave: at the ceiling everything shorter than a
+        // day is short; at zero nothing is.
+        let ceiling = PlaylistFilter {
+            short_playlist_seconds: f64::from(MAX_SHORT_PLAYLIST_SECONDS),
+            ..PlaylistFilter::default()
+        };
+        assert_eq!(
+            ceiling.classify(&playlist("A.MPLS", 86_399.0, false, &[])),
+            [HiddenRule::Short]
+        );
+        let off = PlaylistFilter { short_playlist_seconds: 0.0, ..PlaylistFilter::default() };
+        assert!(off.classify(&playlist("B.MPLS", 0.0, false, &[])).is_empty());
     }
 
     #[test]

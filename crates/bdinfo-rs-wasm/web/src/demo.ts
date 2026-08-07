@@ -20,6 +20,7 @@ import {
   inspect,
   type Playlist,
   renderReport,
+  reportFileName,
   type Stream,
   scan,
 } from "./analyze.js";
@@ -207,6 +208,14 @@ const SETTINGS_KEY = "bdinfo-rs.settings";
 const DEFAULT_SHORT_SECONDS = 20;
 
 /**
+ * The threshold domain's ceiling (0 = the short rule off), mirroring the
+ * `min`/`max` attributes on the `#opt-short-seconds` input and, through them,
+ * the library's shared threshold contract. A stored or typed value outside
+ * the domain reverts here rather than reaching the module, which throws on it.
+ */
+const MAX_SHORT_SECONDS = 86_400;
+
+/**
  * Reads the stored settings, defaulting to the standard filtered table with
  * every report section on. Sizes default to human-readable — the desktop app
  * ships thousands-grouped bytes instead, and this page has always shown
@@ -230,7 +239,10 @@ function loadSettings(): Settings {
     showShortPlaylists: stored.showShortPlaylists === true,
     showLoopingPlaylists: stored.showLoopingPlaylists === true,
     shortPlaylistSeconds:
-      typeof seconds === "number" && Number.isInteger(seconds) && seconds > 0
+      typeof seconds === "number" &&
+      Number.isInteger(seconds) &&
+      seconds >= 0 &&
+      seconds <= MAX_SHORT_SECONDS
         ? seconds
         : DEFAULT_SHORT_SECONDS,
     humanReadableSizes: stored.humanReadableSizes !== false,
@@ -871,12 +883,21 @@ async function copyReport(): Promise<void> {
   }
 }
 
-function downloadReport(): void {
+async function downloadReport(): Promise<void> {
+  // The module's sanitizer names the file: the disc controls its own label
+  // bytes, and this is the one place the demo turns that label into a path.
+  let name: string;
+  try {
+    name = await reportFileName(discName);
+  } catch (error) {
+    showError(errMessage(error));
+    return;
+  }
   const blob = new Blob([reportText], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `BDINFO.${discName}.txt`;
+  link.download = name;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -985,8 +1006,9 @@ async function applyReportSections(): Promise<void> {
  * table. A value equal to the one in force changes nothing and sends nothing.
  */
 async function applyThreshold(): Promise<void> {
+  // 0 is a committed value like any other: it turns the short rule off.
   const parsed = Number(optShortSeconds.value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > MAX_SHORT_SECONDS) {
     optShortSeconds.value = String(settings.shortPlaylistSeconds);
     return;
   }
@@ -1085,4 +1107,6 @@ cancelBtn.addEventListener("click", () => {
 copyBtn.addEventListener("click", () => {
   void copyReport();
 });
-downloadBtn.addEventListener("click", downloadReport);
+downloadBtn.addEventListener("click", () => {
+  void downloadReport();
+});

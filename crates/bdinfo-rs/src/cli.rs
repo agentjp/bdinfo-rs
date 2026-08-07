@@ -76,11 +76,19 @@ struct Cli {
     // `hide_default_value` keeps clap from appending its own `[default: 20]`:
     // the help card states the default inline instead, the way REPORT_DEST
     // does, and the appended form would push this line past 80 columns.
+    //
+    // The `86_400` ceiling (one day; `0` classifies nothing as short)
+    // duplicates `bdinfo_rs_core::bdrom::order::MAX_SHORT_PLAYLIST_SECONDS` by
+    // necessity: `build.rs` `include!`s this file and has no core
+    // build-dependency, so the constant cannot be named here. The test
+    // `the_cutoff_ceiling_matches_the_core_constant` in `tests/cli.rs` pins
+    // the two equal.
     #[arg(
         long,
         value_name = "SECONDS",
         default_value_t = 20,
         hide_default_value = true,
+        value_parser = clap::value_parser!(u32).range(..=86_400),
         help = "Short-playlist cutoff (default: 20)"
     )]
     short_playlist_seconds: u32,

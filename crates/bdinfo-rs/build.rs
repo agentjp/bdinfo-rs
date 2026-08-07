@@ -133,10 +133,12 @@ const LONG_HELP: [(&str, &str); 14] = [
     (
         "short_playlist_seconds",
         "The length in whole seconds below which a playlist counts as short, 20 by default. A \
-         playlist of exactly this length is not short. The cutoff decides what the selection \
-         table hides, what the hidden-playlist line names, and therefore what --whole scans; \
-         --show-short-playlists lists the short ones anyway. Playlists named with --mpls are \
-         never filtered, so the cutoff does not reach them.",
+         playlist of exactly this length is not short. Valid from 0 to 86400 (one day): 0 \
+         classifies nothing as short, and a value past the ceiling is rejected at argument \
+         parsing. The cutoff decides what the selection table hides, what the hidden-playlist \
+         line names, and therefore what --whole scans; --show-short-playlists lists the short \
+         ones anyway. Playlists named with --mpls are never filtered, so the cutoff does not \
+         reach them.",
     ),
     (
         "drop_partial",

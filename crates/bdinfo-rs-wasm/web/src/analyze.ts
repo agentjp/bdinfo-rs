@@ -3,12 +3,16 @@
 // folder or a single Blu-ray `.iso` `File`:
 //
 //   - `inspect` — the fast STRUCTURAL scan (like `bdinfo-rs <disc> --list`): no
-//     packet demux, so it reads the playlist and clip metadata rather than the
-//     multi-GB stream files, and resolves with the whole disc model.
+//     whole-file demux, so it reads the playlist and clip metadata rather than
+//     measuring the multi-GB stream files, and resolves with the whole disc
+//     model. `options.codecs` deepens it to the bounded codec pass.
 //   - `scan` — the FULL measured scan (like `bdinfo-rs <disc>`), resolving with
 //     the rendered report AND the disc model, both from one demux.
 //   - `renderReport` — re-renders the report from a disc model `scan` returned,
 //     with different optional sections and without touching the media again.
+//
+// `reportFileName` rounds the flow off: the sanitized `BDINFO.<label>.txt` name
+// a report is saved under, from the same rule the native CLI applies.
 //
 // Each spawns the scan Worker (which hosts the WebAssembly module), hands it the
 // files, and resolves with the result — the rendered classic disc report being
@@ -86,8 +90,10 @@ export interface ScanOptions {
   selection?: string[];
   /**
    * The length in seconds under which a playlist counts as short, defaulting to
-   * 20 when omitted. Zero switches the short rule off, since no playlist is
-   * shorter than zero seconds; a negative or non-finite value means the default.
+   * 20 when omitted. Must be finite and within 0..=86400 (one day): zero
+   * switches the short rule off, since no playlist is shorter than zero
+   * seconds, and anything outside that domain — negative, non-finite, past the
+   * ceiling — rejects the call rather than silently scanning with the default.
    *
    * Read by {@link inspect} and {@link scan}, both of which classify every
    * playlist against it and report the outcome in {@link Playlist.hiddenBy}.
@@ -95,6 +101,20 @@ export interface ScanOptions {
    * `selection` measures, and the rendered report are all the same either way.
    */
   shortPlaylistSeconds?: number;
+  /**
+   * Read each stream file's head for codec detail during an {@link inspect},
+   * defaulting to `false`.
+   *
+   * Set it and the inspect reads just far enough into each stream file to
+   * parse the first parameter sets, so every {@link Stream} carries its full
+   * codec description — profile, level, HDR metadata — without the whole-file
+   * demux a {@link scan} costs. `Disc.measured` stays `false` and bitrates,
+   * packet counts and chapter rates are still zero.
+   *
+   * Read by {@link inspect} alone — a {@link scan} demuxes everything and
+   * carries full codec detail already.
+   */
+  codecs?: boolean;
   /**
    * Render the report's `STREAM DIAGNOSTICS:` section, defaulting to `true` —
    * the section the CLI's report carries.
@@ -138,6 +158,7 @@ type WorkerMessage =
   | { type: "done"; report: string }
   | { type: "disc"; disc: Disc }
   | { type: "result"; result: ScanResult }
+  | { type: "file-name"; name: string }
   | { type: "error"; message: string };
 
 /** Spawns the scan Worker (a module worker by the bundler-aware convention). */
@@ -178,6 +199,7 @@ function moduleOptions(options?: ScanOptions): ModuleOptions {
     quickSummary: options?.quickSummary,
     shortPlaylistSeconds: options?.shortPlaylistSeconds,
     keepPartial: options?.keepPartial,
+    codecs: options?.codecs,
   };
 }
 
@@ -265,11 +287,14 @@ function request<T>(
  * {@link Disc}) — a `webkitdirectory` folder pick or a single Blu-ray `.iso`
  * `File` in, everything the disc's metadata knows out.
  *
- * No stream file is demuxed, so it returns quickly and `disc.measured` is
+ * No stream file is measured, so it returns quickly and `disc.measured` is
  * `false`: every measured value — bitrates, packet counts, chapter rates — is
  * zero because nothing measured it rather than because it is genuinely zero.
- * Show the playlists as a checklist, then hand the chosen
- * {@link Playlist.name}s to {@link scan}'s `options.selection`.
+ * `options.codecs` deepens the scan to the bounded codec pass, which reads
+ * each stream file's head so the streams carry their full codec description
+ * (profile, level, HDR) while everything else stays as cheap as before. Show
+ * the playlists as a checklist, then hand the chosen {@link Playlist.name}s to
+ * {@link scan}'s `options.selection`.
  *
  * `disc.playlists` holds every playlist on the disc, each carrying its
  * {@link Playlist.group}, {@link Playlist.position} and
@@ -353,6 +378,28 @@ export function renderReport(disc: Disc, options?: ScanOptions): Promise<string>
   return request(
     { kind: "render", disc, options: moduleOptions(options) },
     (reply) => (reply.type === "done" ? { value: reply.report } : null),
+    options,
+  );
+}
+
+/**
+ * The file name a report for a disc labelled `label` is saved under —
+ * `BDINFO.<label>.txt` with every character illegal in a file name replaced,
+ * exactly the name the native CLI and the desktop app write.
+ *
+ * The sanitizer is the core library's (property-tested there): whatever bytes
+ * a disc puts in its volume label, the result is one flat path component, so a
+ * hostile label can neither escape a chosen directory nor break the save. Pass
+ * {@link Disc.volumeLabel} and hand the result to a download attribute.
+ *
+ * Of the options, only `createWorker` and `signal` apply — the name is
+ * computed by the WebAssembly module, so the call runs in the scan Worker like
+ * every other.
+ */
+export function reportFileName(label: string, options?: ScanOptions): Promise<string> {
+  return request(
+    { kind: "file-name", label, options: moduleOptions(options) },
+    (reply) => (reply.type === "file-name" ? { value: reply.name } : null),
     options,
   );
 }

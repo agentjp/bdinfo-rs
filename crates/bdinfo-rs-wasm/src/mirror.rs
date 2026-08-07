@@ -109,15 +109,30 @@ pub struct ScanOptions {
     #[tsify(optional)]
     pub quick_summary: Option<bool>,
     /// The length in seconds under which a playlist counts as short, 20 when
-    /// omitted. Zero switches the short rule off, since no playlist is shorter
-    /// than zero seconds; a negative or non-finite value means the 20 s default.
+    /// omitted. Must be finite and within `0..=86400` (one day): zero switches
+    /// the short rule off, since no playlist is shorter than zero seconds, and
+    /// anything outside that domain — negative, non-finite, past the ceiling —
+    /// makes the call throw rather than silently scanning with the default.
     ///
-    /// Read by `scan_files` and `scan_iso`, which classify every playlist
-    /// against it and report the outcome in each playlist `hiddenBy`. It
-    /// changes no other value: which playlists a disc holds, which ones a
-    /// selection measures, and the rendered report are all the same either way.
+    /// Read by `inspect_files`, `inspect_iso`, `scan_files` and `scan_iso`,
+    /// which classify every playlist against it and report the outcome in each
+    /// playlist `hiddenBy`. It changes no other value: which playlists a disc
+    /// holds, which ones a selection measures, and the rendered report are all
+    /// the same either way.
     #[tsify(optional)]
     pub short_playlist_seconds: Option<f64>,
+    /// Read each stream file's head for codec detail during an inspect, off
+    /// unless switched on. Read by `inspect_files` and `inspect_iso` alone —
+    /// the measuring calls demux everything and carry full codec detail
+    /// already.
+    ///
+    /// Switched on, the inspect reads just far enough into each stream file to
+    /// parse the first parameter sets, so the streams carry their full codec
+    /// description — profile, level, HDR metadata — without the whole-file
+    /// demux a measured scan costs. `measured` stays false and every bitrate,
+    /// packet count and chapter rate is still zero.
+    #[tsify(optional)]
+    pub codecs: Option<bool>,
     /// Keep what the scan measured of a stream file whose read failed partway,
     /// on unless switched off. Read by `scan_files` and `scan_iso`.
     ///
@@ -1324,6 +1339,7 @@ mod tests {
             "quickSummary": false,
             "shortPlaylistSeconds": 5.0,
             "keepPartial": false,
+            "codecs": true,
         }))
         .expect("deserialize an options object");
         assert_eq!(
@@ -1333,6 +1349,7 @@ mod tests {
                 quick_summary: Some(false),
                 short_playlist_seconds: Some(5.0),
                 keep_partial: Some(false),
+                codecs: Some(true),
             }
         );
 
@@ -1346,6 +1363,7 @@ mod tests {
                 quick_summary: None,
                 short_playlist_seconds: None,
                 keep_partial: None,
+                codecs: None,
             }
         );
     }

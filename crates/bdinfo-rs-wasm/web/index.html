@@ -887,10 +887,14 @@
           </label>
           <span class="threshold">
             <span>short&nbsp;=&nbsp;under</span>
+            <!-- min/max spell the shared threshold domain: 0 = the short rule
+                 off, 86400 = the library's MAX_SHORT_PLAYLIST_SECONDS ceiling
+                 (bdrom/order.rs), duplicated here because HTML cannot name a
+                 Rust constant. -->
             <input
               type="number"
               id="opt-short-seconds"
-              min="1"
+              min="0"
               max="86400"
               aria-label="Short-playlist threshold in seconds"
             />

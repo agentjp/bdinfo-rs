@@ -61,7 +61,9 @@ use bdinfo_rs_core::bdrom::disc::{
 };
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
-use bdinfo_rs_core::bdrom::order::{named_selection, selection_order, selection_stream_files};
+use bdinfo_rs_core::bdrom::order::{
+    MAX_SHORT_PLAYLIST_SECONDS, named_selection, selection_order, selection_stream_files,
+};
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
 use bdinfo_rs_core::error::BdError;
@@ -611,25 +613,86 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 // wasm exports use them and the native test build covers + mutates them, while a
 // native non-test build omits them (so neither tier shows dead code).
 
+/// A rejected `shortPlaylistSeconds`: present but outside the valid domain —
+/// finite, from zero up to [`MAX_SHORT_PLAYLIST_SECONDS`]. The exports throw
+/// it rather than substituting a default, so a caller's out-of-range value —
+/// most likely a bug on their side — cannot silently scan as 20 s.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug)]
+struct ThresholdError(f64);
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl std::fmt::Display for ThresholdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "shortPlaylistSeconds must be a finite value in 0..={}, got {}",
+            MAX_SHORT_PLAYLIST_SECONDS, self.0
+        )
+    }
+}
+
 /// The filter the disc model is classified against: the standard rules with
 /// `short_seconds` as the length under which a playlist counts as short.
 ///
-/// A present, finite, non-negative `short_seconds` is taken literally, so `0`
-/// leaves no playlist short and disables the short rule — the meaning the CLI's
-/// `--short-playlist-seconds 0` and the desktop app's threshold setting carry.
-/// An absent, negative or non-finite one means the 20 s default, so a caller
-/// that does not care about the threshold passes `None` and gets the classic
-/// behaviour. Only the threshold is read downstream — no export filters the
-/// playlists any more — so the two switches keep their defaults.
+/// An absent `short_seconds` means the 20 s default. A present one must be
+/// finite and no more than [`MAX_SHORT_PLAYLIST_SECONDS`] (zero allowed) and
+/// is taken literally, so `0` leaves no playlist short and disables the rule —
+/// the meaning the CLI's `--short-playlist-seconds 0` and the desktop app's
+/// threshold setting carry. Only the threshold is read downstream — no export
+/// filters the playlists — so the two switches keep their defaults.
+///
+/// # Errors
+/// [`ThresholdError`] for a present value outside the domain — negative,
+/// non-finite, or past the ceiling.
 #[cfg(any(target_arch = "wasm32", test))]
-fn classification_filter(short_seconds: Option<f64>) -> PlaylistFilter {
+fn classification_filter(short_seconds: Option<f64>) -> Result<PlaylistFilter, ThresholdError> {
     let standard = PlaylistFilter::default();
-    PlaylistFilter {
-        short_playlist_seconds: short_seconds
-            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
-            .unwrap_or(standard.short_playlist_seconds),
-        ..standard
+    let short_playlist_seconds = match short_seconds {
+        None => standard.short_playlist_seconds,
+        Some(seconds) => {
+            if !(seconds.is_finite()
+                && (0.0..=f64::from(MAX_SHORT_PLAYLIST_SECONDS)).contains(&seconds))
+            {
+                return Err(ThresholdError(seconds));
+            }
+            seconds
+        }
+    };
+    Ok(PlaylistFilter { short_playlist_seconds, ..standard })
+}
+
+/// How deep `options` asks an inspect to read: the bounded codec pass
+/// ([`ScanMode::Codecs`]) when `codecs` is on, else the metadata-only scan.
+/// An absent option — or no options object at all — means metadata-only, the
+/// classic inspect.
+#[cfg(any(target_arch = "wasm32", test))]
+fn inspect_mode(options: Option<&ScanOptions>) -> ScanMode {
+    if options.and_then(|options| options.codecs).unwrap_or(false) {
+        ScanMode::Codecs
+    } else {
+        ScanMode::Metadata
     }
+}
+
+/// The unmeasured scan every inspect export shares: opens `root` at `mode`
+/// depth and mirrors the result classified against `filter`.
+///
+/// The mirror says `measured: false` whichever mode ran: the codec pass reads
+/// each stream file's head for codec detail but measures no bitrate, so every
+/// measured value is zero because nothing measured it.
+///
+/// # Errors
+/// The [`BdError`] from [`BdRom::open_resilient`] when the structure is too
+/// damaged to open at all (no `BDMV`/`CLIPINF`/`PLAYLIST`).
+#[cfg(any(target_arch = "wasm32", test))]
+fn inspect_disc(
+    root: &dyn BdDir,
+    mode: ScanMode,
+    filter: &PlaylistFilter,
+) -> Result<Disc, BdError> {
+    let report = BdRom::open_resilient(root, mode)?;
+    Ok(Disc::from_scan(&report.bdrom, &report.errors, false, filter))
 }
 
 /// Why a by-name [`scan_selection`] could not produce a report.
@@ -906,13 +969,30 @@ pub fn scan_report(data: &[u8]) -> String {
     run_report(data)
 }
 
+/// The report's save-file name for a disc labelled `label`.
+///
+/// `BDINFO.<stem>.txt` with every illegal or control character replaced by
+/// `_`, the same name the `bdinfo-rs` command line and the desktop app save
+/// their reports under.
+///
+/// This wraps the core library's sanitizer (property-tested there): whatever
+/// bytes a disc puts in its volume label, the result is one flat path
+/// component, so a hostile label can neither re-root a save path nor break
+/// the write. Pass `disc.volumeLabel` and hand the result to a download
+/// attribute or a save dialog.
+#[wasm_bindgen]
+#[must_use]
+pub fn report_file_name(label: &str) -> String {
+    bdinfo_rs_core::report::file_name(label)
+}
+
 /// The structural-scan entry point for the whole disc model: a
 /// `webkitdirectory`-selected BDMV folder in, a [`Disc`] out.
 ///
-/// Runs only the **structural** scan — no packet demux, so it reads the
-/// playlist and clip metadata rather than the multi-GB stream files — and
-/// returns everything the report prints that a metadata scan can know, plus
-/// every column of the selection table.
+/// Runs the **structural** scan — no whole-file demux, so it reads the
+/// playlist and clip metadata rather than measuring the multi-GB stream
+/// files — and returns everything the report prints that such a scan can
+/// know, plus every column of the selection table.
 ///
 /// `disc.measured` is false: the bitrates, packet counts and chapter rates are
 /// zero because nothing measured them.
@@ -920,29 +1000,33 @@ pub fn scan_report(data: &[u8]) -> String {
 /// `disc.playlists` holds every playlist on the disc, each carrying the rules
 /// that withhold it in `hiddenBy`, so a caller renders the standard selection
 /// table by keeping the playlists whose `hiddenBy` is empty and re-applies
-/// either rule without scanning again. `short_playlist_seconds` sets the length
-/// under which a playlist counts as short, `0` leaving no playlist short;
-/// absent, negative or non-finite means the 20 s default.
+/// either rule without scanning again.
+///
+/// `options` takes the same object as [`scan_files`]; this call reads two of
+/// its options (a scan that renders no report ignores the rest).
+/// `short_playlist_seconds` is the classification threshold — 20 when
+/// omitted, `0` leaving no playlist short, and anything outside the valid
+/// `0..=86400` domain rejected (see [`classification_filter`]). `codecs`
+/// switches on the bounded codec pass: each stream file's head is read just
+/// far enough to parse the first parameter sets, so the streams carry their
+/// full codec detail — profile, level, HDR — while `measured` stays false.
 ///
 /// # Errors
-/// As [`scan_files`]: `paths`/`files` length mismatch, a non-`File` entry, an
-/// incoherent selection, or no readable Blu-ray structure.
+/// An out-of-domain `shortPlaylistSeconds`, and then as [`scan_files`]:
+/// `paths`/`files` length mismatch, a non-`File` entry, an incoherent
+/// selection, or no readable Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn inspect_files(
     paths: Vec<String>,
     files: js_sys::Array,
-    short_playlist_seconds: Option<f64>,
+    options: Option<ScanOptions>,
 ) -> Result<Disc, JsValue> {
+    let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let root = build_web_tree(&paths, &files)?;
-    let report = BdRom::open_resilient(&root, ScanMode::Metadata)
-        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    Ok(Disc::from_scan(
-        &report.bdrom,
-        &report.errors,
-        false,
-        &classification_filter(short_playlist_seconds),
-    ))
+    inspect_disc(&root, inspect_mode(options.as_ref()), &filter)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
 }
 
 /// The structural-scan `.iso` entry point for the whole disc model: a single
@@ -951,28 +1035,21 @@ pub fn inspect_files(
 /// Opens the image through the core read-only UDF 2.50 reader ([`UdfSource`])
 /// instead of a `(relativePath, File)` list, then behaves exactly as
 /// [`inspect_files`] — same structural scan, same `measured: false`, same
-/// meaning for `short_playlist_seconds`.
+/// meaning for every option.
 ///
 /// # Errors
-/// Returns a `JsValue` if the image is not a readable UDF `.iso`, or holds no
-/// readable Blu-ray structure.
+/// An out-of-domain `shortPlaylistSeconds`; a `JsValue` if the image is not a
+/// readable UDF `.iso`, or holds no readable Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn inspect_iso(
-    file: web_sys::File,
-    short_playlist_seconds: Option<f64>,
-) -> Result<Disc, JsValue> {
+pub fn inspect_iso(file: web_sys::File, options: Option<ScanOptions>) -> Result<Disc, JsValue> {
+    let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    let report = BdRom::open_resilient(&source.root(), ScanMode::Metadata)
-        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
-    Ok(Disc::from_scan(
-        &report.bdrom,
-        &report.errors,
-        false,
-        &classification_filter(short_playlist_seconds),
-    ))
+    inspect_disc(&source.root(), inspect_mode(options.as_ref()), &filter)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
 }
 
 /// Renders the classic disc report from a [`Disc`] — no media, no rescan.
@@ -1043,14 +1120,14 @@ pub fn scan_files(
     on_progress: Option<js_sys::Function>,
     options: Option<ScanOptions>,
 ) -> Result<ScanResult, JsValue> {
+    // Validated before the scan: an out-of-domain threshold rejects up front
+    // rather than after a multi-GB demux.
+    let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let root = build_web_tree(&paths, &files)?;
     let mut observe = |p: ScanProgress<'_>| notify(on_progress.as_ref(), &p);
     let scan = scan_root(&root, &selection, scan_options(options.as_ref()), &mut observe)?;
-    Ok(measured_result(
-        &scan,
-        render_options(options.as_ref()),
-        &classification_filter(options.and_then(|options| options.short_playlist_seconds)),
-    ))
+    Ok(measured_result(&scan, render_options(options.as_ref()), &filter))
 }
 
 /// The measured-scan `.iso` entry point: a single OS-picked Blu-ray `.iso`
@@ -1074,17 +1151,16 @@ pub fn scan_iso(
     on_progress: Option<js_sys::Function>,
     options: Option<ScanOptions>,
 ) -> Result<ScanResult, JsValue> {
+    // Validated before the scan, as in `scan_files`.
+    let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
     let scan = scan_root(&source.root(), &selection, scan_options(options.as_ref()), &mut |p| {
         notify(on_progress.as_ref(), &p);
     })?;
-    Ok(measured_result(
-        &scan,
-        render_options(options.as_ref()),
-        &classification_filter(options.and_then(|options| options.short_playlist_seconds)),
-    ))
+    Ok(measured_result(&scan, render_options(options.as_ref()), &filter))
 }
 
 #[cfg(test)]
@@ -1390,8 +1466,8 @@ mod tests {
             .expect("the fixture opens");
         // One scan, both outputs: the report is the pinned bytes and the disc
         // is the same scan mirrored, neither derived from the other.
-        let result =
-            measured_result(&scan, RenderOptions::default(), &super::classification_filter(None));
+        let filter = super::classification_filter(None).expect("an absent threshold is valid");
+        let result = measured_result(&scan, RenderOptions::default(), &filter);
         assert_eq!(result.report.as_bytes(), GOLDEN);
         assert!(result.disc.measured, "the packet scan ran, so the values were measured");
         assert_eq!(result.disc.volume_label, "WASMDISC");
@@ -1405,6 +1481,7 @@ mod tests {
             quick_summary: None,
             short_playlist_seconds: None,
             keep_partial: None,
+            codecs: None,
         }
     }
 
@@ -1448,6 +1525,80 @@ mod tests {
             scan_options(Some(&ScanOptions { keep_partial: Some(true), ..no_options() }))
                 .keep_partial
         );
+    }
+
+    #[test]
+    fn inspect_reads_codec_heads_only_when_asked() {
+        use super::{ScanMode, inspect_mode};
+
+        // No object, an object without the option, and an explicit false all
+        // mean the classic metadata-only inspect; only `codecs: true` deepens
+        // it to the bounded codec pass.
+        assert_eq!(inspect_mode(None), ScanMode::Metadata);
+        assert_eq!(inspect_mode(Some(&no_options())), ScanMode::Metadata);
+        assert_eq!(
+            inspect_mode(Some(&super::ScanOptions { codecs: Some(false), ..no_options() })),
+            ScanMode::Metadata
+        );
+        assert_eq!(
+            inspect_mode(Some(&super::ScanOptions { codecs: Some(true), ..no_options() })),
+            ScanMode::Codecs
+        );
+    }
+
+    #[test]
+    fn a_codecs_inspect_carries_codec_detail_and_stays_unmeasured() {
+        use super::{Node, ScanMode, classification_filter, inspect_disc};
+
+        let filter = classification_filter(None).expect("an absent threshold is valid");
+        let tree = framed_tree(&fixture_blob());
+        let metadata = inspect_disc(&tree, ScanMode::Metadata, &filter).expect("the fixture opens");
+        let codecs = inspect_disc(&tree, ScanMode::Codecs, &filter).expect("the fixture opens");
+
+        // Neither depth ran the whole-file bitrate pass: both mirrors are
+        // unmeasured and every rate is zero because nothing measured it.
+        // Both mirrors are unmeasured, and the video bitrate — a value only
+        // the whole-file pass can supply — is zero at either depth.
+        let streams = |disc: &super::Disc| {
+            let playlist = disc.playlists.first().expect("the fixture has one playlist");
+            let video = playlist.streams.first().expect("the playlist has a video stream");
+            let audio = playlist.streams.get(1).expect("the playlist has an audio stream");
+            (video.clone(), audio.clone())
+        };
+        for disc in [&metadata, &codecs] {
+            assert!(!disc.measured, "an inspect never claims measured values");
+            assert_eq!(streams(disc).0.bitrate_bps, 0, "no pass measures video bitrate");
+        }
+
+        // The codec pass parses each stream file's first parameter sets: the
+        // video description gains its profile/level, and the LPCM stream its
+        // parameter-declared bit depth and rate (1536 kbps for 48 kHz 16-bit
+        // stereo — declared, not measured). The metadata scan knows neither.
+        let (video, audio) = streams(&codecs);
+        assert!(video.full_description.contains("High Profile"), "{}", video.full_description);
+        assert!(audio.full_description.contains("16-bit"), "{}", audio.full_description);
+        assert_eq!(audio.bitrate_bps, 1_536_000);
+        let (video, audio) = streams(&metadata);
+        assert!(!video.full_description.contains("Profile"), "{}", video.full_description);
+        assert!(!audio.full_description.contains("16-bit"), "{}", audio.full_description);
+        assert_eq!(audio.bitrate_bps, 0);
+
+        // An unopenable tree (no BDMV) errors instead of mirroring nothing.
+        let empty: Node<MemFile> = Node::dir("EMPTY", "EMPTY");
+        assert!(inspect_disc(&empty, ScanMode::Metadata, &filter).is_err());
+    }
+
+    #[test]
+    fn report_file_name_is_the_core_sanitized_name() {
+        use super::report_file_name;
+
+        // A clean label passes through; separators, illegal-on-Windows
+        // characters and control bytes become underscores — the sanitizer
+        // itself is property-tested in the core library, so these pin the
+        // wrapping, not the rule set.
+        assert_eq!(report_file_name("WASMDISC"), "BDINFO.WASMDISC.txt");
+        assert_eq!(report_file_name("a/b:c"), "BDINFO.a_b_c.txt");
+        assert_eq!(report_file_name(""), "BDINFO..txt");
     }
 
     #[test]
@@ -1568,31 +1719,51 @@ mod tests {
         }
 
         #[test]
-        fn classification_filter_takes_the_threshold_and_falls_back_to_twenty_seconds() {
-            // Any finite threshold from zero up is used as given; a value no
-            // caller can have meant — absent, negative, non-finite — leaves the
-            // default 20 s in force, so a caller that does not set one gets the
-            // classic classification. Whole filters are compared, so the two
-            // switches the exports do not offer are pinned at their defaults.
-            for (short_seconds, in_force) in [
-                (Some(5.0), 5.0),
-                (Some(0.5), 0.5),
-                (Some(0.0), 0.0),
-                (None, 20.0),
-                (Some(-1.0), 20.0),
-                (Some(f64::NAN), 20.0),
-                (Some(f64::INFINITY), 20.0),
-            ] {
+        fn classification_filter_takes_a_valid_threshold_and_defaults_only_when_absent() {
+            // Absent means the classic 20 s default…
+            assert_eq!(
+                classification_filter(None).expect("an absent threshold is valid"),
+                PlaylistFilter::default()
+            );
+            // …and any finite in-domain value — both domain ends included — is
+            // taken as given. Whole filters are compared, so the two switches
+            // the exports do not offer are pinned at their defaults.
+            for seconds in [0.0, 0.5, 5.0, 86_400.0] {
                 assert_eq!(
-                    classification_filter(short_seconds),
+                    classification_filter(Some(seconds)).expect("an in-domain threshold is valid"),
                     PlaylistFilter {
                         filter_short_playlists: true,
                         filter_looping_playlists: true,
-                        short_playlist_seconds: in_force,
+                        short_playlist_seconds: seconds,
                     },
-                    "{short_seconds:?}"
+                    "{seconds:?}"
                 );
             }
+        }
+
+        #[test]
+        fn classification_filter_rejects_an_out_of_domain_threshold() {
+            // Negative (however slightly), past the one-day ceiling, or
+            // non-finite: rejected with the value echoed back, never silently
+            // replaced by the default.
+            for seconds in
+                [-1.0, -1e-9, 86_400.001, 1e9, f64::NAN, f64::INFINITY, f64::NEG_INFINITY]
+            {
+                let err = classification_filter(Some(seconds))
+                    .expect_err("an out-of-domain threshold must reject");
+                let message = err.to_string();
+                assert!(
+                    message.contains("shortPlaylistSeconds")
+                        && message.contains("0..=86400")
+                        && message.contains(&seconds.to_string()),
+                    "{seconds:?}: {message}"
+                );
+            }
+        }
+
+        /// The filter for a threshold every test here passes as valid.
+        fn valid_filter(short_seconds: Option<f64>) -> PlaylistFilter {
+            classification_filter(short_seconds).expect("a valid threshold")
         }
 
         #[test]
@@ -1606,12 +1777,12 @@ mod tests {
                 ..sample_playlist("00003.MPLS", 5.0, 0, 0, &[])
             };
             assert_eq!(
-                classification_filter(None).classify(&short),
+                valid_filter(None).classify(&short),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Short]
             );
-            assert!(classification_filter(Some(5.0)).classify(&short).is_empty());
+            assert!(valid_filter(Some(5.0)).classify(&short).is_empty());
             assert_eq!(
-                classification_filter(Some(5.0)).classify(&looping),
+                valid_filter(Some(5.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
             );
         }
@@ -1626,9 +1797,9 @@ mod tests {
                 has_loops: true,
                 ..sample_playlist("00003.MPLS", 1.0, 0, 0, &[])
             };
-            assert!(classification_filter(Some(0.0)).classify(&brief).is_empty());
+            assert!(valid_filter(Some(0.0)).classify(&brief).is_empty());
             assert_eq!(
-                classification_filter(Some(0.0)).classify(&looping),
+                valid_filter(Some(0.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
             );
         }

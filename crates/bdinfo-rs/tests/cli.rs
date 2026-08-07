@@ -7,8 +7,8 @@
 //! all real code.
 #![expect(
     unused_crate_dependencies,
-    reason = "black-box CLI test spawns the built binary; it links the bin's \
-              deps (clap, bdinfo-rs-core) but uses neither directly"
+    reason = "black-box CLI test spawns the built binary; it links the bin's clap but never \
+              names it (bdinfo-rs-core IS named, but only for the shared threshold ceiling)"
 )]
 
 pub mod common;
@@ -496,6 +496,47 @@ fn the_short_playlist_cutoff_moves_what_the_table_hides_and_what_the_hint_names(
              with --show-short-playlists"
         ),
         "the hint judges against the given cutoff: {raised}"
+    );
+}
+
+#[test]
+fn a_zero_cutoff_classifies_nothing_as_short() {
+    let root = filtered_bd("cutoffzero");
+    let stdout = listing(&root, &["--short-playlist-seconds", "0"]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+
+    // Nothing is strictly shorter than zero seconds: the 10 s playlist joins
+    // the table, the short hint disappears, and only the looping rule still
+    // withholds.
+    assert_eq!(table_row_lines(&stdout).len(), 2, "table: {stdout}");
+    assert!(stdout.contains("2   1      00002.MPLS     00:00:10"), "table: {stdout}");
+    assert!(!stdout.contains("(short)"), "nothing is short at 0 s: {stdout}");
+    assert!(stdout.contains(LOOPING_HINT), "the looping hint is unaffected: {stdout}");
+}
+
+#[test]
+fn the_cutoff_ceiling_matches_the_core_constant() {
+    // `src/cli.rs` spells the 86_400 ceiling as a literal (`build.rs`
+    // `include!`s that file without the library), so this is the check that
+    // keeps the two in step: the constant's own value parses…
+    let max = bdinfo_rs_core::bdrom::order::MAX_SHORT_PLAYLIST_SECONDS;
+    let root = filtered_bd("cutoffceiling");
+    let accepted = listing(&root, &["--short-playlist-seconds", &max.to_string()]);
+    let _ = std::fs::remove_dir_all(&root).is_ok();
+    assert!(table_row_lines(&accepted).is_empty(), "a day-long cutoff hides everything");
+
+    // …and one past it fails at argument parsing: exit 2 (an invalid
+    // argument), before any path is touched.
+    let over = u64::from(max).checked_add(1).expect("86_401 fits a u64");
+    let output = bdinfo_rs()
+        .args(["X", "--short-playlist-seconds", &over.to_string()])
+        .output()
+        .expect("spawn bdinfo-rs");
+    assert_eq!(output.status.code(), Some(2), "an out-of-range cutoff is a usage error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("short-playlist-seconds") && stderr.contains(&over.to_string()),
+        "the error names the flag and the rejected value: {stderr}"
     );
 }
 
