@@ -12,6 +12,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v3.0.0](https://github.com/agentjp/bdinfo-rs/compare/v2.0.0...v3.0.0) (2026-08-08)
+
+### ⚠ BREAKING CHANGES
+
+* **wasm:** the npm package's string-and-rows API is replaced by a structured disc model:
+  `inspect` and `scan` resolve to a `Disc` — a lossless, typed mirror of the analyzer's
+  output (disc metadata, playlists, streams, chapters, read errors) — and the new
+  `renderReport` re-renders the classic report from it on demand, byte-identical to the
+  CLI's. The report-string and row-tuple exports are gone. Only the npm surface breaks
+  here; the CLI and report contracts are untouched. (#215, #217)
+* **wasm:** every entry point takes one `ScanOptions` object — `inspect` previously took
+  a bare positional threshold — and an out-of-domain `shortPlaylistSeconds` (negative,
+  non-finite, or above 86400) now rejects the call instead of silently scanning with the
+  20-second default. (#286)
+* **core:** AACS-encrypted discs are detected up front, and the CLI refuses to scan them
+  with the new exit code 4; the library exposes the detection and leaves the decision to
+  the caller. (#246)
+
+### Added
+
+* **core:** stream scans survive read errors: statistics accumulated before a failing
+  read are kept and reported, with the failure still listed in the `WARNING` block.
+  `--drop-partial` (CLI), the keep-partial-scans setting (GUI), and `keepPartial` (npm)
+  opt back into discarding. (#285)
+* **core:** one short-playlist threshold contract on every surface: the valid domain is
+  0 to 86400 seconds, and 0 switches the short rule off. Programmatic surfaces (CLI,
+  npm) reject out-of-domain values; interactive ones (GUI dialog, demo page) clamp.
+  (#286)
+* **wasm:** a codecs-depth inspect: `codecs: true` reads just each stream file's head,
+  so every stream carries its full codec description — profile, level, HDR metadata —
+  without the whole-file demux a measured scan costs. (#286)
+* **wasm:** `reportFileName` exposes the sanitized `BDINFO.<label>.txt` filename the CLI
+  and GUI derive, so browser apps save reports under the identical name. (#286)
+* **wasm:** scans list every playlist, each carrying `hiddenBy` classification metadata
+  instead of being withheld by a filter — filtering is the client's choice — and
+  `selection` measures an explicit playlist set unfiltered. (#214)
+* **wasm:** the demo gains playlist-filter, report-section, and size-format settings.
+  (#214, #223)
+* **wasm:** the structured model carries the encrypted-disc flag (`aacsEncrypted`).
+  (#247)
+* **cli:** playlist visibility switches — `--show-short-playlists` and
+  `--show-looping-playlists` with a hidden-playlist hint (#202) — plus
+  `--short-playlist-seconds` for the cutoff itself and the `--no-stream-diagnostics` /
+  `--no-quick-summary` report-section switches (#219), on a compacted single-screen
+  help card (#203).
+* **gui:** encrypted discs are flagged and the scan disabled (#248); playlists hidden by
+  the filters can be shown with a transient toggle (#204).
+* **core:** the playlist projection, classification, formatting, and selection layer is
+  part of the public library API, shared by all three front-ends. (#216, #261, #263)
+* **core:** drive-root volume-label recovery moved into the vfs, covering every
+  front-end. (#262)
+
+### Fixes
+
+* Hardening against hostile disc images from the continuous fuzz campaign: the backup
+  index is used when the primary is unparsable (#245), unknown PMT stream types are
+  skipped instead of aborting the section (#249), UDF CS0 dstring used lengths are
+  clamped (#250), chapter-mark timestamps are masked (#251), `read_bits4` zero-fills its
+  past-window tail (#253), and a playlist summary's angle totals are bounded before
+  allocation (#244). Metadata reads are capped, cutting peak scan memory
+  ([827918c](https://github.com/agentjp/bdinfo-rs/commit/827918c0560e3943b6871eff61d716fcdc667a27)).
+* **wasm:** a `shortPlaylistSeconds` of zero disables the short-playlist filter instead
+  of reading as the 20-second default. (#252)
+* **packaging:** the installer metadata names agentjp as the publisher. (#195)
+* **ci:** the 2.0.0 release lanes are repaired — the gui-publish channel matrix, the AUR
+  and Homebrew checksum legs, gui crate packaging, the AUR deploy's source tree, and the
+  gui crate's post-release gaps. (#142, #143, #144, #145, #147, #148)
+
 ## [v2.0.0](https://github.com/agentjp/bdinfo-rs/compare/v1.2.0...v2.0.0) (2026-07-20)
 
 ### ⚠ BREAKING CHANGES
