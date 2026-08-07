@@ -36,12 +36,7 @@ name: version-freshness
 #     version is coupled to the committed wasm size budget, so it is re-checked
 #     here even though Dependabot does bump it),
 #   - biome.json's versioned schema URL, cross-checked against the @biomejs/biome
-#     version the lockfile installs (Dependabot moves the dep and leaves the URL),
-#   - the Homebrew/actions/setup-homebrew SHA (install-smoke-test.yml), which pins
-#     a TAGLESS repo's `master` — a moving `# master` comment tag Dependabot can't
-#     bump and zizmor's ref-version-mismatch would red-X a PR once it drifts, so it
-#     is nagged here when it drifts past the pinned SHA, keeping re-pinning
-#     deliberate.
+#     version the lockfile installs (Dependabot moves the dep and leaves the URL).
 # (Cargo deps/dev-deps, the rest of the web npm devDependencies — typescript /
 # biome / playwright-core — and GitHub Action SHAs are already auto-bumped by
 # Dependabot — cargo + npm + github-actions ecosystems — so they are deliberately
@@ -381,21 +376,6 @@ jobs:
             }
           }
           $summary += "node: $nodePin (latest-on-major $nodeLatestOnMajor, newest-even $nodeNewestEven)"
-
-          # --- Homebrew/actions/setup-homebrew: install-smoke-test.yml vs master HEAD ---
-          # SHA-pinned to a TAGLESS repo's master branch, so Dependabot can't bump it
-          # (no release to target) and zizmor's ref-version-mismatch is inline-ignored
-          # on that line. Watch it here instead: nag (don't fail CI) when Homebrew
-          # master moves past the frozen SHA, so re-pinning stays a deliberate edit.
-          $brewPin = Read-Pin '.github/workflows/install-smoke-test.yml' 'setup-homebrew@([0-9a-f]{40})'
-          if (-not $brewPin) { throw 'No Homebrew/actions/setup-homebrew SHA pin in install-smoke-test.yml' }
-          $brewHead = gh api repos/Homebrew/actions/branches/master --jq '.commit.sha' 2>$null
-          if ($LASTEXITCODE -ne 0 -or -not $brewHead) {
-            Add-Problem 'Homebrew/actions (query failed)' '- could not query Homebrew/actions master HEAD (GitHub API)'
-          } elseif ($brewPin -ne $brewHead) {
-            Add-Problem 'setup-homebrew SHA drifted' "- Homebrew/actions/setup-homebrew pin ``$($brewPin.Substring(0, 12))`` (install-smoke-test.yml) is behind master HEAD ``$($brewHead.Substring(0, 12))`` — re-pin deliberately (the repo ships no tags, so the SHA is frozen on purpose)"
-          }
-          $summary += "brew: $($brewPin.Substring(0, 12)) (head $(if ($brewHead) { $brewHead.Substring(0, 12) } else { '?' }))"
 
           Write-Host ($summary -join '  ')
           if ($problems.Count -eq 0) { Write-Host 'All pinned versions are fresh and consistent.'; exit 0 }
