@@ -51,8 +51,9 @@ const KEY_WINDOW_MAXIMIZED: &str = "window-maximized";
 /// `-32000` position) is dropped rather than restored.
 const MAX_AXIS: f32 = 16_384.0;
 
-/// The largest accepted short-playlist threshold, in seconds (a full day) —
-/// a stored or typed value beyond it clamps here rather than filtering every
+/// The largest accepted short-playlist threshold, in seconds (a full day).
+///
+/// A stored or typed value beyond it clamps here rather than filtering every
 /// playlist off a disc with a nonsense number. The ceiling itself is the
 /// library's shared threshold domain; only the clamping is this app's choice.
 pub const MAX_SHORT_SECONDS: u32 = bdinfo_rs_core::bdrom::order::MAX_SHORT_PLAYLIST_SECONDS;
