@@ -613,9 +613,9 @@ fn build_web_tree(paths: &[String], files: &js_sys::Array) -> Result<Node<WebFil
 // wasm exports use them and the native test build covers + mutates them, while a
 // native non-test build omits them (so neither tier shows dead code).
 
-/// A rejected `shortPlaylistSeconds`: present but outside the valid domain
-/// (finite, `0..=`[`MAX_SHORT_PLAYLIST_SECONDS`]). The exports throw it
-/// rather than substituting a default, so a caller's out-of-range value —
+/// A rejected `shortPlaylistSeconds`: present but outside the valid domain —
+/// finite, from zero up to [`MAX_SHORT_PLAYLIST_SECONDS`]. The exports throw
+/// it rather than substituting a default, so a caller's out-of-range value —
 /// most likely a bug on their side — cannot silently scan as 20 s.
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug)]
@@ -636,8 +636,8 @@ impl std::fmt::Display for ThresholdError {
 /// `short_seconds` as the length under which a playlist counts as short.
 ///
 /// An absent `short_seconds` means the 20 s default. A present one must be
-/// finite and within `0..=`[`MAX_SHORT_PLAYLIST_SECONDS`] and is taken
-/// literally, so `0` leaves no playlist short and disables the short rule —
+/// finite and no more than [`MAX_SHORT_PLAYLIST_SECONDS`] (zero allowed) and
+/// is taken literally, so `0` leaves no playlist short and disables the rule —
 /// the meaning the CLI's `--short-playlist-seconds 0` and the desktop app's
 /// threshold setting carry. Only the threshold is read downstream — no export
 /// filters the playlists — so the two switches keep their defaults.
@@ -969,7 +969,8 @@ pub fn scan_report(data: &[u8]) -> String {
     run_report(data)
 }
 
-/// The report's save-file name for a disc labelled `label` —
+/// The report's save-file name for a disc labelled `label`.
+///
 /// `BDINFO.<stem>.txt` with every illegal or control character replaced by
 /// `_`, the same name the `bdinfo-rs` command line and the desktop app save
 /// their reports under.
