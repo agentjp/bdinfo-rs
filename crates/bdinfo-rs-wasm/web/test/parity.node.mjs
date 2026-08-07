@@ -94,8 +94,15 @@ function shortPlaylist(mpls) {
 async function main() {
   const golden = await readFile(goldenPath);
 
-  const { initSync, scan_files, scan_iso, inspect_files, inspect_iso, render_report } =
-    await import("../pkg/bdinfo_rs_wasm.js");
+  const {
+    initSync,
+    scan_files,
+    scan_iso,
+    inspect_files,
+    inspect_iso,
+    render_report,
+    report_file_name,
+  } = await import("../pkg/bdinfo_rs_wasm.js");
   initSync({ module: await readFile(wasmPath) });
 
   const paths = [];
@@ -174,7 +181,7 @@ async function main() {
   const numbering = (playlists) =>
     JSON.stringify(playlists.map((playlist) => [playlist.group, playlist.position]));
   const standard = inspect_files(shortPaths, shortFiles).playlists;
-  const lowered = inspect_files(shortPaths, shortFiles, 5).playlists;
+  const lowered = inspect_files(shortPaths, shortFiles, { shortPlaylistSeconds: 5 }).playlists;
   const measuredShort = scan_files(shortPaths, shortFiles, [], undefined, {
     streamDiagnostics: true,
     quickSummary: true,
@@ -184,7 +191,7 @@ async function main() {
     classify(standard) === '["00000.MPLS:","00001.MPLS:short"]' &&
     // A zero threshold switches the short rule off: nothing is shorter than
     // zero seconds, so neither playlist is withheld.
-    classify(inspect_files(shortPaths, shortFiles, 0).playlists) ===
+    classify(inspect_files(shortPaths, shortFiles, { shortPlaylistSeconds: 0 }).playlists) ===
       '["00000.MPLS:","00001.MPLS:"]' &&
     classify(lowered) === '["00000.MPLS:","00001.MPLS:"]' &&
     numbering(standard) === "[[1,1],[1,2]]" &&
@@ -195,6 +202,52 @@ async function main() {
   if (!thresholdOk) {
     console.error(
       `FAIL — classification unexpected: standard ${classify(standard)}, lowered ${classify(lowered)}, numbering ${numbering(standard)}, measured ${classify(measuredShort.playlists)}.`,
+    );
+  }
+
+  // An out-of-domain threshold throws — from the structural and the measured
+  // export alike — instead of silently scanning with the 20 s default.
+  const rejects = (run) => {
+    try {
+      run();
+      return false;
+    } catch (error) {
+      return String(error.message ?? error).includes("shortPlaylistSeconds");
+    }
+  };
+  const rejectionOk =
+    rejects(() => inspect_files(paths, files, { shortPlaylistSeconds: -1 })) &&
+    rejects(() => inspect_files(paths, files, { shortPlaylistSeconds: 86401 })) &&
+    rejects(() => inspect_files(paths, files, { shortPlaylistSeconds: Number.NaN })) &&
+    rejects(() => scan_files(paths, files, [], undefined, { shortPlaylistSeconds: -1 }));
+  if (!rejectionOk) {
+    console.error("FAIL — an out-of-domain shortPlaylistSeconds did not throw.");
+  }
+
+  // The codecs depth: an inspect that reads each stream file's head. The video
+  // stream's description gains its profile/level while the disc stays
+  // unmeasured (the LPCM rate is parameter-declared, so it may fill in).
+  const codecsDisc = inspect_files(paths, files, { codecs: true });
+  const codecsVideo = codecsDisc.playlists[0].streams[0];
+  const plainVideo = inspected.playlists[0].streams[0];
+  const codecsOk =
+    codecsDisc.measured === false &&
+    codecsVideo.bitrateBps === 0 &&
+    codecsVideo.fullDescription.includes("High Profile 4.1") &&
+    !plainVideo.fullDescription.includes("Profile");
+  if (!codecsOk) {
+    console.error(
+      `FAIL — codecs inspect unexpected: measured ${codecsDisc.measured}, video "${codecsVideo.fullDescription}", plain "${plainVideo.fullDescription}".`,
+    );
+  }
+
+  // The report save-file name, sanitized by the core rule.
+  const fileNameOk =
+    report_file_name("WASMDISC") === "BDINFO.WASMDISC.txt" &&
+    report_file_name("a/b:c") === "BDINFO.a_b_c.txt";
+  if (!fileNameOk) {
+    console.error(
+      `FAIL — report_file_name unexpected: ${report_file_name("WASMDISC")}, ${report_file_name("a/b:c")}.`,
     );
   }
 
@@ -299,6 +352,9 @@ async function main() {
     inspectOk &&
     tableOk &&
     thresholdOk &&
+    rejectionOk &&
+    codecsOk &&
+    fileNameOk &&
     fullOk &&
     keepPartialOk &&
     isoOk &&
@@ -307,7 +363,7 @@ async function main() {
     isoFullOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + selection + round trip + retention + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + file name + selection + round trip + retention + .iso OK.`,
     );
     process.exit(0);
   }

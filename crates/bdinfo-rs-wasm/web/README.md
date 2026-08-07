@@ -102,6 +102,26 @@ side.
 measured value — bitrates, packet counts, chapter rates — is zero because
 nothing measured it; `true` after `scan`, where a zero is a genuine zero.
 
+### Codec detail without a full demux
+
+A plain `inspect` reads no stream bytes, so its streams carry only what the
+disc's metadata declares — codec name, resolution, channel layout — and none of
+the detail inside the streams themselves. `codecs: true` deepens the inspect to
+the bounded codec pass: each stream file's head is read just far enough to
+parse the first parameter sets, so every stream's `fullDescription` gains its
+profile, level and HDR metadata while the call stays far cheaper than a
+measured `scan` of a multi-GB disc:
+
+```ts
+const disc = await inspect(picked, { codecs: true });
+// e.g. "1080p / 23.976 fps / 16:9 / High Profile 4.1"
+console.log(disc.playlists[0].streams[0].fullDescription);
+```
+
+`disc.measured` is still `false`: bitrates, packet counts and chapter rates
+stay zero (a parameter-declared rate, like LPCM's, is the one exception),
+because only a full `scan` measures them.
+
 `disc.isAacsEncrypted` says the disc's stream content is AACS-encrypted. Neither
 call throws for it: the structure — playlists, streams as the disc declares
 them, chapters — comes from cleartext metadata and is correct either way. Only
@@ -143,6 +163,20 @@ const { disc } = await scan(picked, undefined, { keepPartial: false });
 zero throughout. The failure is reported in `disc.errors` either way, and a
 disc that reads cleanly produces the same bytes under both settings.
 
+### Saving the report
+
+`reportFileName` gives the name a report is saved under — `BDINFO.<label>.txt`,
+the same name the native CLI writes — with every character illegal in a file
+name replaced by `_`:
+
+```ts
+const name = await reportFileName(disc.volumeLabel); // "BDINFO.MY_DISC.txt"
+```
+
+The sanitizer is the core library's, property-tested there: whatever bytes a
+disc puts in its volume label, the result is one flat path component, so a
+hostile label can neither escape a chosen directory nor break the save.
+
 ### Playlist filtering
 
 The classic report withholds playlists shorter than 20 seconds and looping
@@ -168,9 +202,11 @@ playlist is judged against it:
 const disc = await inspect(picked, { shortPlaylistSeconds: 5 });
 ```
 
-It defaults to 20 seconds when omitted. Zero switches the short rule off — no
-playlist is shorter than zero seconds — so no `Disc` from that call names
-`"short"` in its `hiddenBy`.
+It defaults to 20 seconds when omitted, and must be finite and within 0..=86400
+(one day). Zero switches the short rule off — no playlist is shorter than zero
+seconds — so no `Disc` from that call names `"short"` in its `hiddenBy`. A
+value outside the domain (negative, non-finite, past the ceiling) rejects the
+call with an error rather than silently scanning with the default.
 
 Nothing else moves with it: which playlists a `Disc` holds, which ones a
 `selection` measures, and the rendered report are the same either way.
@@ -234,9 +270,10 @@ The raw wasm-bindgen module is also exported directly for advanced use:
 import init, { scan_files } from "@bdinfo-rs/wasm/wasm";
 ```
 
-It exports `inspect_files`, `inspect_iso`, `scan_files`, `scan_iso` and
-`render_report` — what `inspect`, `scan` and `renderReport` call, minus the
-Worker — plus one entry point the package deliberately does not wrap:
+It exports `inspect_files`, `inspect_iso`, `scan_files`, `scan_iso`,
+`render_report` and `report_file_name` — what `inspect`, `scan`, `renderReport`
+and `reportFileName` call, minus the Worker — plus one entry point the package
+deliberately does not wrap:
 `scan_report(bytes)` takes a whole disc pre-framed into one length-prefixed
 byte buffer and renders it from memory. It exists as the in-memory seam the
 byte-parity tests drive through both the native and the browser build; it is
