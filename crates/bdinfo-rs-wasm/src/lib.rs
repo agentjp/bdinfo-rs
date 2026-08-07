@@ -52,7 +52,7 @@ use std::io::{self, SeekFrom};
 use std::io::{BufRead, BufReader, Read, Seek};
 use std::sync::atomic::AtomicBool;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanProgress, ScanReport};
+use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanOptions, ScanProgress, ScanReport};
 use bdinfo_rs_core::bdrom::order::PlaylistFilter;
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::bdrom::order::{named_selection, selection_order, selection_stream_files};
@@ -689,6 +689,7 @@ fn scan_selection(
     let measured = BdRom::open_resilient_with(
         root,
         ScanMode::Full,
+        ScanOptions::default(),
         Some(&files),
         progress,
         &never_cancelled(),
@@ -747,8 +748,14 @@ fn scan_whole(
     root: &dyn BdDir,
     progress: &mut dyn FnMut(ScanProgress<'_>),
 ) -> Result<Scan, BdError> {
-    let report =
-        BdRom::open_resilient_with(root, ScanMode::Full, None, progress, &never_cancelled())?;
+    let report = BdRom::open_resilient_with(
+        root,
+        ScanMode::Full,
+        ScanOptions::default(),
+        None,
+        progress,
+        &never_cancelled(),
+    )?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(Scan { report, order })
 }

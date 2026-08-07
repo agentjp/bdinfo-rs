@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::bdrom::disc::{BdRom, ScanMode, ScanProgress, ScanReport};
+use crate::bdrom::disc::{BdRom, ScanMode, ScanOptions, ScanProgress, ScanReport};
 use crate::error::BdError;
 use crate::vfs::fs::FsDir;
 use crate::vfs::udf::source::{PathIso, UdfSource};
@@ -33,7 +33,7 @@ use crate::vfs::volume;
 /// disc after its root directory, which a bare Windows drive root (`J:\`) does
 /// not have.
 ///
-/// `mode`, `scan_files`, `progress` and `cancel` are
+/// `mode`, `options`, `scan_files`, `progress` and `cancel` are
 /// [`BdRom::open_resilient_with`]'s, passed through unchanged.
 ///
 /// # Errors
@@ -42,12 +42,14 @@ use crate::vfs::volume;
 pub fn open_folder(
     path: &Path,
     mode: ScanMode,
+    options: ScanOptions,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<ScanReport, BdError> {
     let root = FsDir::new(path);
-    let mut report = BdRom::open_resilient_with(&root, mode, scan_files, progress, cancel)?;
+    let mut report =
+        BdRom::open_resilient_with(&root, mode, options, scan_files, progress, cancel)?;
     report.errors.extend(root.take_errors());
     report.bdrom.volume_label = volume::resolve_folder_label(&report.bdrom.volume_label);
     Ok(report)
@@ -62,7 +64,7 @@ pub fn open_folder(
 /// scan's own recorded failures **plus** the reader's bad-sector recordings
 /// ([`UdfSource::take_errors`]).
 ///
-/// `mode`, `scan_files`, `progress` and `cancel` are
+/// `mode`, `options`, `scan_files`, `progress` and `cancel` are
 /// [`BdRom::open_resilient_with`]'s, passed through unchanged.
 ///
 /// # Errors
@@ -71,13 +73,14 @@ pub fn open_folder(
 pub fn open_iso(
     path: &Path,
     mode: ScanMode,
+    options: ScanOptions,
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<ScanReport, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
     let mut report =
-        BdRom::open_resilient_with(&source.root(), mode, scan_files, progress, cancel)?;
+        BdRom::open_resilient_with(&source.root(), mode, options, scan_files, progress, cancel)?;
     report.errors.extend(source.take_errors());
     Ok(report)
 }
@@ -87,7 +90,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::{BdError, ScanMode, ScanReport, open_folder, open_iso};
+    use super::{BdError, ScanMode, ScanOptions, ScanReport, open_folder, open_iso};
 
     /// The committed real-disc fixtures, one crate over: `BigBuckBunny` (a BDMV
     /// folder) and `BigBuckBunny.iso` (the same disc as a UDF image, whose UDF
@@ -128,6 +131,7 @@ mod tests {
         let report = open_folder(
             path,
             mode,
+            ScanOptions::default(),
             None,
             &mut |_| reported = reported.saturating_add(1),
             &AtomicBool::new(false),
@@ -142,6 +146,7 @@ mod tests {
         let report = open_iso(
             path,
             mode,
+            ScanOptions::default(),
             None,
             &mut |_| reported = reported.saturating_add(1),
             &AtomicBool::new(false),

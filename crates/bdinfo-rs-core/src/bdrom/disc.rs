@@ -742,6 +742,40 @@ impl ScanMode {
     }
 }
 
+/// Behavior switches for one disc open, orthogonal to how deep [`ScanMode`]
+/// reads.
+///
+/// `#[non_exhaustive]`, so literal construction is crate-internal: start from
+/// [`default`](Self::default) and reassign the fields to change on a `mut`
+/// binding.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOptions {
+    /// Whether a resilient scan keeps what the packet scan measured of a
+    /// stream file whose read failed partway (`true` by default).
+    ///
+    /// A kept partial file holds everything the demux accumulated up to the
+    /// failing read — registered streams, codec detail, per-stream tallies,
+    /// per-frame diagnostics, demuxed seconds — and fills the same summary and
+    /// report cells a completed file would, so chapter rows and stream
+    /// diagnostics cover the span before the failure and stay zero after it.
+    /// The failure is recorded as a [`ScanError`] either way; `false` also
+    /// discards the partial state, leaving the affected rows all zero while
+    /// the in-place playlist tallies the demux already flushed still count
+    /// (partial sizes and bitrates next to empty chapter rows). A strict
+    /// ([`BdRom::open`]) scan aborts on the first error regardless, and a
+    /// stream file that fails to open has no demux state to keep.
+    pub keep_partial: bool,
+}
+
+impl Default for ScanOptions {
+    /// Partial stream scans are kept; see
+    /// [`keep_partial`](Self::keep_partial).
+    fn default() -> Self {
+        Self { keep_partial: true }
+    }
+}
+
 impl BdRom {
     /// Opens and scans the Blu-ray disc rooted at `root`.
     ///
@@ -763,12 +797,24 @@ impl BdRom {
     /// - [`BdError::UnknownFileType`]/[`BdError::UnexpectedEof`] for malformed metadata, or
     ///   [`BdError::Io`] for a filesystem error.
     pub fn open(root: &dyn BdDir, mode: ScanMode) -> Result<Self, BdError> {
-        Self::open_with(root, mode, None, &mut |_| {}, &AtomicBool::new(false))
+        Self::open_with(
+            root,
+            mode,
+            ScanOptions::default(),
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
     }
 
-    /// Opens and scans the disc like [`open`](Self::open), with the packet
-    /// scan narrowed to `scan_files`, observed by `progress`, and abortable
-    /// through `cancel`.
+    /// Opens and scans the disc like [`open`](Self::open), with the scan's
+    /// behavior switches set by `options`, the packet scan narrowed to
+    /// `scan_files`, observed by `progress`, and abortable through `cancel`.
+    ///
+    /// `options` — the [`ScanOptions`] behavior switches.
+    /// [`keep_partial`](ScanOptions::keep_partial) matters only to the
+    /// resilient opens; this strict open aborts on the first failure
+    /// regardless.
     ///
     /// `scan_files` — when `Some`, only the stream files whose upper-cased
     /// names (`00000.M2TS`) it contains are packet-scanned; the rest keep
@@ -792,11 +838,20 @@ impl BdRom {
     pub fn open_with(
         root: &dyn BdDir,
         mode: ScanMode,
+        options: ScanOptions,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
         cancel: &AtomicBool,
     ) -> Result<Self, BdError> {
-        Self::open_impl(root, mode, scan_files, progress, cancel, &mut Sink { errors: None })
+        Self::open_impl(
+            root,
+            mode,
+            options,
+            scan_files,
+            progress,
+            cancel,
+            &mut Sink { errors: None },
+        )
     }
 
     /// Opens and scans the disc like [`open`](Self::open), but **collects** per-file
@@ -806,21 +861,31 @@ impl BdRom {
     /// A corrupt/unreadable clip-information file, playlist, or stream file (and
     /// any failed disc-level metadata read) is recorded as a [`ScanError`] and the
     /// scan continues over the readable rest; the affected playlist (or flag) is
-    /// simply absent (or its default) in the returned [`BdRom`]. On healthy media
-    /// the result is identical to [`open`](Self::open) with an empty error list.
+    /// simply absent (or its default) in the returned [`BdRom`] — except a stream
+    /// file whose packet scan failed partway, which keeps its partial demux state
+    /// by default ([`ScanOptions::keep_partial`]). On healthy media the result is
+    /// identical to [`open`](Self::open) with an empty error list.
     ///
     /// # Errors
     /// Only the failures with no readable rest to degrade to: locating
     /// `BDMV`/`CLIPINF`/`PLAYLIST` failed ([`BdError::StructureNotFound`], or
     /// [`BdError::Io`] if those lookups cannot enumerate).
     pub fn open_resilient(root: &dyn BdDir, mode: ScanMode) -> Result<ScanReport, BdError> {
-        Self::open_resilient_with(root, mode, None, &mut |_| {}, &AtomicBool::new(false))
+        Self::open_resilient_with(
+            root,
+            mode,
+            ScanOptions::default(),
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
     }
 
     /// Opens and scans the disc like [`open_resilient`](Self::open_resilient),
-    /// with the packet scan narrowed to `scan_files`, observed by `progress`,
-    /// and abortable through `cancel` (the [`open_with`](Self::open_with)
-    /// extras).
+    /// with the scan's behavior switches set by `options` and the packet scan
+    /// narrowed to `scan_files`, observed by `progress`, and abortable through
+    /// `cancel` (the [`open_with`](Self::open_with) extras). This resilient
+    /// open is where [`ScanOptions::keep_partial`] takes effect.
     ///
     /// # Errors
     /// As [`open_resilient`](Self::open_resilient), plus
@@ -831,6 +896,7 @@ impl BdRom {
     pub fn open_resilient_with(
         root: &dyn BdDir,
         mode: ScanMode,
+        options: ScanOptions,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
         cancel: &AtomicBool,
@@ -839,6 +905,7 @@ impl BdRom {
         let bdrom = Self::open_impl(
             root,
             mode,
+            options,
             scan_files,
             progress,
             cancel,
@@ -852,6 +919,7 @@ impl BdRom {
     fn open_impl(
         root: &dyn BdDir,
         mode: ScanMode,
+        options: ScanOptions,
         scan_files: Option<&BTreeSet<String>>,
         progress: &mut dyn FnMut(ScanProgress<'_>),
         cancel: &AtomicBool,
@@ -938,6 +1006,7 @@ impl BdRom {
                 &interleaved_files,
                 scan_files,
                 mode.measures_bitrate(),
+                options.keep_partial,
                 progress,
                 cancel,
                 sink,
@@ -1437,6 +1506,11 @@ fn build_file_maps(
 /// A playlist whose clips cannot resolve keeps empty presented streams here;
 /// the summary pass reports the failure.
 ///
+/// `keep_partial` ([`ScanOptions::keep_partial`]) reaches both passes: a file
+/// whose head is damaged fails the quick pass at the same spot as the full
+/// one, and its partial quick state (whatever codec detail initialised before
+/// the failure) is retained or dropped by the same switch.
+///
 /// # Errors
 /// Propagates [`scan_stream_files`]'s failures per the `sink` mode.
 #[expect(
@@ -1452,6 +1526,7 @@ fn run_measurement_scan(
     interleaved_files: &BTreeMap<String, u64>,
     scan_files: Option<&BTreeSet<String>>,
     measure: bool,
+    keep_partial: bool,
     callback: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
     sink: &mut Sink<'_>,
@@ -1462,7 +1537,16 @@ fn run_measurement_scan(
     // passes: each carries the caller's flag in its `Progress`.
     let mut warmup = |_: ScanProgress<'_>| {};
     let quick_progress = &mut Progress { callback: &mut warmup, done: 0, total: 0, cancel };
-    let quick = scan_stream_files(stream, ssif, parsed, scan_files, quick_progress, sink, false)?;
+    let quick = scan_stream_files(
+        stream,
+        ssif,
+        parsed,
+        scan_files,
+        quick_progress,
+        sink,
+        keep_partial,
+        false,
+    )?;
     for playlist in parsed.iter_mut() {
         if let Ok(metas) = collect_clip_metas(playlist, clip_files, stream_files, &quick) {
             resolve_playlist_streams(playlist, &metas);
@@ -1484,7 +1568,8 @@ fn run_measurement_scan(
         total: scan_total(stream_files, interleaved_files, scan_files),
         cancel,
     };
-    let full = scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, true)?;
+    let full =
+        scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, keep_partial, true)?;
     // The PGS caption tallies and dimensions only exist after the full pass
     // (the quick pass never reads the graphics payloads), so the presented
     // streams re-merge the reference clip's full-scanned graphics detail —
@@ -1994,10 +2079,16 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
 /// codec detail is initialised; the full pass demuxes every packet to EOF —
 /// the measurement pass. Used only at the `streams` level; the
 /// disc/`playlists` levels skip it entirely. In strict mode a failed open/scan
-/// propagates; in resilient mode it is recorded and the file skipped — its
-/// playlists fall back to the clip-info detail. The one exception is
+/// propagates; in resilient mode it is recorded, and a file that failed
+/// mid-demux keeps its partial state in the returned map when `keep_partial`
+/// is set — otherwise (and always on a failed open) the file is skipped, its
+/// playlists falling back to the clip-info detail. The one exception is
 /// [`BdError::ScanCancelled`] (the caller's flag in the [`Progress`]), which
 /// aborts the pass in both modes without being recorded.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scan orchestration threads the per-open context (dirs, maps, selection, progress, sink) one level down"
+)]
 fn scan_stream_files(
     stream_dir: Option<&dyn BdDir>,
     ssif_dir: Option<&dyn BdDir>,
@@ -2005,6 +2096,7 @@ fn scan_stream_files(
     scan_files: Option<&BTreeSet<String>>,
     progress: &mut Progress<'_>,
     sink: &mut Sink<'_>,
+    keep_partial: bool,
     is_full_scan: bool,
 ) -> Result<BTreeMap<String, TsStreamFile>, BdError> {
     let mut scanned = BTreeMap::new();
@@ -2049,8 +2141,20 @@ fn scan_stream_files(
             return Err(BdError::ScanCancelled);
         }
         progress.finish_file(&name, target);
+        // This one absorb call is the whole keep/drop policy: strict mode
+        // propagates the failure (partial state and all), resilient mode
+        // records it and yields the fallback — the partial file itself under
+        // `keep_partial`, nothing otherwise. A failed open carries no demux
+        // state, so its fallback is always empty.
+        let (fallback, demuxed) = match scan {
+            Ok(StreamScan::Complete(stream_file)) => (None, Ok(Some(stream_file))),
+            Ok(StreamScan::Partial(stream_file, reason)) => {
+                (keep_partial.then_some(stream_file), Err(reason))
+            }
+            Err(reason) => (None, Err(reason)),
+        };
         if let Some(stream_file) =
-            sink.absorb(ScanStage::StreamFile, file.name(), None, scan.map(Some))?
+            sink.absorb(ScanStage::StreamFile, file.name(), fallback, demuxed)?
         {
             scanned.insert(name, stream_file);
         }
@@ -2058,16 +2162,35 @@ fn scan_stream_files(
     Ok(scanned)
 }
 
+/// One stream file's demux outcome, distinguishing a run to EOF from a
+/// mid-demux failure whose measured-so-far state is still worth handing back.
+enum StreamScan {
+    /// The demux read the whole pass's bytes; the file carries its complete
+    /// scan outputs.
+    Complete(TsStreamFile),
+    /// The demux failed partway; the file carries everything accumulated up
+    /// to the failing read — registered streams, codec detail, per-stream
+    /// tallies, per-frame diagnostics, demuxed seconds — alongside the error.
+    /// The caller decides whether to keep or drop the partial state
+    /// ([`ScanOptions::keep_partial`]).
+    Partial(TsStreamFile, BdError),
+}
+
 /// Opens and scans one `*.m2ts` (the per-file unit [`scan_stream_files`]
 /// isolates), demuxing through its `interleaved` 3D source when it has one.
 /// The demux pulls its bytes through the scan's [`Progress`].
+///
+/// A demux failure returns [`StreamScan::Partial`] rather than `Err`; plain
+/// `Err` is reserved for the two no-demux-state cases — the source would not
+/// open, or the caller cancelled ([`BdError::ScanCancelled`], whose partial
+/// state is deliberately never offered: cancellation is an abort, not damage).
 fn scan_one_stream_file(
     file: &dyn BdFile,
     interleaved: Option<Box<dyn BdFile>>,
     playlists: &mut [TsPlaylistFile],
     is_full_scan: bool,
     progress: &mut Progress<'_>,
-) -> Result<TsStreamFile, BdError> {
+) -> Result<StreamScan, BdError> {
     let mut stream_file = TsStreamFile::new(file.name());
     stream_file.interleaved_file = interleaved.map(TsInterleavedFile::new);
     // The interleaved 3D `*.ssif` is the demux source in preference to the plain
@@ -2083,13 +2206,18 @@ fn scan_one_stream_file(
     // the progress, so the demux can poll it alongside the counting reads.
     let cancel = progress.cancel;
     let mut reader = CountingReader { inner, name: file.name().to_ascii_uppercase(), progress };
-    stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel)?;
-    // The scan's public outputs are now captured; free the demux scratch (its
-    // per-PID PES buffers) before the file is parked in the result map, so a
-    // multi-clip disc holds only the in-flight clip's buffers, not every scanned
-    // clip's at once. Pure reclaim — see `TsStreamFile::release_scratch`.
+    let scan = stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel);
+    // The scan's public outputs — complete or partial — are now captured; free
+    // the demux scratch (its per-PID PES buffers) before the file is handed
+    // back, so a multi-clip disc holds only the in-flight clip's buffers, not
+    // every scanned clip's at once. Pure reclaim — see
+    // `TsStreamFile::release_scratch`.
     stream_file.release_scratch();
-    Ok(stream_file)
+    match scan {
+        Ok(()) => Ok(StreamScan::Complete(stream_file)),
+        Err(BdError::ScanCancelled) => Err(BdError::ScanCancelled),
+        Err(reason) => Ok(StreamScan::Partial(stream_file, reason)),
+    }
 }
 
 /// Picks the playlist's reference clip — the clip whose streams become the
@@ -2254,12 +2382,12 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-    use proptest::prelude::{prop_assert, prop_assert_eq, proptest};
+    use proptest::prelude::{ProptestConfig, prop_assert, prop_assert_eq, proptest};
 
     use super::{
         ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID,
-        PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanProgress,
-        ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
+        PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanOptions,
+        ScanProgress, ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
         build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
         clip_has_50hz_video, clip_stem, collect_backups, directory_size, fixtures,
         has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
@@ -3335,7 +3463,7 @@ mod tests {
             extension: ".m2ts".to_owned(),
             bytes,
             trip: trip.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let four_units = [encrypted_stream(), encrypted_stream()].concat();
         // Listed out of name order: the sample must be the largest file plus —
@@ -3377,7 +3505,7 @@ mod tests {
             extension: ".inf".to_owned(),
             bytes: Vec::new(),
             trip: trip.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let aacs = |trip: &Trip| MockDir {
             name: "AACS".to_owned(),
@@ -3418,7 +3546,7 @@ mod tests {
                 extension: ".m2ts".to_owned(),
                 bytes: encrypted_stream(),
                 trip: Trip::new(0),
-                fail_read: false,
+                fail_read_at: None,
             }],
             trip: ok.clone(),
         };
@@ -3432,7 +3560,7 @@ mod tests {
                 extension: ".m2ts".to_owned(),
                 bytes: encrypted_stream(),
                 trip: ok.clone(),
-                fail_read: true,
+                fail_read_at: Some(0),
             }],
             trip: ok,
         };
@@ -4423,9 +4551,11 @@ mod tests {
         extension: String,
         bytes: Vec<u8>,
         trip: Trip,
-        /// When set, `open_read` succeeds but the returned reader errors — to
-        /// exercise `read_file`'s `read_to_end` (not `open_read`) failure arm.
-        fail_read: bool,
+        /// When set, `open_read` succeeds but the returned reader errors once
+        /// this many bytes have been served — `Some(0)` fails the first read
+        /// (exercising `read_file`'s `read_to_end`, not `open_read`, failure
+        /// arm), a larger count models a file whose tail is unreadable.
+        fail_read_at: Option<usize>,
     }
 
     impl BdFile for MockFile {
@@ -4451,10 +4581,12 @@ mod tests {
 
         fn open_read(&self) -> io::Result<Box<dyn ReadSeek>> {
             self.trip.tick()?;
-            if self.fail_read {
-                Ok(Box::new(FailingReader))
-            } else {
-                Ok(Box::new(Cursor::new(self.bytes.clone())))
+            match self.fail_read_at {
+                Some(serve) => Ok(Box::new(ServeThenFail {
+                    bytes: Cursor::new(self.bytes.clone()),
+                    remaining: serve,
+                })),
+                None => Ok(Box::new(Cursor::new(self.bytes.clone()))),
             }
         }
 
@@ -4465,18 +4597,32 @@ mod tests {
         }
     }
 
-    /// A reader that opens fine but errors on the first read.
-    struct FailingReader;
+    /// A reader that serves at most `remaining` bytes of `bytes` and then
+    /// errors — a file whose tail sectors are unreadable. A source shorter
+    /// than `remaining` just hits EOF first (no error).
+    struct ServeThenFail {
+        bytes: Cursor<Vec<u8>>,
+        remaining: usize,
+    }
 
-    impl Read for FailingReader {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::other("read failed"))
+    impl Read for ServeThenFail {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("read failed"));
+            }
+            let cap = self.remaining.min(buf.len());
+            let Some(dst) = buf.get_mut(..cap) else {
+                return Ok(0);
+            };
+            let served = self.bytes.read(dst)?;
+            self.remaining = self.remaining.saturating_sub(served);
+            Ok(served)
         }
     }
 
-    impl Seek for FailingReader {
-        fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
-            Ok(0)
+    impl Seek for ServeThenFail {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.bytes.seek(pos)
         }
     }
 
@@ -4552,7 +4698,7 @@ mod tests {
             extension: extension_of_name(name),
             bytes,
             trip: trip.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -4627,7 +4773,7 @@ mod tests {
             extension: extension_of_name(name),
             bytes: vec![0; len],
             trip: trip.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let dir = MockDir {
             name: "SSIF".to_owned(),
@@ -4670,58 +4816,440 @@ mod tests {
     }
 
     #[test]
-    fn scan_stream_files_propagates_a_reader_error() {
-        // A STREAM dir with one `*.m2ts` whose reader fails after a successful open:
-        // the packet scan's read error propagates out of `scan_stream_files`.
+    fn scan_stream_files_keeps_or_drops_a_partial_file_per_mode_and_switch() {
+        // A STREAM dir with one `*.m2ts` whose reader fails after a successful
+        // open — a read error before any packet demuxes. The three outcomes of
+        // the keep/drop seam, over the same damage:
         let trip = Trip::new(usize::MAX);
         let m2ts = MockFile {
             name: "00000.m2ts".to_owned(),
             extension: ".m2ts".to_owned(),
             bytes: vec![0_u8; 200],
             trip: trip.clone(),
-            fail_read: true,
+            fail_read_at: Some(0),
         };
         let stream_dir =
             MockDir { name: "STREAM".to_owned(), dirs: Vec::new(), files: vec![m2ts], trip };
         // A non-empty playlist list so the scan proceeds past its empty-input guard.
         let mut playlists =
             vec![TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap()];
-        // Strict mode propagates the read failure…
-        let mut noop = |_: ScanProgress<'_>| {};
-        let mut progress =
-            Progress { callback: &mut noop, done: 0, total: 200, cancel: &AtomicBool::new(false) };
-        let strict = scan_stream_files(
-            Some(&stream_dir),
-            None,
-            &mut playlists,
-            None,
-            &mut progress,
-            &mut Sink { errors: None },
-            false,
-        );
+        let run = |playlists: &mut Vec<TsPlaylistFile>, sink: &mut Sink<'_>, keep_partial: bool| {
+            let mut noop = |_: ScanProgress<'_>| {};
+            let mut progress = Progress {
+                callback: &mut noop,
+                done: 0,
+                total: 200,
+                cancel: &AtomicBool::new(false),
+            };
+            let scanned = scan_stream_files(
+                Some(&stream_dir),
+                None,
+                playlists,
+                None,
+                &mut progress,
+                sink,
+                keep_partial,
+                false,
+            );
+            // The failed file still consumes its progress budget (the snap to
+            // the file boundary) whether or not its partial state is kept.
+            assert_eq!(progress.done, 200, "the failed file's bytes are snapped past");
+            scanned
+        };
+        // Strict mode propagates the read failure, partial state and all —
+        // `keep_partial` changes nothing there.
+        let strict = run(&mut playlists, &mut Sink { errors: None }, true);
         assert!(strict.is_err());
-        // …resilient mode records it and skips the file; the failed file still
-        // consumes its progress budget (the snap to the file boundary).
+        // Resilient mode records the failure either way; the switch decides
+        // whether the partial file (here empty — the read failed before any
+        // packet) still lands in the returned map.
         let mut errors = Vec::new();
-        let mut noop = |_: ScanProgress<'_>| {};
-        let mut progress =
-            Progress { callback: &mut noop, done: 0, total: 200, cancel: &AtomicBool::new(false) };
-        let resilient = scan_stream_files(
-            Some(&stream_dir),
-            None,
-            &mut playlists,
-            None,
-            &mut progress,
-            &mut Sink { errors: Some(&mut errors) },
-            false,
-        )
-        .expect("resilient scan continues");
-        assert_eq!(progress.done, 200, "the failed file's bytes are snapped past");
-        assert!(resilient.is_empty());
+        let kept = run(&mut playlists, &mut Sink { errors: Some(&mut errors) }, true)
+            .expect("resilient scan continues");
+        let partial = kept.get("00000.M2TS").expect("the partial file is kept");
+        assert!(partial.streams.is_empty(), "no packet demuxed before the failing read");
         assert_eq!(errors.len(), 1);
         let recorded = errors.first().expect("one recorded error");
         assert_eq!(recorded.stage, ScanStage::StreamFile);
         assert_eq!(recorded.file, "00000.m2ts");
+        // `keep_partial: false` drops the file wholesale — the pre-retention
+        // resilient outcome.
+        let mut errors = Vec::new();
+        let dropped = run(&mut playlists, &mut Sink { errors: Some(&mut errors) }, false)
+            .expect("resilient scan continues");
+        assert!(dropped.is_empty());
+        assert_eq!(errors.len(), 1);
+    }
+
+    // ── partial retention: the disc-level keep/drop seam ─────────────────────
+
+    /// A demuxable `*.m2ts` longer than one read chunk
+    /// ([`DATA_SIZE`](crate::bdrom::m2ts::DATA_SIZE)): PAT, a PMT declaring
+    /// `streams`, AVC video frames (PID 0x1011) timestamped at `head_seconds`
+    /// inside the first chunk, null-PID padding across the chunk boundary,
+    /// then frames at `tail_seconds`. A reader that dies at the boundary hands
+    /// the demux every head frame and none of the tail (a mid-chunk death
+    /// voids the whole in-flight chunk — `fill_buffer` propagates before
+    /// demuxing it).
+    fn two_chunk_m2ts(
+        streams: &[(u8, u16)],
+        head_seconds: &[u64],
+        tail_seconds: &[u64],
+    ) -> Vec<u8> {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        let frame = |s: u64| {
+            let ticks = s.wrapping_mul(90_000);
+            packet(0x1011, true, &pes_dts(0xE0, ticks, ticks, &sps_payload()))
+        };
+        let mut m2ts = packet(0, true, &pat_payload(0x0100));
+        m2ts.extend(packet(0x0100, true, &pmt_payload(streams)));
+        for &s in head_seconds {
+            m2ts.extend(frame(s));
+        }
+        while m2ts.len() <= DATA_SIZE {
+            m2ts.extend(packet(0x1FFF, false, &[0_u8; 184]));
+        }
+        for &s in tail_seconds {
+            m2ts.extend(frame(s));
+        }
+        m2ts
+    }
+
+    /// A minimal one-playlist mock disc around `m2ts`: one 100 s play item
+    /// (`00000.M2TS`, clip info `clip`) with chapter marks at 0 s and 45 s.
+    /// The stream file's reader fails once `serve` bytes have been read
+    /// (`None` = healthy); every other file is intact.
+    fn tripping_disc_with(clip: Vec<u8>, m2ts: Vec<u8>, serve: Option<usize>) -> MockDir {
+        let trip = Trip::new(usize::MAX);
+        let file = |name: &str, bytes: Vec<u8>, fail_read_at: Option<usize>| MockFile {
+            name: name.to_owned(),
+            extension: extension_of_name(name),
+            bytes,
+            trip: trip.clone(),
+            fail_read_at,
+        };
+        let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
+            name: name.to_owned(),
+            dirs,
+            files,
+            trip: trip.clone(),
+        };
+        dir(
+            "disc",
+            vec![dir(
+                "BDMV",
+                vec![
+                    dir("CLIPINF", vec![], vec![file("00000.clpi", clip, None)]),
+                    dir(
+                        "PLAYLIST",
+                        vec![],
+                        vec![file(
+                            "00000.mpls",
+                            mpls("00000", 0, 4_500_000, &[(1, 0, 0), (1, 0, 2_025_000)]),
+                            None,
+                        )],
+                    ),
+                    dir("STREAM", vec![], vec![file("00000.m2ts", m2ts, serve)]),
+                ],
+                vec![],
+            )],
+            vec![],
+        )
+    }
+
+    /// [`tripping_disc_with`] over a video-only clip (AVC on PID 0x1011).
+    fn tripping_disc(m2ts: Vec<u8>, serve: Option<usize>) -> MockDir {
+        tripping_disc_with(clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]), m2ts, serve)
+    }
+
+    #[test]
+    fn open_resilient_keeps_a_mid_file_partial_scan_by_default() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+
+        // Healthy control: the same tree scans clean and both chapters carry
+        // measured rates — so the damaged scan's zero second row below is the
+        // trip's doing, not the fixture's.
+        let healthy = BdRom::open_resilient(&tripping_disc(m2ts.clone(), None), ScanMode::Full)
+            .expect("healthy scan");
+        assert!(healthy.errors.is_empty());
+        let control = healthy.bdrom.playlists.first().unwrap();
+        assert!(control.chapters.first().unwrap().avg_rate > 0.0);
+        assert!(control.chapters.get(1).unwrap().avg_rate > 0.0);
+
+        // Tripped at the chunk boundary: the head frames demuxed, the rest died.
+        let report = BdRom::open_resilient(&tripping_disc(m2ts, Some(DATA_SIZE)), ScanMode::Full)
+            .expect("resilient scan continues");
+        // The full pass trips; the quick pass stops inside the served first
+        // chunk once the lone video stream's codec detail initialises, so it
+        // never reaches the failing read.
+        assert_eq!(report.errors.len(), 1);
+        let recorded = report.errors.first().unwrap();
+        assert_eq!((recorded.stage, recorded.file.as_str()), (ScanStage::StreamFile, "00000.m2ts"));
+
+        let pl = report.bdrom.playlists.first().unwrap();
+        // The kept partial file fills the chapter rows up to the death point:
+        // the first chapter carries its measured rate, the post-death chapter
+        // is a zero row with its mark's own time and length.
+        assert_eq!(pl.chapters.len(), 2);
+        let first = pl.chapters.first().unwrap();
+        assert_eq!(first.time_in.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(first.length.to_bits(), 45.0_f64.to_bits());
+        assert!(first.avg_rate > 0.0);
+        let second = pl.chapters.get(1).unwrap();
+        assert_eq!(second.time_in.to_bits(), 45.0_f64.to_bits());
+        assert_eq!(second.length.to_bits(), 55.0_f64.to_bits());
+        assert_eq!(second.avg_rate.to_bits(), 0.0_f64.to_bits());
+        // The stream-diagnostics material survives too: the clip row carries
+        // the partial demuxed seconds and per-stream tallies.
+        let clip = pl.clips.first().unwrap();
+        assert!(clip.file_seconds > 0.0);
+        let tally = clip.streams.first().expect("the partial file's video tally");
+        assert!(tally.payload_bytes > 0);
+        // The quick pass's codec detail is intact on the presented stream.
+        assert!(pl.streams.first().unwrap().description.contains("High Profile 4.1"));
+    }
+
+    #[test]
+    fn keep_partial_off_drops_the_partial_scan_wholesale() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        let kept =
+            BdRom::open_resilient(&tripping_disc(m2ts.clone(), Some(DATA_SIZE)), ScanMode::Full)
+                .expect("resilient scan continues");
+        let off = BdRom::open_resilient_with(
+            &tripping_disc(m2ts, Some(DATA_SIZE)),
+            ScanMode::Full,
+            ScanOptions { keep_partial: false },
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .expect("resilient scan continues");
+
+        // Same failure recorded either way; the switch only decides retention.
+        assert_eq!(off.errors.len(), kept.errors.len());
+        let pl = off.bdrom.playlists.first().unwrap();
+        let kept_pl = kept.bdrom.playlists.first().unwrap();
+        // The dropped file leaves the chapter rows and diagnostics all zero…
+        assert_eq!(pl.chapters.len(), 2);
+        assert_eq!(pl.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
+        let clip = pl.clips.first().unwrap();
+        assert!(clip.streams.is_empty());
+        assert_eq!(clip.file_seconds.to_bits(), 0.0_f64.to_bits());
+        // …while the in-place playlist tallies the demux flushed before dying
+        // still count, exactly as they do with retention on: dropping the file
+        // preserves the partial-size-next-to-zero-chapters inconsistency by
+        // design (the switch's OFF contract), it does not undo the demux.
+        let kept_clip = kept_pl.clips.first().unwrap();
+        assert!(clip.packet_count > 0);
+        assert_eq!(clip.packet_count, kept_clip.packet_count);
+        assert_eq!(clip.payload_bytes, kept_clip.payload_bytes);
+        // The rendered report's byte pin — see `DAMAGED_OFF_REPORT`.
+        assert_eq!(
+            crate::report::text::render(&off.bdrom, &off.errors),
+            DAMAGED_OFF_REPORT.replace('\n', "\r\n").replace("<TAB>", "\t")
+        );
+    }
+
+    /// The whole expected report of the `keep_partial: false` scan of the
+    /// tripped [`tripping_disc`] fixture, spelled with `\n` endings and a
+    /// `<TAB>` token (the assert respells them `\r\n` and `\t`).
+    ///
+    /// Byte-pinned because the OFF switch's contract is exactly the
+    /// pre-retention damaged-scan output — including its inconsistency: the
+    /// in-place partial tallies still show as the 960-byte Movie Size and the
+    /// FILES bitrate while every chapter row and the stream diagnostics stay
+    /// empty. Retention must change nothing when switched off.
+    const DAMAGED_OFF_REPORT: &str = r"Disc Label:     disc
+Disc Size:      5,243,712 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1
+
+Notes:          
+
+BDINFO HOME:
+  Cinema Squid (old)
+    http://www.cinemasquid.com/blu-ray/tools/bdinfo
+  UniqProject GitHub (new)
+    https://github.com/UniqProject/BDInfo
+
+INCLUDES FORUMS REPORT FOR:
+  AVS Forum Blu-ray Audio and Video Specifications Thread
+    http://www.avsforum.com/avs-vb/showthread.php?t=1155731
+
+WARNING: File errors were encountered during scan:
+
+00000.m2ts<TAB>io error: read failed
+
+********************
+PLAYLIST: 00000.MPLS
+********************
+
+<--- BEGIN FORUMS PASTE --->
+[code]
+                                                                                                                      Total        Video                                                                           
+Title                                                           Codec   Length    Movie Size        Disc Size         Bitrate      Bitrate      Main Audio Track                          Secondary Audio Track    
+-----                                                           ------  -------   --------------    ----------------  -----------  -----------  ------------------                        ---------------------    
+00000.MPLS                                                      AVC     00:01:40  960               5,243,712         0.00 Mbps    0.00 Mbps                                                                       
+[/code]
+
+[code]
+DISC INFO:
+Disc Label:     disc
+Disc Size:      5,243,712 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1b
+
+PLAYLIST REPORT:
+
+Name:           00000.MPLS
+Length:         00:01:40.000 (h:m:s.ms)
+Size:           960 bytes
+Total Bitrate:  0.00 Mbps
+
+(*) Indicates included stream hidden by this playlist.
+
+VIDEO:
+
+Codec                   Bitrate             Description     
+---------------         -------------       -----------     
+* MPEG-4 AVC Video      0 kbps              1080p / 24 fps / 16:9 / High Profile 4.1
+
+FILES:
+
+Name            Time In         Length          Size            Total Bitrate   
+--------------- -------------   -------------   -------------   -------------   
+00000.M2TS      0:00:00.000     0:01:40.000     960                  2 kbps     
+
+CHAPTERS:
+
+Number          Time In         Length          Avg Video Rate  Max 1-Sec Rate  Max 1-Sec Time  Max 5-Sec Rate  Max 5-Sec Time  Max 10Sec Rate  Max 10Sec Time  Avg Frame Size  Max Frame Size  Max Frame Time  
+------          -------------   -------------   --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  
+1               0:00:00.000     0:00:45.000          0 kbps          0 kbps     00:00:00.000         0 kbps     00:00:00.000         0 kbps     00:00:00.000          0 bytes         0 bytes   00:00:00.000    
+2               0:00:45.000     0:00:55.000          0 kbps          0 kbps     00:00:00.000         0 kbps     00:00:00.000         0 kbps     00:00:00.000          0 bytes         0 bytes   00:00:00.000    
+
+STREAM DIAGNOSTICS:
+
+File            PID             Type            Codec           Language                Seconds                     Bitrate                  Bytes        Packets       
+----------      -------------   -----           ----------      -------------           --------------          ---------------         --------------  -----------     
+
+[/code]
+<---- END FORUMS PASTE ---->
+
+QUICK SUMMARY:
+
+Disc Label:     disc
+Disc Size:      5,243,712 bytes
+Protection:     AACS
+Playlist:       00000.MPLS
+Size:           960 bytes
+Length:         00:01:40.000
+Total Bitrate:  0.00 Mbps
+* Video:        MPEG-4 AVC Video / 0 kbps / 1080p / 24 fps / 16:9 / High Profile 4.1
+
+";
+
+    #[test]
+    fn a_quick_pass_partial_keeps_its_initialised_codec_detail() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        // The PMT declares video AND audio, but no audio PES ever arrives, so
+        // the quick pass — unlike the video-only fixtures above, where it
+        // stops inside the first chunk — keeps reading for the audio codec
+        // detail and trips at the boundary exactly like the full pass: one
+        // recorded failure per pass. Its partial file already parsed the
+        // video SPS, and that detail reaches the presented stream only
+        // because the partial quick file is kept.
+        let clip =
+            clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0]), (0x1100, 0x81, [0x61, b'e', b'n', b'g'])]);
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011), (0x81, 0x1100)], &[1, 2, 3], &[46, 47, 48]);
+        let report = BdRom::open_resilient(
+            &tripping_disc_with(clip.clone(), m2ts.clone(), Some(DATA_SIZE)),
+            ScanMode::Full,
+        )
+        .expect("resilient scan continues");
+        assert_eq!(report.errors.len(), 2);
+        let pl = report.bdrom.playlists.first().unwrap();
+        assert!(pl.streams.first().unwrap().description.contains("High Profile 4.1"));
+        assert!(pl.chapters.first().unwrap().avg_rate > 0.0);
+
+        // Switched off, the same damage loses the quick pass's codec detail
+        // with everything else: the presented video keeps only its clip-info
+        // description.
+        let off = BdRom::open_resilient_with(
+            &tripping_disc_with(clip, m2ts, Some(DATA_SIZE)),
+            ScanMode::Full,
+            ScanOptions { keep_partial: false },
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .expect("resilient scan continues");
+        assert_eq!(off.errors.len(), 2);
+        let off_pl = off.bdrom.playlists.first().unwrap();
+        assert!(!off_pl.streams.first().unwrap().description.contains("High Profile 4.1"));
+    }
+
+    #[test]
+    fn open_resilient_records_one_warning_per_pass_on_head_damage() {
+        // A reader that dies on its first byte: the quick pass and the full
+        // pass each open the file and each trip, so ONE failure is recorded
+        // per pass — two `WARNING` lines for the same file, deliberately
+        // undeduplicated.
+        let report =
+            BdRom::open_resilient(&tripping_disc(vec![0_u8; 400], Some(0)), ScanMode::Full)
+                .expect("resilient scan continues");
+        assert_eq!(report.errors.len(), 2);
+        for recorded in &report.errors {
+            assert_eq!(
+                (recorded.stage, recorded.file.as_str()),
+                (ScanStage::StreamFile, "00000.m2ts")
+            );
+        }
+        // Nothing was demuxed, so every measurement is zero — but the open
+        // succeeded and the structure is fully listed.
+        let pl = report.bdrom.playlists.first().unwrap();
+        assert_eq!(pl.chapters.len(), 2);
+        assert_eq!(pl.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
+        assert!(pl.clips.first().unwrap().streams.is_empty());
+    }
+
+    #[test]
+    fn open_strict_aborts_wholesale_on_a_stream_read_error() {
+        // The strict open propagates the first read failure — no partial
+        // state, no report — whatever `keep_partial` would have said.
+        assert!(BdRom::open(&tripping_disc(vec![0_u8; 400], Some(0)), ScanMode::Full).is_err());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        /// Tripping the stream reader at an arbitrary byte offset never
+        /// panics or hangs the resilient scan, and the chapter table keeps
+        /// its shape: one row per mark, each with its mark's own time and
+        /// length, rates finite and non-negative. (24 cases — each scans a
+        /// >5 MiB two-chunk fixture twice; the deterministic boundary
+        /// offsets 0 and `DATA_SIZE` are pinned by the tests above.)
+        #[test]
+        fn a_tripped_reader_yields_a_total_scan_with_one_chapter_row_per_mark(
+            serve in 0_usize..5_400_000,
+        ) {
+            let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47]);
+            let report =
+                BdRom::open_resilient(&tripping_disc(m2ts, Some(serve)), ScanMode::Full)
+                    .expect("the resilient scan is total");
+            let pl = report.bdrom.playlists.first().unwrap();
+            prop_assert_eq!(pl.chapters.len(), 2);
+            let first = pl.chapters.first().unwrap();
+            prop_assert_eq!(first.time_in.to_bits(), 0.0_f64.to_bits());
+            prop_assert_eq!(first.length.to_bits(), 45.0_f64.to_bits());
+            let second = pl.chapters.get(1).unwrap();
+            prop_assert_eq!(second.time_in.to_bits(), 45.0_f64.to_bits());
+            prop_assert_eq!(second.length.to_bits(), 55.0_f64.to_bits());
+            for row in &pl.chapters {
+                prop_assert!(row.avg_rate.is_finite() && row.avg_rate >= 0.0);
+                prop_assert!(row.max_1sec_rate.is_finite() && row.max_1sec_rate >= 0.0);
+            }
+        }
     }
 
     // ── scan progress + selection ───────────────────────────────────────────
@@ -4814,8 +5342,15 @@ mod tests {
         // (the quick codec-init pass is neither budgeted nor reported).
         let mut events: Vec<(String, u64, u64)> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-        let bd = BdRom::open_with(&root, ScanMode::Full, None, &mut collect, &never_cancel())
-            .expect("scan with progress");
+        let bd = BdRom::open_with(
+            &root,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            &mut collect,
+            &never_cancel(),
+        )
+        .expect("scan with progress");
         assert_eq!(bd.playlists.len(), 2);
         assert!(!events.is_empty());
         assert!(events.iter().all(|(_, _, total)| *total == 1000 + 500));
@@ -4831,9 +5366,15 @@ mod tests {
         let selected = BTreeSet::from(["00000.M2TS".to_owned()]);
         let mut events: Vec<(String, u64, u64)> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
-        let bd =
-            BdRom::open_with(&root, ScanMode::Full, Some(&selected), &mut collect, &never_cancel())
-                .expect("scan the selection");
+        let bd = BdRom::open_with(
+            &root,
+            ScanMode::Full,
+            ScanOptions::default(),
+            Some(&selected),
+            &mut collect,
+            &never_cancel(),
+        )
+        .expect("scan the selection");
         assert_eq!(bd.playlists.len(), 2);
         assert!(events.iter().all(|(file, _, total)| file == "00000.M2TS" && *total == 1000));
         assert_eq!(events.last().map(|(_, done, _)| *done), Some(1000));
@@ -4845,6 +5386,7 @@ mod tests {
         let report = BdRom::open_resilient_with(
             &root,
             ScanMode::Full,
+            ScanOptions::default(),
             Some(&selected),
             &mut observe,
             &never_cancel(),
@@ -4858,8 +5400,15 @@ mod tests {
         let mut fired = false;
         let mut observe = |_: ScanProgress<'_>| fired = true;
         drop(
-            BdRom::open_with(&root, ScanMode::Metadata, None, &mut observe, &never_cancel())
-                .expect("metadata-only scan"),
+            BdRom::open_with(
+                &root,
+                ScanMode::Metadata,
+                ScanOptions::default(),
+                None,
+                &mut observe,
+                &never_cancel(),
+            )
+            .expect("metadata-only scan"),
         );
         assert!(!fired);
     }
@@ -4890,8 +5439,15 @@ mod tests {
         let mut baseline: Vec<u64> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| baseline.push(p.done);
         drop(
-            BdRom::open_with(&root, ScanMode::Full, None, &mut collect, &never_cancel())
-                .expect("the uncancelled scan"),
+            BdRom::open_with(
+                &root,
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                &mut collect,
+                &never_cancel(),
+            )
+            .expect("the uncancelled scan"),
         );
         // Cancelling on the FIRST event: the scan aborts with `ScanCancelled`
         // and stops emitting promptly — the full pass's event trail and the
@@ -4903,8 +5459,15 @@ mod tests {
             events.push(p.done);
             cancel.store(true, Ordering::Relaxed);
         };
-        let err = BdRom::open_with(&root, ScanMode::Full, None, &mut trip, &cancel)
-            .expect_err("the cancelled scan errors");
+        let err = BdRom::open_with(
+            &root,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            &mut trip,
+            &cancel,
+        )
+        .expect_err("the cancelled scan errors");
         assert_eq!(err.to_string(), "scan cancelled");
         assert!(events.len() < baseline.len(), "the cancelled scan must stop early");
         assert!(events.len() <= 3, "the event trail stops at the in-flight chunk");
@@ -4913,8 +5476,15 @@ mod tests {
         // abort, not disc damage to collect, so no partial report escapes.
         let cancel = AtomicBool::new(false);
         let mut trip = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
-        let err = BdRom::open_resilient_with(&root, ScanMode::Full, None, &mut trip, &cancel)
-            .expect_err("the cancelled resilient scan errors");
+        let err = BdRom::open_resilient_with(
+            &root,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            &mut trip,
+            &cancel,
+        )
+        .expect_err("the cancelled resilient scan errors");
         assert_eq!(err.to_string(), "scan cancelled");
     }
 
@@ -4928,23 +5498,38 @@ mod tests {
         for mode in [ScanMode::Codecs, ScanMode::Full] {
             let mut fired = false;
             let mut observe = |_: ScanProgress<'_>| fired = true;
-            let err = BdRom::open_with(&root, mode, None, &mut observe, &cancel)
-                .expect_err("the pre-cancelled scan errors");
+            let err =
+                BdRom::open_with(&root, mode, ScanOptions::default(), None, &mut observe, &cancel)
+                    .expect_err("the pre-cancelled scan errors");
             assert_eq!(err.to_string(), "scan cancelled");
             assert!(!fired, "no progress escapes a pre-cancelled scan");
         }
         let mut resilient_fired = false;
         let mut observe = |_: ScanProgress<'_>| resilient_fired = true;
-        let err = BdRom::open_resilient_with(&root, ScanMode::Full, None, &mut observe, &cancel)
-            .expect_err("the pre-cancelled resilient scan errors");
+        let err = BdRom::open_resilient_with(
+            &root,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            &mut observe,
+            &cancel,
+        )
+        .expect_err("the pre-cancelled resilient scan errors");
         assert_eq!(err.to_string(), "scan cancelled");
         assert!(!resilient_fired, "no progress escapes the resilient abort either");
         // Metadata reads no packets, so the flag is never observed — the
         // bounded structural scan completes as if no flag existed.
         let mut metadata_fired = false;
         let mut observe = |_: ScanProgress<'_>| metadata_fired = true;
-        let bd = BdRom::open_with(&root, ScanMode::Metadata, None, &mut observe, &cancel)
-            .expect("the metadata scan never polls the flag");
+        let bd = BdRom::open_with(
+            &root,
+            ScanMode::Metadata,
+            ScanOptions::default(),
+            None,
+            &mut observe,
+            &cancel,
+        )
+        .expect("the metadata scan never polls the flag");
         assert!(!metadata_fired, "a metadata scan reads no packets");
         assert_eq!(bd.playlists.len(), 2);
     }
@@ -4960,7 +5545,7 @@ mod tests {
             extension: ".m2ts".to_owned(),
             bytes: vec![0_u8; 200],
             trip: trip.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let stream_dir = MockDir {
             name: "STREAM".to_owned(),
@@ -4981,6 +5566,7 @@ mod tests {
             None,
             &mut progress,
             &mut Sink { errors: Some(&mut errors) },
+            true,
             false,
         );
         let message = result.err().map(|err| err.to_string());
@@ -5073,7 +5659,7 @@ mod tests {
             extension: name.rsplit_once('.').map_or_else(String::new, |(_, e)| format!(".{e}")),
             bytes: vec![0],
             trip: trip.clone(),
-            fail_read: true,
+            fail_read_at: Some(0),
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -5153,7 +5739,7 @@ mod tests {
             extension: ".bin".to_owned(),
             bytes: vec![1],
             trip: Trip::new(usize::MAX),
-            fail_read: true,
+            fail_read_at: Some(0),
         };
         assert!(read_file(&unreadable).is_err()); // open_read ok, read_to_end fails
         // Exercise the failing reader's seek.
@@ -5223,7 +5809,7 @@ mod tests {
             extension: ".mpls".to_owned(),
             bytes: vec![7; 8],
             trip: Trip::new(usize::MAX),
-            fail_read: false,
+            fail_read_at: None,
         };
         // Exactly `cap` bytes is legal — only the byte *past* the cap is not.
         assert_eq!(read_file_capped(&file, 8).expect("at the cap"), vec![7; 8]);
@@ -5236,7 +5822,7 @@ mod tests {
             extension: ".mpls".to_owned(),
             bytes: vec![7; 9],
             trip: Trip::new(usize::MAX),
-            fail_read: false,
+            fail_read_at: None,
         };
         let err = read_file_capped(&file, 8).expect_err("one byte over the cap");
         assert!(matches!(
@@ -5291,7 +5877,7 @@ mod tests {
             extension: String::new(),
             bytes: vec![1],
             trip,
-            fail_read: false,
+            fail_read_at: None,
         };
         assert_eq!(mock_file.full_name(), "x");
         assert!(!mock_file.is_dir());
@@ -5396,7 +5982,7 @@ mod tests {
             extension: name.rsplit_once('.').map_or_else(String::new, |(_, e)| format!(".{e}")),
             bytes,
             trip: trip.clone(),
-            fail_read,
+            fail_read_at: fail_read.then_some(0),
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -5474,7 +6060,7 @@ mod tests {
             extension: ".mpls".to_owned(),
             bytes: vec![1],
             trip: ok.clone(),
-            fail_read: false,
+            fail_read_at: None,
         };
         let playlist = MockDir {
             name: "PLAYLIST".to_owned(),
@@ -5507,7 +6093,7 @@ mod tests {
                 extension: name.rsplit_once('.').map_or_else(String::new, |(_, e)| format!(".{e}")),
                 bytes: vec![1],
                 trip: bt.clone(),
-                fail_read: false,
+                fail_read_at: None,
             };
             let sub = |name: &str, file: &str| MockDir {
                 name: name.to_owned(),
@@ -5647,7 +6233,7 @@ mod tests {
             extension: name.rsplit_once('.').map_or_else(String::new, |(_, e)| format!(".{e}")),
             bytes,
             trip: trip.clone(),
-            fail_read,
+            fail_read_at: fail_read.then_some(0),
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),

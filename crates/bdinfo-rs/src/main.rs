@@ -79,7 +79,7 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::{
-    BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanProgress,
+    BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanOptions, ScanProgress,
 };
 use bdinfo_rs_core::bdrom::order::{
     HiddenRule, PlaylistFilter, hidden_by, named_selection, selection_order,
@@ -194,9 +194,9 @@ fn scan_disc(
     let location = Path::new(path);
     let mode = scan_mode(run_packet_scan);
     let report = if is_iso(location) {
-        scan::open_iso(location, mode, scan_files, progress, cancel)
+        scan::open_iso(location, mode, ScanOptions::default(), scan_files, progress, cancel)
     } else {
-        scan::open_folder(location, mode, scan_files, progress, cancel)
+        scan::open_folder(location, mode, ScanOptions::default(), scan_files, progress, cancel)
     }?;
     Ok((report.bdrom, report.errors))
 }

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanOptions, ScanProgress};
 use bdinfo_rs_core::bdrom::order::selection_order;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
@@ -133,8 +133,12 @@ fn open(
     cancel: &AtomicBool,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     let report = match input {
-        Input::Folder(path) => core_scan::open_folder(path, mode, scan_files, progress, cancel),
-        Input::Iso(path) => core_scan::open_iso(path, mode, scan_files, progress, cancel),
+        Input::Folder(path) => {
+            core_scan::open_folder(path, mode, ScanOptions::default(), scan_files, progress, cancel)
+        }
+        Input::Iso(path) => {
+            core_scan::open_iso(path, mode, ScanOptions::default(), scan_files, progress, cancel)
+        }
     }?;
     Ok((report.bdrom, report.errors))
 }
