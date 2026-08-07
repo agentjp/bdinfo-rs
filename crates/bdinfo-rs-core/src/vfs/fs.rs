@@ -274,14 +274,6 @@ impl BdDir for FsDir {
         Some(Box::new(self.related(parent.to_path_buf())))
     }
 
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern("*")
-    }
-
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
-    }
-
     fn get_files_pattern_option(
         &self,
         pattern: &str,
@@ -342,11 +334,11 @@ fn extension_of(path: &Path) -> String {
 /// `*` matches any run (including empty) and `?` matches exactly one byte. One
 /// case-folded pass finds `*.mpls` and `*.MPLS` spellings alike.
 ///
-/// Shared with the UDF backend ([`super::udf`]) so `.iso` and folder input
-/// match patterns identically, and public so an out-of-crate
-/// [`BdDir`](crate::vfs::BdDir) backend — a browser file list, an in-memory
-/// tree — resolves [`get_files_pattern`](crate::vfs::BdDir::get_files_pattern)
-/// by the same rule rather than a lookalike of its own.
+/// Shared with the UDF ([`super::udf`]) and in-memory ([`super::mem`])
+/// backends so every input medium matches patterns identically, and public so
+/// an out-of-crate [`BdDir`](crate::vfs::BdDir) backend — a browser file list
+/// — resolves [`get_files_pattern`](crate::vfs::BdDir::get_files_pattern) by
+/// the same rule rather than a lookalike of its own.
 #[must_use]
 pub fn glob_ci(pattern: &[u8], name: &[u8]) -> bool {
     match pattern.split_first() {

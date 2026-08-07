@@ -5,6 +5,12 @@
 //! `std::fs` (folder input — see [`fs`]) or the UDF reader (`.iso` input — see
 //! [`udf`]). A ~12-method file/directory pair is all the parsers need.
 //!
+//! A third backend, [`mem`], serves no disc medium at all: it holds a
+//! synthetic disc as byte buffers in RAM, for harnesses — the browser export
+//! and the fuzz targets — whose input arrives as bytes rather than as a
+//! mounted folder or image. It also defines the section framing those
+//! harnesses share; see its module docs.
+//!
 //! Case-insensitive BDMV lookup is folded in here, done once and correctly and
 //! routed through [`crate::discovery`] — see [`find_directory`] and
 //! [`find_files`].
@@ -18,6 +24,7 @@ use std::io::{self, BufRead, Read, Seek};
 use crate::discovery::{BdFileKind, BdmvDir};
 
 pub mod fs;
+pub mod mem;
 pub mod udf;
 pub mod volume;
 
@@ -89,18 +96,31 @@ pub trait BdDir {
 
     /// Every file directly in this directory.
     ///
+    /// Provided as the match-everything pattern `*` handed to
+    /// [`get_files_pattern`](BdDir::get_files_pattern), so a backend writes
+    /// [`get_files_pattern_option`](BdDir::get_files_pattern_option) alone and
+    /// gets both convenience forms. Overriding stays open — for a listing
+    /// cheaper than a glob pass, or a fake that must fail at this call and not
+    /// at the glob one.
+    ///
     /// # Errors
     /// Propagates the underlying IO error if the directory cannot be read.
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>>;
+    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
+        self.get_files_pattern("*")
+    }
 
     /// Files in this directory matching `pattern`.
     ///
     /// `pattern` is an ASCII case-insensitive glob (`*` = any run, `?` = any one
-    /// character); see [`get_files_pattern_option`](BdDir::get_files_pattern_option).
+    /// character); this is provided as
+    /// [`get_files_pattern_option`](BdDir::get_files_pattern_option) with
+    /// [`SearchOption::TopDirectoryOnly`].
     ///
     /// # Errors
     /// Propagates the underlying IO error if the directory cannot be read.
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>>;
+    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
+        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
+    }
 
     /// Files matching `pattern`, optionally recursing into subdirectories.
     ///
@@ -160,17 +180,22 @@ pub fn find_files(dir: &dyn BdDir, kind: BdFileKind) -> io::Result<Vec<Box<dyn B
 }
 
 /// The extension of `name` *including* the leading dot (e.g. `.SSIF`), or the
-/// empty string when `name` holds no `.`. The text after the last `.` is
-/// returned verbatim (a lone `.` for a trailing-dot name like `00000.`); no
-/// further normalization is applied.
+/// empty string when `name` holds no `.`.
 ///
-/// Both backends derive [`BdFile::extension`] through this one function, and
-/// that agreement is load-bearing: the disc-size total skips an interleaved
-/// stream by matching this string against `.ssif`
-/// ([`crate::bdrom::disc`]), so a folder and the same disc as an `.iso` would
-/// report different sizes if two lookalike derivations disagreed on a name.
+/// The text after the last `.` is returned verbatim — case included, and a lone
+/// `.` for a trailing-dot name like `00000.`; no further normalization is
+/// applied. Callers that need a case-insensitive answer compare case-insensitively.
+///
+/// Every backend derives [`BdFile::extension`] through this one function — the
+/// three in this crate ([`fs`], [`udf`], [`mem`]) and the browser file backend
+/// in `bdinfo-rs-wasm`, which is why this is public — and that agreement is
+/// load-bearing: the disc-size total keeps an interleaved stream out of the
+/// disc size by matching this string against `.ssif` with
+/// [`eq_ignore_ascii_case`](str::eq_ignore_ascii_case) ([`crate::bdrom::disc`]),
+/// so a folder and the same disc as an `.iso` would report different sizes if
+/// two lookalike derivations disagreed on a name.
 #[must_use]
-pub(crate) fn extension_of_name(name: &str) -> String {
+pub fn extension_of_name(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((_, ext)) => format!(".{ext}"),
         None => String::new(),

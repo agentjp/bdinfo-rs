@@ -20,6 +20,7 @@
 //! which drive this entry point over one fixture image and one image that is not
 //! a UDF volume at all.
 
+use bdinfo_rs_core::vfs::udf::source::MemIso;
 use bdinfo_rs_wasm::run_iso_report;
 use libfuzzer_sys::fuzz_target;
 
@@ -28,5 +29,5 @@ mod sparse_iso;
 
 fuzz_target!(|data: &[u8]| {
     let image = sparse_iso::build_image(data);
-    let _ = run_iso_report(sparse_iso::MemIso::boxed(image));
+    let _ = run_iso_report(MemIso::boxed(image));
 });

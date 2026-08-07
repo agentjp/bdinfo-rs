@@ -122,7 +122,8 @@ impl Limits {
 /// VFS file handle reads through its own cursor (no shared seek state).
 ///
 /// The CLI backs this with a file path ([`PathIso`], reopening the `.iso`); tests
-/// back it with an in-memory buffer. Each [`BdFile::open_read`] calls [`open`] once.
+/// and fuzz harnesses back it with an in-memory buffer (`MemIso`, published by the
+/// `test-fixtures` feature). Each [`BdFile::open_read`] calls [`open`] once.
 /// It is object-safe (a [`Box<dyn ReadSeek>`](ReadSeek) return, no associated type)
 /// so the whole backend is **non-generic** — one monomorphization, smaller static
 /// binary (the prime directive), and a single coverage surface over all readers.
@@ -158,6 +159,35 @@ impl IsoReader for PathIso {
         // The dominant consumer is the demux streaming `.m2ts` runs front to
         // back, so the sequential-access hint applies to the image too.
         Ok(Box::new(crate::vfs::fs::open_sequential(&self.path)?))
+    }
+}
+
+/// A buffer-backed [`IsoReader`] — hands each handle its own cursor over one
+/// shared image.
+///
+/// The backend for `.iso` input built byte by byte instead of read from disk:
+/// this module's own descriptor fixtures, and the harnesses that turn arbitrary
+/// bytes into an image. Other crates reach it through the off-by-default
+/// `test-fixtures` feature; inside this crate `cfg(test)` alone brings it in.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[derive(Debug, Clone)]
+pub struct MemIso {
+    data: Arc<[u8]>,
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl MemIso {
+    /// Wraps `image` as the reader factory the `.iso` entry points take.
+    #[must_use]
+    pub fn boxed(image: Vec<u8>) -> Box<dyn IsoReader> {
+        Box::new(Self { data: Arc::from(image) })
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+impl IsoReader for MemIso {
+    fn open(&self) -> io::Result<Box<dyn ReadSeek>> {
+        Ok(Box::new(io::Cursor::new(self.data.to_vec())))
     }
 }
 
@@ -480,14 +510,6 @@ impl BdDir for UdfDir {
     fn parent(&self) -> Option<Box<dyn BdDir>> {
         let pidx = self.parent?;
         dir_at(&self.inner, pidx).map(|d| -> Box<dyn BdDir> { Box::new(d) })
-    }
-
-    fn get_files(&self) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern("*")
-    }
-
-    fn get_files_pattern(&self, pattern: &str) -> io::Result<Vec<Box<dyn BdFile>>> {
-        self.get_files_pattern_option(pattern, SearchOption::TopDirectoryOnly)
     }
 
     fn get_files_pattern_option(
@@ -1657,11 +1679,11 @@ mod tests {
     use proptest::prelude::{any, prop_assert_eq, proptest};
 
     use super::{
-        BdDir, BdFile, Content, EmbeddedReader, ExtentKind, FileEntry, IsoReader, Limits, Node,
-        NodeKind, PartitionLoc, PathIso, Run, UdfDir, UdfFileReader, UdfInner, UdfSource, Volume,
-        build_tree, collect_extents, directory_bytes, expand_directory, extent_runs, file_body,
-        metadata_runs, metadata_sector, offset_by, parse_volume, read_runs, resolve_partitions,
-        resolve_sector,
+        BdDir, BdFile, Content, EmbeddedReader, ExtentKind, FileEntry, IsoReader, Limits, MemIso,
+        Node, NodeKind, PartitionLoc, PathIso, Run, UdfDir, UdfFileReader, UdfInner, UdfSource,
+        Volume, build_tree, collect_extents, directory_bytes, expand_directory, extent_runs,
+        file_body, metadata_runs, metadata_sector, offset_by, parse_volume, read_runs,
+        resolve_partitions, resolve_sector,
     };
     use crate::error::ScanStage;
     use crate::vfs::SearchOption;
@@ -1936,24 +1958,6 @@ mod tests {
 
         fn into_bytes(self) -> Vec<u8> {
             self.bytes
-        }
-    }
-
-    /// An [`IsoReader`] over an in-memory image (each handle gets its own cursor).
-    #[derive(Debug, Clone)]
-    struct MemIso {
-        data: Arc<[u8]>,
-    }
-
-    impl MemIso {
-        fn boxed(bytes: Vec<u8>) -> Box<dyn IsoReader> {
-            Box::new(Self { data: Arc::from(bytes) })
-        }
-    }
-
-    impl IsoReader for MemIso {
-        fn open(&self) -> std::io::Result<Box<dyn super::ReadSeek>> {
-            Ok(Box::new(std::io::Cursor::new(self.data.to_vec())))
         }
     }
 
