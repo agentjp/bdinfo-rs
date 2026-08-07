@@ -40,7 +40,7 @@ function Get-GuiWalkTargets {
         # The parentheses are load-bearing: `,` binds tighter than `-`, so
         # `@(817, $LogicalHeight - 29)` would subtract 29 from the whole array.
         SettingsBtn  = @(817, ($LogicalHeight - 29))
-        DialogCancel = @(538, (($LogicalHeight / 2) + 165))
+        DialogCancel = @(538, (($LogicalHeight / 2) + 179))
         ScanBtn      = @(566, ($LogicalHeight - 28))
     }
 }
