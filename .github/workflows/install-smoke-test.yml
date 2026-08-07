@@ -55,7 +55,7 @@ jobs:
       # nags (files an issue) when Homebrew master moves past this SHA, and the bump
       # is then a deliberate edit here. Dependabot cannot do it (it bumps toward
       # releases, and this repo has none).
-      - uses: Homebrew/actions/setup-homebrew@f5448d3709dc32011524a9e0819671e08d21661c # zizmor: ignore[ref-version-mismatch]
+      - uses: Homebrew/actions/setup-homebrew@d3565f64e59130f1fd713440276f7d3e11079b88 # zizmor: ignore[ref-version-mismatch]
 
       # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
       # check then warns about them on every brew command. We install bdinfo-rs by its
@@ -118,7 +118,7 @@ jobs:
     steps:
       # A SHA-frozen Homebrew/actions pin — the full rationale sits on the
       # homebrew job's identical line above.
-      - uses: Homebrew/actions/setup-homebrew@f5448d3709dc32011524a9e0819671e08d21661c # zizmor: ignore[ref-version-mismatch]
+      - uses: Homebrew/actions/setup-homebrew@d3565f64e59130f1fd713440276f7d3e11079b88 # zizmor: ignore[ref-version-mismatch]
 
       # The same tap-trust story as the homebrew job above, for its reasons.
       - name: Trust the taps (ours + the runner's pre-tapped ones)

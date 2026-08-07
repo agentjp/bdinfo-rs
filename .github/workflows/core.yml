@@ -307,10 +307,33 @@ jobs:
           tool: cargo-llvm-cov,cargo-nextest
           fallback: none
 
+      # --ignore-filename-regex drops crates/bdinfo-rs/build.rs — the completions
+      # and man-page generator — from the measured surface, and is the single
+      # home for that exclusion: scripts/compliance.ps1 passes the same regex so
+      # the local gate and this job measure one identical denominator.
+      #
+      # It is there to exclude in the first place because cargo-llvm-cov (0.8.7)
+      # hands llvm-cov every build-script object it finds under the target
+      # directory. A dependency's build script contributes no source rows anyway
+      # — cargo-llvm-cov's default ignore regex already covers ~/.cargo/registry
+      # and ~/.cargo/git — but a workspace member's build script is not on that
+      # list, so this one's rows survive into the report.
+      #
+      # Whether the toolchain emits any coverage for it is nightly-dependent:
+      # measured 2026-08-07, nightly-2026-08-05 records counters for it and
+      # nightly-2026-07-06 records none, so leaving it in would let the pinned
+      # NIGHTLY silently decide the denominator this floor is computed over.
+      # Excluding it pins the surface to the crates' own source either way.
+      #
+      # Nothing is lost by dropping it: a build script is not shipped surface,
+      # part of it is unreachable by construction (Cargo always sets OUT_DIR, so
+      # main's missing-OUT_DIR arm cannot run), and its real output is proven by
+      # the packaging jobs, which install the completions and the man page and
+      # assert they arrive.
       - name: Coverage (100% lines/regions/functions)
         env:
           NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
-        run: cargo "+$NIGHTLY" llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+        run: cargo "+$NIGHTLY" llvm-cov nextest --workspace --locked --no-tests=fail --summary-only --ignore-filename-regex '[\\/]crates[\\/]bdinfo-rs[\\/]build\.rs$' --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 
   # The root workspace's leg of the MSRV gate — the shared body, the rationale
   # and the build-only posture live in .github/actions/msrv-check.
