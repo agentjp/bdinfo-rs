@@ -64,6 +64,35 @@ const LONG_ABOUT: &str = "bdinfo-rs is a memory-safe, cross-platform Blu-ray ana
                           the playlist selection table, measures the chosen playlists, and writes \
                           BDINFO.<volume label>.txt into REPORT_DEST.";
 
+/// Every exit code the binary returns, for the man page's EXIT STATUS section.
+/// `src/main.rs` documents the same list in its crate docs — the copy a reader
+/// of the shipped binary never sees, which is why it is restated here.
+const EXIT_STATUS: [(&str, &str); 6] = [
+    ("0", "Success. A bare invocation prints the help card and lands here too."),
+    ("1", "The path holds no readable Blu-ray structure, or no playlist matched --mpls."),
+    (
+        "2",
+        "No such path, an unusable REPORT_DEST, an unwritable report file, or an invalid \
+         argument.",
+    ),
+    (
+        "3",
+        "The scan completed with errors. Unreadable files were collected into the report's \
+         WARNING block and the report was still written.",
+    ),
+    (
+        "4",
+        "The disc is AACS-encrypted, so the measured scan was refused before it started — no \
+         picker, no scan, no report file — since only ciphertext would be measured. --list still \
+         works, its output being entirely database-derived, and exits by its own rules.",
+    ),
+    (
+        "130",
+        "The scan was cancelled with Ctrl+C: the Unix 128 + SIGINT spelling, used on every \
+         platform. No report is written.",
+    ),
+];
+
 /// The worked invocations the man page closes with.
 const EXAMPLES: &str = "Examples:\n  \
     # Scan a ripped disc folder; pick playlists interactively, writing the\n  \
@@ -181,6 +210,33 @@ fn man_command() -> clap::Command {
     cmd
 }
 
+/// [`EXIT_STATUS`] as a roff EXIT STATUS section: one tagged paragraph
+/// (`.TP`) per code, the shape `clap_mangen` gives each option.
+///
+/// Written as roff by hand because `clap_mangen` renders a fixed set of
+/// sections from the `clap::Command` and has no seam for another one; the
+/// page is therefore assembled section by section in [`main`] with this one
+/// spliced in after OPTIONS, where a man page conventionally carries it.
+fn exit_status_section() -> Vec<u8> {
+    let mut roff = String::from(".SH EXIT STATUS\n");
+    for (code, meaning) in EXIT_STATUS {
+        roff.push_str(".TP\n\\fB");
+        roff.push_str(code);
+        roff.push_str("\\fR\n");
+        roff.push_str(&roff_escape(meaning));
+        roff.push('\n');
+    }
+    roff.into_bytes()
+}
+
+/// `text` as roff running text: the two characters roff reads as markup there
+/// are the backslash (an escape sequence) and the hyphen, which renders as a
+/// typographic hyphen rather than the minus a flag like `--mpls` needs. No
+/// line starts with `.` or `'`, the other two roff-significant positions.
+fn roff_escape(text: &str) -> String {
+    text.replace('\\', "\\e").replace('-', "\\-")
+}
+
 fn main() -> Result<(), Error> {
     // Only regenerate when the CLI surface or this script changes.
     println!("cargo:rerun-if-changed=src/cli.rs");
@@ -199,9 +255,23 @@ fn main() -> Result<(), Error> {
     }
 
     // Man page (section 1, user commands), rendered from the same command with
-    // the long-form prose reattached.
+    // the long-form prose reattached. Assembled section by section rather than
+    // through `Man::render`, which renders the same sequence but leaves no room
+    // for the hand-written EXIT STATUS section. The command declares a version
+    // and no author, so VERSION closes the page and there is no AUTHORS section.
+    // Each call writes its own roff document, so the two-line `.ds Aq` preamble
+    // clap_mangen prefixes to one now repeats per section — a redefinition of
+    // the same string, which renders nothing.
+    let man = clap_mangen::Man::new(man_command());
     let mut page = Vec::new();
-    clap_mangen::Man::new(man_command()).render(&mut page)?;
+    man.render_title(&mut page)?;
+    man.render_name_section(&mut page)?;
+    man.render_synopsis_section(&mut page)?;
+    man.render_description_section(&mut page)?;
+    man.render_options_section(&mut page)?;
+    page.extend_from_slice(&exit_status_section());
+    man.render_extra_section(&mut page)?;
+    man.render_version_section(&mut page)?;
     fs::write(assets.join("bdinfo-rs.1"), page)?;
 
     Ok(())

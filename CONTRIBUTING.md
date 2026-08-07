@@ -80,6 +80,31 @@ Each of these protects a guarantee the project makes. A change that breaks one w
 A module is considered done at 100% coverage with zero surviving mutants, carrying both unit tests
 and property tests.
 
+## The four-surface option contract
+
+Every user-facing option exists on four surfaces: the `bdinfo-rs-core` library and the three
+front-ends over it. This table is the contract — presence, default, and any deliberate cut.
+
+| Option | `bdinfo-rs-core` | Command line | Desktop app | Browser package |
+|---|---|---|---|---|
+| Short-playlist threshold | `PlaylistFilter::short_playlist_seconds`, default `20.0`; the domain's ceiling is `MAX_SHORT_PLAYLIST_SECONDS` (86400) | `--short-playlist-seconds`, default 20; outside 0 to 86400 fails at argument parsing (exit 2) | `short-playlist-seconds`, default 20; out-of-range values are clamped, not rejected | `shortPlaylistSeconds` on `inspect` and `scan`, default 20; negative, non-finite or past the ceiling throws |
+| Hide short playlists | `PlaylistFilter::filter_short_playlists`, default `true` | on by default, `--show-short-playlists` turns it off | `filter-short-playlists`, default `true` | **Cut** — a playlist is never withheld. Each carries `hiddenBy`; the consumer filters client-side |
+| Hide looping playlists | `PlaylistFilter::filter_looping_playlists`, default `true` | on by default, `--show-looping-playlists` turns it off | `filter-looping-playlists`, default `true` | **Cut** — as above |
+| Keep partially scanned stream files | `ScanOptions::keep_partial`, default `true` | kept by default, `--drop-partial` discards | `keep-partial-scans`, default `true` | `keepPartial` on `scan`, default `true` |
+| `STREAM DIAGNOSTICS` section | `RenderOptions::stream_diagnostics`, default `true` | rendered by default, `--no-stream-diagnostics` omits it | `report-stream-diagnostics`, default `true` | `streamDiagnostics` on `scan` and `renderReport`, default `true` |
+| `QUICK SUMMARY` section | `RenderOptions::quick_summary`, default `true` | rendered by default, `--no-quick-summary` omits it | `report-quick-summary`, default `true` | `quickSummary` on the same two calls, default `true` |
+| Scan depth | `ScanMode::Metadata` / `Codecs` / `Full` | `Metadata` for `--list`, `Full` for a measured run; `Codecs` unused | `Metadata` on open, then `Codecs` unless the disc is encrypted; `Full` for the scan | `inspect` is `Metadata`, or `Codecs` with `codecs: true`; `scan` is `Full` |
+| Cancellation | the `AtomicBool` the packet scan polls per read chunk | <kbd>Ctrl</kbd>+<kbd>C</kbd> on the styled progress path, exit 130 | the Cancel button during a scan | **Cut** — no cooperative cancel; `signal` terminates the Worker, the idiomatic browser cancel |
+| AACS-encrypted disc | `BdRom::is_aacs_encrypted`; the library scans one when asked | refused before the picker, exit 4; `--list` still works | scan action disabled, the disc marked encrypted | `Disc.isAacsEncrypted` and no policy — the consumer decides |
+| Playlist selection | an explicit index order into `bdrom.playlists` | `--mpls` (unfiltered, in the given order), `--whole`, or the interactive picker | table checkboxes; scanning with none checked scans the whole disc | `selection` on `scan` (names, unfiltered); omitted or empty measures the standard set |
+
+The desktop app's settings are keys in `gui.conf`; the browser package's are fields of the options
+object every call takes.
+
+**Any change to an option in this table updates the table in the same pull request** — a new
+option, a changed default, a widened domain, a cut. Its absence is how the surfaces drifted apart
+before it existed.
+
 ## Commit messages
 
 bdinfo-rs uses [Conventional Commits](https://www.conventionalcommits.org/). master is
@@ -196,12 +221,36 @@ releases; only the tag does.
    cargo build
    ```
 
-3. **Generate the changelog section** — `convco changelog v<previous>..HEAD` — and insert it above
+3. **Set it in every other version-bearing file.** The two excluded sibling workspaces and the npm
+   package are outside `cargo set-version`'s reach, and four documents carry the number as prose.
+   The complete list:
+
+   | File | What carries the version |
+   |---|---|
+   | `Cargo.toml` | the workspace version and the `[workspace.dependencies] bdinfo-rs-core` pin |
+   | `crates/bdinfo-rs-wasm/Cargo.toml` | the crate version |
+   | `crates/bdinfo-rs-wasm/web/package.json` | `version`, mirrored into `package-lock.json` |
+   | `crates/bdinfo-rs-gui/Cargo.toml` | the crate version and its own `bdinfo-rs-core` pin |
+   | `SECURITY.md` | the supported-versions table |
+   | `INSTALL.md` | the Docker pin example and the rolling-tag sentence |
+   | `.github/ISSUE_TEMPLATE/bug_report.yml`, `gui_bug_report.yml`, `output_difference.yml` | the version-field placeholders |
+
+   The npm tag guard cross-checks the workspace version, the wasm crate version and
+   `package.json` against the pushed tag, so a missed one fails the release rather than shipping.
+
+4. **Generate the changelog section** — `convco changelog v<previous>..HEAD` — and insert it above
    the preserved history. convco emits the bracketed Keep-a-Changelog shape that cargo-dist parses
    for the release notes. convco derives link hosts from the git remote, so check the generated
    links point at `github.com`.
-4. Run the gate, open a pull request whose title is the release commit, squash-merge, then push the
+5. Run the gate, open a pull request whose title is the release commit, squash-merge, then push the
    `vX.Y.Z` tag on master. The tag must equal the workspace version and sit on master.
+
+Three files are **release-prep, done last**, because they carry the release date rather than only
+the number: the `CHANGELOG.md` section (step 4 above; cargo-dist derives the GitHub Release notes
+from it, so it must exist before the tag), the AppStream metainfo release entry
+(`crates/bdinfo-rs-gui/packaging/io.github.agentjp.bdinfo-rs.metainfo.xml` — copied verbatim into
+the AppImage, `.deb` and `.rpm`, and `appstream-util validate-relax` does not catch a stale entry),
+and `CITATION.cff` (version and date).
 
 The tag fans out to every channel automatically. Releases are **immutable** — never re-push a tag;
 recover a partial release per channel.
@@ -213,11 +262,11 @@ The desktop app releases through its own hand-rolled lane (`gui-release.yml`), n
 macOS `.dmg`, Linux AppImage + `.deb` + `.rpm`), and publishes a GitHub Release marked not-latest.
 cargo-dist's `v` tag-namespace keeps the two lanes from ever firing each other.
 
-**Versioning: coupled start, independent cadence.** The first GUI tag is `gui-v2.0.0`, alongside
-the workspace's `v2.0.0`; from then on the lanes move independently — the gui crate's version bumps
-only when shipped GUI changes warrant it, and workspace releases never drag a GUI bump along. The
-invariant the lane enforces: `gui-vX.Y.Z` must equal `crates/bdinfo-rs-gui/Cargo.toml`'s version
-and sit on master.
+**Versioning: two lanes, one version.** The library, the command line, the browser package and the
+desktop app move in lock-step: every surface carries the same `X.Y.Z`, and a release tags both
+lanes at it (`vX.Y.Z` and `gui-vX.Y.Z`). The lanes are separate because they build and publish
+different artifacts, not because the versions may drift apart. The invariant the GUI lane enforces:
+`gui-vX.Y.Z` must equal `crates/bdinfo-rs-gui/Cargo.toml`'s version and sit on master.
 
 Before tagging, run the lane's dry run: Actions → gui-release → Run workflow (on master). It builds
 and packages all six targets and uploads the results as workflow artifacts for hand-testing; only

@@ -1,8 +1,9 @@
 #![no_main]
 //! Fuzz target: `bdinfo_rs_wasm::run_iso_report` — the backend-agnostic `.iso`
-//! entry point behind the browser package's `scanIso` export. It opens the image
-//! through the core UDF 2.50 reader **resiliently**, scans the disc it finds and
-//! renders the classic report.
+//! parity seam behind the browser package's `scan_iso` export, which wraps it
+//! with progress, selection and error reporting. It opens the image through the
+//! core UDF 2.50 reader **resiliently**, scans the disc it finds and renders the
+//! classic report.
 //!
 //! Input framing: the sparse-image description `shared/sparse_iso.rs` documents,
 //! shared with the `source` target.

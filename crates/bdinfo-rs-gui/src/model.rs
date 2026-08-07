@@ -713,6 +713,31 @@ mod tests {
         assert_eq!(format_file_size(u64::MAX), "16.00 EB");
     }
 
+    /// The shared vector table this app and the browser demo both assert; its
+    /// own header documents the columns and the three deliberate divergences.
+    /// The demo asserts the same file from its Node test suite, so a formatter
+    /// change on either side that is not mirrored on the other fails there.
+    const SIZE_VECTORS: &str = include_str!("../tests/size-vectors.tsv");
+
+    #[test]
+    fn byte_cells_match_the_shared_vector_table() {
+        let mut rows = 0_usize;
+        for line in SIZE_VECTORS.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let mut next = || fields.next().unwrap_or_default();
+            let (bytes, exact, human) = (next(), next(), next());
+            let bytes: u64 = bytes.parse().unwrap_or_default();
+            assert_eq!(byte_cell(bytes, false), exact, "exact cell for {bytes} bytes");
+            assert_eq!(byte_cell(bytes, true), human, "human-readable cell for {bytes} bytes");
+            rows = rows.saturating_add(1);
+        }
+        // A badly parsed or truncated table would assert nothing and still pass.
+        assert_eq!(rows, 14, "every vector in the shared table is asserted");
+    }
+
     #[test]
     fn any_hidden_reflects_the_rows() {
         let rows = playlist_rows(&disc(), &PlaylistFilter::default());

@@ -24,6 +24,7 @@ import {
   type Stream,
   scan,
 } from "./analyze.js";
+import { sizeCell as formatSize } from "./format.js";
 
 /**
  * One selection-table row — the CLI columns this page draws, distilled from a
@@ -279,26 +280,9 @@ function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * A size cell under the size-format setting: `83.62 GB` / `335.37 MB`
- * (1024-based, like BDInfo) when human-readable, the thousands-grouped exact
- * byte count (`11,145,216`) when not, and `—` for a size nothing knows yet.
- */
+/** {@link formatSize} under the page's current size-format setting. */
 function sizeCell(bytes: number | null): string {
-  if (bytes === null || bytes <= 0) {
-    return "—";
-  }
-  if (!settings.humanReadableSizes) {
-    return bytes.toLocaleString("en-US");
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+  return formatSize(bytes, settings.humanReadableSizes);
 }
 
 function fileListToBdmv(list: FileList): BdmvFile[] {

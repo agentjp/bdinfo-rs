@@ -30,6 +30,7 @@ actually see on a normal disc.
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
 | [HEVC `profile_idc` recovery](#correctness-fixes-with-no-effect-on-a-normal-disc) | Edge case only | Malformed headers with `general_profile_idc == 0` |
 | [VC-1 interlaced-field picture type](#correctness-fixes-with-no-effect-on-a-normal-disc) | **No** — internal only | Never — the picture tag is counted, never printed |
+| [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 
 ---
 
@@ -167,6 +168,32 @@ value is never rendered.
 
 ---
 
+## Deliberately different behavior
+
+### AACS-encrypted discs are refused
+
+AACS leaves only the first 16 bytes of every 6144-byte Aligned Unit in the clear (AACS Blu-ray
+Prerecorded Book §3.10), so a demux of the rest reads ciphertext and every value it measures is
+meaningless. BDInfo scans such a disc anyway and prints the resulting statistics — stream layouts,
+bitrates and codec tokens describing nothing. bdinfo-rs detects the encryption during the metadata
+scan and refuses to measure:
+
+- **Command line** — one notice on stderr, then exit code 4: no picker, no scan, no report file.
+  `--list` still works and exits by its own rules, its output being read from the disc's own
+  database rather than from the streams.
+- **Desktop app** — the disc opens, lists and browses like any other, the info box marks it
+  encrypted, and the scan action stays disabled.
+- **Browser package** — no policy: the disc model carries `isAacsEncrypted` and the application
+  decides. The package is a library and mirrors the library layering below.
+
+Refusing is each front-end's policy, not the analyzer's: `bdinfo-rs-core` scans an encrypted disc
+when asked, which is what keeps the decision with the caller.
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/disc.rs` (the encryption probe),
+`crates/bdinfo-rs/src/main.rs` (exit code 4).</sub>
+
+---
+
 ## Desktop app vs. the BDInfo GUI
 
 The report is byte-identical; the window around it is not a pixel-for-pixel port. The three-pane
@@ -191,6 +218,9 @@ Deliberately different:
   them, scans the rest, and shows one warning banner — the same `WARNING` block the report carries.
 - **Saving is both manual and automatic.** A *Save report…* dialog exists alongside the
   save-on-completion setting.
+- **An encrypted disc is never scanned.** The original measures the ciphertext; the app lists the
+  disc and leaves the scan action disabled — see
+  [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused).
 
 ## See also
 

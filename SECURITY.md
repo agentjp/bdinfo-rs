@@ -20,9 +20,9 @@ Security fixes land on the latest release of the current major line.
 
 | Version | Supported |
 |---|---|
-| 2.0.x | ✅ |
-| 1.x | ❌ |
-| < 1.0 | ❌ |
+| 3.0.x | ✅ |
+| 2.x | ❌ |
+| < 2.0 | ❌ |
 
 ## Reporting a vulnerability
 

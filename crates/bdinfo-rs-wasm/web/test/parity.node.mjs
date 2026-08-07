@@ -16,7 +16,11 @@
 // to `render_report`, must render those bytes again — so the model reaches
 // JavaScript and comes back carrying every value the report prints.
 //
-// Prereq: `npm run build` (emits pkg/). Run with `npm run test:node`.
+// It also asserts the demo's size-cell formatter (src/format.ts) against the
+// shared vector table the desktop app asserts in Rust — the one place where a
+// hand-written formatter exists twice, once per language.
+//
+// Prereq: `npm run build` (emits pkg/ and dist/). Run with `npm run test:node`.
 
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -67,6 +71,10 @@ const wasmPath = resolve(here, "../pkg/bdinfo_rs_wasm_bg.wasm");
 // golden is `Disc Label:` — an `.iso` reads the real UDF volume label `Blu-Ray`.
 const isoPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
 const isoGoldenPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/golden/iso.txt");
+// The byte-size vectors the desktop app asserts too — the two size formatters
+// are hand-written once per language and cannot share code, so this table is
+// what keeps them from drifting apart. Its own header documents the columns.
+const sizeVectorsPath = resolve(here, "../../../bdinfo-rs-gui/tests/size-vectors.tsv");
 
 // The fixture's six files at the synthetic disc paths the golden was built from:
 // root `WASMDISC` → disc label `WASMDISC`. `bdmt_eng.xml` is empty, mirroring the
@@ -241,6 +249,28 @@ async function main() {
     );
   }
 
+  // The demo's size cells against the shared vector table, columns 4 and 5 (the
+  // desktop app asserts columns 2 and 3 of the same rows). A row count is
+  // asserted too: a badly parsed table would check nothing and still pass.
+  const { sizeCell } = await import("../dist/format.js");
+  const vectors = (await readFile(sizeVectorsPath, "utf8"))
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => line.split("\t"));
+  const sizeMismatches = vectors.flatMap(([bytes, , , exact, human]) => {
+    const value = Number(bytes);
+    const got = [sizeCell(value, false), sizeCell(value, true)];
+    return got[0] === exact && got[1] === human
+      ? []
+      : [`${bytes}: got ${JSON.stringify(got)}, want ${JSON.stringify([exact, human])}`];
+  });
+  const sizeOk = vectors.length === 14 && sizeMismatches.length === 0;
+  if (!sizeOk) {
+    console.error(
+      `FAIL — size cells diverged from the shared vector table (${vectors.length} vectors): ${sizeMismatches.join("; ")}`,
+    );
+  }
+
   // The report save-file name, sanitized by the core rule.
   const fileNameOk =
     report_file_name("WASMDISC") === "BDINFO.WASMDISC.txt" &&
@@ -354,6 +384,7 @@ async function main() {
     thresholdOk &&
     rejectionOk &&
     codecsOk &&
+    sizeOk &&
     fileNameOk &&
     fullOk &&
     keepPartialOk &&
@@ -363,7 +394,7 @@ async function main() {
     isoFullOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + file name + selection + round trip + retention + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + selection + round trip + retention + .iso OK.`,
     );
     process.exit(0);
   }

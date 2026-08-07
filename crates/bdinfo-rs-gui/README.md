@@ -87,6 +87,7 @@ Two notes that are behaviour, not bugs:
 | | bdinfo-rs-gui | Original |
 |---|---|---|
 | Damaged discs | Scans through; unreadable files go to the report's `WARNING` block and a single banner | Stops with a message box per failed file |
+| AACS-encrypted discs | Lists and browses the disc, marks it encrypted, and disables the scan | Scans the ciphertext and reports the statistics it yields |
 | Saving | *Save report…* dialog with a destination picker, plus optional autosave (off by default) | Autosave beside the disc |
 | Bitrate charts | Not implemented | Present |
 | Custom playlist builder | Not implemented | Present |

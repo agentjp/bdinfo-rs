@@ -1,0 +1,37 @@
+# Shared byte-size formatter vectors — asserted by BOTH implementations.
+#
+# A table's size cell is formatted twice in this project, once per language and
+# with no way to share the code: the desktop app's `model::byte_cell` (Rust) and
+# the browser demo's `sizeCell` (TypeScript, in the wasm crate's web/ package).
+# Each side asserts every row below, so a change to either formatter that is not
+# mirrored in the other fails a test instead of drifting unnoticed.
+#
+# Tab-separated columns:
+#   bytes       the input byte count
+#   gui-exact   desktop app, human-readable sizes OFF (its default)
+#   gui-human   desktop app, human-readable sizes ON
+#   demo-exact  browser demo, human-readable sizes OFF
+#   demo-human  browser demo, human-readable sizes ON (its default)
+#
+# The two agree from 1 KB through the demo's largest unit. They differ by design
+# in three places, each pinned by a row here: below 1024 bytes (the app always
+# prints two decimals and groups thousands, the demo prints whole bytes), at zero
+# (the demo prints an em dash, having nothing to show), and past TB (the demo
+# defines no larger unit and keeps counting in TB).
+#
+# Lines starting with # and blank lines are comments; every other line is a
+# vector.
+0	0	0	—	—
+1	1	1.00 B	1	1 B
+512	512	512.00 B	512	512 B
+1023	1,023	1,023.00 B	1,023	1023 B
+1024	1,024	1.00 KB	1,024	1.00 KB
+1152	1,152	1.13 KB	1,152	1.13 KB
+1536	1,536	1.50 KB	1,536	1.50 KB
+3456	3,456	3.38 KB	3,456	3.38 KB
+1048575	1,048,575	1,024.00 KB	1,048,575	1024.00 KB
+1048576	1,048,576	1.00 MB	1,048,576	1.00 MB
+1073741824	1,073,741,824	1.00 GB	1,073,741,824	1.00 GB
+25000000000	25,000,000,000	23.28 GB	25,000,000,000	23.28 GB
+1099511627776	1,099,511,627,776	1.00 TB	1,099,511,627,776	1.00 TB
+1125899906842624	1,125,899,906,842,624	1.00 PB	1,125,899,906,842,624	1024.00 TB
