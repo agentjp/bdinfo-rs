@@ -11,11 +11,15 @@ golden, on a native runner for every architecture we release.
 | `BigBuckBunny.iso` | the same disc as a UDF `.iso` (volume label `Blu-Ray`) |
 | `golden/folder.txt` | the exact report the folder scan must produce |
 | `golden/iso.txt` | the exact report the `.iso` scan must produce |
+| `golden/folder-no-stream-diagnostics.txt` | the folder report under `--no-stream-diagnostics` |
+| `golden/folder-no-quick-summary.txt` | the folder report under `--no-quick-summary` |
 
-The two goldens are identical except the `Disc Label:` line — which also pins the
-documented "a folder takes its directory name, an `.iso` reads the real UDF volume
-label" behaviour. They carry the report's locked **CRLF** byte contract; `.gitattributes`
-keeps them (`-text`) and the disc bytes (`binary`) verbatim across platforms.
+`folder.txt` and `iso.txt` are identical except the `Disc Label:` line — which also pins
+the documented "a folder takes its directory name, an `.iso` reads the real UDF volume
+label" behaviour. The other two are `folder.txt` minus exactly one optional section each,
+which is what pins that the two switches subtract and never reword. All four carry the
+report's locked **CRLF** byte contract; `.gitattributes` keeps them (`-text`) and the disc
+bytes (`binary`) verbatim across platforms.
 
 ## Attribution
 
@@ -34,12 +38,20 @@ end-to-end, not just the `-m 00000` direct selection.
 
 ## Regenerating
 
-If the locked report format deliberately changes, re-pin both goldens by scanning
-the committed discs and overwriting `golden/folder.txt` and `golden/iso.txt`:
+If the locked report format deliberately changes, re-pin **all four** goldens by scanning
+the committed discs. Each scan writes `BDINFO.{label}.txt` into `$tmp`, so run them one at
+a time and copy the result before the next overwrites it:
 
 ```pwsh
 bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny     $tmp
-bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny.iso $tmp
 # copy $tmp/BDINFO.BigBuckBunny.txt -> golden/folder.txt
+
+bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny.iso $tmp
 # copy $tmp/BDINFO.Blu-Ray.txt      -> golden/iso.txt
+
+bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny $tmp --no-stream-diagnostics
+# copy $tmp/BDINFO.BigBuckBunny.txt -> golden/folder-no-stream-diagnostics.txt
+
+bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny $tmp --no-quick-summary
+# copy $tmp/BDINFO.BigBuckBunny.txt -> golden/folder-no-quick-summary.txt
 ```

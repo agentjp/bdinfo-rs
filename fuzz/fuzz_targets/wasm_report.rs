@@ -1,8 +1,10 @@
 #![no_main]
-//! Fuzz target: `bdinfo_rs_wasm::run_report` — the in-memory entry point behind
-//! the browser package's `scanReport` export. It frames the caller's bytes into
-//! a synthetic BDMV tree of its own, runs the measured scan over it, and renders
-//! the classic report.
+//! Fuzz target: `bdinfo_rs_wasm::run_report` — the crate's in-memory parity
+//! seam, which the `scan_files` export is built over. It frames the caller's
+//! bytes into a synthetic BDMV tree of its own, runs the measured scan over it,
+//! and renders the classic report. The package deliberately exports no raw
+//! report entry point of its own: `scan_files` wraps this one with progress,
+//! selection, the structured disc model and error reporting.
 //!
 //! Input framing: up to six `u32` big-endian length-prefixed sections, the same
 //! framing `parse_report` uses, so one seed describes the same synthetic disc to

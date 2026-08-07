@@ -114,8 +114,12 @@ A run on a terminal opens with the bdinfo-rs banner; `--no-banner` drops it. Pip
 output never carries it.
 
 Unreadable files on a damaged disc are collected into a `WARNING` block and the rest is scanned
-(exit code 3). Release archives ship bash / zsh / fish / PowerShell completions and a
-`bdinfo-rs.1` man page.
+(exit code 3). Whatever a failing stream file measured before the error is kept; `--drop-partial`
+discards it instead. An AACS-encrypted disc is refused before anything is measured (exit code 4) —
+only ciphertext would reach the demuxer — though `--list` still works, its output being read from
+the disc's own database.
+
+Release archives ship bash / zsh / fish / PowerShell completions and a `bdinfo-rs.1` man page.
 
 ## Browser
 
@@ -126,14 +130,20 @@ Web Worker, so a multi-GB stream never has to fit in memory.
 The same analyzer is on npm as [`@bdinfo-rs/wasm`](https://www.npmjs.com/package/@bdinfo-rs/wasm):
 
 ```ts
-import { analyze } from "@bdinfo-rs/wasm";
+import { inspect, scan } from "@bdinfo-rs/wasm";
 
 const picked = [...input.files].map((file) => ({ path: file.webkitRelativePath, file }));
-const report = await analyze(picked); // the classic disc report, as a string
+
+const disc = await inspect(picked);     // structural scan: playlists, streams, chapters, sizes
+const { report } = await scan(picked);  // the classic disc report, as a string
 ```
 
-`listPlaylists` returns the selection table; `listPlaylistsIso` / `analyzeIso` do the same for a
-single `.iso`. Bundler, CSP, and browser-support notes: [`crates/bdinfo-rs-wasm`](crates/bdinfo-rs-wasm).
+`inspect` reads metadata only — pass `{ codecs: true }` for the full codec detail without the
+whole-file demux — and `scan` measures the streams, returning the report alongside the same disc
+model. `renderReport` re-renders that model with different report sections, and `reportFileName`
+gives the `BDINFO.{volume label}.txt` name to save it under. Every call takes either a folder pick
+or a single `.iso` `File`. Bundler, CSP, and browser-support notes:
+[`crates/bdinfo-rs-wasm`](crates/bdinfo-rs-wasm).
 
 ## Differences from BDInfo
 

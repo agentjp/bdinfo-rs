@@ -28,7 +28,7 @@ body:
     attributes:
       label: bdinfo-rs GUI version
       description: Output of `bdinfo-rs-gui --version`.
-      placeholder: "2.0.0"
+      placeholder: "3.0.0"
     validations:
       required: true
   - type: input

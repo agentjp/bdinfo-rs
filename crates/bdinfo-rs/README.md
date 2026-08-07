@@ -39,7 +39,13 @@ bdinfo-rs /path/to/disc --whole               # scan everything the table lists
 
 The table hides playlists shorter than 20 seconds and looping ones, and names what it withheld.
 `--show-short-playlists` and `--show-looping-playlists` put each category back — into the table,
-the picker, and `--whole`.
+the picker, and `--whole`. `--short-playlist-seconds` moves that cutoff (0 to 86400 seconds; 0
+counts nothing as short).
+
+The report renders every section by default. `--no-stream-diagnostics` drops the per-playlist
+`STREAM DIAGNOSTICS` tables and `--no-quick-summary` drops the `QUICK SUMMARY` blocks; each omits
+exactly its own section. `--drop-partial` discards what a stream file measured before a read error
+interrupted it, which is otherwise kept.
 
 A run on a terminal opens with the bdinfo-rs banner; `--no-banner` drops it. Piped or redirected
 output never carries it.
@@ -47,7 +53,10 @@ output never carries it.
 | Exit code | Meaning |
 |---|---|
 | 0 | Scan completed |
+| 1 | Not a Blu-ray structure, or no playlist matched `--mpls` |
+| 2 | No such path, an unusable report destination, or an invalid argument |
 | 3 | Scan completed with unreadable files, collected into the report's `WARNING` block |
+| 4 | AACS-encrypted disc — the scan is refused before it starts; `--list` still works |
 | 130 | Cancelled with <kbd>Ctrl</kbd>+<kbd>C</kbd> |
 
 Release archives ship bash, zsh, fish, and PowerShell completions plus a `bdinfo-rs.1` man page,
