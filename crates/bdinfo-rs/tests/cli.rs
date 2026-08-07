@@ -515,10 +515,6 @@ fn a_zero_cutoff_classifies_nothing_as_short() {
 }
 
 #[test]
-#[expect(
-    clippy::expect_used,
-    reason = "end-to-end test driver; a failed spawn or conversion should abort the test loudly"
-)]
 fn the_cutoff_ceiling_matches_the_core_constant() {
     // `src/cli.rs` spells the 86_400 ceiling as a literal (`build.rs`
     // `include!`s that file without the library), so this is the check that
