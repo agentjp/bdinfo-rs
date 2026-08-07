@@ -48,8 +48,10 @@
 //! [`From`] impl it walks. [`Disc::into_scan`] goes back the other way, rebuilding the [`BdRom`]
 //! and the recorded failures so the report can be rendered from a mirror alone.
 //!
-//! [`ScanResult`] is the one type here with no counterpart in the model: it pairs a rendered
-//! report with the [`Disc`] it was rendered beside, for a scan that returns both.
+//! Two types here have no counterpart in the model. [`ScanResult`] pairs a rendered report with
+//! the [`Disc`] it was rendered beside, for a scan that returns both. [`ScanOptions`] is the one
+//! type that crosses the other way — what a call takes rather than what it produces — so it is
+//! also the only one whose fields are all optional.
 
 use std::io;
 
@@ -80,6 +82,52 @@ pub struct ScanResult {
     pub report: String,
     /// The scanned disc, with `measured` true.
     pub disc: Disc,
+}
+
+/// What one call is asked to do, beyond the disc it is pointed at.
+///
+/// Every option is optional, and an omitted one means the behaviour described
+/// with it — so a call given no options at all renders the classic report, the
+/// bytes the `bdinfo-rs` command line writes.
+///
+/// Each option says which calls read it, and a call ignores the rest:
+/// `render_report` re-renders a disc a scan already produced, so the options
+/// governing what a scan reads mean nothing to it.
+// Only `from_wasm_abi`: this type crosses INTO the module as a parameter and is
+// never returned, so it needs the inverse of the `Disc` conversion and not the
+// forward one.
+#[derive(Tsify, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanOptions {
+    /// Render the report `STREAM DIAGNOSTICS:` section, on unless switched off.
+    /// Read by `scan_files`, `scan_iso` and `render_report`.
+    #[tsify(optional)]
+    pub stream_diagnostics: Option<bool>,
+    /// Render the report `QUICK SUMMARY:` section, on unless switched off. Read
+    /// by the same calls as `streamDiagnostics`.
+    #[tsify(optional)]
+    pub quick_summary: Option<bool>,
+    /// The length in seconds under which a playlist counts as short, 20 when
+    /// omitted. Zero switches the short rule off, since no playlist is shorter
+    /// than zero seconds; a negative or non-finite value means the 20 s default.
+    ///
+    /// Read by `scan_files` and `scan_iso`, which classify every playlist
+    /// against it and report the outcome in each playlist `hiddenBy`. It
+    /// changes no other value: which playlists a disc holds, which ones a
+    /// selection measures, and the rendered report are all the same either way.
+    #[tsify(optional)]
+    pub short_playlist_seconds: Option<f64>,
+    /// Keep what the scan measured of a stream file whose read failed partway,
+    /// on unless switched off. Read by `scan_files` and `scan_iso`.
+    ///
+    /// A kept partial file carries everything the scan accumulated up to the
+    /// failing read, so the chapter rows, stream diagnostics and per-file
+    /// seconds cover the span before the failure and stay zero after it.
+    /// Switched off, that span is discarded and those cells are zero
+    /// throughout. The failure itself is reported in `errors` either way.
+    #[tsify(optional)]
+    pub keep_partial: Option<bool>,
 }
 
 /// A scanned Blu-ray disc: the disc-level properties and every playlist on it.
@@ -999,7 +1047,7 @@ mod tests {
 
     use super::{
         Chapter, Clip, ClipStream, Disc, HiddenRule, Playlist, ScanError, ScanErrorReason,
-        ScanStage, Stream, borrowed_codec_alt_name, order,
+        ScanOptions, ScanStage, Stream, borrowed_codec_alt_name, order,
     };
 
     // One fixture value and one hand-written wire form per mirror type, composed
@@ -1267,6 +1315,39 @@ mod tests {
     fn every_field_survives_a_round_trip_through_the_wire_form() {
         let back: Disc = serde_json::from_value(a_disc_json()).expect("deserialize the mirror");
         assert_eq!(back, a_disc());
+    }
+
+    #[test]
+    fn every_option_is_read_under_its_published_name_and_may_be_left_out() {
+        let all: ScanOptions = serde_json::from_value(json!({
+            "streamDiagnostics": false,
+            "quickSummary": false,
+            "shortPlaylistSeconds": 5.0,
+            "keepPartial": false,
+        }))
+        .expect("deserialize an options object");
+        assert_eq!(
+            all,
+            ScanOptions {
+                stream_diagnostics: Some(false),
+                quick_summary: Some(false),
+                short_playlist_seconds: Some(5.0),
+                keep_partial: Some(false),
+            }
+        );
+
+        // The empty object a caller who wants every default passes: each option
+        // absent, which is what the calls turn into their default behaviour.
+        let empty: ScanOptions = serde_json::from_value(json!({})).expect("deserialize {}");
+        assert_eq!(
+            empty,
+            ScanOptions {
+                stream_diagnostics: None,
+                quick_summary: None,
+                short_playlist_seconds: None,
+                keep_partial: None,
+            }
+        );
     }
 
     #[test]

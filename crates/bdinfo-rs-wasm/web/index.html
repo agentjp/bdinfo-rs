@@ -929,6 +929,15 @@
           The report sections re-render from the disc the scan already returned — instantly, without
           scanning again.
         </p>
+        <hr />
+        <label class="setting">
+          <input type="checkbox" id="opt-keep-partial" />
+          <span>Keep partial data from failed stream reads</span>
+        </label>
+        <p class="setting-note">
+          When a stream file cannot be read to the end, the scan keeps what it measured up to that
+          point; the failure is reported either way. This applies to the next scan.
+        </p>
         <div class="dialog-foot">
           <button class="btn primary" id="settings-close" type="button">Done</button>
         </div>
