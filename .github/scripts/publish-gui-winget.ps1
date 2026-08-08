@@ -22,20 +22,24 @@
 # agentjp.bdinfo-rs-gui` by a maintainer; once that PR merges, this leg
 # auto-submits every version.
 #
-# The generated manifest must OMIT `Scope`: the per-user MSI registers its
+# The submitted manifest must OMIT `Scope`: the per-user MSI registers its
 # ARP entry in HKLM, winget derives installed scope from the hive alone, and
 # a declared `user` scope would fail every upgrade with "installer scope does
-# not match" (winget-cli #3011). The prepare assertions hold komac's output
-# to that and to InstallerType wix / ProductCode present / both
-# architectures.
+# not match" (winget-cli #3011). komac 2.16.0 derives `Scope: user` from that
+# same MSI install context and `update` has no flag to omit it, so both modes
+# render locally with `--dry-run`, strip the Scope line, and hold the result
+# to the assertions (no Scope / InstallerType wix / ProductCode present /
+# both architectures); publishing submits the stripped tree via
+# `komac submit`, never `update --submit` (which would re-render and
+# re-inject the field).
 #
-#   -Mode prepare  validate without submitting: `komac update --dry-run
-#                  --output` renders the manifests into -Payload and the
-#                  assertions above run over them. Package not in winget-pkgs
-#                  yet -> record the bootstrap-pending state and pass (the
-#                  other channels' rehearsal must not die on a known human
-#                  queue), after asserting both MSI URLs resolve.
-#   -Mode publish  the same probe, then `komac update --submit`. Version
+#   -Mode prepare  validate without submitting: the rendered + stripped +
+#                  asserted manifests land in -Payload. Package not in
+#                  winget-pkgs yet -> record the bootstrap-pending state and
+#                  pass (the other channels' rehearsal must not die on a
+#                  known human queue), after asserting both MSI URLs resolve.
+#   -Mode publish  the same probe, render and assertions, then
+#                  `komac submit` over the stripped manifests. Version
 #                  already published or a submission PR open -> skip, green
 #                  (idempotent re-dispatch). Package missing -> FAIL: the
 #                  manual bootstrap has not happened, and nothing this runner
@@ -150,6 +154,30 @@ function Install-Komac {
     return $komac
 }
 
+# Renders the manifests with `komac update --dry-run`, strips the Scope line
+# komac injects (see the header), and holds the result to the assertions.
+# Returns the output tree root and the directory holding the manifest files;
+# everything komac and the review print is routed through Write-Host so the
+# returned object stays the function's only output.
+function Build-Manifests([string] $komac) {
+    $outDir = Join-Path ([System.IO.Path]::GetTempPath()) "komac-manifests-$PID"
+    & $komac update $packageId --version $Version --dry-run --output $outDir --urls @msiUrls | Write-Host
+    if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac update --dry-run failed' }
+
+    $installer = @(Get-ChildItem -Recurse $outDir -Filter '*.installer.yaml')
+    if ($installer.Count -ne 1) { Stop-Leg "expected exactly one installer manifest, found $($installer.Count)" }
+    $manifest = (Get-Content -LiteralPath $installer[0].FullName -Raw) -replace '(?m)^\s*Scope:[^\r\n]*\r?\n?', ''
+    Set-Content -LiteralPath $installer[0].FullName -Value $manifest -NoNewline
+    Write-Host $manifest
+    if ($manifest -notmatch '(?m)^\s*InstallerType:\s*wix\s*$') { Stop-Leg 'the manifest does not declare InstallerType: wix' }
+    if ($manifest -match '(?m)^\s*Scope:') { Stop-Leg 'the manifest declares Scope - it must be omitted (per-user MSI ARP lands in HKLM; a declared scope breaks every upgrade, winget-cli #3011)' }
+    if ($manifest -notmatch '(?m)^\s*ProductCode:') { Stop-Leg 'the manifest carries no ProductCode' }
+    foreach ($arch in 'x64', 'arm64') {
+        if ($manifest -notmatch "(?m)^\s*-?\s*Architecture:\s*$arch\s*$") { Stop-Leg "the manifest carries no $arch installer" }
+    }
+    return @{ Root = $outDir; Leaf = $installer[0].DirectoryName }
+}
+
 if ($Mode -eq 'prepare') {
     if (-not $packageExists) {
         # Nothing komac can render yet; assert the payload URLs resolve so a
@@ -181,21 +209,8 @@ if ($Mode -eq 'prepare') {
     }
 
     $komac = Install-Komac
-    $outDir = Join-Path ([System.IO.Path]::GetTempPath()) "komac-manifests-$PID"
-    & $komac update $packageId --version $Version --dry-run --output $outDir --urls @msiUrls
-    if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac update --dry-run failed' }
-
-    $installer = @(Get-ChildItem -Recurse $outDir -Filter '*.installer.yaml')
-    if ($installer.Count -ne 1) { Stop-Leg "expected exactly one installer manifest, found $($installer.Count)" }
-    $manifest = Get-Content -LiteralPath $installer[0].FullName -Raw
-    Write-Host $manifest
-    if ($manifest -notmatch '(?m)^\s*InstallerType:\s*wix\s*$') { Stop-Leg 'the manifest does not declare InstallerType: wix' }
-    if ($manifest -match '(?m)^\s*Scope:') { Stop-Leg 'the manifest declares Scope - it must be omitted (per-user MSI ARP lands in HKLM; a declared scope breaks every upgrade, winget-cli #3011)' }
-    if ($manifest -notmatch '(?m)^\s*ProductCode:') { Stop-Leg 'the manifest carries no ProductCode' }
-    foreach ($arch in 'x64', 'arm64') {
-        if ($manifest -notmatch "(?m)^\s*-?\s*Architecture:\s*$arch\s*$") { Stop-Leg "the manifest carries no $arch installer" }
-    }
-    Copy-Item -Recurse (Join-Path $outDir '*') $Payload
+    $manifests = Build-Manifests $komac
+    Copy-Item -Recurse (Join-Path $manifests.Root '*') $Payload
     Write-Host "prepared + validated the winget manifests for $packageId $Version"
     exit 0
 }
@@ -214,6 +229,7 @@ if (-not $packageExists) {
 }
 
 $komac = Install-Komac
-& $komac update $packageId --version $Version --submit --urls @msiUrls
-if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac update --submit failed' }
+$manifests = Build-Manifests $komac
+& $komac submit $manifests.Leaf --yes | Write-Host
+if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac submit failed' }
 Write-Host "submitted $packageId $Version to winget-pkgs"
