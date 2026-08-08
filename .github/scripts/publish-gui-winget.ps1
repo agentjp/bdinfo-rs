@@ -143,7 +143,9 @@ function Install-Komac {
     tar -xzf $tarball -C $dir komac
     if ($LASTEXITCODE -ne 0) { Stop-Leg 'could not extract komac' }
     $komac = Join-Path $dir 'komac'
-    & $komac --version
+    # Write-Host, not bare invocation: the version banner would join the
+    # function's output stream and corrupt the returned path into an array.
+    Write-Host (& $komac --version)
     if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac does not run' }
     return $komac
 }
