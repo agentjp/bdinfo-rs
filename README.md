@@ -54,7 +54,7 @@ fallback) — no webview and no bundled runtime.
 
 ```sh
 winget install agentjp.bdinfo-rs-gui              # Windows
-brew install --cask agentjp/tap/bdinfo-rs-gui     # macOS / Linux
+brew install --cask agentjp/tap/bdinfo-rs-gui     # macOS
 yay -S bdinfo-rs-gui-bin                          # Arch
 ```
 

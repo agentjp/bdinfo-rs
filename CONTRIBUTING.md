@@ -234,6 +234,7 @@ releases; only the tag does.
    | `SECURITY.md` | the supported-versions table |
    | `INSTALL.md` | the Docker pin example and the rolling-tag sentence |
    | `.github/ISSUE_TEMPLATE/bug_report.yml`, `gui_bug_report.yml`, `output_difference.yml` | the version-field placeholders |
+   | `crates/bdinfo-rs-wasm/Cargo.lock`, `crates/bdinfo-rs-gui/Cargo.lock`, `fuzz/Cargo.lock` | each sibling lockfile records the workspace crate versions; a `cargo check` in that workspace refreshes it |
 
    The npm tag guard cross-checks the workspace version, the wasm crate version and
    `package.json` against the pushed tag, so a missed one fails the release rather than shipping.

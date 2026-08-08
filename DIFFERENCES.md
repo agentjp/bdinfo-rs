@@ -30,6 +30,7 @@ actually see on a normal disc.
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
 | [HEVC `profile_idc` recovery](#correctness-fixes-with-no-effect-on-a-normal-disc) | Edge case only | Malformed headers with `general_profile_idc == 0` |
 | [VC-1 interlaced-field picture type](#correctness-fixes-with-no-effect-on-a-normal-disc) | **No** — internal only | Never — the picture tag is counted, never printed |
+| [PAT `table_id` validation](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — no conforming disc carries a wrong PAT table id |
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 
 ---
