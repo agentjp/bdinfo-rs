@@ -241,7 +241,7 @@ cargo test
 
 The desktop app is `bdinfo-rs-gui`, released on its own
 [`gui-v*` tags](https://github.com/agentjp/bdinfo-rs/releases?q=%22native+desktop+GUI%22&expanded=true)
-and versioned independently of the command-line binary.
+and versioned in lock-step with the command-line binary.
 
 **Settings and log.** On every platform the app keeps its settings (`gui.conf`) and log
 (`gui.log`) in one per-user folder: `%APPDATA%\bdinfo-rs` on Windows,

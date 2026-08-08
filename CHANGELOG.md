@@ -38,8 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opt back into discarding. (#285)
 * **core:** one short-playlist threshold contract on every surface: the valid domain is
   0 to 86400 seconds, and 0 switches the short rule off. Programmatic surfaces (CLI,
-  npm) reject out-of-domain values; interactive ones (GUI dialog, demo page) clamp.
-  (#286)
+  npm) reject out-of-domain values; the GUI dialog clamps, and the demo page reverts to
+  its default. (#286)
 * **wasm:** a codecs-depth inspect: `codecs: true` reads just each stream file's head,
   so every stream carries its full codec description — profile, level, HDR metadata —
   without the whole-file demux a measured scan costs. (#286)
@@ -50,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `selection` measures an explicit playlist set unfiltered. (#214)
 * **wasm:** the demo gains playlist-filter, report-section, and size-format settings.
   (#214, #223)
-* **wasm:** the structured model carries the encrypted-disc flag (`aacsEncrypted`).
+* **wasm:** the structured model carries the encrypted-disc flag (`isAacsEncrypted`).
   (#247)
 * **cli:** playlist visibility switches — `--show-short-playlists` and
   `--show-looping-playlists` with a hidden-playlist hint (#202) — plus

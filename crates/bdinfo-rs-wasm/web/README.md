@@ -21,7 +21,7 @@ Firefox.
 npm i @bdinfo-rs/wasm
 ```
 
-The published payload is **~497 KB of WebAssembly + ~44 KB of JS**. Only the
+The published payload is **~501 KB of WebAssembly + ~44 KB of JS**. Only the
 main-thread entry you import (~9 KB) loads up front; the scan Worker (~3 KB)
 and the wasm-bindgen glue (~32 KB) that hosts the `.wasm` are fetched lazily
 inside the Worker, and nothing past the entry loads at all until the first scan.
