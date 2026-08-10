@@ -87,7 +87,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/bdinfo-rs-gui
           # The ONE archive every GUI leg on this workspace restores from, and
@@ -109,7 +109,7 @@ jobs:
       # action's checksummed manifest, never its runtime-resolved cargo-binstall
       # fallback (rationale in core.yml).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-nextest
           fallback: none
@@ -303,13 +303,13 @@ jobs:
           NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
         run: rustup toolchain install "$NIGHTLY" --profile minimal --component rustfmt --component llvm-tools-preview
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/bdinfo-rs-gui
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
-        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
           fallback: none
@@ -422,7 +422,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/bdinfo-rs-gui
           # Read-only on `gui build + test`'s archive: that job builds the same
@@ -519,7 +519,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: crates/bdinfo-rs-gui
           # Read-only on `gui build + test`'s archive: this job's debug build is
