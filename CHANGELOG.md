@@ -21,64 +21,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output (disc metadata, playlists, streams, chapters, read errors) — and the new
   `renderReport` re-renders the classic report from it on demand, byte-identical to the
   CLI's. The report-string and row-tuple exports are gone. Only the npm surface breaks
-  here; the CLI and report contracts are untouched. (#215, #217)
+  here; the CLI and report contracts are untouched. ([#215](https://github.com/agentjp/bdinfo-rs/issues/215), [#217](https://github.com/agentjp/bdinfo-rs/issues/217))
 * **wasm:** every entry point takes one `ScanOptions` object — `inspect` previously took
   a bare positional threshold — and an out-of-domain `shortPlaylistSeconds` (negative,
   non-finite, or above 86400) now rejects the call instead of silently scanning with the
-  20-second default. (#286)
+  20-second default. ([#286](https://github.com/agentjp/bdinfo-rs/issues/286))
 * **core:** AACS-encrypted discs are detected up front, and the CLI refuses to scan them
   with the new exit code 4; the library exposes the detection and leaves the decision to
-  the caller. (#246)
+  the caller. ([#246](https://github.com/agentjp/bdinfo-rs/issues/246))
 
 ### Added
 
 * **core:** stream scans survive read errors: statistics accumulated before a failing
   read are kept and reported, with the failure still listed in the `WARNING` block.
   `--drop-partial` (CLI), the keep-partial-scans setting (GUI), and `keepPartial` (npm)
-  opt back into discarding. (#285)
+  opt back into discarding. ([#285](https://github.com/agentjp/bdinfo-rs/issues/285))
 * **core:** one short-playlist threshold contract on every surface: the valid domain is
   0 to 86400 seconds, and 0 switches the short rule off. Programmatic surfaces (CLI,
   npm) reject out-of-domain values; the GUI dialog clamps, and the demo page reverts to
-  its default. (#286)
+  its default. ([#286](https://github.com/agentjp/bdinfo-rs/issues/286))
 * **wasm:** a codecs-depth inspect: `codecs: true` reads just each stream file's head,
   so every stream carries its full codec description — profile, level, HDR metadata —
-  without the whole-file demux a measured scan costs. (#286)
+  without the whole-file demux a measured scan costs. ([#286](https://github.com/agentjp/bdinfo-rs/issues/286))
 * **wasm:** `reportFileName` exposes the sanitized `BDINFO.<label>.txt` filename the CLI
-  and GUI derive, so browser apps save reports under the identical name. (#286)
+  and GUI derive, so browser apps save reports under the identical name. ([#286](https://github.com/agentjp/bdinfo-rs/issues/286))
 * **wasm:** scans list every playlist, each carrying `hiddenBy` classification metadata
   instead of being withheld by a filter — filtering is the client's choice — and
-  `selection` measures an explicit playlist set unfiltered. (#214)
+  `selection` measures an explicit playlist set unfiltered. ([#214](https://github.com/agentjp/bdinfo-rs/issues/214))
 * **wasm:** the demo gains playlist-filter, report-section, and size-format settings.
-  (#214, #223)
+  ([#214](https://github.com/agentjp/bdinfo-rs/issues/214), [#223](https://github.com/agentjp/bdinfo-rs/issues/223))
 * **wasm:** the structured model carries the encrypted-disc flag (`isAacsEncrypted`).
-  (#247)
+  ([#247](https://github.com/agentjp/bdinfo-rs/issues/247))
 * **cli:** playlist visibility switches — `--show-short-playlists` and
-  `--show-looping-playlists` with a hidden-playlist hint (#202) — plus
+  `--show-looping-playlists` with a hidden-playlist hint ([#202](https://github.com/agentjp/bdinfo-rs/issues/202)) — plus
   `--short-playlist-seconds` for the cutoff itself and the `--no-stream-diagnostics` /
-  `--no-quick-summary` report-section switches (#219), on a compacted single-screen
-  help card (#203).
-* **gui:** encrypted discs are flagged and the scan disabled (#248); playlists hidden by
-  the filters can be shown with a transient toggle (#204).
+  `--no-quick-summary` report-section switches ([#219](https://github.com/agentjp/bdinfo-rs/issues/219)), on a compacted single-screen
+  help card ([#203](https://github.com/agentjp/bdinfo-rs/issues/203)).
+* **gui:** encrypted discs are flagged and the scan disabled ([#248](https://github.com/agentjp/bdinfo-rs/issues/248)); playlists hidden by
+  the filters can be shown with a transient toggle ([#204](https://github.com/agentjp/bdinfo-rs/issues/204)).
 * **core:** the playlist projection, classification, formatting, and selection layer is
-  part of the public library API, shared by all three front-ends. (#216, #261, #263)
+  part of the public library API, shared by all three front-ends. ([#216](https://github.com/agentjp/bdinfo-rs/issues/216), [#261](https://github.com/agentjp/bdinfo-rs/issues/261), [#263](https://github.com/agentjp/bdinfo-rs/issues/263))
 * **core:** drive-root volume-label recovery moved into the vfs, covering every
-  front-end. (#262)
+  front-end. ([#262](https://github.com/agentjp/bdinfo-rs/issues/262))
 
 ### Fixes
 
 * Hardening against hostile disc images from the continuous fuzz campaign: the backup
-  index is used when the primary is unparsable (#245), unknown PMT stream types are
-  skipped instead of aborting the section (#249), UDF CS0 dstring used lengths are
-  clamped (#250), chapter-mark timestamps are masked (#251), `read_bits4` zero-fills its
-  past-window tail (#253), and a playlist summary's angle totals are bounded before
-  allocation (#244). Metadata reads are capped, cutting peak scan memory
+  index is used when the primary is unparsable ([#245](https://github.com/agentjp/bdinfo-rs/issues/245)), unknown PMT stream types are
+  skipped instead of aborting the section ([#249](https://github.com/agentjp/bdinfo-rs/issues/249)), UDF CS0 dstring used lengths are
+  clamped ([#250](https://github.com/agentjp/bdinfo-rs/issues/250)), chapter-mark timestamps are masked ([#251](https://github.com/agentjp/bdinfo-rs/issues/251)), `read_bits4` zero-fills its
+  past-window tail ([#253](https://github.com/agentjp/bdinfo-rs/issues/253)), and a playlist summary's angle totals are bounded before
+  allocation ([#244](https://github.com/agentjp/bdinfo-rs/issues/244)). Metadata reads are capped, cutting peak scan memory
   ([827918c](https://github.com/agentjp/bdinfo-rs/commit/827918c0560e3943b6871eff61d716fcdc667a27)).
 * **wasm:** a `shortPlaylistSeconds` of zero disables the short-playlist filter instead
-  of reading as the 20-second default. (#252)
-* **packaging:** the installer metadata names agentjp as the publisher. (#195)
+  of reading as the 20-second default. ([#252](https://github.com/agentjp/bdinfo-rs/issues/252))
+* **packaging:** the installer metadata names agentjp as the publisher. ([#195](https://github.com/agentjp/bdinfo-rs/issues/195))
 * **ci:** the 2.0.0 release lanes are repaired — the gui-publish channel matrix, the AUR
   and Homebrew checksum legs, gui crate packaging, the AUR deploy's source tree, and the
-  gui crate's post-release gaps. (#142, #143, #144, #145, #147, #148)
+  gui crate's post-release gaps. ([#142](https://github.com/agentjp/bdinfo-rs/issues/142), [#143](https://github.com/agentjp/bdinfo-rs/issues/143), [#144](https://github.com/agentjp/bdinfo-rs/issues/144), [#145](https://github.com/agentjp/bdinfo-rs/issues/145), [#147](https://github.com/agentjp/bdinfo-rs/issues/147), [#148](https://github.com/agentjp/bdinfo-rs/issues/148))
 
 ## [v2.0.0](https://github.com/agentjp/bdinfo-rs/compare/v1.2.0...v2.0.0) (2026-07-20)
 
@@ -88,10 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ScanMode` — `Metadata`, `Codecs`, or `Full` — where they previously took a `bool` selecting the
   measured pass. `open_with` and `open_resilient_with` also take a `&AtomicBool` cancel flag:
   set it from any thread and the scan aborts at its next read chunk with
-  `BdError::ScanCancelled`. (#114)
+  `BdError::ScanCancelled`. ([#114](https://github.com/agentjp/bdinfo-rs/issues/114))
 * **report:** `report::text::render_with` takes a `RenderOptions` argument, gating each
   playlist's `STREAM DIAGNOSTICS` and `QUICK SUMMARY` sections. `render` is unchanged and
-  still emits the locked default report with every section on. (#114)
+  still emits the locked default report with every section on. ([#114](https://github.com/agentjp/bdinfo-rs/issues/114))
 
 ### Added
 
@@ -101,7 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   report. Pure Rust on `iced`, GPU-accelerated through wgpu with a software fallback; no
   webview and no bundled runtime. The report it renders is byte-identical to the CLI's.
   Settings, window geometry, theme, and UI scale persist; a per-launch `gui.log` records the
-  selected graphics adapter, panics, and otherwise-swallowed errors. (#114)
+  selected graphics adapter, panics, and otherwise-swallowed errors. ([#114](https://github.com/agentjp/bdinfo-rs/issues/114))
 * **Desktop app distribution:** `gui-v*` tags publish their own GitHub Release with twelve
   artifacts — per-user `.msi` and portable `.zip` for Windows x64/arm64, `.dmg` for Intel and
   Apple Silicon, and `.AppImage` / `.deb` / `.rpm` for Linux x64/arm64 — each covered by
@@ -109,25 +109,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WinGet (`agentjp.bdinfo-rs-gui`), a Homebrew cask, the AUR (`bdinfo-rs-gui-bin`), the
   Cloudsmith apt/dnf repository, and crates.io. Installation and the first-launch prompts on
   the unsigned Windows and macOS builds are documented in
-  [INSTALL.md](INSTALL.md#desktop-app). (#132)
+  [INSTALL.md](INSTALL.md#desktop-app). ([#132](https://github.com/agentjp/bdinfo-rs/issues/132))
 * **CLI:** `Ctrl+C` during a scan cancels it gracefully and exits with code 130, instead of
-  killing the process mid-write. (#114)
+  killing the process mid-write. ([#114](https://github.com/agentjp/bdinfo-rs/issues/114))
 
 ### Fixes
 
 * **codec:** print the Maximum Content Light Level unit as `cd/m2`, matching the MaxFALL and
   mastering-display luminance lines; the BDInfo lineage spells this one line `cd / m2`. The
-  divergence is recorded in [DIFFERENCES.md](DIFFERENCES.md). (#114)
-* **ci:** resolve appimagetool freshness against its highest semver tag (#136), stage the GUI
-  release downloads outside the tracked assets directory (#134), and compile the Linux
-  packagers from source on the GUI release legs (#133).
+  divergence is recorded in [DIFFERENCES.md](DIFFERENCES.md). ([#114](https://github.com/agentjp/bdinfo-rs/issues/114))
+* **ci:** resolve appimagetool freshness against its highest semver tag ([#136](https://github.com/agentjp/bdinfo-rs/issues/136)), stage the GUI
+  release downloads outside the tracked assets directory ([#134](https://github.com/agentjp/bdinfo-rs/issues/134)), and compile the Linux
+  packagers from source on the GUI release legs ([#133](https://github.com/agentjp/bdinfo-rs/issues/133)).
 
 ## [v1.2.0](https://github.com/agentjp/bdinfo-rs/compare/v1.1.0...v1.2.0) (2026-07-11)
 
 ### Fixes
 
 * **cli:** recover the real disc label when scanning a Windows drive root
-(#77)
+([#77](https://github.com/agentjp/bdinfo-rs/issues/77))
 ([1f6ee48](https://github.com/agentjp/bdinfo-rs/commit/1f6ee485a43a4a105fb063e6355530e1ef3e82a2)),
 closes [#77](https://github.com/agentjp/bdinfo-rs/issues/77)
 [#76](https://github.com/agentjp/bdinfo-rs/issues/76)
@@ -144,16 +144,16 @@ closes [#77](https://github.com/agentjp/bdinfo-rs/issues/77)
   never has to fit in memory. The rendered report is byte-for-byte the classic disc
   report, pinned to its own golden rendered from the same Big Buck Bunny fixture the
   native end-to-end test scans (held byte-identical across native, Node, and
-  headless Chrome and Firefox). No bytes leave the page. (#41)
+  headless Chrome and Firefox). No bytes leave the page. ([#41](https://github.com/agentjp/bdinfo-rs/issues/41))
 
 ### Bug Fixes
 
 * **wasm:** spawn the scan Web Worker through a statically analyzable
   `new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })`, so
   bundlers (Vite, webpack) detect and emit the worker chunk instead of breaking at
-  runtime. (#45)
+  runtime. ([#45](https://github.com/agentjp/bdinfo-rs/issues/45))
 * **packaging:** ship a complete machine-readable DEP-5 `copyright` in the `.deb`
-  (every bundled license enumerated), satisfying Debian policy. (#31)
+  (every bundled license enumerated), satisfying Debian policy. ([#31](https://github.com/agentjp/bdinfo-rs/issues/31))
 
 ### Changed
 
@@ -161,7 +161,7 @@ closes [#77](https://github.com/agentjp/bdinfo-rs/issues/77)
   LGPL 2.1 version only), matching the upstream BDInfo per-file source headers
   ("either version 2.1 of the License, or (at your option) any later version"). This
   is a documentation/metadata correction: no code changes, and downstream terms are
-  unchanged except that the "or later" option is now explicitly granted. (#40)
+  unchanged except that the "or later" option is now explicitly granted. ([#40](https://github.com/agentjp/bdinfo-rs/issues/40))
 
 ### Added
 
@@ -169,7 +169,7 @@ closes [#77](https://github.com/agentjp/bdinfo-rs/issues/77)
   bdinfo-rs is a Rust port of, and derivative work based on, BDInfo (© 2010 Cinema
   Squid, LGPL-2.1-or-later) — with the report/analysis baseline ported from
   [UniqProject/BDInfo](https://github.com/UniqProject/BDInfo) and the console flow
-  following [tetrahydroc/BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI). (#40)
+  following [tetrahydroc/BDInfoCLI](https://github.com/tetrahydroc/BDInfoCLI). ([#40](https://github.com/agentjp/bdinfo-rs/issues/40))
 
 ## [v1.0.1](https://github.com/agentjp/bdinfo-rs/compare/v1.0.0...218dab463b7973086ae318e8d38da945787dd458) (2026-06-22)
 
