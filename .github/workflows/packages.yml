@@ -27,7 +27,12 @@ name: packages
 #   - Scoop     -> the agentjp/scoop-bucket repo (Excavator auto-update bot)
 #
 # Secrets required (configure before the first release, or the jobs fail):
-#   WINGET_TOKEN       - classic PAT (public_repo) on the bot account that forked winget-pkgs
+#   WINGET_TOKEN       - classic PAT (public_repo + workflow) on the bot account that forked
+#                        winget-pkgs. `workflow` is required: komac syncs the fork before
+#                        submitting, and that CreateRef is rejected without it once upstream
+#                        winget-pkgs has changed .github/workflows past the fork's last sync.
+#                        Reads still work, so `komac list-versions` passes and only the
+#                        submit fails.
 #   AUR_SSH_KEY        - private SSH key whose public half is on the aur.archlinux.org account
 #   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the linux-packages job)
 #
