@@ -5,18 +5,18 @@
 # linear-history make rebase/merge-commit unusable), so each PR lands as one commit
 # whose subject is the PR TITLE — that subject MUST be a valid conventional commit and
 # drives the changelog + version. Every commit in a PR must also be conventional: the
-# commit-msg hook (scripts/install-hooks.ps1) and CI (.github/workflows/conventional.yml)
-# both call `convco check`, and CI additionally lints the PR title as a required gate.
+# commit-msg hook and CI (.github/workflows/conventional.yml) both call `convco check`,
+# and CI additionally lints the PR title as a required gate.
 # convco never commits, tags, or pushes on its own; its output is advisory and the
 # pushed `vX.Y.Z` tag remains the source of truth.
 
 # Changelog/version links should point at github.com. NOTE: convco ALWAYS derives
 # host/owner/repository from `git remote origin` and ignores the values below when
-# a remote exists (verified on convco 0.7.1, 2026-08-12). This repo's origin is the `ai.github.com` SSH-config
-# alias, so convco renders https://ai.github.com/ links. These keys are kept to
-# express intent (and in case a future convco honours them); the cockpit release
-# helper (scripts/release-prep.ps1) rewrites `ai.github.com` -> `github.com` in the
-# generated section before it lands in CHANGELOG.md. See CONTRIBUTING.md.
+# a remote exists (verified on convco 0.7.1, 2026-08-12). This repo's origin is the
+# `ai.github.com` SSH-config alias, so convco renders https://ai.github.com/ links.
+# These keys are kept to express intent (and in case a future convco honours them);
+# the release procedure rewrites `ai.github.com` -> `github.com` in the generated
+# section before it lands in CHANGELOG.md. See CONTRIBUTING.md, "Cutting a release".
 host: https://github.com
 owner: agentjp
 repository: bdinfo-rs
