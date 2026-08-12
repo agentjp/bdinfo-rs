@@ -58,15 +58,15 @@ version = "1.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
-version = "4.6.5"
+version = "4.6.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_builder]]
-version = "4.6.5"
+version = "4.6.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_complete]]
-version = "4.6.8"
+version = "4.6.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_derive]]
@@ -78,7 +78,7 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_mangen]]
-version = "0.3.0"
+version = "0.3.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.colorchoice]]
@@ -214,7 +214,7 @@ version = "3.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror-impl]]
-version = "2.0.19"
+version = "2.0.20"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
@@ -238,9 +238,9 @@ version = "0.61.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]
-version = "0.8.55"
+version = "0.8.56"
 criteria = "safe-to-run"
 
 [[exemptions.zerocopy-derive]]
-version = "0.8.55"
+version = "0.8.56"
 criteria = "safe-to-run"
