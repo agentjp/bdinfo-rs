@@ -128,7 +128,7 @@ mod tests {
     /// Opens `path` as a folder at `mode`, with no selection and no
     /// cancellation, asserting that the progress sink fires exactly when a
     /// packet scan ran — the pass-through arguments have to reach the demux,
-    /// and only [`ScanMode::Full`] reports (the quick codec pass does not).
+    /// and [`ScanMode::Metadata`] reads no packets to report.
     fn folder(path: &Path, mode: ScanMode) -> Result<ScanReport, BdError> {
         let mut reported = 0_usize;
         let report = open_folder(
@@ -139,7 +139,7 @@ mod tests {
             &mut |_| reported = reported.saturating_add(1),
             &AtomicBool::new(false),
         );
-        assert_eq!(reported != 0, report.is_ok() && mode == ScanMode::Full);
+        assert_eq!(reported != 0, report.is_ok() && mode != ScanMode::Metadata);
         report
     }
 
@@ -154,7 +154,7 @@ mod tests {
             &mut |_| reported = reported.saturating_add(1),
             &AtomicBool::new(false),
         );
-        assert_eq!(reported != 0, report.is_ok() && mode == ScanMode::Full);
+        assert_eq!(reported != 0, report.is_ok() && mode != ScanMode::Metadata);
         report
     }
 

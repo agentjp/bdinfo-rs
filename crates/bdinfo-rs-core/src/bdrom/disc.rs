@@ -530,26 +530,36 @@ pub struct ScanProgress<'a> {
     /// The stream file currently being demuxed (its upper-cased name; the
     /// interleaved `*.ssif` source still reports its `*.M2TS` name).
     pub file: &'a str,
-    /// Bytes demuxed so far across the reported (full) pass, never decreasing
-    /// and never exceeding [`total`](Self::total).
+    /// Bytes demuxed so far across the reported pass, never decreasing and
+    /// never exceeding [`total`](Self::total).
     pub done: u64,
     /// Total bytes the reported pass will demux: every selected stream file's
-    /// source, once. (The quick codec-init pass reads only file heads and is
-    /// neither budgeted nor reported.)
+    /// source, once. Which pass is the reported one follows the
+    /// [`ScanMode`]: under [`Full`](ScanMode::Full) it is the whole-file
+    /// measurement pass, and the quick codec-init pass ahead of it is neither
+    /// budgeted nor reported; under [`Codecs`](ScanMode::Codecs), which has no
+    /// measurement pass, the quick pass itself reports. The quick pass reads
+    /// only as far into each file as its codec detail needs, so under `Codecs`
+    /// the count advances by the bytes actually read and then snaps up to the
+    /// file's budgeted source size as that file finishes — the same
+    /// per-file-boundary snap a short or failed full-pass read gets. Either
+    /// way a completed scan ends at `total`.
     pub total: u64,
 }
 
-/// The live bookkeeping of one packet scan: the running byte count over the
-/// full pass's total, reported through the caller's callback before and
-/// after every demux read and at every file boundary, plus the caller's
-/// cooperative cancel flag the demux polls per read chunk.
+/// The live bookkeeping of one demux pass: the running byte count over that
+/// pass's total, reported through the caller's callback before and after
+/// every demux read and at every file boundary, plus the caller's
+/// cooperative cancel flag the demux polls per read chunk. Each pass builds
+/// its own; `run_measurement_scan` decides which of them the caller observes.
 struct Progress<'a> {
-    /// The caller's observer; a no-op for the plain `open`s.
+    /// The observer of this pass: the caller's callback for the reported
+    /// pass, a no-op for an unreported one and for the plain `open`s.
     callback: &'a mut dyn FnMut(ScanProgress<'_>),
     /// Bytes demuxed so far, kept within `0..=total`.
     done: u64,
-    /// Total bytes the reported (full) demux pass will read over the
-    /// selected files.
+    /// Total bytes this pass will read over the selected files (zero for an
+    /// unreported pass, whose count no one sees).
     total: u64,
     /// The caller's cancel flag; never set for the plain `open`s.
     cancel: &'a AtomicBool,
@@ -601,11 +611,14 @@ impl Read for CountingReader<'_, '_> {
     }
 }
 
-/// The byte total the reported (full) demux pass will read: per selected
-/// stream file, its interleaved `*.ssif` source when one exists, else the
-/// file itself, each counted once. The quick pass reads only file heads and
-/// is not budgeted (nor reported), so the display runs 0→100% at the full
-/// pass's steady pace.
+/// The byte total the reported demux pass will read: per selected stream
+/// file, its interleaved `*.ssif` source when one exists, else the file
+/// itself, each counted once. The same budget serves either reported pass —
+/// the full pass reads every one of those bytes, so its display runs 0→100%
+/// at a steady pace, while the quick pass (the reported one in
+/// [`ScanMode::Codecs`]) reads only each file's head and reaches 100% in
+/// per-file jumps as [`Progress::finish_file`] snaps the count to each
+/// finished file's share.
 fn scan_total(
     stream_files: &BTreeMap<String, u64>,
     interleaved_files: &BTreeMap<String, u64>,
@@ -832,9 +845,10 @@ impl BdRom {
     /// their metadata-only summaries (zero measured rates). `None` scans
     /// every stream file.
     ///
-    /// `progress` is called before and after every demux read and at every file boundary
-    /// with the running [`ScanProgress`]; it never fires without the packet
-    /// scan.
+    /// `progress` is called before and after every demux read of the reported
+    /// pass and at every file boundary with the running [`ScanProgress`],
+    /// whose [`total`](ScanProgress::total) documents which pass each mode
+    /// reports; it never fires without the packet scan.
     ///
     /// `cancel` — a cooperative stop flag: set it from any thread (a UI cancel
     /// button, a Ctrl+C handler, the progress callback itself) and the packet
@@ -1542,12 +1556,24 @@ fn run_measurement_scan(
     cancel: &AtomicBool,
     sink: &mut Sink<'_>,
 ) -> Result<(ScannedFiles, ScannedFiles), BdError> {
-    // The quick pass reads an unpredictable sliver of each file (codec
-    // init), so it draws no progress; the reported budget is the full pass,
-    // every selected byte once — a steady 0→100%. Cancellation reaches both
-    // passes: each carries the caller's flag in its `Progress`.
-    let mut warmup = |_: ScanProgress<'_>| {};
-    let quick_progress = &mut Progress { callback: &mut warmup, done: 0, total: 0, cancel };
+    // The caller observes the last pass this scan runs, against one budget:
+    // every selected file's source once (`scan_total`). With a full pass to
+    // come the quick pass stays silent — it reads an unpredictable sliver of
+    // each file, so reporting it would spend part of the bar on a distance
+    // the budget cannot predict, and restart the count afterwards; the full
+    // pass then owns a steady 0→100%. Without one (`Codecs`) the quick pass
+    // IS the scan the caller waits on, so it reports instead: its reads
+    // advance the count and the per-file boundary snaps carry it over the
+    // tails it never reads, up to 100% at the last file. Cancellation reaches
+    // both passes either way: each carries the caller's flag in its
+    // `Progress`.
+    let total = scan_total(stream_files, interleaved_files, scan_files);
+    let mut silent = |_: ScanProgress<'_>| {};
+    let quick_progress = &mut if measure {
+        Progress { callback: &mut silent, done: 0, total: 0, cancel }
+    } else {
+        Progress { callback: &mut *callback, done: 0, total, cancel }
+    };
     let quick = scan_stream_files(
         stream,
         ssif,
@@ -1573,12 +1599,7 @@ fn run_measurement_scan(
     if !measure {
         return Ok((quick, BTreeMap::new()));
     }
-    let progress = &mut Progress {
-        callback,
-        done: 0,
-        total: scan_total(stream_files, interleaved_files, scan_files),
-        cancel,
-    };
+    let progress = &mut Progress { callback, done: 0, total, cancel };
     let full =
         scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, keep_partial, true)?;
     // The PGS caption tallies and dimensions only exist after the full pass
@@ -5570,7 +5591,8 @@ Total Bitrate:  0.00 Mbps
         let root = FsDir::new(disc.root.clone());
 
         // Full scan: both files — the count runs 0→total over the full pass
-        // (the quick codec-init pass is neither budgeted nor reported).
+        // (a `Full` open's quick codec-init pass is neither budgeted nor
+        // reported).
         let mut events: Vec<(String, u64, u64)> = Vec::new();
         let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
         let bd = BdRom::open_with(
@@ -5645,6 +5667,65 @@ Total Bitrate:  0.00 Mbps
             .expect("metadata-only scan"),
         );
         assert!(!fired);
+    }
+
+    #[test]
+    fn a_codecs_open_reports_the_quick_pass_a_full_open_leaves_silent() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        // One stream file just past a full-pass chunk whose codec detail is
+        // complete in its first packets: the quick pass exits early inside
+        // that first chunk while the full pass reads to EOF, so which pass a
+        // trail came from is visible in where its count stops climbing.
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        let size = u64::try_from(m2ts.len()).expect("the fixture is far under u64::MAX");
+        let chunk = u64::try_from(DATA_SIZE).expect("the read chunk is far under u64::MAX");
+        let disc = tripping_disc(m2ts, None);
+        let trail = |mode| {
+            let mut events: Vec<(String, u64, u64)> = Vec::new();
+            let mut collect =
+                |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
+            drop(
+                BdRom::open_with(
+                    &disc,
+                    mode,
+                    ScanOptions::default(),
+                    None,
+                    &mut collect,
+                    &never_cancel(),
+                )
+                .expect("the healthy mock disc scans"),
+            );
+            events
+        };
+        let climbs = |events: &[(String, u64, u64)]| {
+            events.windows(2).all(|pair| {
+                pair.first().is_none_or(|(_, a, _)| pair.get(1).is_none_or(|(_, b, _)| a <= b))
+            })
+        };
+
+        // `Codecs`: the quick pass reports, against the same whole-source
+        // budget the full pass would have used.
+        let codecs = trail(ScanMode::Codecs);
+        assert!(codecs.iter().all(|(file, _, total)| file == "00000.M2TS" && *total == size));
+        assert_eq!(codecs.first().map(|(_, done, _)| *done), Some(0));
+        assert!(climbs(&codecs), "the count never goes backwards");
+        // The pass stops reading long before EOF — its last read event is
+        // still inside the first full-pass chunk…
+        let last_read = codecs.iter().rev().nth(1).map(|(_, done, _)| *done);
+        assert!(last_read.is_some_and(|done| done < chunk), "the quick pass exits early");
+        // …and the file-boundary snap is what carries the display to 100%.
+        assert_eq!(codecs.last().map(|(_, done, _)| *done), Some(size));
+
+        // `Full`: the quick pass ahead of the measurement pass stays silent.
+        // Its first read would be a 16 KiB quick chunk followed by its own
+        // snap to 100%; the trail instead opens on a full-pass chunk and
+        // climbs to 100% once, so nothing of it reaches the caller.
+        let full = trail(ScanMode::Full);
+        assert!(full.iter().all(|(file, _, total)| file == "00000.M2TS" && *total == size));
+        assert_eq!(full.first().map(|(_, done, _)| *done), Some(0));
+        assert_eq!(full.get(1).map(|(_, done, _)| *done), Some(chunk));
+        assert!(climbs(&full), "the count never restarts");
+        assert_eq!(full.last().map(|(_, done, _)| *done), Some(size));
     }
 
     // ── cooperative cancellation ─────────────────────────────────────────────
