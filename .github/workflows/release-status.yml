@@ -137,11 +137,14 @@ jobs:
 
           # Cloudsmith deb/rpm — anonymous public API. Cloudsmith stores the packaging-
           # revisioned version (e.g. 1.2.0-1), so match the version BASE (strip -<revision>),
-          # NOT a bare version: query. Expect 4 (deb+rpm x2 arch). Retry a transient failure.
+          # NOT a bare version: query. The bdinfo-rs-gui packages share this repository and
+          # an unanchored name search matches by substring, so anchor the exact name
+          # (name:^bdinfo-rs$) and re-check it in jq, like the GUI row below. Expect 4
+          # (deb+rpm x2 arch). Retry a transient failure.
           cs="?"; i=0
           while [ "$i" -lt 3 ]; do
-            cs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
-              | jq --arg v "$ver" '[.[] | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
+            cs=$(curl -sS -G "https://api.cloudsmith.io/v1/packages/bdinfo-rs/bdinfo-rs/" --data-urlencode "query=name:^bdinfo-rs$ version:$ver*" --data-urlencode "page_size=100" 2>/dev/null \
+              | jq --arg v "$ver" '[.[] | select(.name == "bdinfo-rs") | select((.version | sub("-[0-9]+$"; "")) == $v)] | length' 2>/dev/null || echo "?")
             { [ "$cs" != "?" ] && [ -n "$cs" ]; } && break
             i=$((i+1)); sleep 2
           done
