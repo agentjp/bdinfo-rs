@@ -57,11 +57,25 @@ use crate::error::BdError;
 use crate::primitives::Pid;
 use crate::stream::{StreamKind, TsStream, TsStreamType};
 
-/// Read-chunk size (5 MiB) for each underlying read. The packet state machine
-/// is chunk-boundary-agnostic, so the value affects only read granularity
-/// (tests drive a small size to exercise the cross-chunk deferral paths) —
-/// plus failure granularity: a read error voids only its own chunk, so the
-/// demux keeps everything up to the last completed chunk boundary.
+/// Read-chunk size (256 KiB) for each underlying full-pass read. The packet
+/// state machine is chunk-boundary-agnostic, so the value changes no healthy
+/// output byte (tests drive a small size to exercise the cross-chunk deferral
+/// paths) — it sets read granularity, and with it three damaged-media bounds:
+/// how long one blocking read can stall (a stalled optical request spans the
+/// chunk's 128 optical sectors of in-device retries), how stale the per-chunk cancel
+/// poll ([`fill_buffer`]) can get, and how many bytes a failed read discards
+/// (a read error voids only its own chunk, so the demux keeps everything up
+/// to the last completed chunk boundary). Tunable within those trade-offs.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const DATA_SIZE: usize = 262_144;
+
+/// Read-chunk size (5 MiB) for each underlying full-pass read on
+/// `wasm32-unknown-unknown`. The browser read seam pays one synchronous
+/// `FileReaderSync` round trip per read call, so the wasm build keeps the
+/// large chunk (20× fewer calls than the native 256 KiB); browser reads of
+/// damaged media return promptly (a thrown exception, not an in-device
+/// retry), so the native chunk's stall/cancel/loss bounds buy nothing there.
+#[cfg(target_arch = "wasm32")]
 pub(crate) const DATA_SIZE: usize = 5_242_880;
 
 /// Size of the fixed `PAT`/`PMT` section-assembly buffers.
@@ -2965,7 +2979,8 @@ mod tests {
     fn a_mid_scan_cancel_stops_at_the_next_chunk_boundary() {
         // A stream one byte longer than a read chunk; serving the first chunk
         // trips the flag, so the scan aborts with `ScanCancelled` before the
-        // second chunk and the tail is never read.
+        // second chunk and the tail is never read — a cancel raised while a
+        // chunk is in flight takes effect within that one chunk's bytes.
         let cancel = AtomicBool::new(false);
         let bytes = vec![0_u8; DATA_SIZE.wrapping_add(1)];
         let mut reader = TripAfterServing { inner: Cursor::new(bytes), cancel: &cancel };
@@ -2974,7 +2989,46 @@ mod tests {
         let err = file.scan_cancellable(&mut reader, &mut pls, true, &cancel).unwrap_err();
         assert_eq!(err.to_string(), "scan cancelled");
         let consumed = usize::try_from(reader.inner.position()).expect("position fits");
-        assert!(consumed < reader.inner.get_ref().len(), "the tail is never read");
+        assert!(consumed <= DATA_SIZE, "at most the in-flight chunk is read after the trip");
+    }
+
+    /// A reader recording the destination length of each read call — how the
+    /// chunk size a scan entry selected reaches the underlying source.
+    struct SizeRecorder {
+        inner: Cursor<Vec<u8>>,
+        sizes: Vec<usize>,
+    }
+
+    impl Read for SizeRecorder {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.sizes.push(buf.len());
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn the_default_scan_entries_read_the_full_pass_in_data_size_chunks() {
+        // The payload does not matter here — only the destination length the
+        // demux hands the reader, which for a fresh chunk is the whole chunk.
+        // Both default entries (`scan` and `scan_cancellable`) must select the
+        // same size: the disc-level open drives the cancellable one, and the
+        // plain one must not diverge from it.
+        let bytes = vec![0_u8; 4096];
+        let first_size = |cancellable: bool| {
+            let mut recorder =
+                SizeRecorder { inner: Cursor::new(bytes.clone()), sizes: Vec::new() };
+            let mut file = TsStreamFile::new("00000.m2ts");
+            let mut pls = [empty_playlist()];
+            if cancellable {
+                file.scan_cancellable(&mut recorder, &mut pls, true, &AtomicBool::new(false))
+                    .expect("scan");
+            } else {
+                file.scan(&mut recorder, &mut pls, true).expect("scan");
+            }
+            recorder.sizes.first().copied()
+        };
+        assert_eq!(first_size(false), Some(DATA_SIZE));
+        assert_eq!(first_size(true), Some(DATA_SIZE));
     }
 
     // ── the sequential scan strategy (the wasm32 build's path) ──────────────
