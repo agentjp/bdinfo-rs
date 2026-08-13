@@ -195,7 +195,9 @@ pub struct TsStreamDiagnostics {
     pub bytes: u64,
     /// Transport packets in this window.
     pub packets: u64,
-    /// Window start time in seconds (`PTS / 90000`).
+    /// Time in seconds (`PTS / 90000`) of the frame that closed this window:
+    /// one entry is emitted per completed window, stamped with its closing
+    /// frame's time, not its start.
     pub marker: f64,
     /// Window length in seconds (the PTS delta `/ 90000`).
     pub interval: f64,
