@@ -2387,12 +2387,13 @@ mod tests {
     use super::{
         ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID,
         PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanOptions,
-        ScanProgress, ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
-        build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
-        clip_has_50hz_video, clip_stem, collect_backups, directory_size, fixtures,
-        has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
-        resolve_playlist_streams, scan_stream_files, scan_total, select_reference,
-        stream_content_encrypted, stream_summary, unit_shows_encryption, walked_disc_root,
+        ScanProgress, ScanReport, ScanStage, Sink, TsPlaylistFile, TsStreamFile,
+        backup_subdir_files, build_chapter_summaries, build_clip_summaries, build_sorted_streams,
+        clear_measurements, clip_has_50hz_video, clip_stem, collect_backups, directory_size,
+        fixtures, has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file,
+        read_file_capped, resolve_playlist_streams, scan_stream_files, scan_total,
+        select_reference, stream_content_encrypted, stream_summary, unit_shows_encryption,
+        walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::clpi::clips::build_clpi;
@@ -4918,11 +4919,23 @@ mod tests {
         m2ts
     }
 
-    /// A minimal one-playlist mock disc around `m2ts`: one 100 s play item
-    /// (`00000.M2TS`, clip info `clip`) with chapter marks at 0 s and 45 s.
-    /// The stream file's reader fails once `serve` bytes have been read
-    /// (`None` = healthy); every other file is intact.
-    fn tripping_disc_with(clip: Vec<u8>, m2ts: Vec<u8>, serve: Option<usize>) -> MockDir {
+    /// One clip of a [`tripping_disc_of`] tree: `stem` names the `{stem}.clpi`
+    /// / `{stem}.m2ts` pair carrying `clip` and `m2ts` bytes, and the stream
+    /// file's reader fails once `serve` bytes have been read (`None` =
+    /// healthy).
+    struct MockClip {
+        stem: &'static str,
+        clip: Vec<u8>,
+        m2ts: Vec<u8>,
+        serve: Option<usize>,
+    }
+
+    /// A mock disc over `clips` carrying one `*.mpls` per `playlists` entry:
+    /// entry `(stem, items)` becomes `{stem}.mpls`, playing each named clip
+    /// stem as its own 100 s play item, with chapter marks at 0 s and 45 s of
+    /// the first item. Every metadata file is intact — a clip's own `serve` is
+    /// the only damage on the disc.
+    fn tripping_disc_of(clips: &[MockClip], playlists: &[(&str, &[&str])]) -> MockDir {
         let trip = Trip::new(usize::MAX);
         let file = |name: &str, bytes: Vec<u8>, fail_read_at: Option<usize>| MockFile {
             name: name.to_owned(),
@@ -4937,27 +4950,45 @@ mod tests {
             files,
             trip: trip.clone(),
         };
+        let clip_info: Vec<MockFile> = clips
+            .iter()
+            .map(|clip| file(&format!("{}.clpi", clip.stem), clip.clip.clone(), None))
+            .collect();
+        let streams: Vec<MockFile> = clips
+            .iter()
+            .map(|clip| file(&format!("{}.m2ts", clip.stem), clip.m2ts.clone(), clip.serve))
+            .collect();
+        let playlist_files: Vec<MockFile> = playlists
+            .iter()
+            .map(|&(stem, items)| {
+                file(
+                    &format!("{stem}.mpls"),
+                    mpls_items(items, 0, 4_500_000, &[], &[], &[(1, 0, 0), (1, 0, 2_025_000)]),
+                    None,
+                )
+            })
+            .collect();
         dir(
             "disc",
             vec![dir(
                 "BDMV",
                 vec![
-                    dir("CLIPINF", vec![], vec![file("00000.clpi", clip, None)]),
-                    dir(
-                        "PLAYLIST",
-                        vec![],
-                        vec![file(
-                            "00000.mpls",
-                            mpls("00000", 0, 4_500_000, &[(1, 0, 0), (1, 0, 2_025_000)]),
-                            None,
-                        )],
-                    ),
-                    dir("STREAM", vec![], vec![file("00000.m2ts", m2ts, serve)]),
+                    dir("CLIPINF", vec![], clip_info),
+                    dir("PLAYLIST", vec![], playlist_files),
+                    dir("STREAM", vec![], streams),
                 ],
                 vec![],
             )],
             vec![],
         )
+    }
+
+    /// A minimal one-playlist mock disc around `m2ts`: one 100 s play item
+    /// (`00000.M2TS`, clip info `clip`) with chapter marks at 0 s and 45 s.
+    /// The stream file's reader fails once `serve` bytes have been read
+    /// (`None` = healthy); every other file is intact.
+    fn tripping_disc_with(clip: Vec<u8>, m2ts: Vec<u8>, serve: Option<usize>) -> MockDir {
+        tripping_disc_of(&[MockClip { stem: "00000", clip, m2ts, serve }], &[("00000", &["00000"])])
     }
 
     /// [`tripping_disc_with`] over a video-only clip (AVC on PID 0x1011).
@@ -5253,6 +5284,151 @@ Total Bitrate:  0.00 Mbps
                 prop_assert!(row.max_1sec_rate.is_finite() && row.max_1sec_rate >= 0.0);
             }
         }
+    }
+
+    // ── subset selection over damaged media ─────────────────────────────────
+
+    #[test]
+    fn a_narrowed_selection_leaves_the_defective_playlists_rows_unchanged() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        // Three playlists over DISTINCT clips — no clip is shared, so nothing
+        // the demux writes in place reaches another playlist — and the first
+        // clip's reader dies at the read-chunk boundary.
+        let video = || clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let m2ts = || two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        let disc = tripping_disc_of(
+            &[
+                MockClip { stem: "00000", clip: video(), m2ts: m2ts(), serve: Some(DATA_SIZE) },
+                MockClip { stem: "00001", clip: video(), m2ts: m2ts(), serve: None },
+                MockClip { stem: "00002", clip: video(), m2ts: m2ts(), serve: None },
+            ],
+            &[("00000", &["00000"]), ("00001", &["00001"]), ("00002", &["00002"])],
+        );
+        let scan = |selection: Option<&BTreeSet<String>>| {
+            BdRom::open_resilient_with(
+                &disc,
+                ScanMode::Full,
+                ScanOptions::default(),
+                selection,
+                &mut |_| {},
+                &never_cancel(),
+            )
+            .expect("resilient scan continues")
+        };
+        let selection = |names: &[&str]| -> BTreeSet<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+        let playlist = |report: &ScanReport, name: &str| -> PlaylistSummary {
+            report
+                .bdrom
+                .playlists
+                .iter()
+                .find(|summary| summary.name == name)
+                .expect("every playlist is summarised")
+                .clone()
+        };
+        // The same damaged disc opened three ways: no selection at all, a
+        // selection naming every clip, and a true subset that keeps the
+        // defective playlist and one other while deselecting the third.
+        let whole = scan(None);
+        let every = scan(Some(&selection(&["00000.M2TS", "00001.M2TS", "00002.M2TS"])));
+        let subset = scan(Some(&selection(&["00000.M2TS", "00001.M2TS"])));
+
+        // The defective playlist is measured-then-damaged, not merely absent:
+        // chapter 1 carries the head frames' rate, chapter 2 is the zero row
+        // the death at the boundary leaves behind.
+        let defective = playlist(&whole, "00000.MPLS");
+        assert!(defective.chapters.first().unwrap().avg_rate > 0.0);
+        assert_eq!(defective.chapters.get(1).unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
+        assert!(defective.clips.first().unwrap().payload_bytes > 0);
+
+        // The three-way assertion: a selected playlist's own rows are a pure
+        // function of its own clips, so narrowing the selection changes
+        // nothing about them — chapter rows, FILES rows, presented streams,
+        // and the playlist totals are identical across all three opens…
+        assert_eq!(playlist(&every, "00000.MPLS"), defective);
+        assert_eq!(playlist(&subset, "00000.MPLS"), defective);
+        // …and so is the failure the damage records.
+        for report in [&whole, &every, &subset] {
+            assert_eq!(report.errors.len(), 1);
+            let recorded = report.errors.first().unwrap();
+            assert_eq!(
+                (recorded.stage, recorded.file.as_str()),
+                (ScanStage::StreamFile, "00000.m2ts")
+            );
+        }
+
+        // What the narrowing DOES change, so the assertion above is over a
+        // genuinely narrowed scan rather than a selection the scan ignored:
+        // the deselected third playlist is never read and keeps only its
+        // metadata, while the second selected one measures exactly as it does
+        // in the two full opens.
+        let third = playlist(&whole, "00002.MPLS");
+        assert!(third.chapters.first().unwrap().avg_rate > 0.0);
+        assert_eq!(playlist(&every, "00002.MPLS"), third);
+        let deselected = playlist(&subset, "00002.MPLS");
+        assert_eq!(deselected.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
+        assert!(deselected.clips.first().unwrap().streams.is_empty());
+        assert_eq!(playlist(&subset, "00001.MPLS"), playlist(&whole, "00001.MPLS"));
+    }
+
+    #[test]
+    fn an_earlier_clip_without_diagnostics_shifts_the_chapter_rows_past_the_boundary() {
+        // A two-clip playlist (100 s per clip, 200 s total; chapter marks at
+        // 0 s and 45 s of the first clip) where one clip's reader dies on its
+        // first byte — that clip contributes no diagnostics at all — and the
+        // other carries frames at 1/2/3 s. Each diagnostics entry closes at
+        // the NEXT frame's timestamp, so the surviving clip contributes two
+        // 100-byte entries, at clip seconds 2 and 3. Which of the two clips is
+        // damaged decides the chapter table's shape.
+        let video = || clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let frames = || two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[]);
+        let rows = |first: Option<usize>, second: Option<usize>| {
+            let disc = tripping_disc_of(
+                &[
+                    MockClip { stem: "00000", clip: video(), m2ts: frames(), serve: first },
+                    MockClip { stem: "00001", clip: video(), m2ts: frames(), serve: second },
+                ],
+                &[("00000", &["00000", "00001"])],
+            );
+            BdRom::open_resilient(&disc, ScanMode::Full)
+                .expect("resilient scan continues")
+                .bdrom
+                .playlists
+                .first()
+                .unwrap()
+                .chapters
+                .clone()
+        };
+
+        // The EARLIER clip missing: the walk steps over it without advancing
+        // the playlist position, so the surviving clip's first entry — at
+        // playlist second 102, far past the 45 s mark — is what closes
+        // chapter 1, and its second entry closes chapter 2. Both rows measure
+        // an entry; the accounting is shifted across the boundary, not lost.
+        let shifted = rows(Some(0), None);
+        assert_eq!(shifted.len(), 2);
+        let first = shifted.first().unwrap();
+        assert!(first.avg_rate > 0.0);
+        assert_eq!(first.max_frame_size.to_bits(), 100.0_f64.to_bits());
+        assert_eq!(first.max_frame_time.to_bits(), 102.0_f64.to_bits());
+        let second = shifted.get(1).unwrap();
+        assert!(second.avg_rate > 0.0);
+        assert_eq!(second.max_frame_time.to_bits(), 103.0_f64.to_bits());
+
+        // The mirror image — the LATER clip missing — is the collapse the
+        // partial-retention tests pin instead: both entries land in chapter 1,
+        // inside its own span, and chapter 2 is a zero row.
+        let collapsed = rows(None, Some(0));
+        let first = collapsed.first().unwrap();
+        assert!(
+            first.avg_rate > shifted.first().unwrap().avg_rate,
+            "chapter 1 absorbs both entries here, only the shifted one there"
+        );
+        assert_eq!(first.max_frame_time.to_bits(), 2.0_f64.to_bits());
+        let second = collapsed.get(1).unwrap();
+        assert_eq!(second.avg_rate.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(second.max_frame_size.to_bits(), 0.0_f64.to_bits());
     }
 
     // ── scan progress + selection ───────────────────────────────────────────
