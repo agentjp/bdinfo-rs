@@ -156,9 +156,8 @@ fn error_lines(errors: &[ScanError]) -> Vec<String> {
 
 /// The no-op progress sink.
 ///
-/// [`scan_structural`] always uses it (the bounded `Codecs` pass reports no
-/// progress), and a [`scan_measured`] caller that wants no live progress —
-/// the golden ties — passes it too.
+/// [`scan_structural`] always uses it, and a [`scan_measured`] caller that
+/// wants no live progress — the golden ties — passes it too.
 pub const fn no_progress(_: ScanProgress<'_>) {}
 
 /// Runs the **structural** scan over `input` (fast — no M2TS demux) and returns
