@@ -908,6 +908,70 @@ fn list_on_an_encrypted_disc_prints_the_table_with_the_notice() {
     assert!(stderr.contains("AACS-encrypted"), "the notice still prints: {stderr}");
 }
 
+// --- the multi-playlist disc: three playlists over three distinct clips ---
+//
+// `BigBuckBunny` is a one-playlist, one-clip disc, so nothing about it can
+// distinguish a selection from the whole disc — `--list`, `-m 00000` and
+// `--whole` all name the same lone row. `MultiPlaylist` is the disc where the
+// listing, the selection and the per-playlist accounting can disagree: three
+// playlists, three clip stems, one playlist spanning two of them. It is
+// deliberately NOT pinned to a golden — the report's byte contract stays
+// BigBuckBunny's one golden per switch — so this checks the flow, not the format.
+
+#[test]
+fn the_multi_playlist_disc_lists_three_playlists_and_scans_them_clean() {
+    let disc = real_fixture("MultiPlaylist");
+
+    let list =
+        bdinfo_rs().args([disc.as_os_str(), "--list".as_ref()]).output().expect("spawn bdinfo-rs");
+    assert!(list.status.success(), "list failed: {}", String::from_utf8_lossy(&list.stderr));
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    // Longest playlist first, and `00001.MPLS` in a group of its own because it
+    // is the one playlist sharing no clip with the others.
+    for row in [
+        "1   1      00002.MPLS     00:00:50",
+        "2   1      00000.MPLS     00:00:30",
+        "3   2      00001.MPLS     00:00:25",
+    ] {
+        assert!(stdout.contains(row), "the table is missing {row:?}: {stdout}");
+    }
+    assert!(!stdout.contains("\n4   "), "the table lists exactly three playlists: {stdout}");
+
+    let dest = std::env::temp_dir().join(format!("bdinfo-rs-multi-{}", std::process::id()));
+    std::fs::create_dir_all(&dest).expect("create dest");
+    let output = bdinfo_rs()
+        .args([disc.as_os_str(), dest.as_os_str(), "-w".as_ref()])
+        .output()
+        .expect("spawn bdinfo-rs");
+    let report = std::fs::read(dest.join("BDINFO.MultiPlaylist.txt")).expect("read the report");
+    let _ = std::fs::remove_dir_all(&dest).is_ok();
+    // Exit 0, not the resilient scan's 3: every file on this disc reads clean.
+    assert_eq!(output.status.code(), Some(0), "scan: {}", String::from_utf8_lossy(&output.stderr));
+
+    let text = String::from_utf8(report).expect("the report is valid UTF-8");
+    for section in ["PLAYLIST: 00000.MPLS", "PLAYLIST: 00001.MPLS", "PLAYLIST: 00002.MPLS"] {
+        assert!(text.contains(section), "the report is missing {section:?}: {text}");
+    }
+    for clip in ["00011.M2TS", "00022.M2TS", "00033.M2TS"] {
+        assert!(text.contains(clip), "the report is missing clip {clip:?}: {text}");
+    }
+    assert!(!text.contains("WARNING"), "an intact disc reports no warnings: {text}");
+
+    // The stream files carry real transport packets, so the video row's rate is
+    // measured rather than the flat zero a zero-filled `*.m2ts` would leave. The
+    // value itself is not pinned — only that the measurement happened.
+    let video = text
+        .lines()
+        .find(|line| line.starts_with("MPEG-4 AVC Video"))
+        .expect("the report names the video codec");
+    let rate: u32 = video
+        .split_whitespace()
+        .nth(3)
+        .and_then(|kbps| kbps.replace(',', "").parse().ok())
+        .expect("the video row carries a bitrate");
+    assert!(rate > 0, "the scan measured a video bitrate: {video}");
+}
+
 #[test]
 fn a_real_list_shows_the_filtered_table_without_writing_a_report() {
     let disc = real_fixture("BigBuckBunny");

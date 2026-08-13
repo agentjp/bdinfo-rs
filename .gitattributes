@@ -22,6 +22,7 @@ fuzz/corpus/** binary
 # still diffing as text). Without these, `* text=auto eol=lf` above would clobber
 # both on checkout.
 crates/bdinfo-rs/tests/fixtures/BigBuckBunny/** binary
+crates/bdinfo-rs/tests/fixtures/MultiPlaylist/** binary
 crates/bdinfo-rs/tests/fixtures/*.iso binary
 crates/bdinfo-rs/tests/fixtures/golden/*.txt -text diff
 
