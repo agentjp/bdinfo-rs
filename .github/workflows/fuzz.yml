@@ -1007,6 +1007,34 @@ jobs:
           else {
             "live only in this run's artifacts, which expire 90 days after it"
           }
+          # Promotion is SELECTIVE, so the recipe names targets rather than
+          # globbing `fuzz-corpus-*`: that glob takes every artifact the run
+          # uploaded, the units it adds to the committed seeds are permanent,
+          # and a low-gain target costs bytes out of all proportion to the code
+          # it reaches. Measured
+          # 2026-08-13 on the pass that reported 3,907 edges across 14 legs —
+          # the four targets whose best leg cleared 150 edges carried 98.3% of
+          # that total, while three listed-but-smaller ones would have added
+          # 12,022 units for 65 edges between them. The cut below sits in the
+          # empty band between those two groups (153 and 30 are its
+          # neighbours), so it does not balance on a boundary.
+          $promoteCut = 100
+          # One entry per TARGET however many of its arches gained: both arch
+          # artifacts are wanted, and `fuzz-corpus-<target>-*` asks for both in
+          # one pattern.
+          $promote = @($gainers | Where-Object { $_.cov_gained -ge $promoteCut } |
+            ForEach-Object { $_.target } | Sort-Object -Unique)
+          if ($promote.Count -gt 0) {
+            $promotePatterns = (($promote | ForEach-Object { "--pattern 'fuzz-corpus-$_-*'" }) -join ' ')
+            $promoteLead = "To promote them into the regression set, naming only the $($promote.Count) target(s) whose best leg gained $promoteCut edges or more:"
+          }
+          else {
+            # An empty pattern list would make `gh run download` take every
+            # artifact, which is the one thing this block exists to avoid, so
+            # the command carries a placeholder instead.
+            $promotePatterns = "--pattern 'fuzz-corpus-<target>-*'"
+            $promoteLead = "No target's best leg gained $promoteCut edges or more. To promote one anyway, name it:"
+          }
           $title = "Fuzz corpus: $totalGained edge(s) beyond the committed seeds"
           $body = @(
             "The discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They $whereTheyLive; nothing is committed automatically."
@@ -1027,12 +1055,14 @@ jobs:
             ''
             "Latest run: $env:RUN_URL"
             ''
-            'To promote them into the regression set:'
+            $promoteLead
             ''
             '```sh'
-            "gh run download $($env:RUN_URL -replace '.*/', '') --pattern 'fuzz-corpus-*' --dir /tmp/grown"
+            "gh run download $($env:RUN_URL -replace '.*/', '') $promotePatterns --dir /tmp/grown"
             '# then copy each /tmp/grown/fuzz-corpus-<target>-<arch>/* into fuzz/corpus/<target>/ and open a PR'
             '```'
+            ''
+            "That cut is a guideline for what earns a pull request, not the one-edge condition this issue fires on — add ``--pattern 'fuzz-corpus-<target>-*'`` for any other row above you want. One pattern per target takes both arches, which is the point: unzipping them into one directory collapses the units they share."
             ''
             'This is one rolling issue, edited after every pass. It closes itself once every leg measures a gain of exactly zero — for a target that is not yet saturated, promoting the units above lowers its gain rather than ending it, because the next pass explores onward from what was promoted.'
           ) | Where-Object { $null -ne $_ }
