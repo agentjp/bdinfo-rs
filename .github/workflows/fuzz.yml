@@ -38,13 +38,22 @@ name: fuzz
 # existing budget, which is the direction the cadence measurement below points;
 # raising FUZZ_SECONDS instead would push against it.
 #
-# NIGHTLY rather than weekly, deliberately: GitHub evicts a cache unused for 7
-# days, so a weekly schedule rides the eviction boundary and would silently
-# reset discovery to the seeds — and this repository's cron fires 2-4 h late
-# every day (sweep.yml's header carries the measurement), which is exactly the
-# jitter that turns "rides the boundary" into "crossed it". Fuzzing has
-# diminishing returns within a run and compounding returns across runs, so
-# frequent short runs beat rare long ones once the corpus persists.
+# CADENCE: an unconditional nightly FLOOR plus extra slots selected at run time
+# by the FUZZ_SCHEDULE repository variable, so retuning how often the pass runs
+# is a variable edit rather than a pull request. What forces the frequency is
+# not the fuzzer but the corpus cache below. This repository's Actions cache
+# store sits at 9.9-11.4 GB against GitHub's 10 GB limit, so LRU eviction runs
+# whenever merges write new build caches, and an entry touched once a day is the
+# LRU tail: measured 2026-08-07..12, the accumulated corpus compounded from
+# 30,373 to 47,303 units beyond the committed seeds over four quiet days, and
+# one merge-heavy day (fourteen dependency pull requests merged inside two
+# hours) erased it — the next pass restored 3,461. An entry re-saved every 3 h
+# is never the tail. Fuzzing independently has diminishing returns within a run
+# and compounding returns across runs, so frequent short runs beat rare long
+# ones once the corpus persists; and a weekly schedule would fail outright,
+# since GitHub evicts a cache unused for 7 days and this repository's cron fires
+# 2-4 h late every day (sweep.yml's header carries the measurement) — the jitter
+# that turns "rides the eviction boundary" into "crossed it".
 #
 # CORPUS GROWTH IS HUMAN-GATED: a leg that ends with more units than it
 # restored uploads them as an artifact and the report job names the count in one
@@ -61,14 +70,31 @@ on:
   push:
     tags: ['v*']
   schedule:
-    # Nightly, and set EARLY on purpose to compensate for a delay this
-    # repository does not control: measured over n=11 days, every cron here
-    # fired 2 h 17 m to 4 h 00 m late (sweep.yml's header carries the
-    # measurement and the evidence that it tracks the day, not the workflow).
-    # Asking for 21:11 UTC therefore lands the run at roughly 23:30-01:10 UTC —
-    # clear of the 05:37 sweep, whose ~20-job mutation fleet is the account's
-    # concurrent-job ceiling, and clear of it even when both slip.
-    - cron: "11 21 * * *"
+    # Every candidate slot is declared here and only some of them fuzz: GitHub
+    # resolves `on.schedule` from the default branch, where a repository
+    # variable cannot reach, so the selection happens in the `targets` job's
+    # `if` below and FUZZ_SCHEDULE holds the extra slots to honour. 21:11 is the
+    # floor and fires whatever the variable says. Each string is compared
+    # char-for-char against github.event.schedule, so these lines, that
+    # condition's literals and the variable's elements must stay byte-identical.
+    #
+    # The hours are the REQUEST, not the firing time: measured over n=11 days,
+    # every cron here fired 2 h 17 m to 4 h 00 m late (sweep.yml's header
+    # carries the measurement and the evidence that it tracks the day, not the
+    # workflow). Asking for 21:11 UTC therefore lands that run at roughly
+    # 23:30-01:10 UTC. The 03:11 slot lands at roughly 05:15-07:10 and so
+    # overlaps the 05:37 daily sweep, whose ~20-job mutation fleet is the
+    # account's concurrent-job ceiling — accepted deliberately: the two queue
+    # against each other, which costs wall time, not runner minutes (unmetered
+    # on a public repository).
+    - cron: "11 0 * * *"
+    - cron: "11 3 * * *"
+    - cron: "11 6 * * *"
+    - cron: "11 9 * * *"
+    - cron: "11 12 * * *"
+    - cron: "11 15 * * *"
+    - cron: "11 18 * * *"
+    - cron: "11 21 * * *" # the floor
   workflow_dispatch:
     inputs:
       seconds:
@@ -110,6 +136,20 @@ jobs:
   # fuzz/Cargo.toml and a row there), not four.
   targets:
     name: read the target list
+    # THE SCHEDULE GATE for the whole pass — `deep` and `report` both need this
+    # job, so a slot this condition rejects skips all three. FUZZ_SCHEDULE is a
+    # JSON array of the cron strings declared above that are to fuzz; unset or
+    # empty, only the floor runs.
+    #
+    # The clause order is load-bearing, because GitHub expressions short-circuit
+    # `||`: tag pushes and dispatches pass before the variable is read at all,
+    # then the floor passes before fromJSON can reach it. A malformed
+    # FUZZ_SCHEDULE therefore reds only the extra slots' firings — visibly, in
+    # the run list — while the nightly floor keeps fuzzing.
+    if: >-
+      github.event_name != 'schedule' ||
+      github.event.schedule == '11 21 * * *' ||
+      contains(fromJSON(vars.FUZZ_SCHEDULE || '[]'), github.event.schedule)
     runs-on: ubuntu-latest
     outputs:
       list: ${{ steps.read.outputs.list }}
@@ -145,6 +185,13 @@ jobs:
     needs: [targets]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # A job-level block REPLACES the workflow's top-level one rather than adding
+    # to it, so `contents: read` is restated here beside the `actions: read`
+    # that the artifact fallback below needs to list and download this
+    # workflow's own artifacts — without it the checkout loses its token.
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -286,6 +333,47 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-i686-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-i686-
+
+      # THE CACHE'S BACKSTOP, because a cache entry is storage nobody promised:
+      # both lineages above can be evicted between passes (the header's cadence
+      # note carries the measurement), and every unit in them was also uploaded
+      # as a `fuzz-corpus-<target>-<arch>` artifact, which lives 90 days in a
+      # store the cache budget does not touch. Runs only when both restores came
+      # back empty, and before the seeding step below, so its `restored` count
+      # includes whatever this recovers.
+      #
+      # Queried per artifact NAME, not "the newest run's artifacts": a leg that
+      # found nothing new uploads nothing, so the newest run need not carry an
+      # artifact for every target and the newest one of a given name may be
+      # several passes old. Best-effort throughout — continue-on-error plus a
+      # tolerated failure on every call — because an API outage may cost this
+      # leg its head start but must never cost the leg.
+      #
+      # The trust model is the restores' one above, unchanged: these zips hold
+      # fuzzer INPUT BYTES that the harness parses, which is the operation the
+      # whole tier exists to attack, and only this workflow's own runs write
+      # them. Reading them back is therefore no more exposure than the cache is.
+      - name: Fall back to the newest corpus artifacts
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          [ -z "$(find "fuzz/accumulated/$TARGET" -type f -print -quit 2>/dev/null)" ] || exit 0
+          for arch in x86_64 i686; do
+            name="fuzz-corpus-$TARGET-$arch"
+            id=$(gh api "repos/$GH_REPO/actions/artifacts?name=$name&per_page=5" \
+              --jq '[.artifacts[] | select(.expired|not)][0].id' || true)
+            [ -n "$id" ] || continue
+            mkdir -p "fuzz/accumulated/$TARGET"
+            # upload-artifact zips a directory's CONTENTS, so this unpacks flat
+            # into the accumulated directory, which is the layout the seeding
+            # step and the cache path both expect.
+            gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > corpus-artifact.zip &&
+              unzip -oq corpus-artifact.zip -d "fuzz/accumulated/$TARGET" || true
+            rm -f corpus-artifact.zip
+          done
+          echo "$TARGET/$ARCH: $(find "fuzz/accumulated/$TARGET" -type f 2>/dev/null | wc -l) unit(s) recovered from artifacts"
 
       # What counts as an accumulated unit is decided by CONTENT, not by
       # filename: libFuzzer's merge (which `cargo fuzz cmin` runs) writes every
@@ -634,7 +722,12 @@ jobs:
   report:
     name: crash + growth issues
     needs: [targets, deep]
-    if: ${{ !cancelled() }}
+    # Keyed on `targets`, because a slot its schedule gate rejects skips the
+    # legs too: this job would then find no result artifacts, read that as
+    # "the accumulated corpus adds nothing over the committed seeds" and close
+    # the rolling growth issue. NOT keyed on `deep` — a night whose legs crash
+    # is the night the crash issues matter most.
+    if: ${{ !cancelled() && needs.targets.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
