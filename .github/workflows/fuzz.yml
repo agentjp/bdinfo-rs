@@ -185,6 +185,13 @@ jobs:
     needs: [targets]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # A job-level block REPLACES the workflow's top-level one rather than adding
+    # to it, so `contents: read` is restated here beside the `actions: read`
+    # that the artifact fallback below needs to list and download this
+    # workflow's own artifacts — without it the checkout loses its token.
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -326,6 +333,47 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-i686-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-i686-
+
+      # THE CACHE'S BACKSTOP, because a cache entry is storage nobody promised:
+      # both lineages above can be evicted between passes (the header's cadence
+      # note carries the measurement), and every unit in them was also uploaded
+      # as a `fuzz-corpus-<target>-<arch>` artifact, which lives 90 days in a
+      # store the cache budget does not touch. Runs only when both restores came
+      # back empty, and before the seeding step below, so its `restored` count
+      # includes whatever this recovers.
+      #
+      # Queried per artifact NAME, not "the newest run's artifacts": a leg that
+      # found nothing new uploads nothing, so the newest run need not carry an
+      # artifact for every target and the newest one of a given name may be
+      # several passes old. Best-effort throughout — continue-on-error plus a
+      # tolerated failure on every call — because an API outage may cost this
+      # leg its head start but must never cost the leg.
+      #
+      # The trust model is the restores' one above, unchanged: these zips hold
+      # fuzzer INPUT BYTES that the harness parses, which is the operation the
+      # whole tier exists to attack, and only this workflow's own runs write
+      # them. Reading them back is therefore no more exposure than the cache is.
+      - name: Fall back to the newest corpus artifacts
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          [ -z "$(find "fuzz/accumulated/$TARGET" -type f -print -quit 2>/dev/null)" ] || exit 0
+          for arch in x86_64 i686; do
+            name="fuzz-corpus-$TARGET-$arch"
+            id=$(gh api "repos/$GH_REPO/actions/artifacts?name=$name&per_page=5" \
+              --jq '[.artifacts[] | select(.expired|not)][0].id' || true)
+            [ -n "$id" ] || continue
+            mkdir -p "fuzz/accumulated/$TARGET"
+            # upload-artifact zips a directory's CONTENTS, so this unpacks flat
+            # into the accumulated directory, which is the layout the seeding
+            # step and the cache path both expect.
+            gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > corpus-artifact.zip &&
+              unzip -oq corpus-artifact.zip -d "fuzz/accumulated/$TARGET" || true
+            rm -f corpus-artifact.zip
+          done
+          echo "$TARGET/$ARCH: $(find "fuzz/accumulated/$TARGET" -type f 2>/dev/null | wc -l) unit(s) recovered from artifacts"
 
       # What counts as an accumulated unit is decided by CONTENT, not by
       # filename: libFuzzer's merge (which `cargo fuzz cmin` runs) writes every
