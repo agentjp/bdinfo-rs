@@ -67,7 +67,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2",
-    "binaryen": "^131.0.0",
+    "binaryen": "^132.0.0",
     "playwright-core": "^1",
     "typescript": "^7"
   }
