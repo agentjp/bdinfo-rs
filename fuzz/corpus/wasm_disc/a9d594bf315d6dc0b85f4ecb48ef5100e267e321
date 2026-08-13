@@ -1,0 +1,1 @@
+{"vomd":false,"errors":[{"file":"ISmpls","stage":"playlist","reason":{"kind":"unknownFileType","magic":"'X00"}},{"file":"a","stage":"playlist","reason":{"kind":"unknownFileType","magic":"XXXX000"}},{"file":"I","stage":"playlist","reason":{"kind":"unknownFileType","magic":"'XXX0000"}},{"reason":{"kind":"unknownFileType","magic":"XXXX0003"}}}]}
