@@ -852,10 +852,15 @@ jobs:
           # bytes, so the duplicate collapses the moment both artifacts are
           # unzipped into one directory. The number is a review-queue signal, not
           # a distinct-unit count.
+          # Every leg of a run gets the same FUZZ_SECONDS and WORKERS, so any
+          # leg's copy is the whole run's budget. Read from the first because an
+          # empty $stats has no leg to read at all.
+          $seconds = @($stats).Count ? $stats[0].seconds : 0
+          $workers = @($stats).Count ? $stats[0].workers : 0
           @(
             '## Discovery pass'
             ''
-            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target per arch across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup). Those units reach $totalGained edge(s) the committed seeds alone do not."
+            "Budget ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup). Those units reach $totalGained edge(s) the committed seeds alone do not."
             ''
             '| target | arch | seeds | restored | new | seed cov | cov | gained | ft | exec/s |'
             '|---|---|---|---|---|---|---|---|---|---|'
@@ -944,9 +949,13 @@ jobs:
           }
 
           # --- one rolling issue for corpus growth ---------------------------
-          # Tag runs do not save the corpus cache, so they have nothing to
-          # promote and must not touch this issue.
-          if ($env:SAVES_CORPUS -ne 'true') { exit 0 }
+          # Refreshed by every event that files issues, a release tag included:
+          # a tag leg uploads the same `fuzz-corpus-<target>-<arch>` artifact
+          # every other leg uploads (that step carries no event condition), so it
+          # holds the same promotable units. Declining to SAVE a corpus cache is
+          # a separate fact about where those units survive afterwards — it is
+          # what the body's wording below keys on — and says nothing about
+          # whether there is anything to promote.
           gh label create fuzz-corpus --color 0e8a16 --description 'Fuzz corpus growth awaiting review' --force | Out-Null
           $open = gh issue list --state open --label fuzz-corpus --json number --jq '.[0].number'
           # KEYED ON COVERAGE, NOT ON UNIT COUNT, because a unit count can never
@@ -981,9 +990,56 @@ jobs:
           $grownRows = @($gainers | Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
             "| ``$($_.target)`` | $($_.arch) | $($_.cov_gained) | $($_.seed_cov) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
           })
+          # This workflow's push trigger is `tags: ['v*']`, so a push here is
+          # always a release tag.
+          $trigger = switch ($env:GITHUB_EVENT_NAME) {
+            'push' { 'a release tag' }
+            'schedule' { 'a scheduled pass' }
+            default { 'a manual dispatch' }
+          }
+          # A tag run saves no corpus cache — a tag-scoped Actions cache entry
+          # cannot be restored by the master-scoped runs that would read it — so
+          # its units survive only as this run's artifacts and their 90-day
+          # retention. Whoever reads this issue after a tag pass has that long.
+          $whereTheyLive = if ($env:SAVES_CORPUS -eq 'true') {
+            "live in this workflow's per-target, per-arch Actions cache and are re-minimised against the committed seeds on every pass"
+          }
+          else {
+            "live only in this run's artifacts, which expire 90 days after it"
+          }
+          # Promotion is SELECTIVE, so the recipe names targets rather than
+          # globbing `fuzz-corpus-*`: that glob takes every artifact the run
+          # uploaded, the units it adds to the committed seeds are permanent,
+          # and a low-gain target costs bytes out of all proportion to the code
+          # it reaches. Measured
+          # 2026-08-13 on the pass that reported 3,907 edges across 14 legs —
+          # the four targets whose best leg cleared 150 edges carried 98.3% of
+          # that total, while three listed-but-smaller ones would have added
+          # 12,022 units for 65 edges between them. The cut below sits in the
+          # empty band between those two groups (153 and 30 are its
+          # neighbours), so it does not balance on a boundary.
+          $promoteCut = 100
+          # One entry per TARGET however many of its arches gained: both arch
+          # artifacts are wanted, and `fuzz-corpus-<target>-*` asks for both in
+          # one pattern.
+          $promote = @($gainers | Where-Object { $_.cov_gained -ge $promoteCut } |
+            ForEach-Object { $_.target } | Sort-Object -Unique)
+          if ($promote.Count -gt 0) {
+            $promotePatterns = (($promote | ForEach-Object { "--pattern 'fuzz-corpus-$_-*'" }) -join ' ')
+            $promoteLead = "To promote them into the regression set, naming only the $($promote.Count) target(s) whose best leg gained $promoteCut edges or more:"
+          }
+          else {
+            # An empty pattern list would make `gh run download` take every
+            # artifact, which is the one thing this block exists to avoid, so
+            # the command carries a placeholder instead.
+            $promotePatterns = "--pattern 'fuzz-corpus-<target>-*'"
+            $promoteLead = "No target's best leg gained $promoteCut edges or more. To promote one anyway, name it:"
+          }
           $title = "Fuzz corpus: $totalGained edge(s) beyond the committed seeds"
           $body = @(
-            "The nightly discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They live in this workflow's per-target, per-arch Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
+            "The discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They $whereTheyLive; nothing is committed automatically."
+            ''
+            "Refreshed by $trigger, fuzzing ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). A release tag fuzzes 600s where a scheduled pass fuzzes 300, so two refreshes are only comparable with each other when their budgets match."
             ''
             'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached. The total is summed over both pointer widths, which are different binaries: their edge counts are not the same edges and do not dedupe. The unit counts are summed the same way, but a unit found at both widths is the same bytes under the same sha1 filename, so those DO collapse when both artifacts are unzipped into one directory.'
             ''
@@ -999,12 +1055,14 @@ jobs:
             ''
             "Latest run: $env:RUN_URL"
             ''
-            'To promote them into the regression set:'
+            $promoteLead
             ''
             '```sh'
-            "gh run download $($env:RUN_URL -replace '.*/', '') --pattern 'fuzz-corpus-*' --dir /tmp/grown"
+            "gh run download $($env:RUN_URL -replace '.*/', '') $promotePatterns --dir /tmp/grown"
             '# then copy each /tmp/grown/fuzz-corpus-<target>-<arch>/* into fuzz/corpus/<target>/ and open a PR'
             '```'
+            ''
+            "That cut is a guideline for what earns a pull request, not the one-edge condition this issue fires on — add ``--pattern 'fuzz-corpus-<target>-*'`` for any other row above you want. One pattern per target takes both arches, which is the point: unzipping them into one directory collapses the units they share."
             ''
             'This is one rolling issue, edited after every pass. It closes itself once every leg measures a gain of exactly zero — for a target that is not yet saturated, promoting the units above lowers its gain rather than ending it, because the next pass explores onward from what was promoted.'
           ) | Where-Object { $null -ne $_ }
