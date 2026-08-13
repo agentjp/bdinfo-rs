@@ -266,8 +266,9 @@ jobs:
           Write-Host "Staged $tag with provenance. It is NOT live until approved (2FA):"
           Write-Host "  npm stage view @bdinfo-rs/wasm"
           Write-Host "  npm stage download @bdinfo-rs/wasm"
-          Write-Host "  npm stage approve @bdinfo-rs/wasm     (or npm stage reject)"
+          Write-Host "  npm stage list @bdinfo-rs/wasm        (copy the stage UUID)"
+          Write-Host "  npm stage approve <stage-uuid>        (or npm stage reject <stage-uuid>)"
           Write-Host "Or approve at npmjs.com -> the package -> Staged."
           if ($env:GITHUB_STEP_SUMMARY) {
-            "@bdinfo-rs/wasm $tag is STAGED (not live). Approve with: npm stage approve @bdinfo-rs/wasm (2FA), or on npmjs.com." | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            "@bdinfo-rs/wasm $tag is STAGED (not live). Approve with: npm stage list @bdinfo-rs/wasm -> npm stage approve <stage-uuid> (2FA), or on npmjs.com." | Add-Content -Path $env:GITHUB_STEP_SUMMARY
           }
