@@ -150,7 +150,8 @@ fn run_window(open: Option<PathBuf>) -> ExitCode {
     // exactly like the theme chips.
     .scale_factor(App::ui_scale)
     // "Auto" tracks the desktop live; while the initial scan runs, also drive
-    // the indeterminate progress-bar animation.
+    // the indeterminate progress-bar animation, and while the measured scan
+    // runs, the 1 s liveness tick.
     .subscription(App::subscription)
     .default_font(ui::UI)
     .font(
@@ -759,6 +760,10 @@ struct App {
     scan_cancel: Option<Arc<AtomicBool>>,
     /// When the current measured scan started.
     scan_start: Option<Instant>,
+    /// When the in-flight scan's last progress event arrived (the scan start
+    /// until the first one) — what the 1 s scanning tick measures the stall
+    /// hint against ([`Flow::tick`]).
+    last_progress: Option<Instant>,
     /// A one-line status (e.g. `Report saved to: …`), shown in the bottom bar.
     status: Option<String>,
     /// Whether the report view (over the panes) is showing.
@@ -818,6 +823,7 @@ impl Default for App {
             generation: 0,
             scan_cancel: None,
             scan_start: None,
+            last_progress: None,
             status: None,
             showing_report: false,
             notice: None,
@@ -1062,7 +1068,9 @@ enum Message {
     SettingsCancel,
     /// The OS reported (or changed) its light/dark setting.
     OsTheme(iced::theme::Mode),
-    /// An animation frame — advances the indeterminate "scanning" bar.
+    /// A display tick with no payload: per-frame while listing (advances the
+    /// indeterminate bar), ~1 s while scanning (re-reads the wall clock for
+    /// the elapsed readout and the stall hint).
     Tick,
     /// A pane splitter was dragged — resize the two panes it divides.
     PaneResized(pane_grid::ResizeEvent),
@@ -1227,6 +1235,7 @@ impl App {
             Message::ScanSelected => self.start_scan(),
             Message::Progress { generation, file, done, total } => {
                 let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+                self.last_progress = Some(Instant::now());
                 self.flow.progress(generation, file, done, total, elapsed);
                 Task::none()
             }
@@ -1234,6 +1243,10 @@ impl App {
                 self.on_finished(generation, report, errors, playlists)
             }
             Message::ScanFailed { generation, error } => {
+                // Logged whether or not the flow applies it: a late failure
+                // from a cancelled worker ("scan cancelled") is the log's
+                // only record that the blocked thread finally returned.
+                log::info!("scan failed: {error}");
                 self.flow = std::mem::take(&mut self.flow).scan_failed(generation, error);
                 Task::none()
             }
@@ -1269,7 +1282,7 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                self.pulse = progress::pulse_advance(self.pulse);
+                self.on_tick();
                 Task::none()
             }
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -1483,8 +1496,10 @@ impl App {
 
     /// The live subscriptions: the OS light/dark change feed, plus — only while
     /// the initial scan is in flight — a per-frame tick that animates the
-    /// indeterminate progress bar. The tick is off in every other state, so the
-    /// window is not redrawing continuously when idle.
+    /// indeterminate progress bar, and — only while the measured scan is — a
+    /// ~1 s wall-clock tick that keeps the elapsed readout and the stall hint
+    /// moving. The ticks are off in every other state, so the window is not
+    /// redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
         // Debug auto-open (`BDINFO_GUI_OPEN`/`_ISO`) rides a SUBSCRIPTION,
@@ -1539,6 +1554,15 @@ impl App {
         }));
         if self.flow.stage() == Stage::Listing {
             subs.push(iced::window::frames().map(|_| Message::Tick));
+        }
+        // The measured scan can run for hours, so its liveness tick is a 1 Hz
+        // wall-clock subscription — NOT the per-frame ticker above, whose ~60
+        // redraws a second are only acceptable for the brief listing stage.
+        // Each tick re-reads the clock in the Tick arm, so elapsed climbs and
+        // the stall hint appears even when a read stuck in drive-firmware
+        // retries emits no progress event for minutes.
+        if self.flow.stage() == Stage::Scanning {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         // While a column divider is held, follow the mouse globally — even off the
         // grab zone — so the drag tracks the cursor and ends on button release.
@@ -1646,6 +1670,19 @@ impl App {
         Task::none()
     }
 
+    /// Applies a display tick: advances the indeterminate bar's phase, and —
+    /// while the measured scan is in flight — re-reads the wall clock so the
+    /// elapsed readout and the stall hint move even when no progress event
+    /// arrives ([`Flow::tick`]).
+    fn on_tick(&mut self) {
+        self.pulse = progress::pulse_advance(self.pulse);
+        if self.flow.stage() == Stage::Scanning {
+            let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+            let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
+            self.flow.tick(elapsed, since_progress);
+        }
+    }
+
     /// Cancels the in-flight measured scan for real: trips the worker's
     /// cooperative stop flag — the demux exits at its next read chunk, freeing
     /// CPU and IO — then returns the UI to the table. The worker's late "scan
@@ -1653,6 +1690,7 @@ impl App {
     /// flow is no longer Scanning), so nothing else changes.
     fn cancel_scan(&mut self) -> Task<Message> {
         if let Some(cancel) = self.scan_cancel.take() {
+            log::info!("scan cancelled");
             cancel.store(true, Ordering::Relaxed);
         }
         self.flow = std::mem::take(&mut self.flow).cancel();
@@ -1672,10 +1710,18 @@ impl App {
         let was_scanning = self.flow.stage() == Stage::Scanning;
         self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
+            log::info!("scan finished: {} error(s) recorded", self.flow.report_errors().len());
+            for error in self.flow.report_errors() {
+                log::info!("scan error: {error}");
+            }
             self.notice = Some(flow::scan_notice(self.flow.report_errors().len()));
             if self.persisted.autosave_report {
                 self.autosave_report();
             }
+        } else {
+            // A completion the generation guard dropped — the user cancelled
+            // or restarted; the log still records the old worker returning.
+            log::info!("stale scan completion dropped");
         }
         Task::none()
     }
@@ -1787,6 +1833,16 @@ impl App {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.scan_start = Some(Instant::now());
+        self.last_progress = self.scan_start;
+        // The scan's opening log line: with the per-file lines and the
+        // terminal line below, gui.log can now place a field report's hang
+        // inside the scan (and name the file) rather than only before it.
+        log::info!(
+            "scan started: {} playlist(s), {} stream file(s), input {}",
+            selection.len(),
+            scan_files.len(),
+            input.display()
+        );
         self.status = None;
         self.showing_report = false;
         self.notice = None;
@@ -1828,6 +1884,9 @@ impl App {
                 }
                 last_sent = Some(Instant::now());
                 if file_changed {
+                    // One log line per stream file, from the worker thread —
+                    // after a freeze, the last of these names the stuck file.
+                    log::info!("scanning {}", progress.file);
                     progress.file.clone_into(&mut last_file);
                 }
                 let _ = sender.unbounded_send(Message::Progress {
@@ -2503,6 +2562,13 @@ impl App {
             "Drop to open the disc folder or .iso image.".to_owned()
         } else {
             self.status.clone().unwrap_or_else(|| match self.flow.stage() {
+                // A stalled scan (no progress event past the threshold —
+                // [`Flow::scan_stalled`]) says the drive is struggling with
+                // the named file; classic BDInfo's bar just freezes silently.
+                Stage::Scanning if self.flow.scan_stalled() => progress.map_or_else(
+                    || "Starting scan…".to_owned(),
+                    |pr| format!("Still reading {}…", pr.file()),
+                ),
                 Stage::Scanning => progress.map_or_else(
                     || "Starting scan…".to_owned(),
                     |pr| format!("Scanning {}…", pr.file()),
@@ -3646,6 +3712,7 @@ mod harness {
 mod interaction {
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use bdinfo_rs_gui::flow::Stage;
     use bdinfo_rs_gui::model::{Sort, SortColumn};
@@ -3758,6 +3825,32 @@ mod interaction {
             app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::fraction);
         assert_eq!(fraction, Some(0.5));
         assert!(sees(&app, "Scanning A.M2TS…"), "the lead line names the demuxing file");
+    }
+
+    #[test]
+    fn a_tick_keeps_elapsed_climbing_and_flags_a_stalled_read() {
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Progress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 1,
+            total: 2,
+        });
+        assert!(sees(&app, "Scanning A.M2TS…"));
+        // Re-date the scan start and the last progress event into the past —
+        // the wall time a stuck ReadFile would let pass with no event at all.
+        app.scan_start = Instant::now().checked_sub(Duration::from_secs(90));
+        app.last_progress = Instant::now().checked_sub(Duration::from_secs(30));
+        let _ = app.update(Message::Tick);
+        // One tick re-reads the clock: elapsed climbs with no progress event,
+        // and the quiet 30 s turn the lead line into the stall hint.
+        assert_eq!(
+            app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::elapsed_hms),
+            Some("00:01:30".to_owned())
+        );
+        assert!(app.flow.scan_stalled());
+        assert!(sees(&app, "Still reading A.M2TS…"), "the stall hint names the stuck file");
     }
 
     #[test]
