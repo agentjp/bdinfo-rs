@@ -369,6 +369,11 @@ enum Inner {
         /// The names being scanned, in table order — the report's selection
         /// order, carried into `Reported` for option-change re-renders.
         scanned: Vec<String>,
+        /// Whether progress events have gone quiet past the stall threshold
+        /// ([`crate::progress::stalled`]) — set by [`Flow::tick`], cleared by
+        /// every applied progress event. The status line then reads "still
+        /// reading" instead of implying normal progress.
+        stalled: bool,
     },
     Reported {
         listing: Listing,
@@ -548,7 +553,15 @@ impl Flow {
             {
                 listing.error = None;
                 let scanned = listing.scan_names();
-                Self { inner: Inner::Scanning { listing, generation, progress: None, scanned } }
+                Self {
+                    inner: Inner::Scanning {
+                        listing,
+                        generation,
+                        progress: None,
+                        scanned,
+                        stalled: false,
+                    },
+                }
             }
             other => Self { inner: other },
         }
@@ -558,6 +571,8 @@ impl Flow {
     /// byte counts, and the wall time elapsed since the scan started. Applied only
     /// while scanning **and** when `generation` matches the in-flight scan (a
     /// stale event is dropped); the pure progress math is [`ProgressModel`].
+    /// A real event is proof the read loop is moving, so it also clears the
+    /// stall flag [`Flow::tick`] may have raised.
     pub fn progress(
         &mut self,
         generation: u64,
@@ -566,10 +581,29 @@ impl Flow {
         total: u64,
         elapsed: Duration,
     ) {
-        if let Inner::Scanning { generation: active, progress, .. } = &mut self.inner
+        if let Inner::Scanning { generation: active, progress, stalled, .. } = &mut self.inner
             && *active == generation
         {
             *progress = Some(ProgressModel::compute(file, done, total, elapsed));
+            *stalled = false;
+        }
+    }
+
+    /// Advances the wall-clock readout while a scan is in flight — the shell's
+    /// ~1 s tick. `elapsed` (since the scan started) re-stamps the progress
+    /// model's elapsed seconds so the readout climbs even when no progress
+    /// event arrives (a read stuck in drive-firmware retries emits none), and
+    /// `since_progress` (since the last progress event) drives the stall flag
+    /// ([`crate::progress::stalled`]). The remaining estimate is untouched —
+    /// it is meaningful only against real progress. A no-op off
+    /// [`Stage::Scanning`], and before the first progress event only the
+    /// stall flag moves (there is no model to re-stamp).
+    pub fn tick(&mut self, elapsed: Duration, since_progress: Duration) {
+        if let Inner::Scanning { progress, stalled, .. } = &mut self.inner {
+            if let Some(model) = progress.as_mut() {
+                model.set_elapsed(elapsed);
+            }
+            *stalled = crate::progress::stalled(since_progress);
         }
     }
 
@@ -857,6 +891,15 @@ impl Flow {
             Inner::Scanning { progress, .. } => progress.as_ref(),
             _ => None,
         }
+    }
+
+    /// Whether the in-flight scan's progress events have gone quiet past the
+    /// stall threshold — the status line then says "still reading" so a read
+    /// stuck on damaged media looks like a struggling drive, not a dead app.
+    /// Always false off [`Stage::Scanning`].
+    #[must_use]
+    pub const fn scan_stalled(&self) -> bool {
+        matches!(self.inner, Inner::Scanning { stalled: true, .. })
     }
 
     /// Whether a report can be shown / saved / copied now — true whenever a disc
@@ -1271,6 +1314,59 @@ mod tests {
         assert_eq!(flow.selected_count(), 0);
         // Nothing checked does not block scanning — it is a whole-disc scan.
         assert!(flow.can_scan());
+    }
+
+    #[test]
+    fn a_tick_advances_elapsed_without_a_progress_event() {
+        let mut flow = listed().start_scanning(1);
+        flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::from_secs(4));
+        let before = flow.progress_view().expect("a progress model");
+        assert_eq!(before.elapsed_hms(), "00:00:04");
+        assert_eq!(before.remaining_hms(), "00:00:04");
+        // The wall clock moves on with no progress event in between…
+        flow.tick(Duration::from_secs(65), Duration::from_secs(2));
+        let after = flow.progress_view().expect("the model survives the tick");
+        assert_eq!(after.elapsed_hms(), "00:01:05");
+        // …and only elapsed follows: the percent, the remaining estimate and
+        // the file hold, and 2 s of quiet is not yet a stall.
+        assert_eq!(after.percent, 50);
+        assert_eq!(after.remaining_hms(), "00:00:04");
+        assert_eq!(after.file(), "A.M2TS");
+        assert!(!flow.scan_stalled());
+    }
+
+    #[test]
+    fn quiet_ticks_flag_the_stall_and_a_progress_event_clears_it() {
+        let mut flow = listed().start_scanning(1);
+        flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::from_secs(1));
+        assert!(!flow.scan_stalled());
+        // The threshold is 5 s inclusive; just under it is not a stall.
+        flow.tick(Duration::from_secs(6), Duration::from_millis(4_999));
+        assert!(!flow.scan_stalled());
+        flow.tick(Duration::from_secs(7), Duration::from_secs(5));
+        assert!(flow.scan_stalled());
+        // Well past the threshold reads stalled too (the flag is a range,
+        // not a single instant).
+        flow.tick(Duration::from_secs(8), Duration::from_secs(6));
+        assert!(flow.scan_stalled());
+        // A fresh progress event is proof of life and clears the flag.
+        flow.progress(1, "A.M2TS".to_owned(), 1, 2, Duration::from_secs(9));
+        assert!(!flow.scan_stalled());
+    }
+
+    #[test]
+    fn a_tick_before_any_progress_or_off_stage_is_harmless() {
+        // Scanning with no model yet: nothing to re-stamp, but the stall flag
+        // still tracks (the very first read can be the one that sticks).
+        let mut flow = listed().start_scanning(1);
+        flow.tick(Duration::from_secs(9), Duration::from_secs(9));
+        assert!(flow.progress_view().is_none());
+        assert!(flow.scan_stalled());
+        // Off Stage::Scanning a stray tick changes nothing.
+        let mut flow = listed();
+        flow.tick(Duration::from_secs(9), Duration::from_secs(9));
+        assert!(!flow.scan_stalled());
+        assert_eq!(flow.stage(), Stage::Listed);
     }
 
     #[test]

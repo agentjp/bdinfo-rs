@@ -40,6 +40,21 @@ pub fn pulse_fraction(phase: u16) -> f32 {
 /// coalescing interval.
 const EMIT_EVERY: Duration = Duration::from_millis(100);
 
+/// How long the scan may go without a progress event before the display calls
+/// the current read stalled. Progress normally arrives many times a second
+/// (one event per read chunk, coalesced to [`EMIT_EVERY`]), so a multi-second
+/// silence means one read syscall has not returned — damaged optical media
+/// held in drive-firmware retries, which can block for minutes with no error.
+const STALL_AFTER: Duration = Duration::from_secs(5);
+
+/// Whether `since_progress` — the time since the last progress event — has
+/// crossed the stall threshold ([`STALL_AFTER`], inclusive), so the status
+/// line should say the drive is struggling rather than imply normal progress.
+#[must_use]
+pub(crate) fn stalled(since_progress: Duration) -> bool {
+    since_progress >= STALL_AFTER
+}
+
 /// Whether a scan-progress event should become a UI message.
 ///
 /// The scan fires its callback every few MB — tens of thousands of times on a
@@ -74,6 +89,15 @@ impl ProgressModel {
     pub(crate) fn compute(file: String, done: u64, total: u64, elapsed: Duration) -> Self {
         let (percent, elapsed_seconds, remaining_seconds) = progress_stats(done, total, elapsed);
         Self { file, percent, elapsed_seconds, remaining_seconds }
+    }
+
+    /// Re-stamps the elapsed wall time from the clock, leaving `file`,
+    /// `percent` and `remaining_seconds` at their last computed values — the
+    /// remaining estimate is meaningful only against real progress, so a
+    /// wall-clock tick may never touch it. Whole seconds, truncated, like
+    /// every displayed time.
+    pub(crate) const fn set_elapsed(&mut self, elapsed: Duration) {
+        self.elapsed_seconds = elapsed.as_secs();
     }
 
     /// The bar fill, a fraction in `0.0..=1.0` (the progress bar's value over a
@@ -143,6 +167,26 @@ mod tests {
         assert_eq!(model.file(), "00000.M2TS");
         assert_eq!(model.elapsed_hms(), "00:00:04");
         assert_eq!(model.remaining_hms(), "00:00:12");
+    }
+
+    #[test]
+    fn set_elapsed_restamps_only_the_wall_clock() {
+        let mut model =
+            ProgressModel::compute("00000.M2TS".to_owned(), 50, 200, Duration::from_secs(4));
+        // 65.999 s truncates to 00:01:05; percent, remaining and the file
+        // hold their last computed values.
+        model.set_elapsed(Duration::from_millis(65_999));
+        assert_eq!(model.elapsed_hms(), "00:01:05");
+        assert_eq!(model.percent, 25);
+        assert_eq!(model.remaining_hms(), "00:00:12");
+        assert_eq!(model.file(), "00000.M2TS");
+    }
+
+    #[test]
+    fn the_stall_threshold_is_five_seconds_inclusive() {
+        assert!(!super::stalled(Duration::from_millis(4_999)));
+        assert!(super::stalled(Duration::from_secs(5)));
+        assert!(super::stalled(Duration::from_secs(6)));
     }
 
     #[test]
