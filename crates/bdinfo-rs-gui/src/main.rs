@@ -1282,13 +1282,7 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                self.pulse = progress::pulse_advance(self.pulse);
-                if self.flow.stage() == Stage::Scanning {
-                    let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
-                    let since_progress =
-                        self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
-                    self.flow.tick(elapsed, since_progress);
-                }
+                self.on_tick();
                 Task::none()
             }
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
@@ -1676,6 +1670,19 @@ impl App {
         Task::none()
     }
 
+    /// Applies a display tick: advances the indeterminate bar's phase, and —
+    /// while the measured scan is in flight — re-reads the wall clock so the
+    /// elapsed readout and the stall hint move even when no progress event
+    /// arrives ([`Flow::tick`]).
+    fn on_tick(&mut self) {
+        self.pulse = progress::pulse_advance(self.pulse);
+        if self.flow.stage() == Stage::Scanning {
+            let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+            let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
+            self.flow.tick(elapsed, since_progress);
+        }
+    }
+
     /// Cancels the in-flight measured scan for real: trips the worker's
     /// cooperative stop flag — the demux exits at its next read chunk, freeing
     /// CPU and IO — then returns the UI to the table. The worker's late "scan
@@ -1701,15 +1708,10 @@ impl App {
         playlists: Vec<PlaylistSummary>,
     ) -> Task<Message> {
         let was_scanning = self.flow.stage() == Stage::Scanning;
-        self.flow = std::mem::take(&mut self.flow).finished(
-            generation,
-            report,
-            Arc::clone(&errors),
-            playlists,
-        );
+        self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
-            log::info!("scan finished: {} error(s) recorded", errors.len());
-            for error in errors.iter() {
+            log::info!("scan finished: {} error(s) recorded", self.flow.report_errors().len());
+            for error in self.flow.report_errors() {
                 log::info!("scan error: {error}");
             }
             self.notice = Some(flow::scan_notice(self.flow.report_errors().len()));
