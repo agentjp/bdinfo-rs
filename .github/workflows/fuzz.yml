@@ -51,9 +51,10 @@ name: fuzz
 # is never the tail. Fuzzing independently has diminishing returns within a run
 # and compounding returns across runs, so frequent short runs beat rare long
 # ones once the corpus persists; and a weekly schedule would fail outright,
-# since GitHub evicts a cache unused for 7 days and this repository's cron fires
-# 2-4 h late every day (sweep.yml's header carries the measurement) — the jitter
-# that turns "rides the eviction boundary" into "crossed it".
+# since GitHub evicts a cache unused for 7 days and a cron here fires late by
+# anything from half an hour to four (the schedule block below carries the
+# measurement) — the jitter that turns "rides the eviction boundary" into
+# "crossed it".
 #
 # CORPUS GROWTH IS HUMAN-GATED: a leg that ends with more units than it
 # restored uploads them as an artifact and the report job names the count in one
@@ -78,12 +79,15 @@ on:
     # char-for-char against github.event.schedule, so these lines, that
     # condition's literals and the variable's elements must stay byte-identical.
     #
-    # The hours are the REQUEST, not the firing time: measured over n=11 days,
-    # every cron here fired 2 h 17 m to 4 h 00 m late (sweep.yml's header
-    # carries the measurement and the evidence that it tracks the day, not the
-    # workflow). Asking for 21:11 UTC therefore lands that run at roughly
-    # 23:30-01:10 UTC. The 03:11 slot lands at roughly 05:15-07:10 and so
-    # overlaps the 05:37 daily sweep, whose ~20-job mutation fleet is the
+    # The hours are the REQUEST, not the firing time, and how late a slot fires
+    # differs between the workflows in this repository — sweep.yml's header
+    # records 2 h 17 m to 4 h 00 m over n=11 days for its own cron, which is not
+    # this file's distribution. Measured on this workflow's ten scheduled runs
+    # from 2026-08-03 to 2026-08-12: nine fired 29 to 68 minutes late and one
+    # (2026-08-06) fired 3 h 51 m late. So 21:11 UTC usually starts inside the
+    # 21:40-22:20 window, and 03:11 usually starts inside 03:40-04:20 — well
+    # ahead of the 05:37 daily sweep. It is the rare outlier that puts 03:11
+    # near 07:00, alongside that sweep's ~20-job mutation fleet, which is the
     # account's concurrent-job ceiling — accepted deliberately: the two queue
     # against each other, which costs wall time, not runner minutes (unmetered
     # on a public repository).
@@ -375,6 +379,50 @@ jobs:
           done
           echo "$TARGET/$ARCH: $(find "fuzz/accumulated/$TARGET" -type f 2>/dev/null | wc -l) unit(s) recovered from artifacts"
 
+      # THE SEEDS-ONLY BASELINE: how many edges the COMMITTED corpus alone
+      # reaches, which is what "edges gained" is measured against in this leg's
+      # stats and in the corpus-growth issue below. It has to run HERE, before
+      # the seeding step's `cp -n` mixes the accumulated units into
+      # fuzz/corpus/<target> — afterwards the two are one directory and the
+      # committed half can no longer be measured on its own. Cheap: a -runs=0
+      # replay loads the corpus, prints one INITED line and exits, which took
+      # 5 s over `codec`'s 7,717 seeds (measured 2026-08-13). Being the job's
+      # first `cargo fuzz run` it also absorbs the target's build, so the
+      # seconds are all this step adds.
+      #
+      # An unmeasurable baseline travels as an EMPTY output and is recorded as
+      # null, NEVER as 0: a zero baseline would report the leg's entire
+      # coverage as a gain, inflating the issue's headline and holding it open
+      # on a number nobody measured.
+      #
+      # The step cannot fail the leg either way. A committed seed that crashes
+      # a target is what core.yml's `corpus replay (regression gate, <arch>)`
+      # check exists to catch, on every pull request that touches the parser;
+      # a crash found while fuzzing files its own issue through the steps below.
+      - name: Measure the committed seeds' coverage
+        id: baseline
+        continue-on-error: true
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: |
+          seed_cov=""
+          seed_ft=""
+          if [ -n "$(find "fuzz/corpus/$TARGET" -type f -print -quit 2>/dev/null)" ]; then
+            set +e
+            cargo +"$NIGHTLY" fuzz run "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER" -- \
+              -runs=0 $GUARDS 2>&1 | tee baseline.log
+            set -e
+            # `#2542 INITED cov: 4065 ft: 17861 corp: 2542/...` — one line, from
+            # the one process a replay runs, which is what makes it comparable
+            # with the MAX over the workers' DONE lines further down. An
+            # unparsed line leaves both values empty.
+            seed_cov=$(sed -n 's/.*INITED cov: \([0-9]*\) ft: \([0-9]*\).*/\1/p' baseline.log | head -1)
+            seed_ft=$(sed -n 's/.*INITED cov: \([0-9]*\) ft: \([0-9]*\).*/\2/p' baseline.log | head -1)
+          fi
+          echo "seed_cov=$seed_cov" >> "$GITHUB_OUTPUT"
+          echo "seed_ft=$seed_ft" >> "$GITHUB_OUTPUT"
+          echo "$TARGET/$ARCH: the committed seeds alone reach ${seed_cov:-(unmeasured)} edge(s), ${seed_ft:-(unmeasured)} feature(s)"
+
       # What counts as an accumulated unit is decided by CONTENT, not by
       # filename: libFuzzer's merge (which `cargo fuzz cmin` runs) writes every
       # unit it keeps under the sha1 of its bytes, so a committed seed can come
@@ -549,6 +597,8 @@ jobs:
         env:
           RESTORED: ${{ steps.seed.outputs.restored }}
           SEEDS: ${{ steps.seed.outputs.seeds }}
+          SEED_COV: ${{ steps.baseline.outputs.seed_cov }}
+          SEED_FT: ${{ steps.baseline.outputs.seed_ft }}
           GROWN: ${{ steps.collect.outputs.grown }}
           NEW: ${{ steps.collect.outputs.new }}
           RC: ${{ steps.run.outputs.rc }}
@@ -579,6 +629,16 @@ jobs:
             $ft = if ($log -match '(?s).*\bft:\s*(\d+)') { [int]$Matches[1] } else { 0 }
             $execs = if ($log -match '(?s).*\bexec/s:\s*(\d+)') { [int]$Matches[1] } else { 0 }
           }
+          # An empty baseline output means the seeds-only replay produced no
+          # number, and it stays $null all the way into the issue: 0 would claim
+          # the seeds reach nothing and report every edge this leg has as a gain
+          # over them. cov_gained pairs the MAX over the workers' DONE lines
+          # with a single-process INITED line — both are one process's view of
+          # the same shared corpus, which is what makes the subtraction mean
+          # anything.
+          $seedCov = if ($env:SEED_COV) { [int]$env:SEED_COV } else { $null }
+          $seedFt = if ($env:SEED_FT) { [int]$env:SEED_FT } else { $null }
+          $covGained = if ($null -ne $seedCov) { $cov - $seedCov } else { $null }
           $stats = [ordered]@{
             target = $env:TARGET
             arch = $env:ARCH
@@ -588,7 +648,10 @@ jobs:
             restored = [int]$env:RESTORED
             grown = [int]$env:GROWN
             new = [int]$env:NEW
+            seed_cov = $seedCov
+            seed_ft = $seedFt
             cov = $cov
+            cov_gained = $covGained
             ft = $ft
             execs_per_sec = $execs
             units_executed = [int64](($units | ForEach-Object { [int64]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
@@ -762,14 +825,28 @@ jobs:
             $stats = @(Get-ChildItem results -Recurse -Filter stats.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
             $crashes = @(Get-ChildItem results -Recurse -Filter crash.json | ForEach-Object { Get-Content -Raw $_.FullName | ConvertFrom-Json })
           }
+          # A leg whose seeds-only baseline could not be measured carries $null
+          # in seed_cov and cov_gained, and every consumer here has to keep it
+          # distinct from 0 — hence the dash in the table and the separate list
+          # in the issue rather than a zero that reads as "measured, gained
+          # nothing".
+          $dash = { param($v) if ($null -eq $v) { '-' } else { $v } }
           $rows = @($stats | Sort-Object target, arch | ForEach-Object {
-            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.cov) | $($_.ft) | $($_.execs_per_sec) |"
+            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $(& $dash $_.seed_cov) | $($_.cov) | $(& $dash $_.cov_gained) | $($_.ft) | $($_.execs_per_sec) |"
           })
           # [int] on purpose: Measure-Object sums an empty set to $null, and
           # $null is not 0, so an artifact-less run would otherwise file a
           # growth issue with a blank count.
           $totalNew = [int](($stats | Measure-Object -Property new -Sum).Sum)
           $totalRestored = [int](($stats | Measure-Object -Property restored -Sum).Sum)
+          # The legs that reached code the committed seeds do not, which is what
+          # the growth issue below keys on. Summed over legs and therefore over
+          # both pointer widths — and edges, unlike the units counted above, do
+          # not collapse on union: the arches are different binaries, so an edge
+          # counted in both is not one edge counted twice.
+          $unmeasured = @($stats | Where-Object { $null -eq $_.cov_gained })
+          $gainers = @($stats | Where-Object { $_.cov_gained -gt 0 })
+          $totalGained = [int](($gainers | Measure-Object -Property cov_gained -Sum).Sum)
           # Counted per leg, so a unit found at both widths counts twice here —
           # the arches share one corpus and cmin names a unit by the sha1 of its
           # bytes, so the duplicate collapses the moment both artifacts are
@@ -778,15 +855,15 @@ jobs:
           @(
             '## Discovery pass'
             ''
-            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target per arch across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup)."
+            "Budget $((@($stats).Count ? $stats[0].seconds : 0))s per target per arch across $((@($stats).Count ? $stats[0].workers : 0)) concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup). Those units reach $totalGained edge(s) the committed seeds alone do not."
             ''
-            '| target | arch | seeds | restored | new | cov | ft | exec/s |'
-            '|---|---|---|---|---|---|---|---|'
+            '| target | arch | seeds | restored | new | seed cov | cov | gained | ft | exec/s |'
+            '|---|---|---|---|---|---|---|---|---|---|'
             $rows
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
 
           if ($env:FILE_ISSUES -ne 'true') {
-            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); new units: $totalNew."
+            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); new units: $totalNew; edges gained: $totalGained."
             exit 0
           }
 
@@ -872,25 +949,53 @@ jobs:
           if ($env:SAVES_CORPUS -ne 'true') { exit 0 }
           gh label create fuzz-corpus --color 0e8a16 --description 'Fuzz corpus growth awaiting review' --force | Out-Null
           $open = gh issue list --state open --label fuzz-corpus --json number --jq '.[0].number'
-          if ($totalNew -eq 0) {
+          # KEYED ON COVERAGE, NOT ON UNIT COUNT, because a unit count can never
+          # reach zero: every pass writes thousands of feature-distinct units of
+          # its own, so an issue that fires on units reports tens of thousands
+          # after every pass forever — measured 2026-08-13, the first pass after
+          # 37,812 units were promoted into the committed seeds reported 28,174
+          # against the 28,180 of the night before. The question worth asking a
+          # human is whether those units reach code the seeds do not, and a
+          # single edge is enough to ask it: a small gain can still be a
+          # genuinely new branch.
+          #
+          # Closing needs every leg to have MEASURED a gain of exactly zero. A
+          # leg whose baseline is null proves nothing about absence, and a run
+          # that produced no stats at all proves less still, so both hold the
+          # issue open. A closed issue is never reopened either — the next pass
+          # finds no open `fuzz-corpus` issue and creates a fresh one.
+          if (@($stats).Count -gt 0 -and $unmeasured.Count -eq 0 -and @($stats | Where-Object { $_.cov_gained -ne 0 }).Count -eq 0) {
             if ($open) {
-              gh issue close $open --comment "The accumulated corpus adds nothing over the committed seeds: $env:RUN_URL" | Out-Null
+              gh issue close $open --comment "Every leg's accumulated units reach exactly the edges the committed seeds already reach: $env:RUN_URL" | Out-Null
               Write-Host "Closed issue #$open"
             }
             exit 0
           }
-          $grownRows = @($stats | Where-Object { $_.new -gt 0 } | Sort-Object target, arch | ForEach-Object {
-            "| ``$($_.target)`` | $($_.arch) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
+          if ($gainers.Count -eq 0) {
+            Write-Host "No leg gained an edge over the committed seeds, and $($unmeasured.Count) of $(@($stats).Count) leg(s) could not be measured — neither filing nor closing."
+            exit 0
+          }
+          # Sorted by what the reader is deciding on: the legs whose units are
+          # worth a promotion pull request sit at the top. The unit count stays
+          # a column because it sizes that pull request.
+          $grownRows = @($gainers | Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
+            "| ``$($_.target)`` | $($_.arch) | $($_.cov_gained) | $($_.seed_cov) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
           })
-          $title = "Fuzz corpus: $totalNew unit(s) beyond the committed seeds"
+          $title = "Fuzz corpus: $totalGained edge(s) beyond the committed seeds"
           $body = @(
-            "The nightly discovery pass has accumulated $totalNew unit(s) that the committed seed corpus does not cover. They live in this workflow's per-target, per-arch Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
+            "The nightly discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They live in this workflow's per-target, per-arch Actions cache and are re-minimised against the seeds every night; nothing is committed automatically."
             ''
-            'The count is summed over both pointer widths. A unit found at both is the same bytes under the same sha1 filename, so it collapses when both artifacts are unzipped into one directory — the distinct total is what lands in the pull request.'
+            'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached. The total is summed over both pointer widths, which are different binaries: their edge counts are not the same edges and do not dedupe. The unit counts are summed the same way, but a unit found at both widths is the same bytes under the same sha1 filename, so those DO collapse when both artifacts are unzipped into one directory.'
             ''
-            '| target | arch | units | artifact |'
-            '|---|---|---|---|'
+            '| target | arch | edges gained | seed cov | units | artifact |'
+            '|---|---|---|---|---|---|'
             $grownRows
+            $(if ($unmeasured.Count -gt 0) {
+              @(
+                ''
+                "Baseline unmeasured (their gain is unknown, not zero): $((@($unmeasured | ForEach-Object { "``$($_.target)`` ($($_.arch))" } | Sort-Object -Unique) -join ', '))."
+              )
+            })
             ''
             "Latest run: $env:RUN_URL"
             ''
@@ -901,8 +1006,9 @@ jobs:
             '# then copy each /tmp/grown/fuzz-corpus-<target>-<arch>/* into fuzz/corpus/<target>/ and open a PR'
             '```'
             ''
-            'This is one rolling issue, edited after every pass. It closes itself once the accumulated corpus adds nothing over the committed seeds — which is what happens the night after the units above are merged.'
-          ) -join "`n"
+            'This is one rolling issue, edited after every pass. It closes itself once every leg measures a gain of exactly zero — for a target that is not yet saturated, promoting the units above lowers its gain rather than ending it, because the next pass explores onward from what was promoted.'
+          ) | Where-Object { $null -ne $_ }
+          $body = ($body -join "`n")
           if ($open) {
             gh issue edit $open --title $title --body $body | Out-Null
             Write-Host "Updated issue #$open"
