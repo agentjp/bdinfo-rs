@@ -25,9 +25,22 @@ execSync("cargo build --release --target wasm32-unknown-unknown --locked", {
 execSync(`wasm-bindgen --target web --out-dir "${pkg}" --out-name bdinfo_rs_wasm "${wasm}"`, {
   stdio: "inherit",
 });
-// `--all-features`: rustc's wasm32 output uses sign-ext / bulk-memory / etc., so
-// wasm-opt must accept those features or it rejects the module as invalid.
-execFileSync(process.execPath, [wasmOpt, "-Oz", "--all-features", bg, "-o", bg], {
+// rustc's wasm32-unknown-unknown output uses these target features (the
+// target's defaults), so wasm-opt must accept each or it rejects the module as
+// invalid. They are enabled individually, NOT with --all-features: that flag
+// also opts into new BINARY ENCODINGS engines may not parse yet — binaryen 132's
+// --all-features emits the compact import section (WebAssembly/binaryen#8926),
+// which Node 26 rejects at compile with "unknown import kind". A feature rustc
+// starts needing fails loudly at validation; add its --enable flag here.
+const features = [
+  "--enable-sign-ext",
+  "--enable-bulk-memory",
+  "--enable-mutable-globals",
+  "--enable-nontrapping-float-to-int",
+  "--enable-multivalue",
+  "--enable-reference-types",
+];
+execFileSync(process.execPath, [wasmOpt, "-Oz", ...features, bg, "-o", bg], {
   stdio: "inherit",
 });
 
