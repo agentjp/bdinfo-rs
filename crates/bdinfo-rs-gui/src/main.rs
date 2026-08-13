@@ -1870,10 +1870,11 @@ impl App {
             debug_worker_panic();
             #[cfg(debug_assertions)]
             debug_scan_delay();
-            // The scan fires its progress callback every few MB — tens of thousands
-            // of times on a feature disc. Coalesce to one message per ~100 ms (plus
-            // every file boundary) so the UI re-renders a few times a second, not
-            // thousands; the CLI throttles its terminal redraw the same way.
+            // The scan fires its progress callback before and after every read —
+            // several per 256 KiB chunk, hundreds of thousands of times on a
+            // feature disc. Coalesce to one message per ~100 ms (plus every file
+            // boundary) so the UI re-renders a few times a second, not thousands;
+            // the CLI throttles its terminal redraw the same way.
             let mut last_sent: Option<Instant> = None;
             let mut last_file = String::new();
             let mut on_progress = |progress: ScanProgress<'_>| {

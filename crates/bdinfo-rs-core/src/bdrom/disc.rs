@@ -540,9 +540,9 @@ pub struct ScanProgress<'a> {
 }
 
 /// The live bookkeeping of one packet scan: the running byte count over the
-/// full pass's total, reported through the caller's callback after every
-/// demux read and at every file boundary, plus the caller's cooperative
-/// cancel flag the demux polls per read chunk.
+/// full pass's total, reported through the caller's callback before and
+/// after every demux read and at every file boundary, plus the caller's
+/// cooperative cancel flag the demux polls per read chunk.
 struct Progress<'a> {
     /// The caller's observer; a no-op for the plain `open`s.
     callback: &'a mut dyn FnMut(ScanProgress<'_>),
@@ -559,6 +559,16 @@ impl Progress<'_> {
     /// Advances the counter by `bytes` demuxed from `file` and reports.
     fn advance(&mut self, file: &str, bytes: u64) {
         self.done = self.done.saturating_add(bytes).min(self.total);
+        (self.callback)(ScanProgress { file, done: self.done, total: self.total });
+    }
+
+    /// Reports the current count against `file` without advancing it — the
+    /// pre-read heartbeat. [`CountingReader`] fires it before every physical
+    /// read, so a consumer watching for staleness knows a read is in flight
+    /// (and in which file) rather than seeing plain silence: on damaged media
+    /// one blocking read can stall for minutes, and the heartbeat is the last
+    /// event before that gap opens.
+    fn heartbeat(&mut self, file: &str) {
         (self.callback)(ScanProgress { file, done: self.done, total: self.total });
     }
 
@@ -584,6 +594,7 @@ struct CountingReader<'a, 'b> {
 
 impl Read for CountingReader<'_, '_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.progress.heartbeat(&self.name);
         let bytes = self.inner.read(buf)?;
         self.progress.advance(&self.name, u64::try_from(bytes).unwrap_or(u64::MAX));
         Ok(bytes)
@@ -821,7 +832,7 @@ impl BdRom {
     /// their metadata-only summaries (zero measured rates). `None` scans
     /// every stream file.
     ///
-    /// `progress` is called after every demux read and at every file boundary
+    /// `progress` is called before and after every demux read and at every file boundary
     /// with the running [`ScanProgress`]; it never fires without the packet
     /// scan.
     ///
@@ -2385,15 +2396,15 @@ mod tests {
     use proptest::prelude::{ProptestConfig, prop_assert, prop_assert_eq, proptest};
 
     use super::{
-        ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, MAX_METADATA_BYTES, MVC_PID,
-        PlaylistFilter, PlaylistSummary, Progress, SOURCE_PACKET_BYTES, ScanMode, ScanOptions,
-        ScanProgress, ScanReport, ScanStage, Sink, TsPlaylistFile, TsStreamFile,
-        backup_subdir_files, build_chapter_summaries, build_clip_summaries, build_sorted_streams,
-        clear_measurements, clip_has_50hz_video, clip_stem, collect_backups, directory_size,
-        fixtures, has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file,
-        read_file_capped, resolve_playlist_streams, scan_stream_files, scan_total,
-        select_reference, stream_content_encrypted, stream_summary, unit_shows_encryption,
-        walked_disc_root,
+        ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, CountingReader,
+        MAX_METADATA_BYTES, MVC_PID, PlaylistFilter, PlaylistSummary, Progress,
+        SOURCE_PACKET_BYTES, ScanMode, ScanOptions, ScanProgress, ScanReport, ScanStage, Sink,
+        TsPlaylistFile, TsStreamFile, backup_subdir_files, build_chapter_summaries,
+        build_clip_summaries, build_sorted_streams, clear_measurements, clip_has_50hz_video,
+        clip_stem, collect_backups, directory_size, fixtures, has_aacs_key_file, merge_stream,
+        rate_over, read_disc_title, read_file, read_file_capped, resolve_playlist_streams,
+        scan_stream_files, scan_total, select_reference, stream_content_encrypted, stream_summary,
+        unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::clpi::clips::build_clpi;
@@ -5096,7 +5107,7 @@ mod tests {
     /// FILES bitrate while every chapter row and the stream diagnostics stay
     /// empty. Retention must change nothing when switched off.
     const DAMAGED_OFF_REPORT: &str = r"Disc Label:     disc
-Disc Size:      5,243,712 bytes
+Disc Size:      263,040 bytes
 Protection:     AACS
 BDInfo:         0.8.0.1
 
@@ -5125,13 +5136,13 @@ PLAYLIST: 00000.MPLS
                                                                                                                       Total        Video                                                                           
 Title                                                           Codec   Length    Movie Size        Disc Size         Bitrate      Bitrate      Main Audio Track                          Secondary Audio Track    
 -----                                                           ------  -------   --------------    ----------------  -----------  -----------  ------------------                        ---------------------    
-00000.MPLS                                                      AVC     00:01:40  960               5,243,712         0.00 Mbps    0.00 Mbps                                                                       
+00000.MPLS                                                      AVC     00:01:40  960               263,040           0.00 Mbps    0.00 Mbps                                                                       
 [/code]
 
 [code]
 DISC INFO:
 Disc Label:     disc
-Disc Size:      5,243,712 bytes
+Disc Size:      263,040 bytes
 Protection:     AACS
 BDInfo:         0.8.0.1b
 
@@ -5174,7 +5185,7 @@ File            PID             Type            Codec           Language        
 QUICK SUMMARY:
 
 Disc Label:     disc
-Disc Size:      5,243,712 bytes
+Disc Size:      263,040 bytes
 Protection:     AACS
 Playlist:       00000.MPLS
 Size:           960 bytes
@@ -5261,11 +5272,13 @@ Total Bitrate:  0.00 Mbps
         /// panics or hangs the resilient scan, and the chapter table keeps
         /// its shape: one row per mark, each with its mark's own time and
         /// length, rates finite and non-negative. (24 cases — each scans a
-        /// >5 MiB two-chunk fixture twice; the deterministic boundary
-        /// offsets 0 and `DATA_SIZE` are pinned by the tests above.)
+        /// two-chunk fixture just past `DATA_SIZE` twice; the range runs
+        /// beyond the fixture so some cases never trip, and the
+        /// deterministic boundary offsets 0 and `DATA_SIZE` are pinned by
+        /// the tests above.)
         #[test]
         fn a_tripped_reader_yields_a_total_scan_with_one_chapter_row_per_mark(
-            serve in 0_usize..5_400_000,
+            serve in 0_usize..crate::bdrom::m2ts::DATA_SIZE.saturating_add(10_000),
         ) {
             let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47]);
             let report =
@@ -5465,6 +5478,8 @@ Total Bitrate:  0.00 Mbps
                 cancel: &AtomicBool::new(false),
             };
             progress.advance("A.M2TS", 30);
+            // A heartbeat reports without moving the count.
+            progress.heartbeat("A.M2TS");
             // An over-read clamps at the total instead of overshooting.
             progress.advance("A.M2TS", 90);
             // A snap target below the current count never moves it backwards…
@@ -5473,6 +5488,7 @@ Total Bitrate:  0.00 Mbps
         assert_eq!(
             events,
             [
+                ("A.M2TS".to_owned(), 30, 100),
                 ("A.M2TS".to_owned(), 30, 100),
                 ("A.M2TS".to_owned(), 100, 100),
                 ("A.M2TS".to_owned(), 100, 100),
@@ -5494,6 +5510,42 @@ Total Bitrate:  0.00 Mbps
             progress.finish_file("B.M2TS", 60);
         }
         assert_eq!(events, [("B.M2TS".to_owned(), 10, 100), ("B.M2TS".to_owned(), 60, 100)]);
+    }
+
+    #[test]
+    fn a_counting_reader_heartbeats_before_every_read_and_advances_after() {
+        // Two reads through the counting seam: one serving bytes, one at EOF.
+        // Each is bracketed by a heartbeat (same count) and an advance, so a
+        // consumer's last event before a blocking read names the file being
+        // read — the signal a stalled read leaves behind.
+        let mut events: Vec<(String, u64, u64)> = Vec::new();
+        {
+            let mut callback =
+                |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
+            let mut progress = Progress {
+                callback: &mut callback,
+                done: 0,
+                total: 5,
+                cancel: &AtomicBool::new(false),
+            };
+            let mut reader = CountingReader {
+                inner: Box::new(Cursor::new(vec![0_u8; 5])),
+                name: "A.M2TS".to_owned(),
+                progress: &mut progress,
+            };
+            let mut sink = [0_u8; 8];
+            assert_eq!(reader.read(&mut sink).expect("serving read"), 5);
+            assert_eq!(reader.read(&mut sink).expect("EOF read"), 0);
+        }
+        assert_eq!(
+            events,
+            [
+                ("A.M2TS".to_owned(), 0, 5),
+                ("A.M2TS".to_owned(), 5, 5),
+                ("A.M2TS".to_owned(), 5, 5),
+                ("A.M2TS".to_owned(), 5, 5),
+            ]
+        );
     }
 
     /// A cancel flag that never trips — the default scan extras of every test
@@ -5532,6 +5584,9 @@ Total Bitrate:  0.00 Mbps
         .expect("scan with progress");
         assert_eq!(bd.playlists.len(), 2);
         assert!(!events.is_empty());
+        // The pre-read heartbeat precedes the first byte: the pass's first
+        // event reports a zero count, naming the file about to be read.
+        assert_eq!(events.first().map(|(_, done, _)| *done), Some(0));
         assert!(events.iter().all(|(_, _, total)| *total == 1000 + 500));
         assert!(events.windows(2).all(|pair| {
             pair.first().is_none_or(|(_, a, _)| pair.get(1).is_none_or(|(_, b, _)| a <= b))
@@ -5649,7 +5704,10 @@ Total Bitrate:  0.00 Mbps
         .expect_err("the cancelled scan errors");
         assert_eq!(err.to_string(), "scan cancelled");
         assert!(events.len() < baseline.len(), "the cancelled scan must stop early");
-        assert!(events.len() <= 3, "the event trail stops at the in-flight chunk");
+        // The in-flight chunk still completes (the flag is polled per chunk),
+        // emitting at most a heartbeat + advance pair for its serving read
+        // and another for its EOF read; nothing follows.
+        assert!(events.len() <= 4, "the event trail stops at the in-flight chunk");
 
         // The resilient scan aborts identically: cancellation is the caller's
         // abort, not disc damage to collect, so no partial report escapes.

@@ -77,10 +77,10 @@ use libfuzzer_sys::fuzz_target;
 /// chunk boundary is a point the two strategies must agree at, and the demux
 /// carries its packet state across them: 192 is one BDAV packet, 448 always
 /// lands mid-packet, 4096 is a page, and 32,768 is larger than most units so
-/// the whole stream arrives as a single chunk. The production size (`scan`
-/// passes 5 MiB) is deliberately absent: it would make every unit
-/// single-chunk — which 32,768 already does — at the cost of zeroing 5 MiB per
-/// scan.
+/// the whole stream arrives as a single chunk. The production sizes (`scan`
+/// selects per pass: 256 KiB full / 16 KiB quick natively, 5 MiB on wasm32)
+/// are deliberately absent: each would make every unit single-chunk — which
+/// 32,768 already does — at a larger per-scan zeroing cost.
 const CHUNK_SIZES: [usize; 4] = [192, 448, 4096, 32_768];
 
 /// The stream reader, optionally failing part-way through.
