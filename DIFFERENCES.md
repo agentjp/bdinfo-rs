@@ -32,6 +32,7 @@ actually see on a normal disc.
 | [VC-1 interlaced-field picture type](#correctness-fixes-with-no-effect-on-a-normal-disc) | **No** — internal only | Never — the picture tag is counted, never printed |
 | [PAT `table_id` validation](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — no conforming disc carries a wrong PAT table id |
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
+| [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 
 ---
 
@@ -192,6 +193,28 @@ when asked, which is what keeps the decision with the caller.
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/disc.rs` (the encryption probe),
 `crates/bdinfo-rs/src/main.rs` (exit code 4).</sub>
+
+### Damaged-media read granularity
+
+BDInfo 0.8 reads stream files in 5 MiB requests in both measurement passes (raised from
+0.7.5.6's 16 KiB by a throughput change with no correctness motive). bdinfo-rs reads
+256 KiB per request in the full pass and 16 KiB in the quick codec pass; the browser
+package keeps 5 MiB for both, since its file reads each cost one synchronous round trip.
+Healthy discs produce byte-identical reports either way — the packet state machine carries
+its state across chunk boundaries, so the request size cannot change a measured value.
+
+On damaged media the request size is the failure granularity, and there the outputs
+deliberately diverge from BDInfo 0.8:
+
+- a failed request discards only its own bytes, so a partial scan retains up to ~5 MiB
+  more measured data per damaged file than 0.8 would (toward 0.7.5.6's loss profile) —
+  chapter rows and stream tallies fill further before the zero rows begin;
+- cancellation, polled once per request, takes effect within 256 KiB of reading instead
+  of 5 MiB;
+- one unreadable span stalls a 256 KiB (listing: 16 KiB) request inside the drive's
+  retry storm rather than a 5 MiB one.
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`).</sub>
 
 ---
 

@@ -78,6 +78,27 @@ pub(crate) const DATA_SIZE: usize = 262_144;
 #[cfg(target_arch = "wasm32")]
 pub(crate) const DATA_SIZE: usize = 5_242_880;
 
+/// Read-chunk size (16 KiB) for each underlying quick-pass read. The quick
+/// codec pass stops at the first completed access unit past which every
+/// registered stream's codec detail is initialised, so its chunk size bounds
+/// the read-ahead past that point — and on a file whose head is unreadable,
+/// how many bytes one blocking read can stall on before the failure is
+/// recorded and the pass moves to the next file.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const QUICK_DATA_SIZE: usize = 16_384;
+
+/// Quick-pass read-chunk size on `wasm32-unknown-unknown`: [`DATA_SIZE`]'s
+/// 5 MiB, for the same per-read round-trip economy.
+#[cfg(target_arch = "wasm32")]
+pub(crate) const QUICK_DATA_SIZE: usize = DATA_SIZE;
+
+/// The read-chunk size the default scan entries select for a pass: the full
+/// measurement pass reads [`DATA_SIZE`] chunks, the quick codec pass
+/// [`QUICK_DATA_SIZE`].
+const fn default_chunk_size(is_full_scan: bool) -> usize {
+    if is_full_scan { DATA_SIZE } else { QUICK_DATA_SIZE }
+}
+
 /// Size of the fixed `PAT`/`PMT` section-assembly buffers.
 const SECTION_SIZE: usize = 1024;
 
@@ -593,7 +614,13 @@ impl TsStreamFile {
         playlists: &mut [TsPlaylistFile],
         is_full_scan: bool,
     ) -> Result<(), BdError> {
-        self.scan_chunked(reader, playlists, is_full_scan, DATA_SIZE, &mut |_, _| {})
+        self.scan_chunked(
+            reader,
+            playlists,
+            is_full_scan,
+            default_chunk_size(is_full_scan),
+            &mut |_, _| {},
+        )
     }
 
     /// [`scan`](Self::scan) with a cooperative `cancel` flag — the demux entry
@@ -607,7 +634,14 @@ impl TsStreamFile {
         is_full_scan: bool,
         cancel: &AtomicBool,
     ) -> Result<(), BdError> {
-        self.scan_chunked_with(reader, playlists, is_full_scan, DATA_SIZE, cancel, &mut |_, _| {})
+        self.scan_chunked_with(
+            reader,
+            playlists,
+            is_full_scan,
+            default_chunk_size(is_full_scan),
+            cancel,
+            &mut |_, _| {},
+        )
     }
 
     /// [`scan`](Self::scan) with an explicit read-chunk size and a codec-seam
@@ -1932,7 +1966,8 @@ mod tests {
         pes_pts_padded, pes_variable, pmt_payload, pmt_payload_es, pmt_section,
     };
     use super::{
-        DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics, TsStreamFile, pts_to_f64, round_long,
+        DATA_SIZE, QUICK_DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics, TsStreamFile,
+        pts_to_f64, round_long,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::interleaved::MemBdFile;
@@ -3007,28 +3042,30 @@ mod tests {
     }
 
     #[test]
-    fn the_default_scan_entries_read_the_full_pass_in_data_size_chunks() {
+    fn the_default_scan_entries_select_the_chunk_size_by_pass() {
         // The payload does not matter here — only the destination length the
         // demux hands the reader, which for a fresh chunk is the whole chunk.
         // Both default entries (`scan` and `scan_cancellable`) must select the
-        // same size: the disc-level open drives the cancellable one, and the
-        // plain one must not diverge from it.
+        // same size per pass: the disc-level open drives the cancellable one,
+        // and the plain one must not diverge from it.
         let bytes = vec![0_u8; 4096];
-        let first_size = |cancellable: bool| {
+        let first_size = |cancellable: bool, full: bool| {
             let mut recorder =
                 SizeRecorder { inner: Cursor::new(bytes.clone()), sizes: Vec::new() };
             let mut file = TsStreamFile::new("00000.m2ts");
             let mut pls = [empty_playlist()];
             if cancellable {
-                file.scan_cancellable(&mut recorder, &mut pls, true, &AtomicBool::new(false))
+                file.scan_cancellable(&mut recorder, &mut pls, full, &AtomicBool::new(false))
                     .expect("scan");
             } else {
-                file.scan(&mut recorder, &mut pls, true).expect("scan");
+                file.scan(&mut recorder, &mut pls, full).expect("scan");
             }
             recorder.sizes.first().copied()
         };
-        assert_eq!(first_size(false), Some(DATA_SIZE));
-        assert_eq!(first_size(true), Some(DATA_SIZE));
+        assert_eq!(first_size(false, true), Some(DATA_SIZE));
+        assert_eq!(first_size(true, true), Some(DATA_SIZE));
+        assert_eq!(first_size(false, false), Some(QUICK_DATA_SIZE));
+        assert_eq!(first_size(true, false), Some(QUICK_DATA_SIZE));
     }
 
     // ── the sequential scan strategy (the wasm32 build's path) ──────────────
