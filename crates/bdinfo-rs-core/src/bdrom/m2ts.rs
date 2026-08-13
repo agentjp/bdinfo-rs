@@ -66,6 +66,8 @@ use crate::stream::{StreamKind, TsStream, TsStreamType};
 /// poll ([`fill_buffer`]) can get, and how many bytes a failed read discards
 /// (a read error voids only its own chunk, so the demux keeps everything up
 /// to the last completed chunk boundary). Tunable within those trade-offs.
+/// The size is a deliberate divergence from classic `BDInfo` 0.8's 5 MiB —
+/// see DIFFERENCES.md, "Damaged-media read granularity".
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const DATA_SIZE: usize = 262_144;
 
@@ -83,7 +85,9 @@ pub(crate) const DATA_SIZE: usize = 5_242_880;
 /// registered stream's codec detail is initialised, so its chunk size bounds
 /// the read-ahead past that point — and on a file whose head is unreadable,
 /// how many bytes one blocking read can stall on before the failure is
-/// recorded and the pass moves to the next file.
+/// recorded and the pass moves to the next file. Diverges deliberately from
+/// classic `BDInfo` 0.8 (5 MiB for both passes) — see DIFFERENCES.md,
+/// "Damaged-media read granularity".
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) const QUICK_DATA_SIZE: usize = 16_384;
 
@@ -197,7 +201,10 @@ pub struct TsStreamDiagnostics {
     pub packets: u64,
     /// Time in seconds (`PTS / 90000`) of the frame that closed this window:
     /// one entry is emitted per completed window, stamped with its closing
-    /// frame's time, not its start.
+    /// frame's time, not its start. Exception: the end-of-scan flush closing
+    /// each stream's final window stamps it with the running maximum video
+    /// timestamp across streams, so on an interleaved (MVC) scan a dependent
+    /// view's last entry can carry the base view's time and interval.
     pub marker: f64,
     /// Window length in seconds (the PTS delta `/ 90000`).
     pub interval: f64,

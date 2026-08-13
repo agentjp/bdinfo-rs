@@ -1092,8 +1092,9 @@ pub fn render_report(disc: Disc, options: Option<ScanOptions>) -> String {
 /// demux, so a consumer that wants the report and the model never reads a
 /// multi-GB disc twice.
 ///
-/// When `on_progress` is supplied it is called as `(file, done, total)` after
-/// each demux read. A non-empty `selection` names the playlists to measure (CLI
+/// When `on_progress` is supplied it is called as `(file, done, total)` before
+/// and after each demux read. A non-empty `selection` names the playlists to
+/// measure (CLI
 /// `--mpls` semantics — unfiltered, in order); an empty `selection` measures the
 /// standard `--whole` set. `options` carries the rest: the optional report
 /// sections, the short-playlist threshold `disc.playlists` is classified against

@@ -42,9 +42,10 @@ const EMIT_EVERY: Duration = Duration::from_millis(100);
 
 /// How long the scan may go without a progress event before the display calls
 /// the current read stalled. Progress normally arrives many times a second
-/// (one event per read chunk, coalesced to [`EMIT_EVERY`]), so a multi-second
-/// silence means one read syscall has not returned — damaged optical media
-/// held in drive-firmware retries, which can block for minutes with no error.
+/// (a heartbeat before and a count after every read, coalesced to
+/// [`EMIT_EVERY`]), so a multi-second silence means one read syscall has not
+/// returned — damaged optical media held in drive-firmware retries, which can
+/// block for minutes with no error.
 const STALL_AFTER: Duration = Duration::from_secs(5);
 
 /// Whether `since_progress` — the time since the last progress event — has
@@ -57,8 +58,8 @@ pub(crate) fn stalled(since_progress: Duration) -> bool {
 
 /// Whether a scan-progress event should become a UI message.
 ///
-/// The scan fires its callback every few MB — tens of thousands of times on a
-/// feature disc — so the worker coalesces to one message per `EMIT_EVERY`
+/// The scan fires its callback before and after every read — hundreds of
+/// thousands of times on a feature disc — so the worker coalesces to one message per `EMIT_EVERY`
 /// (100 ms), plus every file boundary and the final event, exactly like the
 /// CLI throttles its terminal redraw. `since_last` is the time since the last
 /// emitted message (`None` before the first, which always emits).

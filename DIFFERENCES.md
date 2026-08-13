@@ -211,10 +211,19 @@ deliberately diverge from BDInfo 0.8:
   chapter rows and stream tallies fill further before the zero rows begin;
 - cancellation, polled once per request, takes effect within 256 KiB of reading instead
   of 5 MiB;
-- one unreadable span stalls a 256 KiB (listing: 16 KiB) request inside the drive's
-  retry storm rather than a 5 MiB one.
+- one unreadable span stalls one small request inside the drive's retry storm rather
+  than a 5 MiB one — 16 KiB in the quick codec pass (which runs first in every
+  measurement scan and alone in a codec-only browse), 256 KiB in the full pass.
 
-<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`).</sub>
+A damaged scan of a bare Windows drive root also keeps a degraded disc label: once
+stream read errors are recorded, the raw-device read that recovers the UDF volume label
+is skipped — one more sector-by-sector grind of a failing drive for a cosmetic string —
+so the report and its file name carry the bare drive letter. Classic BDInfo shows the
+OS-reported volume label there (it reads it through the filesystem before scanning and
+has no raw-device read to skip).
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`),
+`crates/bdinfo-rs-core/src/vfs/volume.rs` (the label-read gate).</sub>
 
 ---
 

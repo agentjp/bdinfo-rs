@@ -832,7 +832,7 @@ impl BdRom {
     /// their metadata-only summaries (zero measured rates). `None` scans
     /// every stream file.
     ///
-    /// `progress` is called after every demux read and at every file boundary
+    /// `progress` is called before and after every demux read and at every file boundary
     /// with the running [`ScanProgress`]; it never fires without the packet
     /// scan.
     ///
