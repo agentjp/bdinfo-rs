@@ -594,7 +594,8 @@ impl Flow {
     /// model's elapsed seconds so the readout climbs even when no progress
     /// event arrives (a read stuck in drive-firmware retries emits none), and
     /// `since_progress` (since the last progress event) drives the stall flag
-    /// ([`crate::progress::stalled`]). The remaining estimate is untouched —
+    /// (its fixed threshold lives in [`crate::progress`], beside the model's
+    /// other display constants). The remaining estimate is untouched —
     /// it is meaningful only against real progress. A no-op off
     /// [`Stage::Scanning`], and before the first progress event only the
     /// stall flag moves (there is no model to re-stamp).
