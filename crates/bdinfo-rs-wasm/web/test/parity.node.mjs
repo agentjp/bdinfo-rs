@@ -1,11 +1,13 @@
 // Node golden-parity test — no browser, no driver.
 //
 // Loads the BUILT, wasm-opt'd module (pkg/) straight into Node via `initSync`
-// (the synchronous byte-init path, no fetch), shims the three browser globals the
-// streaming export touches (`File`, `FileReaderSync`, plus `.size`/`.slice`), and
-// drives the SAME production export the Worker uses — `scan_files` over a
-// `(relativePath, File)` list built from the committed Big Buck Bunny BD-ROM
-// fixture. It then asserts the rendered report is BYTE-IDENTICAL to the pinned
+// (the synchronous byte-init path, no fetch), installs the browser globals the
+// streaming export touches (`shims.mjs`: `File`, `FileReaderSync`, plus
+// `.size`/`.slice`), and drives the SAME production export the Worker uses —
+// `scan_files` over a `(relativePath, File)` list built from the committed Big
+// Buck Bunny BD-ROM fixture.
+//
+// It then asserts the rendered report is BYTE-IDENTICAL to the pinned
 // golden (`tests/golden_report.txt`) — the crate's own golden, rendered from the
 // same Big Buck Bunny fixture the native CLI e2e test scans and pinned by the
 // native and in-browser parity tests alike. So this ties the wasm channel to the
@@ -25,40 +27,13 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installShims, ShimFile } from "./shims.mjs";
 
 // --- browser-global shims (synchronous, Worker-equivalent) -------------------
 
-/** A minimal synchronous `Blob`: a byte window with `size` and `slice`. */
-class ShimBlob {
-  constructor(bytes) {
-    this._bytes = bytes;
-  }
-  get size() {
-    return this._bytes.length;
-  }
-  slice(start, end) {
-    return new ShimBlob(this._bytes.subarray(start, end));
-  }
-}
-
-/** A `File` over a byte buffer — what the wasm `instanceof File` check sees. */
-class ShimFile extends ShimBlob {
-  constructor(bytes, name) {
-    super(bytes);
-    this.name = name;
-  }
-}
-
-/** `FileReaderSync.readAsArrayBuffer` — the synchronous byte read the seam needs. */
-class ShimFileReaderSync {
-  readAsArrayBuffer(blob) {
-    const b = blob._bytes;
-    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-  }
-}
-
-globalThis.File = ShimFile;
-globalThis.FileReaderSync = ShimFileReaderSync;
+// No fault policy is installed, so every read below serves its bytes.
+// `faults.node.mjs` drives the same shims through reads that throw.
+installShims();
 
 // --- paths -------------------------------------------------------------------
 
