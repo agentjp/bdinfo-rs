@@ -997,7 +997,10 @@ fn a_truncated_stream_file_scans_clean_and_raises_the_stderr_notice() {
     let parent = std::env::temp_dir().join(format!("bdinfo-rs-short-{}", std::process::id()));
     let root = parent.join("MultiPlaylist");
     copy_tree(&real_fixture("MultiPlaylist"), &root);
-    let clip = root.join("BDMV").join("STREAM").join("00011.M2TS");
+    // The committed file name is lower-case; only the report and the notice
+    // upper-case it. A case-insensitive filesystem forgives a wrong case here,
+    // Linux does not.
+    let clip = root.join("BDMV").join("STREAM").join("00011.m2ts");
     let bytes = std::fs::read(&clip).expect("read the stream file");
     // 1,920,000 bytes = 500 clip seconds at the fixture's 3840 bytes/second.
     let kept = bytes.get(..1_920_000).expect("the clip is 6,297,600 bytes");
