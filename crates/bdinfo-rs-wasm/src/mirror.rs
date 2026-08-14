@@ -14,6 +14,10 @@
 //! | [`ScanStage`] | [`ScanStage`](bdinfo_rs_core::error::ScanStage) |
 //! | [`ScanErrorReason`] | [`BdError`](bdinfo_rs_core::error::BdError) |
 //! | [`HiddenRule`] | [`HiddenRule`](bdinfo_rs_core::bdrom::order::HiddenRule) |
+//! | [`MeasuredSnapshot`] | [`MeasuredSnapshot`](core_measured::MeasuredSnapshot) |
+//! | [`MeasuredPlaylist`] | [`MeasuredPlaylist`](core_measured::MeasuredPlaylist) |
+//! | [`MeasuredClip`] | [`MeasuredClip`](core_measured::MeasuredClip) |
+//! | [`MeasuredStream`] | [`MeasuredStream`](core_measured::MeasuredStream) |
 //!
 //! ## Conventions
 //!
@@ -52,6 +56,11 @@
 //! the [`Disc`] it was rendered beside, for a scan that returns both. [`ScanOptions`] is the one
 //! type that crosses the other way — what a call takes rather than what it produces — so it is
 //! also the only one whose fields are all optional.
+//!
+//! The four `Measured*` types are the only ones that cross **during** a scan rather than at its
+//! end: a measured observer is handed one [`MeasuredSnapshot`] per demuxed read chunk, so a page
+//! can tick its cells while the scan runs. Their `From` impls are the only ones taking a core
+//! type that is not part of the disc model.
 
 use std::io;
 
@@ -59,6 +68,7 @@ use bdinfo_rs_core::bdrom::chapters::{ChapterSummary, seconds_to_ticks};
 use bdinfo_rs_core::bdrom::disc::{
     BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary,
 };
+use bdinfo_rs_core::bdrom::measured as core_measured;
 use bdinfo_rs_core::bdrom::order::{self, PlaylistFilter, table_rows};
 use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error;
@@ -503,6 +513,90 @@ pub struct Chapter {
     pub max_frame_time_seconds: f64,
 }
 
+/// What a measured scan has tallied so far, taken while it is still running.
+///
+/// A scan that was given a measured observer hands it one of these per demuxed
+/// read chunk, so a display can tick its cells during the scan instead of
+/// waiting for the report. Every value is one the finished scan reports too:
+/// `measuredBytes` lands on the same number the `Clip` packet counts give, and
+/// `bitrateBps` on the same rate the `Stream` carries, so a cell that ticks
+/// here never jumps at the handover.
+///
+/// Two properties make the snapshots composable into a live display: each
+/// covers only the playlists that play the stream file it was taken over, so a
+/// display keeps its last known numbers for every other playlist; and within
+/// one scan the byte tallies only grow, so a cell one snapshot raises is never
+/// walked back by a later one.
+#[derive(Tsify, Serialize, Debug, Clone, PartialEq, Eq)]
+#[tsify(into_wasm_abi)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredSnapshot {
+    /// The stream file the scan was demuxing when it took this snapshot, in
+    /// upper case, for example `00000.M2TS`.
+    pub file: String,
+    /// The playlists that sequence that file, by name. Empty when no playlist
+    /// plays it: a clip file no playlist references is still scanned, and moves
+    /// nothing.
+    pub playlists: Vec<MeasuredPlaylist>,
+}
+
+/// The tallies of one playlist within a `MeasuredSnapshot`.
+#[derive(Tsify, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredPlaylist {
+    /// The playlist file name in upper case, for example `00000.MPLS` — the
+    /// same `name` the disc model carries.
+    pub name: String,
+    /// Packet-derived bytes over every clip the playlist sequences, angle clips
+    /// included. The live form of the sum of the playlist `clips` packet counts
+    /// times 192.
+    pub measured_bytes: u64,
+    /// The sequenced clips, one entry per row of the playlist `clips` and in
+    /// that same order, so the two line up by position.
+    pub clips: Vec<MeasuredClip>,
+    /// The measured rates of the playlist presented streams, one entry per
+    /// packet identifier and camera angle. Empty until the scan resolves the
+    /// presented streams, and never ordered like the playlist `streams`: match
+    /// a row by its `pid` and `angleIndex`, never by position.
+    pub streams: Vec<MeasuredStream>,
+}
+
+/// The tallies of one sequenced clip within a `MeasuredSnapshot`.
+#[derive(Tsify, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredClip {
+    /// The clip stream-file name in upper case, for example `00000.M2TS`. Only
+    /// the clips carrying the snapshot `file` can have moved since the previous
+    /// snapshot; a playlist that plays one file twice has one entry per play
+    /// item.
+    pub name: String,
+    /// Which camera angle this clip belongs to; zero is the main angle.
+    pub angle_index: i32,
+    /// Packet-derived bytes measured for this clip — the live form of the clip
+    /// `packetCount` times 192.
+    pub measured_bytes: u64,
+}
+
+/// The measured rates of one presented stream within a `MeasuredSnapshot`.
+#[derive(Tsify, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasuredStream {
+    /// The packet identifier.
+    pub pid: u16,
+    /// Which camera angle this row carries: zero for the main presentation row,
+    /// and 1 upwards for the per-angle copies of a video stream. Together with
+    /// `pid` it names exactly one row of the playlist `streams`.
+    pub angle_index: usize,
+    /// The stream bitrate in bits per second so far — the live form of the
+    /// stream `bitrateBps`. A constant-rate stream carries its declared rate
+    /// from the start; a variable-rate one is recomputed as the scan proceeds.
+    pub bitrate_bps: i64,
+    /// The bitrate in bits per second over the region where the stream is
+    /// active — the live form of the stream `activeBitrateBps`, and filled in
+    /// for the same streams.
+    pub active_bitrate_bps: i64,
+}
+
 /// One file the scan could not read or parse, and continued past.
 ///
 /// A scan never stops on a bad file: it records the failure here and scans the
@@ -825,6 +919,47 @@ impl From<&ChapterSummary> for Chapter {
     }
 }
 
+impl From<&core_measured::MeasuredSnapshot> for MeasuredSnapshot {
+    fn from(snapshot: &core_measured::MeasuredSnapshot) -> Self {
+        Self {
+            file: snapshot.file.clone(),
+            playlists: snapshot.playlists.iter().map(MeasuredPlaylist::from).collect(),
+        }
+    }
+}
+
+impl From<&core_measured::MeasuredPlaylist> for MeasuredPlaylist {
+    fn from(playlist: &core_measured::MeasuredPlaylist) -> Self {
+        Self {
+            name: playlist.name.clone(),
+            measured_bytes: playlist.measured_bytes,
+            clips: playlist.clips.iter().map(MeasuredClip::from).collect(),
+            streams: playlist.streams.iter().map(MeasuredStream::from).collect(),
+        }
+    }
+}
+
+impl From<&core_measured::MeasuredClip> for MeasuredClip {
+    fn from(clip: &core_measured::MeasuredClip) -> Self {
+        Self {
+            name: clip.name.clone(),
+            angle_index: clip.angle_index,
+            measured_bytes: clip.measured_bytes,
+        }
+    }
+}
+
+impl From<&core_measured::MeasuredStream> for MeasuredStream {
+    fn from(stream: &core_measured::MeasuredStream) -> Self {
+        Self {
+            pid: stream.pid.get(),
+            angle_index: stream.angle_index,
+            bitrate_bps: stream.bitrate,
+            active_bitrate_bps: stream.active_bitrate,
+        }
+    }
+}
+
 impl From<&error::ScanError> for ScanError {
     fn from(failure: &error::ScanError) -> Self {
         Self {
@@ -1128,8 +1263,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        Chapter, Clip, ClipStream, Disc, HiddenRule, Playlist, ScanError, ScanErrorReason,
-        ScanOptions, ScanStage, Stream, borrowed_codec_alt_name, order,
+        Chapter, Clip, ClipStream, Disc, HiddenRule, MeasuredSnapshot, Playlist, ScanError,
+        ScanErrorReason, ScanOptions, ScanStage, Stream, borrowed_codec_alt_name, core_measured,
+        order,
     };
 
     // One fixture value and one hand-written wire form per mirror type, composed
@@ -1767,6 +1903,93 @@ mod tests {
             &PlaylistFilter::default(),
             None,
         )
+    }
+
+    /// Every snapshot a measured scan of the fixture disc takes, mirrored.
+    ///
+    /// The scan is the real one — the core types are `#[non_exhaustive]`, so a
+    /// snapshot cannot be built by hand — which is also what makes the
+    /// assertions below a comparison against the numbers the same scan then
+    /// reports, rather than against a fixture restating the mapping.
+    fn fixture_snapshots() -> (Vec<MeasuredSnapshot>, Disc) {
+        use std::sync::atomic::AtomicBool;
+
+        use bdinfo_rs_core::bdrom::disc::{ScanObservers, ScanOptions, ScanProgress};
+
+        let tree = crate::framed_tree(&crate::tests::fixture_blob());
+        let mut taken: Vec<MeasuredSnapshot> = Vec::new();
+        let mut progress = |_: ScanProgress<'_>| {};
+        let mut watch = |snapshot: core_measured::MeasuredSnapshot| {
+            taken.push(MeasuredSnapshot::from(&snapshot));
+        };
+        let cancel = AtomicBool::new(false);
+        let report = BdRom::open_resilient_observed(
+            &tree,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            ScanObservers::new(&mut progress, &cancel).with_measured(&mut watch),
+        )
+        .expect("the fixture disc opens");
+        let disc =
+            Disc::from_scan(&report.bdrom, &report.errors, true, &PlaylistFilter::default(), None);
+        (taken, disc)
+    }
+
+    #[test]
+    fn a_live_snapshot_carries_the_numbers_the_finished_scan_reports() {
+        let (snapshots, disc) = fixture_snapshots();
+        let last = snapshots.last().expect("the measured pass takes at least one snapshot");
+        assert_eq!(last.file, "00000.M2TS", "the snapshot names the stream file it was taken over");
+
+        let playlist = disc.playlists.first().expect("the fixture disc has a playlist");
+        let live = last.playlists.first().expect("the fixture playlist plays the scanned clip");
+        assert_eq!(last.playlists.len(), 1, "only the playlists playing that file are covered");
+        assert_eq!(live.name, playlist.name);
+
+        // The playlist total, the per-clip rows and the per-stream rates all
+        // land on the finished summaries: the last snapshot of a scan IS the
+        // report, in the live spelling.
+        let clip_bytes = |clip: &Clip| clip.packet_count * 192;
+        assert_eq!(live.measured_bytes, playlist.clips.iter().map(clip_bytes).sum::<u64>());
+        assert!(live.measured_bytes > 0, "the packet scan measured the clip");
+        assert_eq!(live.clips.len(), playlist.clips.len());
+        for (measured, clip) in live.clips.iter().zip(&playlist.clips) {
+            assert_eq!((&measured.name, measured.angle_index), (&clip.name, clip.angle_index));
+            assert_eq!(measured.measured_bytes, clip_bytes(clip));
+        }
+
+        // Streams are keyed, never zipped: the snapshot orders them main map
+        // first and then per angle, which is not the report row order.
+        assert_eq!(live.streams.len(), playlist.streams.len());
+        for stream in &playlist.streams {
+            let measured = live
+                .streams
+                .iter()
+                .find(|live| (live.pid, live.angle_index) == (stream.pid, stream.angle_index))
+                .expect("every presented stream has a measured row");
+            assert_eq!(measured.bitrate_bps, stream.bitrate_bps, "pid {}", stream.pid);
+            assert_eq!(measured.active_bitrate_bps, stream.active_bitrate_bps);
+        }
+        assert!(
+            live.streams.iter().any(|stream| stream.bitrate_bps > 0),
+            "the measured rates reach the mirror"
+        );
+    }
+
+    #[test]
+    fn the_byte_tallies_only_grow_across_a_scan() {
+        // The property a live display leans on: a cell one snapshot raises is
+        // never walked back by a later one, so patching cells in arrival order
+        // cannot show a number going down.
+        let (snapshots, _) = fixture_snapshots();
+        assert!(snapshots.len() > 1, "the fixture clip spans several read chunks");
+        let totals: Vec<u64> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.playlists.iter().map(|playlist| playlist.measured_bytes).sum())
+            .collect();
+        assert!(totals.is_sorted(), "byte tallies must be monotone: {totals:?}");
+        assert!(totals.first() < totals.last(), "and they must actually move: {totals:?}");
     }
 
     #[test]

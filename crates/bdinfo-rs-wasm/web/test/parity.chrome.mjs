@@ -327,6 +327,7 @@ async function main() {
           names: texts("#playlist-body td.name"),
           positions: texts("#playlist-body tr td:nth-child(2)"),
           sizes: texts("#playlist-body tr td:nth-child(6)"),
+          measured: texts('#playlist-body td[data-cell="measured"]'),
           active: document.querySelector("#playlist-body tr.active")?.dataset.name ?? null,
           panesVisible: !document.getElementById("detail-panes").hidden,
           paneLabel: document.getElementById("pane-playlist").textContent,
@@ -725,6 +726,15 @@ async function main() {
   demoOk &= demoEq("scan keeps the active row", demo.scanned.active, "00000.MPLS");
   demoOk &= demoEq("measured size fills after the scan", demo.scanned.files, [
     ["00000.M2TS", "1", "00:00:30", "10.63 MB", "10.55 MB"],
+  ]);
+  // The table's own measured column: empty before any scan, and filled for both
+  // rows afterwards — they play the same clip, so they measure the same bytes.
+  // Mid-scan the same cells tick from the scan's snapshots; the page reads them
+  // here after it finished, where the numbers are the report's.
+  demoOk &= demoEq("measured column starts empty", demo.initial.measured, ["—", "—"]);
+  demoOk &= demoEq("measured column fills after the scan", demo.scanned.measured, [
+    "10.55 MB",
+    "10.55 MB",
   ]);
   // 973, not the report's 974: the pane integer-divides bits/s to kbps like the
   // desktop pane, where the report's codec table rounds.

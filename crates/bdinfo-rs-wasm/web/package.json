@@ -48,6 +48,8 @@
     "dist/analyze.js",
     "dist/analyze.d.ts",
     "dist/worker.js",
+    "dist/measured.js",
+    "dist/measured.d.ts",
     "pkg",
     "README.md",
     "LICENSE",
@@ -62,7 +64,7 @@
     "size": "node check-size.mjs",
     "check": "biome check .",
     "format": "biome check --write .",
-    "test:node": "node test/parity.node.mjs && node test/faults.node.mjs",
+    "test:node": "node test/parity.node.mjs && node test/faults.node.mjs && node test/measured.node.mjs",
     "test:chrome": "node test/parity.chrome.mjs"
   },
   "devDependencies": {

@@ -228,6 +228,33 @@ call with an error rather than silently scanning with the default.
 Nothing else moves with it: which playlists a `Disc` holds, which ones a
 `selection` measures, and the rendered report are the same either way.
 
+### Live numbers while the scan runs
+
+`onProgress` says how far a scan has read; `options.onMeasured` says what it has
+measured so far, so a table can fill its measured cells during the scan instead
+of waiting for the report:
+
+```ts
+await scan(picked, undefined, {
+  onMeasured: ({ file, playlists }) => {
+    for (const playlist of playlists) {
+      // `measuredBytes` per playlist, `clips[]` per stream file, `streams[]`
+      // per (pid, angleIndex) — the live form of the same values `scan`
+      // resolves with.
+      cells.get(playlist.name).textContent = format(playlist.measuredBytes);
+    }
+  },
+});
+```
+
+Each snapshot covers only the playlists that play the stream file named by
+`file`, so keep your last known numbers for the rest; within one scan the byte
+tallies only grow. The values land exactly on the finished ones, so a cell that
+ticks does not jump when the scan ends. The callback is called **at most once a
+second** whatever the read speed — the scan produces snapshots far faster on a
+quick source and the extra ones are dropped — and a scan given no `onMeasured`
+builds no snapshots at all.
+
 ### Cancelling
 
 Pass an `AbortSignal`. Aborting it terminates the scan Worker and rejects the

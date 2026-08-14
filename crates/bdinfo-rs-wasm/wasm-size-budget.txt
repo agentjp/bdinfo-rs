@@ -2,8 +2,10 @@
 # (web/pkg/bdinfo_rs_wasm_bg.wasm, after `wasm-opt -Oz`).
 #
 # A ceiling, not a target: the gate and CI (wasm.yml) fail if the optimized
-# .wasm exceeds it. Current optimized size is ~513,498 B (rustc 1.97.1 +
-# wasm-bindgen 0.2.126 + binaryen 131.0.0).
+# .wasm exceeds it. Current optimized size is ~540,482 B (rustc 1.97.1 +
+# wasm-bindgen 0.2.127 + binaryen 132.0.0); the same tree built ~513,498 B under
+# wasm-bindgen 0.2.126 + binaryen 131.0.0, so a few tens of kilobytes of the
+# figure are toolchain drift rather than code.
 #
 # The ceiling is 1 MiB, roughly double the current figure. It is deliberately
 # loose: a payload of this size is not a cost worth designing around for a tool
@@ -24,4 +26,7 @@
 # row serializer and the four exports that fed it took ~2,859 B back off.
 # Replacing the scanning calls' positional option tails with one deserialized
 # options object added ~5,126 B - one more visitor over four optional fields.
+# The live measured-snapshot mirror (four types serialized once per demuxed read
+# chunk) added ~4,468 B, measured against the same tree without it: `Serialize`
+# alone over small flat records is the cheap half of serde.
 1048576

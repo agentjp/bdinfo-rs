@@ -13,6 +13,11 @@
 // forwarded to the main thread as it demuxes; the answer is posted back when
 // done.
 //
+// A measured scan also forwards the tallies it has so far, so the page can tick
+// its cells during the scan. Those messages carry a whole disc worth of numbers
+// where a progress message carries three, so they are the one reply this module
+// rate-limits (`throttleMeasured`) rather than relaying as they arrive.
+//
 // This module is internal: `dist/worker.js` is not an importable subpath of the
 // package, so the request and reply shapes below are free to change with the
 // `analyze.ts` that speaks them.
@@ -26,6 +31,7 @@ import init, {
   scan_files,
   scan_iso,
 } from "../pkg/bdinfo_rs_wasm.js";
+import { throttleMeasured } from "./measured.js";
 
 /**
  * The options object every request carries, built in `analyze.ts` and handed to
@@ -101,6 +107,11 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     const onProgress = (file: string, done: number, total: number) => {
       self.postMessage({ type: "progress", file, done, total });
     };
+    // One gate per request: a scan starts ticking on its first snapshot, and
+    // the clock does not carry over from the previous scan.
+    const onMeasured = throttleMeasured((measured) => {
+      self.postMessage({ type: "measured", measured });
+    });
     switch (data.kind) {
       case "inspect":
         self.postMessage({
@@ -117,13 +128,20 @@ self.onmessage = async (event: MessageEvent<Request>) => {
       case "scan":
         self.postMessage({
           type: "result",
-          result: scan_files(data.paths, data.files, data.selection, onProgress, data.options),
+          result: scan_files(
+            data.paths,
+            data.files,
+            data.selection,
+            onProgress,
+            data.options,
+            onMeasured,
+          ),
         });
         break;
       case "scan-iso":
         self.postMessage({
           type: "result",
-          result: scan_iso(data.file, data.selection, onProgress, data.options),
+          result: scan_iso(data.file, data.selection, onProgress, data.options, onMeasured),
         });
         break;
       case "render":

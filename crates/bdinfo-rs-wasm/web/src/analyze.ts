@@ -18,7 +18,12 @@
 // files, and resolves with the result — the rendered classic disc report being
 // the very bytes the native CLI writes to `BDINFO.<label>.txt`.
 
-import type { Disc, ScanOptions as ModuleOptions, ScanResult } from "../pkg/bdinfo_rs_wasm.js";
+import type {
+  Disc,
+  MeasuredSnapshot,
+  ScanOptions as ModuleOptions,
+  ScanResult,
+} from "../pkg/bdinfo_rs_wasm.js";
 
 // The structured disc model is generated from the Rust types, so these
 // declarations and the values the WebAssembly module hands back have one source
@@ -30,6 +35,10 @@ export type {
   ClipStream,
   Disc,
   HiddenRule,
+  MeasuredClip,
+  MeasuredPlaylist,
+  MeasuredSnapshot,
+  MeasuredStream,
   Playlist,
   ScanError,
   ScanErrorReason,
@@ -62,6 +71,12 @@ export interface ScanProgress {
 
 /** A progress observer, called repeatedly as the scan demuxes. */
 export type ProgressFn = (progress: ScanProgress) => void;
+
+/**
+ * A live-tally observer, called as a measured scan raises its numbers — at most
+ * once a second, whatever the read speed.
+ */
+export type MeasuredFn = (measured: MeasuredSnapshot) => void;
 
 /**
  * Optional overrides for every call in this module. Each option documents which
@@ -142,6 +157,22 @@ export interface ScanOptions {
    */
   keepPartial?: boolean;
   /**
+   * An observer of the scan measured tallies as they build up, so a table can
+   * tick its measured cells during the scan instead of waiting for the report.
+   *
+   * It is called with one {@link MeasuredSnapshot} at most once a second — the
+   * scan produces them far faster on a quick source, and the extra ones are
+   * dropped rather than posted. Each snapshot covers only the playlists that
+   * play the stream file it was taken over, so keep your last known numbers for
+   * the rest; within one scan the byte tallies only grow. The values land
+   * exactly on the ones {@link scan} resolves with, so a cell that ticks here
+   * does not jump when the scan finishes.
+   *
+   * Read by {@link scan}. Omitting it costs nothing: a scan nobody watches
+   * builds no snapshots at all.
+   */
+  onMeasured?: MeasuredFn;
+  /**
    * An optional {@link AbortSignal} that cancels the call in progress: when it
    * aborts, the scan Worker is terminated and the returned promise rejects with
    * the signal's reason (an `AbortError`), so callers can tell a user cancel
@@ -155,6 +186,7 @@ export interface ScanOptions {
 /** Everything the scan Worker posts back; see `worker.ts` for who sends what. */
 type WorkerMessage =
   | ({ type: "progress" } & ScanProgress)
+  | { type: "measured"; measured: MeasuredSnapshot }
   | { type: "done"; report: string }
   | { type: "disc"; disc: Disc }
   | { type: "result"; result: ScanResult }
@@ -220,11 +252,11 @@ function cancelledError(signal?: AbortSignal): DOMException {
  * out of the reply that answers it.
  *
  * `request` is the shape every call in this module shares: spawn the Worker,
- * post one request, forward demux progress to `onProgress`, settle on the first
- * reply `take` accepts or on the first `error`, and terminate the Worker on
- * every exit — reply, failure, or cancel. `take` returns `null` for a message
- * that is not this request's answer, which is what keeps the message loop out of
- * the calls themselves.
+ * post one request, forward demux progress to `onProgress` and live tallies to
+ * `options.onMeasured`, settle on the first reply `take` accepts or on the first
+ * `error`, and terminate the Worker on every exit — reply, failure, or cancel.
+ * `take` returns `null` for a message that is not this request's answer, which
+ * is what keeps the message loop out of the calls themselves.
  *
  * `message` must be one of the request shapes `worker.ts` declares as `Request`;
  * that union is the contract, and it cannot be imported here because `worker.ts`
@@ -259,6 +291,10 @@ function request<T>(
       const reply = event.data;
       if (reply.type === "progress") {
         onProgress?.(reply);
+        return;
+      }
+      if (reply.type === "measured") {
+        options?.onMeasured?.(reply.measured);
         return;
       }
       if (reply.type === "error") {
@@ -324,7 +360,9 @@ export function inspect(source: DiscSource, options?: ScanOptions): Promise<Disc
  * UDF reader and read on demand at byte offsets, never loaded whole, so a
  * multi-GB image is fine.
  *
- * `onProgress`, if given, is called as the scan demuxes. `options.selection`
+ * `onProgress`, if given, is called as the scan demuxes, and
+ * `options.onMeasured` as its measured numbers climb — the two together are
+ * what a page needs to show a live scan. `options.selection`
  * measures only the named playlists (the CLI's `--mpls`), defaulting to the
  * standard `--whole` set. `options.streamDiagnostics` and
  * `options.quickSummary` choose the report's optional sections, both rendered
