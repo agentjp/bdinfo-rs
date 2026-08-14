@@ -676,14 +676,24 @@ mod tests {
         // waiting on one to conclude a cancelled listing is over would wait
         // forever.
         let mut events: Vec<u64> = Vec::new();
+        let mut on_progress = |progress: bdinfo_rs_core::bdrom::disc::ScanProgress<'_>| {
+            events.push(progress.done);
+        };
+        // One direct priming call — the scan itself must never add to it, so
+        // the assertion below counts exactly this call and nothing more.
+        on_progress(bdinfo_rs_core::bdrom::disc::ScanProgress {
+            file: "00000.M2TS",
+            done: 7,
+            total: 9,
+        });
         let message = super::scan_structural(
             &Input::Folder(fixture("BigBuckBunny")),
-            &mut |progress| events.push(progress.done),
+            &mut on_progress,
             &AtomicBool::new(true),
         )
         .expect_err("a cancelled listing yields no table");
         assert_eq!(message, "scan cancelled");
-        assert!(events.is_empty(), "no event precedes the cancel poll");
+        assert_eq!(events, [7], "no event beyond the priming call precedes the cancel poll");
     }
 
     #[test]
