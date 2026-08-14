@@ -3,7 +3,8 @@
 //! Holds the pure logic — the argv surface and attended-session evidence
 //! ([`args`]), the playlist view-model ([`model`]), the
 //! master-detail pane view-models ([`panes`]), the selection model (`selection`),
-//! the live-progress model ([`progress`]), the flow state machine ([`flow`]),
+//! the live-progress model ([`progress`]), the mid-scan measured cells
+//! ([`live`]), the flow state machine ([`flow`]),
 //! the copy-path helpers ([`paths`]), the clipboard sanitizer ([`clipboard`]),
 //! the column-weight math ([`columns`]), the persistent configuration
 //! ([`settings`]), the best-effort diagnostics log ([`diagnostics`]), the
@@ -28,6 +29,7 @@ pub mod columns;
 pub mod diagnostics;
 pub mod flow;
 pub mod icon;
+pub mod live;
 pub mod model;
 pub mod panes;
 pub mod paths;

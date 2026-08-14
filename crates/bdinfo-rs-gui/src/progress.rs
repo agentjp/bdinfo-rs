@@ -68,6 +68,23 @@ pub fn emit_due(file_changed: bool, done: u64, total: u64, since_last: Option<Du
     file_changed || done == total || since_last.is_none_or(|elapsed| elapsed >= EMIT_EVERY)
 }
 
+/// How often the measured tallies are worth a UI message — the worker's
+/// grid-tick interval.
+///
+/// The scan reports them once per demuxed read chunk, which on a fast source is
+/// many times a second and on a stalled one not for minutes; the grids are
+/// re-rendered per message, so the cells tick on a wall clock instead. One
+/// second is the rate classic `BDInfo` samples its live grids at.
+const MEASURE_EVERY: Duration = Duration::from_secs(1);
+
+/// Whether a measured snapshot should become a UI message. `since_last` is the
+/// time since the last emitted one (`None` before the first, which always
+/// emits).
+#[must_use]
+pub fn measure_due(since_last: Option<Duration>) -> bool {
+    since_last.is_none_or(|elapsed| elapsed >= MEASURE_EVERY)
+}
+
 /// A live-progress snapshot: the current file, the percent, and the estimates.
 ///
 /// The iced shell stores the latest of these while a scan is in flight and
@@ -232,6 +249,16 @@ mod tests {
         // A file boundary and the final byte always emit, however recent.
         assert!(super::emit_due(true, 4, 100, Some(Duration::ZERO)));
         assert!(super::emit_due(false, 100, 100, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn measured_snapshots_tick_once_a_second() {
+        // The first snapshot of a scan always emits; the rest wait out the
+        // interval, whose boundary is inclusive.
+        assert!(super::measure_due(None));
+        assert!(!super::measure_due(Some(Duration::from_millis(999))));
+        assert!(super::measure_due(Some(Duration::from_secs(1))));
+        assert!(super::measure_due(Some(Duration::from_secs(5))));
     }
 
     // The projection runs over hostile-shaped byte counts and durations, so

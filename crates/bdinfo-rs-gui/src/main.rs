@@ -33,11 +33,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bdinfo_rs_core::bdrom::disc::{HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{
+    HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanObservers, ScanProgress,
+};
+use bdinfo_rs_core::bdrom::measured::MeasuredSnapshot;
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report;
 use bdinfo_rs_gui::diagnostics::{self, LogErr as _};
 use bdinfo_rs_gui::flow::{self, Flow, ScanRequest, Stage};
+use bdinfo_rs_gui::live::{self, LivePlaylist};
 use bdinfo_rs_gui::model::{SelectableRow, Sort, SortColumn, ViewSettings, format_file_size};
 use bdinfo_rs_gui::panes::{CodecRow, StreamFileRow};
 use bdinfo_rs_gui::progress::{self, ProgressModel};
@@ -1030,6 +1034,10 @@ enum Message {
     ScanSelected,
     /// A streamed scan-progress event from the worker thread.
     Progress { generation: u64, file: String, done: u64, total: u64 },
+    /// The measured cells the running scan has tallied, one entry per playlist
+    /// the worker's latest snapshot covered — the grids' live numbers, sent at
+    /// most once a second ([`bdinfo_rs_gui::progress::measure_due`]).
+    Measured { generation: u64, playlists: Vec<(String, LivePlaylist)> },
     /// The worker's measured scan finished. The errors are typed (shared —
     /// `ScanError` is not `Clone`) so the flow can re-render the report when
     /// a report-section toggle changes.
@@ -1253,6 +1261,7 @@ impl App {
                 self.flow.progress(generation, file, done, total, elapsed);
                 Task::none()
             }
+            Message::Measured { generation, playlists } => self.on_measured(generation, playlists),
             Message::Finished { generation, report, errors, playlists } => {
                 self.on_finished(generation, report, errors, playlists)
             }
@@ -1716,6 +1725,19 @@ impl App {
         Task::none()
     }
 
+    /// Applies the running scan's measured cells to the grids. A pure flow
+    /// transition — the generation guard and the cells-only rule are
+    /// [`Flow::measured`]'s — so the only shell-side effect is the repaint the
+    /// returned (empty) task lets iced do.
+    fn on_measured(
+        &mut self,
+        generation: u64,
+        playlists: Vec<(String, LivePlaylist)>,
+    ) -> Task<Message> {
+        self.flow.measured(generation, playlists);
+        Task::none()
+    }
+
     /// Applies a display tick: advances the indeterminate bar's phase, then
     /// re-reads the wall clock so the elapsed readout and the stall hint move
     /// even when no progress event arrives. The listing and the measured scan
@@ -1996,14 +2018,29 @@ impl App {
                     total: progress.total,
                 });
             };
+            // The measured tallies arrive once per demuxed read chunk — many a
+            // second on a fast source. Each message re-renders three grids, so
+            // they tick on a wall clock (the rate classic BDInfo samples its
+            // own live grids at) rather than per chunk, and only the numbers the
+            // grids draw cross the channel.
+            let mut last_measured: Option<Instant> = None;
+            let mut on_measured = |snapshot: MeasuredSnapshot| {
+                if !progress::measure_due(last_measured.map(|at| at.elapsed())) {
+                    return;
+                }
+                last_measured = Some(Instant::now());
+                let _ = sender.unbounded_send(Message::Measured {
+                    generation,
+                    playlists: live::updates(snapshot),
+                });
+            };
             let result = scan::scan_measured(
                 &input,
                 &selection,
                 &scan_files,
                 options,
                 scan_options,
-                &mut on_progress,
-                &cancel,
+                ScanObservers::new(&mut on_progress, &cancel).with_measured(&mut on_measured),
             );
             let outcome = match result {
                 Ok(measured) => Message::Finished {
@@ -4094,6 +4131,40 @@ mod interaction {
             app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::fraction);
         assert_eq!(fraction, Some(0.5));
         assert!(sees(&app, "Scanning A.M2TS…"), "the lead line names the demuxing file");
+    }
+
+    #[test]
+    fn the_workers_measured_cells_tick_the_table_and_the_panes() {
+        use bdinfo_rs_gui::live::LivePlaylist;
+
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        assert!(!sees(&app, "1,234,560"), "nothing is measured before the first snapshot");
+
+        let cells = |bytes: u64| {
+            vec![(
+                "00000.MPLS".to_owned(),
+                LivePlaylist { measured_bytes: bytes, clips: vec![bytes], streams: Vec::new() },
+            )]
+        };
+        let _ = app
+            .update(Message::Measured { generation: app.generation, playlists: cells(1_234_560) });
+        assert!(sees(&app, "1,234,560"), "the row's Measured Bytes cell carries the count");
+        // The same count reaches the active playlist's Stream Files pane. Both
+        // grids draw the identical string, so the pane is read through the
+        // view-model rather than searched for on screen.
+        assert_eq!(
+            app.flow.stream_file_rows().first().map(|row| row.measured.clone()),
+            Some("1,234,560".to_owned())
+        );
+        // A snapshot from a superseded scan is dropped before the flow.
+        let _ = app.update(Message::Measured {
+            generation: app.generation.wrapping_add(1),
+            playlists: cells(9_999_999),
+        });
+        assert!(!sees(&app, "9,999,999"), "the stale cells must not repaint");
+        assert!(sees(&app, "1,234,560"));
     }
 
     #[test]

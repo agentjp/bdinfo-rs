@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanMode, ScanOptions, ScanProgress};
+use bdinfo_rs_core::bdrom::disc::{
+    BdRom, PlaylistSummary, ScanMode, ScanObservers, ScanOptions, ScanProgress,
+};
 use bdinfo_rs_core::bdrom::order::selection_order;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
@@ -132,14 +134,15 @@ fn open(
     mode: ScanMode,
     options: ScanOptions,
     scan_files: Option<&BTreeSet<String>>,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
+    observers: ScanObservers<'_>,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     let report = match input {
         Input::Folder(path) => {
-            core_scan::open_folder(path, mode, options, scan_files, progress, cancel)
+            core_scan::open_folder_observed(path, mode, options, scan_files, observers)
         }
-        Input::Iso(path) => core_scan::open_iso(path, mode, options, scan_files, progress, cancel),
+        Input::Iso(path) => {
+            core_scan::open_iso_observed(path, mode, options, scan_files, observers)
+        }
     }?;
     Ok((report.bdrom, report.errors))
 }
@@ -186,7 +189,10 @@ pub fn scan_structural(
         // one that renders a report. A listing open that hits a mid-file read
         // error therefore keeps that file's partial codec detail whatever the
         // setting says, so the panes stay as full as the disc allows.
-        open(input, mode, ScanOptions::default(), None, progress, cancel)
+        //
+        // A fresh bundle per open: the listing makes two of them, and the
+        // observers hold the callback exclusively for one call.
+        open(input, mode, ScanOptions::default(), None, ScanObservers::new(&mut *progress, cancel))
             .map_err(|err: BdError| err.to_string())
     })?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
@@ -221,7 +227,7 @@ fn listing_scan(mut open: impl FnMut(ScanMode) -> Opened) -> Opened {
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.
 ///
-/// Streams progress through `progress` and renders the classic report in
+/// Streams progress through `observers` and renders the classic report in
 /// `selection` order — the GUI equivalent of `bdinfo-rs <disc> --mpls A,B`.
 ///
 /// `selection` is the chosen playlist names in table order, and `scan_files` the
@@ -234,28 +240,30 @@ fn listing_scan(mut open: impl FnMut(ScanMode) -> Opened) -> Opened {
 /// iced shell's worker thread, where native demux keeps its `thread::scope`
 /// parallelism.
 ///
-/// `cancel` is the shell's Cancel affordance: set it (from the UI thread) and
-/// the demux aborts at its next read chunk, so the worker returns within
-/// moments instead of scanning a possibly-90-GB disc to completion.
+/// `observers` carries the scan's three seams: the progress callback, the
+/// cooperative cancel flag, and — when the caller installs one
+/// ([`ScanObservers::with_measured`]) — the measured-tally observer whose
+/// snapshots let a display tick its cells while the scan runs. The cancel flag
+/// is the shell's Cancel affordance: set it (from the UI thread) and the demux
+/// aborts at its next read chunk, so the worker returns within moments instead
+/// of scanning a possibly-90-GB disc to completion.
 ///
 /// # Errors
 /// A short message when the structure is too damaged to open at all — the same
 /// hard error [`scan_structural`] surfaces (it cannot occur in practice, since
 /// the structural scan just located the same structure, but the result is
-/// reported rather than panicked) — or when `cancel` was set mid-scan (the
-/// message is dropped by the shell's generation guard; no report escapes).
+/// reported rather than panicked) — or when the cancel flag was set mid-scan
+/// (the message is dropped by the shell's generation guard; no report escapes).
 pub fn scan_measured(
     input: &Input,
     selection: &[String],
     scan_files: &BTreeSet<String>,
     options: RenderOptions,
     scan_options: ScanOptions,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
+    observers: ScanObservers<'_>,
 ) -> Result<Measured, String> {
-    let (bdrom, errors) =
-        open(input, ScanMode::Full, scan_options, Some(scan_files), progress, cancel)
-            .map_err(|err| err.to_string())?;
+    let (bdrom, errors) = open(input, ScanMode::Full, scan_options, Some(scan_files), observers)
+        .map_err(|err| err.to_string())?;
     let order = selection_order(&bdrom.playlists, selection);
     let report = text::render_with(&bdrom, &order, &errors, options);
     Ok(Measured {
@@ -480,14 +488,14 @@ mod tests {
         // structure — but the result is a Result, not a hope).
         let dir = scratch("empty-measured");
         std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let cancel = AtomicBool::new(false);
         let message = super::scan_measured(
             &Input::Folder(dir),
             &[],
             &std::collections::BTreeSet::new(),
             bdinfo_rs_core::report::text::RenderOptions::default(),
             ScanOptions::default(),
-            &mut super::no_progress,
-            &std::sync::atomic::AtomicBool::new(false),
+            super::ScanObservers::new(&mut super::no_progress, &cancel),
         )
         .expect_err("no Blu-ray structure to open");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
@@ -717,6 +725,77 @@ mod tests {
         // disc's BDMV/BACKUP copy — resilience, not silence; the warning above
         // is the record of the primary's corruption.
         assert!(!structural.bdrom.playlists.is_empty());
+    }
+
+    #[test]
+    fn a_measured_scan_streams_live_cells_that_land_on_the_finished_summaries() {
+        // The whole point of the live cells: a grid that ticks them during the
+        // scan and takes the summaries at the end never jumps at the handover.
+        // The three-playlist fixture also shows the per-file scope — its middle
+        // playlist shares no clip, while one clip is played by two playlists.
+        use std::collections::BTreeMap;
+
+        use bdinfo_rs_core::bdrom::disc::ClipSummary;
+        use bdinfo_rs_core::bdrom::measured::MeasuredSnapshot;
+        use bdinfo_rs_core::bdrom::order::selection_stream_files;
+        use bdinfo_rs_core::report::text::RenderOptions;
+
+        use crate::live::{self, LivePlaylist};
+
+        let input = Input::Folder(fixture("MultiPlaylist"));
+        let listed = scan_structural(&input).expect("the fixture lists");
+        let selection: Vec<String> =
+            listed.bdrom.playlists.iter().map(|playlist| playlist.name.clone()).collect();
+        let scan_files = selection_stream_files(&listed.bdrom.playlists, &selection);
+        let cancel = AtomicBool::new(false);
+        let mut live: BTreeMap<String, LivePlaylist> = BTreeMap::new();
+        let mut covered: Vec<Vec<String>> = Vec::new();
+        let measured = {
+            let mut watch = |snapshot: MeasuredSnapshot| {
+                let updates = live::updates(snapshot);
+                covered.push(updates.iter().map(|(name, _)| name.clone()).collect());
+                live.extend(updates);
+            };
+            super::scan_measured(
+                &input,
+                &selection,
+                &scan_files,
+                RenderOptions::default(),
+                ScanOptions::default(),
+                super::ScanObservers::new(&mut super::no_progress, &cancel)
+                    .with_measured(&mut watch),
+            )
+        }
+        .expect("the fixture scans");
+
+        assert_eq!(measured.playlists.len(), 3);
+        for playlist in &measured.playlists {
+            let cells = live.get(&playlist.name).expect("every scanned playlist was reported");
+            assert!(cells.measured_bytes > 0, "{} measured nothing", playlist.name);
+            assert_eq!(cells.measured_bytes, playlist.total_angle_packet_size());
+            let clips: Vec<u64> = playlist.clips.iter().map(ClipSummary::packet_size).collect();
+            assert_eq!(cells.clips, clips, "{} clip rows", playlist.name);
+            for stream in &playlist.streams {
+                assert_eq!(
+                    cells.bitrate(stream.pid, stream.angle_index),
+                    Some(stream.bitrate),
+                    "{} stream {:?}",
+                    playlist.name,
+                    stream.pid
+                );
+            }
+        }
+        // One snapshot per demuxed chunk plus one per file boundary, each
+        // naming only the playlists that play the file it was taken over.
+        assert!(covered.len() >= scan_files.len(), "at least one snapshot per stream file");
+        assert!(
+            covered.iter().any(|names| names.len() == 2),
+            "the shared clip moves two playlists at once: {covered:?}"
+        );
+        assert!(
+            covered.iter().any(|names| names.len() == 1),
+            "a clip played by one playlist moves only it: {covered:?}"
+        );
     }
 
     #[test]

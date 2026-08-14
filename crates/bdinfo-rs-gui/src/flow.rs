@@ -16,7 +16,7 @@
 //! late message can drive the UI into an inconsistent state. That invariant is
 //! proptested.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
+use crate::live::LivePlaylist;
 use crate::model::{
     self, HiddenPlaylists, PlaylistRow, SelectableRow, Sort, SortColumn, ViewSettings,
 };
@@ -407,6 +408,14 @@ enum Inner {
         /// every applied progress event. The status line then reads "still
         /// reading" instead of implying normal progress.
         stalled: bool,
+        /// The measured cells the scan has reported so far, by playlist name —
+        /// what the table's `Measured Bytes` column and the two panes show
+        /// while the scan runs ([`crate::live`]). Merged per playlist by
+        /// [`Flow::measured`] and read only here: the rows, their order and the
+        /// retained report never see it, and the finished scan's summaries
+        /// replace it rather than adding to it. Empty until the first snapshot,
+        /// so an unreported playlist keeps showing the summaries' zeros.
+        live: BTreeMap<String, LivePlaylist>,
     },
     Reported {
         listing: Listing,
@@ -593,6 +602,7 @@ impl Flow {
                         progress: None,
                         scanned,
                         stalled: false,
+                        live: BTreeMap::new(),
                     },
                 }
             }
@@ -619,6 +629,26 @@ impl Flow {
         {
             *progress = Some(ProgressModel::compute(file, done, total, elapsed));
             *stalled = false;
+        }
+    }
+
+    /// Records the measured cells a scan in flight has reported — one entry per
+    /// playlist the snapshot covered ([`crate::live::updates`]). Applied only
+    /// while scanning **and** when `generation` matches the in-flight scan, like
+    /// [`Flow::progress`].
+    ///
+    /// **Cells only.** Each entry replaces that playlist's previous one and
+    /// nothing else moves: the row set, the sort order, the checked set, the
+    /// active row and the retained report are all untouched, so the table the
+    /// user is watching cannot reorder or rebuild under a running scan. A
+    /// playlist no snapshot has covered yet keeps showing the (zero) summary
+    /// values, and the scan's completion ([`Flow::finished`]) replaces every
+    /// cell with the measured summaries.
+    pub fn measured(&mut self, generation: u64, playlists: Vec<(String, LivePlaylist)>) {
+        if let Inner::Scanning { generation: active, live, .. } = &mut self.inner
+            && *active == generation
+        {
+            live.extend(playlists);
         }
     }
 
@@ -818,24 +848,31 @@ impl Flow {
     }
 
     /// The "Stream Files" pane rows for the active playlist (empty when none),
-    /// their size cells rendered under the human-readable toggle.
+    /// their size cells rendered under the human-readable toggle — and, while a
+    /// scan is reporting that playlist, its measured sizes as of the last
+    /// snapshot.
     #[must_use]
     pub fn stream_file_rows(&self) -> Vec<StreamFileRow> {
         self.any_listing()
             .and_then(|listing| {
                 listing.active_playlist().map(|playlist| {
-                    panes::stream_file_rows(playlist, listing.view.human_readable_sizes)
+                    panes::stream_file_rows(
+                        playlist,
+                        listing.view.human_readable_sizes,
+                        self.live_playlist(&playlist.name),
+                    )
                 })
             })
             .unwrap_or_default()
     }
 
-    /// The "Streams" (codec) pane rows for the active playlist (empty when none).
+    /// The "Streams" (codec) pane rows for the active playlist (empty when
+    /// none), their rates ticking with the scan like the sizes above.
     #[must_use]
     pub fn codec_rows(&self) -> Vec<CodecRow> {
         self.any_listing()
             .and_then(Listing::active_playlist)
-            .map(panes::codec_rows)
+            .map(|playlist| panes::codec_rows(playlist, self.live_playlist(&playlist.name)))
             .unwrap_or_default()
     }
 
@@ -862,18 +899,29 @@ impl Flow {
     }
 
     /// The selectable table rows (empty unless a disc is loaded).
+    ///
+    /// A row whose playlist a scan in flight has reported shows that scan's
+    /// running `Measured Bytes` count in place of the summary's; every other
+    /// cell, and the row order, is the same one a settled table renders.
     #[must_use]
     pub fn table(&self) -> Vec<SelectableRow> {
         let Some(listing) = self.any_listing() else { return Vec::new() };
         model::display_rows(&listing.rows, listing.view)
             .into_iter()
             .enumerate()
-            .map(|(index, cells)| SelectableRow {
-                index,
-                selected: listing.selection.is_checked(index),
-                active: index == listing.active,
-                has_hidden: listing.rows.get(index).is_some_and(|row| row.has_hidden_streams),
-                cells,
+            .map(|(index, mut cells)| {
+                let row = listing.rows.get(index);
+                if let Some(live) = row.and_then(|row| self.live_playlist(&row.name)) {
+                    cells.measured_bytes =
+                        model::byte_cell(live.measured_bytes, listing.view.human_readable_sizes);
+                }
+                SelectableRow {
+                    index,
+                    selected: listing.selection.is_checked(index),
+                    active: index == listing.active,
+                    has_hidden: row.is_some_and(|row| row.has_hidden_streams),
+                    cells,
+                }
             })
             .collect()
     }
@@ -1050,6 +1098,17 @@ impl Flow {
         }
     }
 
+    /// The named playlist's cells as the in-flight scan last reported them, or
+    /// `None` outside a scan and for a playlist no snapshot has covered yet.
+    /// Only [`Stage::Scanning`] answers: a settled table's numbers come from
+    /// the summaries themselves.
+    fn live_playlist(&self, name: &str) -> Option<&LivePlaylist> {
+        match &self.inner {
+            Inner::Scanning { live, .. } => live.get(name),
+            _ => None,
+        }
+    }
+
     /// The listing behind an **editable** state (Listed / Reported) — the
     /// read side of [`editable_listing_mut`](Self::editable_listing_mut).
     const fn editable_listing(&self) -> Option<&Listing> {
@@ -1074,11 +1133,51 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, fixtures};
+    use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, StreamSummary, fixtures};
+    use bdinfo_rs_core::primitives::Pid;
+    use bdinfo_rs_core::stream::TsStreamType;
 
     use super::{Flow, Stage};
+    use crate::live::{LivePlaylist, LiveStream};
     use crate::model::{Sort, SortColumn, ViewSettings};
     use crate::scan::{Input, Structural};
+
+    /// A presented video stream on camera angle `angle_index`, unmeasured — the
+    /// fields the Streams pane reads, and the `(pid, angle_index)` pair a live
+    /// rate is keyed on.
+    fn stream_summary(pid: Pid, angle_index: usize) -> StreamSummary {
+        StreamSummary {
+            pid,
+            stream_type: TsStreamType::default(),
+            codec_short_name: String::new(),
+            codec_name: "MPEG-4 AVC Video".to_owned(),
+            codec_alt_name: "",
+            bitrate: 0,
+            active_bitrate: 0,
+            language_name: String::new(),
+            language_code: String::new(),
+            description: String::new(),
+            full_description: "1080p / 23.976 fps / 16:9".to_owned(),
+            channel_description: String::new(),
+            sample_rate: 0,
+            bit_depth: 0,
+            channel_count: 0,
+            height: 0,
+            angle_index,
+            is_hidden: false,
+            ssif_only: false,
+        }
+    }
+
+    /// The Stream Files pane's `Measured Size` cells, in row order.
+    fn pane_sizes(flow: &Flow) -> Vec<String> {
+        flow.stream_file_rows().into_iter().map(|row| row.measured).collect()
+    }
+
+    /// The Streams pane's `Bit Rate` cells, in row order.
+    fn pane_rates(flow: &Flow) -> Vec<String> {
+        flow.codec_rows().into_iter().map(|row| row.bitrate).collect()
+    }
 
     fn playlist(name: &str, length: f64, clips: &[&str]) -> PlaylistSummary {
         playlist_sized(name, length, 1000, clips)
@@ -1737,6 +1836,130 @@ mod tests {
         assert_eq!(sizes, ["192,000"]);
     }
 
+    /// The live cells one snapshot carries for a playlist: its total, its
+    /// per-clip counts, and one presented stream's rate on the main angle.
+    fn live_cells(
+        name: &str,
+        measured_bytes: u64,
+        clips: &[u64],
+        bitrate: i64,
+    ) -> (String, LivePlaylist) {
+        (
+            name.to_owned(),
+            LivePlaylist {
+                measured_bytes,
+                clips: clips.to_vec(),
+                streams: vec![LiveStream { pid: Pid::new(0x1011), angle_index: 0, bitrate }],
+            },
+        )
+    }
+
+    /// The table's `Measured Bytes` cells, in row order.
+    fn measured_cells(flow: &Flow) -> Vec<String> {
+        flow.table().into_iter().map(|row| row.cells.measured_bytes).collect()
+    }
+
+    #[test]
+    fn a_measured_update_ticks_the_cells_and_moves_nothing_else() {
+        let mut flow = listed3();
+        flow.toggle(0);
+        flow.set_active(1);
+        let mut flow = flow.start_scanning(1);
+        let before = flow.report().expect("the pre-scan report").to_owned();
+        assert_eq!(measured_cells(&flow), ["0", "0", "0"], "nothing measured yet");
+
+        flow.measured(1, vec![live_cells("00001.MPLS", 960, &[960], 19_000)]);
+
+        // The reported playlist's cell ticks; the others hold their zeros.
+        assert_eq!(measured_cells(&flow), ["0", "960", "0"]);
+        // Everything else about the table is exactly as it was: the same rows
+        // in the same order, the same checked row, the same highlight, the same
+        // frozen state and the same retained report.
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+        assert_eq!(flow.selected_count(), 1);
+        assert!(flow.table().first().is_some_and(|row| row.selected));
+        assert_eq!(flow.active_index(), Some(1));
+        assert_eq!(flow.stage(), Stage::Scanning);
+        assert!(!flow.editable());
+        assert_eq!(flow.report(), Some(before.as_str()), "the report is not regenerated");
+
+        // A later snapshot replaces that playlist's cell and still leaves the
+        // playlists it did not cover alone.
+        flow.measured(1, vec![live_cells("00001.MPLS", 1_920, &[1_920], 19_000)]);
+        assert_eq!(measured_cells(&flow), ["0", "1,920", "0"]);
+    }
+
+    #[test]
+    fn the_active_playlists_panes_tick_with_the_scan() {
+        // The active playlist plays two clips and presents one stream, so both
+        // panes have a cell to move.
+        let mut structural = structural();
+        let feature = structural.bdrom.playlists.first_mut().expect("the feature playlist");
+        feature.clips = fixtures::clips(&["A.M2TS", "B.M2TS"], 50.0);
+        feature.streams = vec![stream_summary(Pid::new(0x1011), 0)];
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        let mut flow = flow.start_scanning(1);
+        assert_eq!(pane_sizes(&flow), ["-", "-"], "nothing demuxed yet");
+        assert_eq!(pane_rates(&flow), ["-"]);
+
+        flow.measured(1, vec![live_cells("00000.MPLS", 960, &[768, 192], 19_000)]);
+        assert_eq!(pane_sizes(&flow), ["768", "192"], "one cell per clip row, in clip order");
+        assert_eq!(pane_rates(&flow), ["19 kbps"]);
+
+        // A playlist the snapshot did not cover keeps showing its own (unread)
+        // tallies — the panes never borrow another playlist's numbers.
+        let mut other = listed();
+        other.set_active(1);
+        let mut other = other.start_scanning(1);
+        other.measured(1, vec![live_cells("00000.MPLS", 960, &[768, 192], 19_000)]);
+        assert_eq!(pane_sizes(&other), ["-"]);
+    }
+
+    #[test]
+    fn measured_cells_reach_only_the_scan_they_belong_to() {
+        // A snapshot from a superseded scan is dropped, like a stale progress
+        // event…
+        let mut flow = listed3().start_scanning(5);
+        flow.measured(4, vec![live_cells("00001.MPLS", 960, &[960], 19_000)]);
+        assert_eq!(measured_cells(&flow), ["0", "0", "0"], "stale cells ignored");
+        // …and so is one that arrives when no scan is running at all, in either
+        // stage that shows the table.
+        let mut listed = listed3();
+        listed.measured(5, vec![live_cells("00001.MPLS", 960, &[960], 19_000)]);
+        assert_eq!(measured_cells(&listed), ["0", "0", "0"]);
+        let mut reported = listed3().start_scanning(5).finished(
+            5,
+            "R".to_owned(),
+            Arc::new(Vec::new()),
+            structural3().bdrom.playlists,
+        );
+        reported.measured(5, vec![live_cells("00001.MPLS", 960, &[960], 19_000)]);
+        assert_eq!(measured_cells(&reported), ["0", "0", "0"]);
+    }
+
+    #[test]
+    fn the_scans_end_takes_the_live_cells_off_the_grids() {
+        // Finishing swaps in the measured summaries — the live cells are a
+        // display of the same numbers on their way there, never an addition to
+        // them.
+        let mut flow = listed().start_scanning(1);
+        flow.measured(1, vec![live_cells("00000.MPLS", 960, &[960], 19_000)]);
+        assert_eq!(measured_cells(&flow), ["960", "0"]);
+        let mut measured = structural().bdrom.playlists;
+        measured
+            .first_mut()
+            .and_then(|playlist| playlist.clips.first_mut())
+            .expect("the first clip")
+            .packet_count = 1000; // 1000 * 192 = 192,000 bytes
+        let done = flow.clone().finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
+        assert_eq!(measured_cells(&done), ["192,000", "0"]);
+        // Cancelling ends the scan without measured summaries to show, so the
+        // table returns to the pre-scan zeros rather than keeping the numbers
+        // of a scan that never completed.
+        assert_eq!(measured_cells(&flow.cancel()), ["0", "0"]);
+    }
+
     #[test]
     fn a_stale_generation_never_advances_the_state() {
         let mut flow = listed();
@@ -1862,37 +2085,13 @@ mod tests {
 
     #[test]
     fn warnings_hidden_streams_and_codec_rows_surface_through_the_flow() {
-        use bdinfo_rs_core::bdrom::disc::StreamSummary;
-        use bdinfo_rs_core::primitives::Pid;
-        use bdinfo_rs_core::stream::TsStreamType;
-
         // A disc whose structural scan recorded a warning and whose feature
         // playlist presents one HIDDEN stream: all three accessors the shell
         // banners/marks from must surface it.
         let mut structural = structural();
         structural.warnings = vec!["BDMV/PLAYLIST/00000.mpls: unreadable".to_owned()];
         structural.bdrom.playlists.first_mut().expect("the feature playlist").streams =
-            vec![StreamSummary {
-                pid: Pid::new(0x1011),
-                stream_type: TsStreamType::default(),
-                codec_short_name: String::new(),
-                codec_name: "MPEG-4 AVC Video".to_owned(),
-                codec_alt_name: "",
-                bitrate: 0,
-                active_bitrate: 0,
-                language_name: String::new(),
-                language_code: String::new(),
-                description: String::new(),
-                full_description: "1080p / 23.976 fps / 16:9".to_owned(),
-                channel_description: String::new(),
-                sample_rate: 0,
-                bit_depth: 0,
-                channel_count: 0,
-                height: 0,
-                angle_index: 0,
-                is_hidden: true,
-                ssif_only: false,
-            }];
+            vec![StreamSummary { is_hidden: true, ..stream_summary(Pid::new(0x1011), 0) }];
         let flow =
             Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
         // The structural warning reaches the banner accessor verbatim.
@@ -1912,8 +2111,6 @@ mod tests {
     #[test]
     fn a_measured_short_stream_file_surfaces_the_notice_with_the_shared_wording() {
         use bdinfo_rs_core::bdrom::disc::ClipStreamTally;
-        use bdinfo_rs_core::primitives::Pid;
-        use bdinfo_rs_core::stream::TsStreamType;
 
         // No disc, and an unmeasured (structural) disc: silent.
         assert!(Flow::idle().short_stream_notices().is_empty());
