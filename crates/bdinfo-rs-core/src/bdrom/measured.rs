@@ -114,11 +114,17 @@ pub(crate) const fn packet_size(packets: u64) -> u64 {
 /// `file` is compared to the clip names exactly, so it must be the upper-cased
 /// stream-file name the demux attributes its windows under — the same match
 /// the demux itself makes when it pre-filters the playlists a clip can touch.
-pub(crate) fn snapshot(file: &str, playlists: &[TsPlaylistFile]) -> MeasuredSnapshot {
+/// Feeding only that pre-filtered subset here yields the same snapshot as
+/// feeding the whole disc's list, since the per-playlist filter below is the
+/// very match the pre-filter applied.
+pub(crate) fn snapshot<'a>(
+    file: &str,
+    playlists: impl IntoIterator<Item = &'a TsPlaylistFile>,
+) -> MeasuredSnapshot {
     MeasuredSnapshot {
         file: file.to_owned(),
         playlists: playlists
-            .iter()
+            .into_iter()
             .filter_map(|playlist| playlist_tallies(file, playlist))
             .collect(),
     }

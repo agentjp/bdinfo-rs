@@ -51,6 +51,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use super::interleaved::TsInterleavedFile;
+use super::measured::{self, MeasuredSnapshot};
 use super::mpls::TsPlaylistFile;
 use crate::bitstream::TsStreamBuffer;
 use crate::error::BdError;
@@ -632,16 +633,21 @@ impl TsStreamFile {
         )
     }
 
-    /// [`scan`](Self::scan) with a cooperative `cancel` flag — the demux entry
-    /// the disc-level open drives. The flag is polled once per read chunk
-    /// ([`fill_buffer`]); when set, the scan aborts promptly with
-    /// [`BdError::ScanCancelled`] instead of reading further.
+    /// [`scan`](Self::scan) with a cooperative `cancel` flag and an optional
+    /// measured-tally observer — the demux entry the disc-level open drives.
+    /// The flag is polled once per read chunk ([`fill_buffer`]); when set, the
+    /// scan aborts promptly with [`BdError::ScanCancelled`] instead of reading
+    /// further. On a full scan, `measured` is handed an owned
+    /// [`MeasuredSnapshot`] of the playlists this clip can touch after each
+    /// parsed chunk (delivered on the calling thread); a non-full scan never
+    /// snapshots — its tallies are a partial sliver a display must not show.
     pub(crate) fn scan_cancellable(
         &mut self,
         reader: &mut dyn Read,
         playlists: &mut [TsPlaylistFile],
         is_full_scan: bool,
         cancel: &AtomicBool,
+        measured: Option<&mut (dyn FnMut(MeasuredSnapshot) + '_)>,
     ) -> Result<(), BdError> {
         self.scan_chunked_with(
             reader,
@@ -650,6 +656,7 @@ impl TsStreamFile {
             default_chunk_size(is_full_scan),
             cancel,
             &mut |_, _| {},
+            measured,
         )
     }
 
@@ -675,15 +682,21 @@ impl TsStreamFile {
             chunk_size,
             &AtomicBool::new(false),
             observe,
+            None,
         )
     }
 
     /// The full-parameter scan behind every entry above — explicit chunk
-    /// size, cooperative `cancel` flag, and codec-seam observer — dispatched
-    /// to the execution strategy the build target supports:
+    /// size, cooperative `cancel` flag, codec-seam observer, and optional
+    /// measured-tally observer — dispatched to the execution strategy the
+    /// build target supports:
     /// [`scan_threaded`](Self::scan_threaded) wherever threads exist,
     /// [`scan_sequential`](Self::scan_sequential) on `wasm32-unknown-unknown`
     /// (which has none).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the one dispatch point threads every scan entry's parameters (source, targets, pass, chunking, cancellation, both observers) to the strategy"
+    )]
     fn scan_chunked_with(
         &mut self,
         reader: &mut dyn Read,
@@ -692,14 +705,31 @@ impl TsStreamFile {
         chunk_size: usize,
         cancel: &AtomicBool,
         observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
+        measured: Option<&mut (dyn FnMut(MeasuredSnapshot) + '_)>,
     ) -> Result<(), BdError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.scan_threaded(reader, playlists, is_full_scan, chunk_size, cancel, observe)
+            self.scan_threaded_observed(
+                reader,
+                playlists,
+                is_full_scan,
+                chunk_size,
+                cancel,
+                observe,
+                measured,
+            )
         }
         #[cfg(target_arch = "wasm32")]
         {
-            self.scan_sequential(reader, playlists, is_full_scan, chunk_size, cancel, observe)
+            self.scan_sequential_observed(
+                reader,
+                playlists,
+                is_full_scan,
+                chunk_size,
+                cancel,
+                observe,
+                measured,
+            )
         }
     }
 
@@ -768,10 +798,58 @@ impl TsStreamFile {
         cancel: &AtomicBool,
         observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
     ) -> Result<(), BdError> {
+        self.scan_threaded_observed(
+            reader,
+            playlists,
+            is_full_scan,
+            chunk_size,
+            cancel,
+            observe,
+            None,
+        )
+    }
+
+    /// [`scan_threaded`](Self::scan_threaded) with an optional measured-tally
+    /// observer: on a full scan, each parsed chunk is followed by an owned
+    /// [`MeasuredSnapshot`] of the playlists this clip can touch. The observer
+    /// type is deliberately not `Send` (a browser caller's observer closes
+    /// over a JavaScript function), so the worker — which owns the tallies —
+    /// builds
+    /// each owned snapshot and hands it over a channel to the calling thread,
+    /// which runs the observer between its reads and drains the channel once
+    /// the worker is done. Both strategies therefore hand the same snapshot
+    /// sequence to the observer: one per parsed chunk, in parse order, on the
+    /// calling thread — snapshots are state derived from the compared demux
+    /// output, so the equivalence contract on
+    /// [`scan_sequential`](Self::scan_sequential) needs no third comparison.
+    ///
+    /// # Errors
+    /// As [`scan_threaded`](Self::scan_threaded); snapshots of the chunks
+    /// parsed before a read failure or cancellation are still delivered.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the strategy takes every scan entry's parameters (source, targets, pass, chunking, cancellation, both observers) in one call"
+    )]
+    pub(crate) fn scan_threaded_observed(
+        &mut self,
+        reader: &mut dyn Read,
+        playlists: &mut [TsPlaylistFile],
+        is_full_scan: bool,
+        chunk_size: usize,
+        cancel: &AtomicBool,
+        observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
+        measured: Option<&mut (dyn FnMut(MeasuredSnapshot) + '_)>,
+    ) -> Result<(), BdError> {
         let Some((mut parser, mut relevant, chunk_size)) = self.begin_scan(playlists, chunk_size)
         else {
             return Ok(());
         };
+        // A non-full scan's tallies are the head sliver the quick pass happens
+        // to read (and the disc-level open discards them before measuring), so
+        // only the full pass reports them.
+        let mut watcher = if is_full_scan { measured } else { None };
+        let snapshotting = watcher.is_some();
         // Set when the reader fails: the worker then skips the bitrate tail,
         // abandoning the scan exactly where the classic sequential loop would.
         let read_failed = AtomicBool::new(false);
@@ -783,6 +861,9 @@ impl TsStreamFile {
         let this = &mut *self;
         let (full_tx, full_rx) = mpsc::sync_channel::<Vec<u8>>(1);
         let (free_tx, free_rx) = mpsc::sync_channel::<Vec<u8>>(2);
+        // Unbounded so the worker never blocks on a slow observer; at most the
+        // chunks in flight (three buffers' worth) are ever pending.
+        let (snapshot_tx, snapshot_rx) = mpsc::channel::<MeasuredSnapshot>();
         thread::scope(|scope| {
             let read_failed = &read_failed;
             let finished_early = &finished_early;
@@ -795,6 +876,18 @@ impl TsStreamFile {
                         // mid-scan return.
                         finished_early.store(true, Ordering::SeqCst);
                         return;
+                    }
+                    if snapshotting {
+                        // Sent before the buffer is recycled, so once the
+                        // reader holds this chunk's returned buffer the
+                        // snapshot is already waiting for its next drain. The
+                        // send cannot fail — the receiver outlives the worker
+                        // (the scope joins it) — so `drop` only discards the
+                        // must-use `Result`.
+                        drop(snapshot_tx.send(measured::snapshot(
+                            &this.name,
+                            relevant.iter().map(|playlist| &**playlist),
+                        )));
                     }
                     // Hand the spent buffer back for reuse (a no-op if the
                     // reader is already gone).
@@ -813,6 +906,14 @@ impl TsStreamFile {
             // so a deeper read-ahead only holds more idle buffers, not speed.
             let mut fresh: u8 = 2;
             loop {
+                // Deliver the snapshots the worker has produced so far — the
+                // mid-scan liveness this observer exists for; the rest arrive
+                // in the drain after the loop.
+                if let Some(watch) = watcher.as_deref_mut() {
+                    while let Ok(snapshot) = snapshot_rx.try_recv() {
+                        watch(snapshot);
+                    }
+                }
                 let mut buffer = if fresh > 0 {
                     fresh = fresh.wrapping_sub(1);
                     vec![0_u8; chunk_size]
@@ -839,6 +940,16 @@ impl TsStreamFile {
                 }
             }
             drop(full_tx); // end-of-stream for the worker
+            // The worker may still be parsing chunks already read; deliver
+            // their snapshots too (`recv` returns `Err` once the worker exits
+            // and its sender drops), so the observer ends the scan holding
+            // every parsed chunk's tallies whether the reader finished, failed
+            // or was cancelled — exactly the sequential strategy's sequence.
+            if let Some(watch) = watcher {
+                while let Ok(snapshot) = snapshot_rx.recv() {
+                    watch(snapshot);
+                }
+            }
         });
         if finished_early.load(Ordering::SeqCst) {
             // The scan finished before the reader did; any read-ahead error
@@ -880,10 +991,48 @@ impl TsStreamFile {
         cancel: &AtomicBool,
         observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
     ) -> Result<(), BdError> {
+        self.scan_sequential_observed(
+            reader,
+            playlists,
+            is_full_scan,
+            chunk_size,
+            cancel,
+            observe,
+            None,
+        )
+    }
+
+    /// [`scan_sequential`](Self::scan_sequential) with an optional
+    /// measured-tally observer, run inline after each parsed chunk of a full
+    /// scan — the same snapshot sequence
+    /// [`scan_threaded_observed`](Self::scan_threaded_observed) delivers, with
+    /// no channel because everything already runs on the calling thread.
+    ///
+    /// # Errors
+    /// As [`scan_sequential`](Self::scan_sequential); snapshots of the chunks
+    /// parsed before a read failure or cancellation are still delivered.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the strategy takes every scan entry's parameters (source, targets, pass, chunking, cancellation, both observers) in one call"
+    )]
+    pub(crate) fn scan_sequential_observed(
+        &mut self,
+        reader: &mut dyn Read,
+        playlists: &mut [TsPlaylistFile],
+        is_full_scan: bool,
+        chunk_size: usize,
+        cancel: &AtomicBool,
+        observe: &mut (dyn FnMut(u16, &TsStreamBuffer) + Send),
+        measured: Option<&mut (dyn FnMut(MeasuredSnapshot) + '_)>,
+    ) -> Result<(), BdError> {
         let Some((mut parser, mut relevant, chunk_size)) = self.begin_scan(playlists, chunk_size)
         else {
             return Ok(());
         };
+        // A non-full scan's tallies are the head sliver the quick pass happens
+        // to read (and the disc-level open discards them before measuring), so
+        // only the full pass reports them.
+        let mut watcher = if is_full_scan { measured } else { None };
         // Case for case against the threaded strategy: `parse_chunk` returning
         // `true` is the early finish (the worker's `finished_early` → `Ok`); a
         // read error returns without the bitrate tail (the worker's
@@ -903,6 +1052,12 @@ impl TsStreamFile {
                     if self.parse_chunk(&buffer, &mut parser, &mut relevant, is_full_scan, observe)
                     {
                         return Ok(());
+                    }
+                    if let Some(watch) = watcher.as_deref_mut() {
+                        watch(measured::snapshot(
+                            &self.name,
+                            relevant.iter().map(|playlist| &**playlist),
+                        ));
                     }
                 }
                 Err(e) => return Err(e),
@@ -1975,13 +2130,14 @@ mod tests {
         pes_pts_padded, pes_variable, pmt_payload, pmt_payload_es, pmt_section,
     };
     use super::{
-        DATA_SIZE, QUICK_DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics, TsStreamFile,
-        pts_to_f64, round_long,
+        DATA_SIZE, MeasuredSnapshot, QUICK_DATA_SIZE, TsInterleavedFile, TsStreamDiagnostics,
+        TsStreamFile, pts_to_f64, round_long,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::interleaved::MemBdFile;
     use crate::bdrom::mpls::TsPlaylistFile;
     use crate::bitstream::TsStreamBuffer;
+    use crate::error::BdError;
     use crate::primitives::Pid;
     use crate::stream::{TsAudioStream, TsStream, TsStreamType, TsVideoStream};
     /// A throwaway playlist with no clips — lets [`TsStreamFile::scan`] run (it
@@ -2997,7 +3153,7 @@ mod tests {
         let mut file = TsStreamFile::new("00000.m2ts");
         let mut pls = [empty_playlist()];
         let err = file
-            .scan_cancellable(&mut AlwaysError, &mut pls, true, &AtomicBool::new(true))
+            .scan_cancellable(&mut AlwaysError, &mut pls, true, &AtomicBool::new(true), None)
             .unwrap_err();
         assert_eq!(err.to_string(), "scan cancelled");
     }
@@ -3030,7 +3186,7 @@ mod tests {
         let mut reader = TripAfterServing { inner: Cursor::new(bytes), cancel: &cancel };
         let mut file = TsStreamFile::new("00000.m2ts");
         let mut pls = [empty_playlist()];
-        let err = file.scan_cancellable(&mut reader, &mut pls, true, &cancel).unwrap_err();
+        let err = file.scan_cancellable(&mut reader, &mut pls, true, &cancel, None).unwrap_err();
         assert_eq!(err.to_string(), "scan cancelled");
         let consumed = usize::try_from(reader.inner.position()).expect("position fits");
         assert!(consumed <= DATA_SIZE, "at most the in-flight chunk is read after the trip");
@@ -3064,7 +3220,7 @@ mod tests {
             let mut file = TsStreamFile::new("00000.m2ts");
             let mut pls = [empty_playlist()];
             if cancellable {
-                file.scan_cancellable(&mut recorder, &mut pls, full, &AtomicBool::new(false))
+                file.scan_cancellable(&mut recorder, &mut pls, full, &AtomicBool::new(false), None)
                     .expect("scan");
             } else {
                 file.scan(&mut recorder, &mut pls, full).expect("scan");
@@ -3187,6 +3343,186 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.to_string(), "scan cancelled");
+    }
+
+    // ── the measured-snapshot chunk cadence ──────────────────────────────────
+
+    /// A demuxable stream whose per-clip tallies move across several 192-byte
+    /// chunks: PAT, PMT, then one bounded video PES per second of `1..=frames`
+    /// (each closing the previous frame's window, so the playlists tally as
+    /// the parse proceeds).
+    fn framed_video(frames: u64) -> Vec<u8> {
+        let mut bytes = pat_pmt_video();
+        for second in 1..=frames {
+            let ticks = second.wrapping_mul(90_000);
+            bytes.extend(packet(0x1011, true, &pes_dts(0xE0, ticks, ticks, &[0x5A; 40])));
+        }
+        bytes
+    }
+
+    /// Runs the strategy under test over `bytes` with a snapshot-collecting
+    /// measured observer, returning the collected snapshots and the scan's
+    /// result — the shared driver of the chunk-cadence tests, which compare
+    /// the two strategies' sequences.
+    fn observed_strategy_scan(
+        threaded: bool,
+        reader: &mut dyn Read,
+        full: bool,
+        chunk: usize,
+        cancel: &AtomicBool,
+    ) -> (Vec<MeasuredSnapshot>, Result<(), BdError>) {
+        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
+        let mut watch = |snapshot: MeasuredSnapshot| snapshots.push(snapshot);
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [video_playlist(0x1011)];
+        let result = if threaded {
+            file.scan_threaded_observed(
+                reader,
+                &mut pls,
+                full,
+                chunk,
+                cancel,
+                &mut no_seam,
+                Some(&mut watch),
+            )
+        } else {
+            file.scan_sequential_observed(
+                reader,
+                &mut pls,
+                full,
+                chunk,
+                cancel,
+                &mut no_seam,
+                Some(&mut watch),
+            )
+        };
+        (snapshots, result)
+    }
+
+    #[test]
+    fn both_strategies_snapshot_every_chunk_of_a_full_scan_identically() {
+        // One 192-byte packet per chunk over a stream whose windows close as
+        // frames arrive: the observer sees one snapshot per parsed chunk, and
+        // the threaded pipeline hands over exactly the sequence the
+        // sequential loop produces inline.
+        let bytes = framed_video(6);
+        let chunks = bytes.len() / 192;
+        let run = |threaded: bool| {
+            let mut cur = Cursor::new(bytes.clone());
+            let (snapshots, result) =
+                observed_strategy_scan(threaded, &mut cur, true, 192, &AtomicBool::new(false));
+            result.expect("scan");
+            snapshots
+        };
+        let threaded = run(true);
+        let sequential = run(false);
+        assert_eq!(threaded.len(), chunks, "one snapshot per parsed chunk");
+        assert_eq!(threaded, sequential);
+        // Every snapshot is taken over this clip and covers the one playlist
+        // that plays it, and the byte tallies only ever grow.
+        assert!(threaded.iter().all(|s| s.file == "00000.M2TS"));
+        let tallies: Vec<u64> = threaded
+            .iter()
+            .map(|s| s.playlists.first().expect("the playlist plays the clip").measured_bytes)
+            .collect();
+        assert!(
+            tallies
+                .windows(2)
+                .all(|pair| pair.first().is_none_or(|a| pair.get(1).is_none_or(|b| a <= b))),
+            "tallies never regress"
+        );
+        assert!(tallies.last().is_some_and(|&bytes| bytes > 0), "the demuxed packets tally");
+    }
+
+    #[test]
+    fn a_non_full_scan_never_snapshots_even_with_an_observer_installed() {
+        // A quick pass reads an unpredictable head sliver whose tallies the
+        // disc-level open discards before measuring, so neither strategy
+        // reports it: the same early-finishing stream that drives the
+        // non-full stop tests yields no snapshot at all.
+        let mut bytes = pat_pmt_video();
+        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 90_000, 90_000, &sps_au())));
+        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 180_000, 180_000, &[0; 40])));
+        for threaded in [true, false] {
+            let mut cur = Cursor::new(bytes.clone());
+            let (snapshots, result) =
+                observed_strategy_scan(threaded, &mut cur, false, 192, &AtomicBool::new(false));
+            result.expect("scan");
+            assert!(snapshots.is_empty(), "threaded={threaded} snapshotted a non-full scan");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_scan_still_delivers_the_snapshots_of_the_parsed_chunks() {
+        // Serving the first chunk trips the flag, so the scan aborts before
+        // the second — but the first chunk was parsed, and its snapshot
+        // reaches the observer before the error returns (on the threaded
+        // strategy that is the post-loop channel drain), identically in both
+        // strategies.
+        let bytes = framed_video(7);
+        let chunk = 192 * 4;
+        let run = |threaded: bool| {
+            let cancel = AtomicBool::new(false);
+            let mut reader =
+                TripAfterServing { inner: Cursor::new(bytes.clone()), cancel: &cancel };
+            let (snapshots, result) =
+                observed_strategy_scan(threaded, &mut reader, true, chunk, &cancel);
+            assert_eq!(result.expect_err("the tripped flag cancels").to_string(), "scan cancelled");
+            snapshots
+        };
+        let threaded = run(true);
+        let sequential = run(false);
+        assert_eq!(threaded.len(), 1, "exactly the one parsed chunk is snapshotted");
+        assert_eq!(threaded, sequential);
+    }
+
+    /// A reader appending `"read"` to a shared log as each call is served —
+    /// paired with an observer appending `"snap"`, the log shows how snapshot
+    /// deliveries interleave with reads on the calling thread.
+    struct LogReader<'a> {
+        inner: Cursor<Vec<u8>>,
+        log: &'a std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl Read for LogReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.log.borrow_mut().push("read");
+            self.inner.read(buf)
+        }
+    }
+
+    #[test]
+    fn the_threaded_strategy_delivers_snapshots_while_still_reading() {
+        // The liveness the per-chunk cadence exists for: a snapshot must not
+        // wait for the whole file. The reader's third iteration blocks on the
+        // recycle channel, and the worker sends each chunk's snapshot before
+        // recycling its buffer, so by the fourth read at the latest a
+        // snapshot has been delivered — deterministically, despite the
+        // pipeline's two-buffer read-ahead.
+        let bytes = framed_video(4);
+        assert!(bytes.len() / 192 >= 3, "the interleave argument needs three chunks");
+        let log = std::cell::RefCell::new(Vec::new());
+        let mut reader = LogReader { inner: Cursor::new(bytes), log: &log };
+        let mut watch = |_: MeasuredSnapshot| log.borrow_mut().push("snap");
+        let mut file = TsStreamFile::new("00000.m2ts");
+        let mut pls = [video_playlist(0x1011)];
+        file.scan_threaded_observed(
+            &mut reader,
+            &mut pls,
+            true,
+            192,
+            &AtomicBool::new(false),
+            &mut no_seam,
+            Some(&mut watch),
+        )
+        .expect("scan");
+        let entries = log.into_inner();
+        let first_snap = entries.iter().position(|&e| e == "snap").expect("snapshots delivered");
+        let last_read = entries.iter().rposition(|&e| e == "read").expect("chunks read");
+        assert!(
+            first_snap < last_read,
+            "no snapshot before the last read: {entries:?} (all deliveries waited for EOF)"
+        );
     }
 
     /// The decoded marker the demux records for a video update whose timestamp is
