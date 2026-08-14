@@ -569,11 +569,12 @@ impl Progress<'_> {
     /// Advances the counter by `bytes` demuxed from `file` and reports.
     fn advance(&mut self, file: &str, bytes: u64) {
         self.done = self.done.saturating_add(bytes).min(self.total);
-        (self.callback)(ScanProgress { file, done: self.done, total: self.total });
+        self.heartbeat(file);
     }
 
     /// Reports the current count against `file` without advancing it — the
-    /// pre-read heartbeat. [`CountingReader`] fires it before every physical
+    /// pre-read heartbeat, and the single emission point the two counter
+    /// updates end in. [`CountingReader`] fires it before every physical
     /// read, so a consumer watching for staleness knows a read is in flight
     /// (and in which file) rather than seeing plain silence: on damaged media
     /// one blocking read can stall for minutes, and the heartbeat is the last
@@ -587,7 +588,7 @@ impl Progress<'_> {
     /// percentage of the files after it.
     fn finish_file(&mut self, file: &str, target: u64) {
         self.done = self.done.max(target).min(self.total);
-        (self.callback)(ScanProgress { file, done: self.done, total: self.total });
+        self.heartbeat(file);
     }
 }
 

@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["bluray", "bdmv", "m2ts", "cli", "video"]
 categories = ["command-line-utilities", "multimedia::video"]
 
-# Keep the ~6 MB real-disc test fixtures out of the published crate — they exist
+# Keep the ~30 MB real-disc test fixtures out of the published crate — they exist
 # only for the repo's CI (the end-to-end scan in tests/cli.rs) and are useless to
 # anyone installing from crates.io. `cargo install`/`publish` build the binary, not
 # the integration tests, so excluding them doesn't affect the build; tests/cli.rs
