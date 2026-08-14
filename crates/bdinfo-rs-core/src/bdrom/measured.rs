@@ -117,9 +117,9 @@ pub(crate) const fn packet_size(packets: u64) -> u64 {
 /// Feeding only that pre-filtered subset here yields the same snapshot as
 /// feeding the whole disc's list, since the per-playlist filter below is the
 /// very match the pre-filter applied.
-pub(crate) fn snapshot(
+pub(crate) fn snapshot<'a>(
     file: &str,
-    playlists: impl IntoIterator<Item = &TsPlaylistFile>,
+    playlists: impl IntoIterator<Item = &'a TsPlaylistFile> + 'a,
 ) -> MeasuredSnapshot {
     MeasuredSnapshot {
         file: file.to_owned(),
