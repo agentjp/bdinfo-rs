@@ -914,9 +914,12 @@ fn list_on_an_encrypted_disc_prints_the_table_with_the_notice() {
 // distinguish a selection from the whole disc — `--list`, `-m 00000` and
 // `--whole` all name the same lone row. `MultiPlaylist` is the disc where the
 // listing, the selection and the per-playlist accounting can disagree: three
-// playlists, three clip stems, one playlist spanning two of them. It is
-// deliberately NOT pinned to a golden — the report's byte contract stays
-// BigBuckBunny's one golden per switch — so this checks the flow, not the format.
+// playlists, three clip stems, one playlist spanning two of them. Its shared
+// clip is also deliberately long enough to span more than one read chunk, so a
+// read failure inside it truncates the clip instead of voiding it (the fixtures
+// README carries the sizes). It is deliberately NOT pinned to a golden — the
+// report's byte contract stays BigBuckBunny's one golden per switch — so this
+// checks the flow, not the format.
 
 #[test]
 fn the_multi_playlist_disc_lists_three_playlists_and_scans_them_clean() {
@@ -929,8 +932,8 @@ fn the_multi_playlist_disc_lists_three_playlists_and_scans_them_clean() {
     // Longest playlist first, and `00001.MPLS` in a group of its own because it
     // is the one playlist sharing no clip with the others.
     for row in [
-        "1   1      00002.MPLS     00:00:50",
-        "2   1      00000.MPLS     00:00:30",
+        "1   1      00002.MPLS     00:27:40",
+        "2   1      00000.MPLS     00:27:20",
         "3   2      00001.MPLS     00:00:25",
     ] {
         assert!(stdout.contains(row), "the table is missing {row:?}: {stdout}");

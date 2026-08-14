@@ -29,14 +29,20 @@ bytes (`binary`) verbatim across platforms.
 reports: `--list`, `-m 00000` and `--whole` all name the same row. `MultiPlaylist`
 exists for everything that needs a disc where they can differ — subset selection,
 per-playlist accounting, and injecting a read failure into one clip and watching
-which playlists move. It is 283 KiB and carries no copyrighted content: every byte
+which playlists move. It is 6.2 MiB and carries no copyrighted content: every byte
 is generated.
 
 | Playlist | Length | Play items | Chapter marks (playlist seconds) |
 | --- | --- | --- | --- |
-| `00000.MPLS` | 30 s | `00011.M2TS` | 0, 10, 20 |
+| `00000.MPLS` | 1,640 s | `00011.M2TS` | 0, 600, 1200, 1500 |
 | `00001.MPLS` | 25 s | `00022.M2TS` | 0, 8, 16 |
-| `00002.MPLS` | 50 s | `00033.M2TS` + `00011.M2TS` | 0, 10, 20, 35 |
+| `00002.MPLS` | 1,660 s | `00033.M2TS` + `00011.M2TS` | 0, 10, 20, 620, 1220, 1520 |
+
+| Clip | Length | Size |
+| --- | --- | --- |
+| `00011.M2TS` | 1,640 s | 6,297,600 bytes |
+| `00022.M2TS` | 25 s | 96,000 bytes |
+| `00033.M2TS` | 20 s | 76,800 bytes |
 
 Clip stems (`000{11,22,33}`) never collide with playlist stems, so a name in a log
 says which kind of file it came from. `00011.M2TS` is shared: a failure injected into
@@ -45,6 +51,19 @@ with the others, which is why the listing puts it in a group of its own. Every
 playlist clears the default 20-second short-playlist filter, and none replays a clip
 from the same in-time, so none is filtered as looping — the default listing shows all
 three.
+
+**`00011.M2TS` is sized to span more than one read chunk**, which is what the other
+two clips deliberately cannot do. The browser build reads stream files in 5,242,880-byte
+chunks (`m2ts::DATA_SIZE` under `target_arch = "wasm32"`; the native build uses 262,144),
+so a read that fails inside this clip's second chunk keeps everything its first chunk
+carried, while a failure anywhere in a one-chunk clip voids that clip whole. Three
+otherwise-untestable shapes come out of that, all pinned by the browser fault harness
+(`crates/bdinfo-rs-wasm/web/test/faults.node.mjs`): mid-file partial data, a WARNING
+block naming a damaged file ONCE (the bounded codec pass finishes inside chunk 1 and
+never reaches the damage, so only the full measured pass records an error), and a
+multi-chunk read cadence. The chunk boundary falls at clip second 1365.33 — between the
+1,200-second and 1,500-second marks — so a damaged-disc scan shows whole chapters, one
+partial chapter and a row of zeros in the same table.
 
 Each clip declares one AVC video stream (PID 0x1011, 1080p / 24 fps / 16:9) and one
 AC-3 audio stream (PID 0x1100, 5.1 / 48 kHz / English), in both its `*.clpi` and its
