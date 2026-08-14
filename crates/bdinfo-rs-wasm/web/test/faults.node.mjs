@@ -14,12 +14,18 @@
 //
 // The disc is three playlists over three clips, one of them shared:
 //
-//   00000.MPLS  30 s  00011.M2TS                marks at 0, 10, 20
-//   00001.MPLS  25 s  00022.M2TS                marks at 0, 8, 16
-//   00002.MPLS  50 s  00033.M2TS + 00011.M2TS   marks at 0, 10, 20, 35
+//   00000.MPLS  1640 s  00011.M2TS                marks at 0, 600, 1200, 1500
+//   00001.MPLS    25 s  00022.M2TS                marks at 0, 8, 16
+//   00002.MPLS  1660 s  00033.M2TS + 00011.M2TS   marks at 0, 10, 20, 620, 1220, 1520
 //
 // so a failure in 00011 moves two playlists, a failure in 00022 moves one, and
 // 00002 is the only playlist that can lose one clip and keep another.
+//
+// 00011.M2TS is the one clip bigger than a read chunk (6,297,600 bytes against
+// `WASM_CHUNK`), which is what lets a fault TRUNCATE a file here instead of
+// voiding it: fail a read inside its second chunk and everything the first
+// chunk carried survives. The other two clips are read whole in one call, so a
+// fault anywhere in them takes the whole file.
 //
 // Prereq: `npm run build` (emits pkg/). Run with `npm run test:node`.
 
@@ -35,17 +41,36 @@ const discRoot = resolve(here, "../../../bdinfo-rs/tests/fixtures/MultiPlaylist"
 const wasmPath = resolve(here, "../pkg/bdinfo_rs_wasm_bg.wasm");
 
 /** The clip byte lengths, so a fault offset can be placed inside or past one. */
-const CLIP_BYTES = { "00011.m2ts": 115_200, "00022.m2ts": 96_000, "00033.m2ts": 76_800 };
+const CLIP_BYTES = { "00011.m2ts": 6_297_600, "00022.m2ts": 96_000, "00033.m2ts": 76_800 };
 
-// The fault modes. Offsets are inside their file unless the name says otherwise;
-// every clip here is far smaller than the 5 MiB chunk the demux asks for, so a
-// read covers a whole file in one call and any in-file offset voids all of it.
-// A real multi-GB clip fails one chunk and keeps the chunks before it.
+/**
+ * The read-chunk size this build asks for — `m2ts::DATA_SIZE` under
+ * `target_arch = "wasm32"`, which the browser build uses for BOTH the bounded
+ * codec pass and the full measured pass (the native build's smaller quick chunk
+ * does not apply here).
+ *
+ * Every read below is one chunk of it, clamped to the end of the file, so it is
+ * also where a clip's chunk boundaries are: byte 5,242,880 of 00011.M2TS is
+ * clip second 1365.33, between that clip's 1,200-second and 1,500-second marks.
+ */
+const WASM_CHUNK = 5_242_880;
+
+// The fault modes. Offsets are inside their file unless the name says otherwise.
+// 00022 and 00033 are smaller than one chunk, so a read covers either whole in
+// one call and any in-file offset voids all of it; 00011 spans two chunks, so
+// where in it the fault sits decides whether the clip is voided or truncated —
+// the distinction a real multi-GB clip makes on a damaged disc.
 const MODES = {
   // No fault at all: the reference the fault runs are read against.
   healthy: {},
-  // The shared clip dies. Two playlists reference it; the third does not.
+  // The shared clip dies in its FIRST chunk, so nothing of it survives and both
+  // passes record an error. Two playlists reference it; the third does not.
   sharedClip: { files: { "00011.m2ts": 40_000 } },
+  // The shared clip dies deep — inside its SECOND chunk, past where the bounded
+  // codec pass stops reading. Only the full measured pass reaches the damage, so
+  // the WARNING block names the file ONCE (the field's line-per-damaged-file
+  // shape), and the playlists keep every chapter the first chunk covered.
+  deepFault: { files: { "00011.m2ts": WASM_CHUNK + 307_200 } },
   // Two clips die independently, which is the shape a failing drive was
   // observed to produce: a WARNING block naming more than one file.
   twoClips: { files: { "00011.m2ts": 40_000, "00022.m2ts": 10_000 } },
@@ -56,7 +81,7 @@ const MODES = {
   poisonedVolume: { files: { "00033.m2ts": 30_000 }, poisonVolume: true },
   // A fault past the end of its file, so no read ever reaches it. Proves the
   // injector gates on the offset instead of failing whatever it is pointed at.
-  unreachedFault: { files: { "00011.m2ts": 200_000 } },
+  unreachedFault: { files: { "00011.m2ts": 8_000_000 } },
 };
 
 const SELECTIONS = {
@@ -70,9 +95,12 @@ const SELECTIONS = {
 
 // What each (mode, selection) produces today, one line per run:
 //
-//   reads   the clip reads in order, `!` marking one that threw. The scan makes
-//           two passes over the selected clips — a bounded codec pass then the
-//           full measured pass — so a clip that fails in both is named twice.
+//   reads   the clip reads in order, `@n` marking a read of chunk n (chunk 0
+//           carries no marker) and `!` one that threw. The scan makes two passes
+//           over the selected clips — a bounded codec pass then the full
+//           measured pass — so a clip that fails in both is named twice. The
+//           bounded pass stops as soon as every stream is identified, which is
+//           inside the first chunk, so it never reads a `@1`.
 //   warn    the files the report's `WARNING:` block names, in printed order.
 //   blocks  the `PLAYLIST:` blocks the report carries, in printed order — the
 //           scanned selection, in the order the caller named it, never the whole
@@ -84,70 +112,89 @@ const SELECTIONS = {
 //           deselected playlist sharing a scanned clip carries its tallies.
 const EXPECTED = {
   "healthy/all":
-    "reads=00011,00022,00033,00011,00022,00033 warn= blocks=00000,00001,00002 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=19088,19677,18607,19000/19035",
+    "reads=00011,00022,00033,00011,00011@1,00022,00033 warn= blocks=00000,00001,00002 " +
+    "00000=19088,19088,19088,19079/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
   "healthy/defectiveOnly":
-    "reads=00011,00033,00011,00033 warn= blocks=00002 " +
-    "00000=19088,19088,18956/19044 00001=0,0,0/0 00002=19088,19677,18607,19000/19035",
+    "reads=00011,00033,00011,00011@1,00033 warn= blocks=00002 " +
+    "00000=19088,19088,19088,19079/19087 00001=0,0,0/0 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
   "healthy/defectivePlusOne":
-    "reads=00011,00022,00033,00011,00022,00033 warn= blocks=00002,00001 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=19088,19677,18607,19000/19035",
+    "reads=00011,00022,00033,00011,00011@1,00022,00033 warn= blocks=00002,00001 " +
+    "00000=19088,19088,19088,19079/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
 
   "sharedClip/all":
     "reads=00011!,00022,00033,00011!,00022,00033 warn=00011,00011 blocks=00000,00001,00002 " +
-    "00000=0,0,0/0 00001=19088,19088,18941/19035 00002=19088,18956,0,0/0",
+    "00000=0,0,0,0/0 00001=19088,19088,18941/19035 00002=19088,18956,0,0,0,0/0",
   "sharedClip/defectiveOnly":
     "reads=00011!,00033,00011!,00033 warn=00011,00011 blocks=00002 " +
-    "00000=0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0/0",
+    "00000=0,0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0,0,0/0",
   "sharedClip/defectivePlusOne":
     "reads=00011!,00022,00033,00011!,00022,00033 warn=00011,00011 blocks=00002,00001 " +
-    "00000=0,0,0/0 00001=19088,19088,18941/19035 00002=19088,18956,0,0/0",
+    "00000=0,0,0,0/0 00001=19088,19088,18941/19035 00002=19088,18956,0,0,0,0/0",
+
+  // The deep fault's three tells, in one line each: ONE warning line where
+  // `sharedClip` has two, a `@1!` read where the bounded pass has no `@1` at
+  // all, and chapters that stop mid-table instead of going zero from the start.
+  "deepFault/all":
+    "reads=00011,00022,00033,00011,00011@1!,00022,00033 warn=00011 blocks=00000,00001,00002 " +
+    "00000=19088,19088,10498,0/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,10498,0/19086",
+  "deepFault/defectiveOnly":
+    "reads=00011,00033,00011,00011@1!,00033 warn=00011 blocks=00002 " +
+    "00000=19088,19088,10498,0/19087 00001=0,0,0/0 " +
+    "00002=19088,19677,19076,19088,10498,0/19086",
+  "deepFault/defectivePlusOne":
+    "reads=00011,00022,00033,00011,00011@1!,00022,00033 warn=00011 blocks=00002,00001 " +
+    "00000=19088,19088,10498,0/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,10498,0/19086",
 
   "twoClips/all":
     "reads=00011!,00022!,00033,00011!,00022!,00033 warn=00011,00022,00011,00022 " +
-    "blocks=00000,00001,00002 00000=0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0/0",
+    "blocks=00000,00001,00002 00000=0,0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0,0,0/0",
   "twoClips/defectiveOnly":
     "reads=00011!,00033,00011!,00033 warn=00011,00011 blocks=00002 " +
-    "00000=0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0/0",
+    "00000=0,0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0,0,0/0",
   "twoClips/defectivePlusOne":
     "reads=00011!,00022!,00033,00011!,00022!,00033 warn=00011,00022,00011,00022 " +
-    "blocks=00002,00001 00000=0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0/0",
+    "blocks=00002,00001 00000=0,0,0,0/0 00001=0,0,0/0 00002=19088,18956,0,0,0,0/0",
 
   "earlierClip/all":
-    "reads=00011,00022,00033!,00011,00022,00033! warn=00033,00033 blocks=00000,00001,00002 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=721,0,18607,19000/19044",
+    "reads=00011,00022,00033!,00011,00011@1,00022,00033! warn=00033,00033 " +
+    "blocks=00000,00001,00002 00000=19088,19088,19088,19079/19087 " +
+    "00001=19088,19088,18941/19035 00002=721,0,19076,19088,19088,19079/19087",
   "earlierClip/defectiveOnly":
-    "reads=00011,00033!,00011,00033! warn=00033,00033 blocks=00002 " +
-    "00000=19088,19088,18956/19044 00001=0,0,0/0 00002=721,0,18607,19000/19044",
+    "reads=00011,00033!,00011,00011@1,00033! warn=00033,00033 blocks=00002 " +
+    "00000=19088,19088,19088,19079/19087 00001=0,0,0/0 " +
+    "00002=721,0,19076,19088,19088,19079/19087",
   "earlierClip/defectivePlusOne":
-    "reads=00011,00022,00033!,00011,00022,00033! warn=00033,00033 blocks=00002,00001 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=721,0,18607,19000/19044",
+    "reads=00011,00022,00033!,00011,00011@1,00022,00033! warn=00033,00033 blocks=00002,00001 " +
+    "00000=19088,19088,19088,19079/19087 00001=19088,19088,18941/19035 " +
+    "00002=721,0,19076,19088,19088,19079/19087",
 
   "poisonedVolume/all":
     "reads=00011,00022,00033!,00011!,00022!,00033! warn=00033,00011,00022,00033 " +
-    "blocks=00000,00001,00002 00000=0,0,0/0 00001=0,0,0/0 00002=0,0,0,0/0",
+    "blocks=00000,00001,00002 00000=0,0,0,0/0 00001=0,0,0/0 00002=0,0,0,0,0,0/0",
   "poisonedVolume/defectiveOnly":
     "reads=00011,00033!,00011!,00033! warn=00033,00011,00033 blocks=00002 " +
-    "00000=0,0,0/0 00001=0,0,0/0 00002=0,0,0,0/0",
+    "00000=0,0,0,0/0 00001=0,0,0/0 00002=0,0,0,0,0,0/0",
   "poisonedVolume/defectivePlusOne":
     "reads=00011,00022,00033!,00011!,00022!,00033! warn=00033,00011,00022,00033 " +
-    "blocks=00002,00001 00000=0,0,0/0 00001=0,0,0/0 00002=0,0,0,0/0",
+    "blocks=00002,00001 00000=0,0,0,0/0 00001=0,0,0/0 00002=0,0,0,0,0,0/0",
 
   "unreachedFault/all":
-    "reads=00011,00022,00033,00011,00022,00033 warn= blocks=00000,00001,00002 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=19088,19677,18607,19000/19035",
+    "reads=00011,00022,00033,00011,00011@1,00022,00033 warn= blocks=00000,00001,00002 " +
+    "00000=19088,19088,19088,19079/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
   "unreachedFault/defectiveOnly":
-    "reads=00011,00033,00011,00033 warn= blocks=00002 " +
-    "00000=19088,19088,18956/19044 00001=0,0,0/0 00002=19088,19677,18607,19000/19035",
+    "reads=00011,00033,00011,00011@1,00033 warn= blocks=00002 " +
+    "00000=19088,19088,19088,19079/19087 00001=0,0,0/0 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
   "unreachedFault/defectivePlusOne":
-    "reads=00011,00022,00033,00011,00022,00033 warn= blocks=00002,00001 " +
-    "00000=19088,19088,18956/19044 00001=19088,19088,18941/19035 " +
-    "00002=19088,19677,18607,19000/19035",
+    "reads=00011,00022,00033,00011,00011@1,00022,00033 warn= blocks=00002,00001 " +
+    "00000=19088,19088,19088,19079/19087 00001=19088,19088,18941/19035 " +
+    "00002=19088,19677,19076,19088,19088,19079/19086",
 };
 
 /** Every file under `dir`, deepest-first within a directory, as absolute paths. */
@@ -179,6 +226,15 @@ function warningFiles(report) {
     .map((line) => stem(line.split("\t")[0]));
 }
 
+/**
+ * Whether a logged read is one whole chunk of the cadence: it starts on a chunk
+ * boundary and ends one chunk later, or at the end of its file.
+ */
+function isChunkRead(read) {
+  const size = CLIP_BYTES[read.name.toLowerCase()];
+  return read.start % WASM_CHUNK === 0 && read.end === Math.min(read.start + WASM_CHUNK, size);
+}
+
 /** The `PLAYLIST:` block headings the report carries, in printed order. */
 const reportBlocks = (report) =>
   [...report.matchAll(/^PLAYLIST: (\d+)\.MPLS\r$/gm)].map((match) => match[1]);
@@ -200,7 +256,10 @@ async function main() {
 
   const failures = [];
   const reports = new Map();
-  const wholeFileReads = [];
+  const offCadenceReads = [];
+  /** The healthy and deep-fault whole-disc models, for the truncation pins. */
+  let healthyDisc = null;
+  let deepDisc = null;
   /** The disc model of one damaged subset scan, kept for the re-render pin. */
   let subsetDisc = null;
 
@@ -216,14 +275,19 @@ async function main() {
       if (key === "twoClips/defectiveOnly") {
         subsetDisc = result.disc;
       }
+      if (key === "healthy/all") {
+        healthyDisc = result.disc;
+      }
+      if (key === "deepFault/all") {
+        deepDisc = result.disc;
+      }
 
       const clipReads = readLog().filter((read) => read.name.endsWith(".m2ts"));
-      wholeFileReads.push(
-        ...clipReads.filter(
-          (read) => read.start !== 0 || read.end !== CLIP_BYTES[read.name.toLowerCase()],
-        ),
-      );
-      const reads = clipReads.map((read) => `${stem(read.name)}${read.failed ? "!" : ""}`);
+      offCadenceReads.push(...clipReads.filter((read) => !isChunkRead(read)));
+      const reads = clipReads.map((read) => {
+        const chunk = read.start / WASM_CHUNK;
+        return `${stem(read.name)}${chunk > 0 ? `@${chunk}` : ""}${read.failed ? "!" : ""}`;
+      });
       const playlists = result.disc.playlists.map((playlist) => {
         const rates = playlist.chapters.map((chapter) => Math.round(chapter.avgRateBps));
         const video = Math.round(playlist.streams[0].bitrateBps);
@@ -242,11 +306,14 @@ async function main() {
     }
   }
 
-  // Every clip is read whole, in one call, on both passes — the property that
-  // makes a fault here void a file rather than truncate it, and the reason this
-  // disc cannot exercise the keep-the-completed-chunks path a multi-GB clip has.
-  if (wholeFileReads.length > 0) {
-    failures.push(`clip reads were not whole-file: ${JSON.stringify(wholeFileReads)}`);
+  // Every clip read is one whole chunk of the cadence — start on a chunk
+  // boundary, end a chunk later or at the end of the file, never anything
+  // between. That is what makes the `@n` markers above readable as chunk
+  // indices, and it is the cadence a live progress consumer sees: one snapshot
+  // opportunity per chunk, so a one-chunk clip offers exactly one and 00011
+  // offers two.
+  if (offCadenceReads.length > 0) {
+    failures.push(`clip reads were off the chunk cadence: ${JSON.stringify(offCadenceReads)}`);
   }
 
   // A fault no read reaches must change nothing at all — byte-identical reports.
@@ -281,6 +348,47 @@ async function main() {
     failures.push(
       `re-render blocks were ${rerendered.join(",")}, not the whole disc in table order`,
     );
+  }
+
+  // Damage deep inside a multi-chunk clip is named ONCE per file, not twice.
+  // The bounded codec pass has every stream identified well inside chunk 1 and
+  // stops there, so it never reaches byte 5,550,080 and records nothing; only
+  // the full measured pass, reading to the end, fails. That is the WARNING shape
+  // a damaged multi-GB clip produces in the field — one line per damaged file —
+  // and no one-chunk clip on this disc can produce it.
+  for (const label of Object.keys(SELECTIONS)) {
+    const named = warningFiles(reports.get(`deepFault/${label}`));
+    if (named.join(",") !== "00011") {
+      failures.push(
+        `deepFault/${label} WARNING named [${named.join(",")}], not 00011 exactly once`,
+      );
+    }
+  }
+
+  // And the data the failed read did not cost is still there. The marks are laid
+  // so 00011's chunk boundary (byte 5,242,880 = clip second 1365.33) falls in
+  // the SECOND-TO-LAST chapter of both playlists that play it: every chapter
+  // before that one comes back carrying the healthy scan's rate, the one holding
+  // the boundary comes back non-zero but short of it, and the one after it is a
+  // row of zeros. Mid-file partial data, through the real exports.
+  const chapterRates = (disc, name) =>
+    disc.playlists
+      .find((playlist) => playlist.name === name)
+      .chapters.map((chapter) => Math.round(chapter.avgRateBps));
+  for (const name of ["00000.MPLS", "00002.MPLS"]) {
+    const healthy = chapterRates(healthyDisc, name);
+    const damaged = chapterRates(deepDisc, name);
+    const boundary = damaged.length - 2;
+    const shape = `${name} healthy=${healthy.join(",")} damaged=${damaged.join(",")}`;
+    if (damaged.slice(0, boundary).join(",") !== healthy.slice(0, boundary).join(",")) {
+      failures.push(`deepFault: chapters before the boundary moved — ${shape}`);
+    }
+    if (!(damaged[boundary] > 0 && damaged[boundary] < healthy[boundary])) {
+      failures.push(`deepFault: the chapter holding the boundary is not partial — ${shape}`);
+    }
+    if (damaged[boundary + 1] !== 0) {
+      failures.push(`deepFault: the chapter past the boundary is not zero — ${shape}`);
+    }
   }
 
   if (failures.length > 0) {
