@@ -23,13 +23,15 @@
 //!   case-insensitively (the `vfs` discovery).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::io::{self, Read};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chapters::{ChapterClip, ChapterSummary, walk_chapters};
 use super::clpi::TsStreamClipFile;
 use super::interleaved::TsInterleavedFile;
 use super::m2ts::{TsStreamFile, bytes_to_f64, round_long};
+use super::measured::{self, MeasuredSnapshot};
 use super::mpls::TsPlaylistFile;
 use super::order::{self, PlaylistFilter};
 use super::shortfall::{self, ShortStreamFile};
@@ -273,10 +275,12 @@ pub struct ClipSummary {
 }
 
 impl ClipSummary {
-    /// The clip's packet-derived size in bytes (`packet_count * 192`).
+    /// The clip's packet-derived size in bytes — its demuxed packet count at
+    /// [`measured::packet_size`]'s 192 bytes a source packet, the same
+    /// conversion the live snapshots of a running scan apply.
     #[must_use]
     pub const fn packet_size(&self) -> u64 {
-        self.packet_count.wrapping_mul(192)
+        measured::packet_size(self.packet_count)
     }
 
     /// The clip's packet-derived bitrate in bits/s —
@@ -548,15 +552,78 @@ pub struct ScanProgress<'a> {
     pub total: u64,
 }
 
+/// Everything one scan reports to and takes its orders from: where the
+/// progress goes, what watches the measured tallies build up, and the flag
+/// that stops it.
+///
+/// The bundle [`BdRom::open_observed`] and
+/// [`BdRom::open_resilient_observed`] take in place of a widening argument
+/// list. Its contents are set only through [`new`](Self::new) and the builder
+/// methods — `ScanObservers::new(&mut progress, &cancel)`, then
+/// `.with_measured(&mut watch)` for a caller that wants the live tallies too —
+/// so a scan facility added later is another builder method rather than a
+/// break at every call site.
+pub struct ScanObservers<'a> {
+    /// Where each [`ScanProgress`] observation goes.
+    progress: &'a mut dyn FnMut(ScanProgress<'_>),
+    /// The measured-tally observer, when the caller installed one.
+    measured: Option<&'a mut dyn FnMut(MeasuredSnapshot)>,
+    /// The cooperative cancel flag the packet scan polls.
+    cancel: &'a AtomicBool,
+}
+
+impl<'a> ScanObservers<'a> {
+    /// The observers of a scan that reports to `progress` and stops when
+    /// `cancel` is set, watching no measured tallies — what
+    /// [`BdRom::open_with`] passes.
+    #[must_use]
+    pub fn new(progress: &'a mut dyn FnMut(ScanProgress<'_>), cancel: &'a AtomicBool) -> Self {
+        Self { progress, measured: None, cancel }
+    }
+
+    /// The same observers with `measured` watching the tallies build up: it is
+    /// handed an owned [`MeasuredSnapshot`] as each stream file of the
+    /// measurement pass finishes.
+    ///
+    /// Only the measurement pass ([`ScanMode::Full`]) reports here. The bounded
+    /// codec pass ahead of it reads an unpredictable sliver of each file and
+    /// has its tallies discarded before the measurement starts, so reporting it
+    /// would hand a display numbers that then vanish; a [`ScanMode::Codecs`]
+    /// open, which is that pass and nothing else, is silent for the same
+    /// reason.
+    #[must_use]
+    pub fn with_measured(mut self, measured: &'a mut dyn FnMut(MeasuredSnapshot)) -> Self {
+        self.measured = Some(measured);
+        self
+    }
+}
+
+// A closure has no `Debug`, so the observers print what a reader can act on:
+// whether a measured observer is installed, and whether the scan has been told
+// to stop.
+impl fmt::Debug for ScanObservers<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScanObservers")
+            .field("measured", &self.measured.is_some())
+            .field("cancelled", &self.cancel.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 /// The live bookkeeping of one demux pass: the running byte count over that
 /// pass's total, reported through the caller's callback before and after
 /// every demux read and at every file boundary, plus the caller's
-/// cooperative cancel flag the demux polls per read chunk. Each pass builds
-/// its own; `run_measurement_scan` decides which of them the caller observes.
+/// cooperative cancel flag the demux polls per read chunk and the measured
+/// observer its file boundaries snapshot to. Each pass builds its own;
+/// `run_measurement_scan` decides which of them the caller observes.
 struct Progress<'a> {
     /// The observer of this pass: the caller's callback for the reported
     /// pass, a no-op for an unreported one and for the plain `open`s.
     callback: &'a mut dyn FnMut(ScanProgress<'_>),
+    /// The caller's measured observer, installed on the measurement pass
+    /// alone — `None` leaves every snapshot unbuilt, which is what makes an
+    /// unobserved scan cost nothing.
+    measured: Option<&'a mut dyn FnMut(MeasuredSnapshot)>,
     /// Bytes demuxed so far, kept within `0..=total`.
     done: u64,
     /// Total bytes this pass will read over the selected files (zero for an
@@ -590,6 +657,16 @@ impl Progress<'_> {
     fn finish_file(&mut self, file: &str, target: u64) {
         self.done = self.done.max(target).min(self.total);
         self.heartbeat(file);
+    }
+
+    /// Hands the measured observer an owned snapshot of what `playlists` hold
+    /// after demuxing `file`, and does nothing at all when no observer is
+    /// installed — the snapshot is built inside the check, so an unobserved
+    /// scan never walks the playlists for one.
+    fn emit_measured(&mut self, file: &str, playlists: &[TsPlaylistFile]) {
+        if let Some(observer) = self.measured.as_deref_mut() {
+            observer(measured::snapshot(file, playlists));
+        }
     }
 }
 
@@ -859,6 +936,10 @@ impl BdRom {
     /// per chunk, so the demux hot path is unaffected; a scan that reads no
     /// packets ([`ScanMode::Metadata`]) never observes it.
     ///
+    /// To watch the measured tallies as well as the byte count, pass the same
+    /// two through a [`ScanObservers`] bundle to
+    /// [`open_observed`](Self::open_observed).
+    ///
     /// # Errors
     /// As [`open`](Self::open), plus [`BdError::ScanCancelled`] when `cancel`
     /// was set mid-scan.
@@ -870,15 +951,24 @@ impl BdRom {
         progress: &mut dyn FnMut(ScanProgress<'_>),
         cancel: &AtomicBool,
     ) -> Result<Self, BdError> {
-        Self::open_impl(
-            root,
-            mode,
-            options,
-            scan_files,
-            progress,
-            cancel,
-            &mut Sink { errors: None },
-        )
+        Self::open_observed(root, mode, options, scan_files, ScanObservers::new(progress, cancel))
+    }
+
+    /// Opens and scans the disc like [`open_with`](Self::open_with), taking its
+    /// progress callback and cancel flag as a [`ScanObservers`] bundle — the
+    /// form that can carry a measured observer too
+    /// ([`ScanObservers::with_measured`]).
+    ///
+    /// # Errors
+    /// As [`open_with`](Self::open_with).
+    pub fn open_observed(
+        root: &dyn BdDir,
+        mode: ScanMode,
+        options: ScanOptions,
+        scan_files: Option<&BTreeSet<String>>,
+        observers: ScanObservers<'_>,
+    ) -> Result<Self, BdError> {
+        Self::open_impl(root, mode, options, scan_files, observers, &mut Sink { errors: None })
     }
 
     /// Opens and scans the disc like [`open`](Self::open), but **collects** per-file
@@ -928,14 +1018,36 @@ impl BdRom {
         progress: &mut dyn FnMut(ScanProgress<'_>),
         cancel: &AtomicBool,
     ) -> Result<ScanReport, BdError> {
+        Self::open_resilient_observed(
+            root,
+            mode,
+            options,
+            scan_files,
+            ScanObservers::new(progress, cancel),
+        )
+    }
+
+    /// Opens and scans the disc like
+    /// [`open_resilient_with`](Self::open_resilient_with), taking its progress
+    /// callback and cancel flag as a [`ScanObservers`] bundle — the form that
+    /// can carry a measured observer too ([`ScanObservers::with_measured`]).
+    ///
+    /// # Errors
+    /// As [`open_resilient_with`](Self::open_resilient_with).
+    pub fn open_resilient_observed(
+        root: &dyn BdDir,
+        mode: ScanMode,
+        options: ScanOptions,
+        scan_files: Option<&BTreeSet<String>>,
+        observers: ScanObservers<'_>,
+    ) -> Result<ScanReport, BdError> {
         let mut errors = Vec::new();
         let bdrom = Self::open_impl(
             root,
             mode,
             options,
             scan_files,
-            progress,
-            cancel,
+            observers,
             &mut Sink { errors: Some(&mut errors) },
         )?;
         Ok(ScanReport { bdrom, errors })
@@ -948,8 +1060,7 @@ impl BdRom {
         mode: ScanMode,
         options: ScanOptions,
         scan_files: Option<&BTreeSet<String>>,
-        progress: &mut dyn FnMut(ScanProgress<'_>),
-        cancel: &AtomicBool,
+        observers: ScanObservers<'_>,
         sink: &mut Sink<'_>,
     ) -> Result<Self, BdError> {
         // Walk self+ancestors for a `BDMV` before trying the child lookup,
@@ -1034,8 +1145,7 @@ impl BdRom {
                 scan_files,
                 mode.measures_bitrate(),
                 options.keep_partial,
-                progress,
-                cancel,
+                observers,
                 sink,
             )?
         } else {
@@ -1563,7 +1673,7 @@ fn build_file_maps(
 /// Propagates [`scan_stream_files`]'s failures per the `sink` mode.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the scan orchestration threads the per-open context (dirs, maps, selection, progress, sink) one level down"
+    reason = "the scan orchestration threads the per-open context (dirs, maps, selection, observers, sink) one level down"
 )]
 fn run_measurement_scan(
     stream: Option<&dyn BdDir>,
@@ -1575,8 +1685,7 @@ fn run_measurement_scan(
     scan_files: Option<&BTreeSet<String>>,
     measure: bool,
     keep_partial: bool,
-    callback: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
+    observers: ScanObservers<'_>,
     sink: &mut Sink<'_>,
 ) -> Result<(ScannedFiles, ScannedFiles), BdError> {
     // The caller observes the last pass this scan runs, against one budget:
@@ -1590,12 +1699,17 @@ fn run_measurement_scan(
     // tails it never reads, up to 100% at the last file. Cancellation reaches
     // both passes either way: each carries the caller's flag in its
     // `Progress`.
+    //
+    // The measured observer belongs to the measurement pass alone (see
+    // `ScanObservers::with_measured`): the quick pass is built without one, so
+    // its file boundaries have nothing to snapshot to.
+    let ScanObservers { progress: callback, measured, cancel } = observers;
     let total = scan_total(stream_files, interleaved_files, scan_files);
     let mut silent = |_: ScanProgress<'_>| {};
     let quick_progress = &mut if measure {
-        Progress { callback: &mut silent, done: 0, total: 0, cancel }
+        Progress { callback: &mut silent, measured: None, done: 0, total: 0, cancel }
     } else {
-        Progress { callback: &mut *callback, done: 0, total, cancel }
+        Progress { callback: &mut *callback, measured: None, done: 0, total, cancel }
     };
     let quick = scan_stream_files(
         stream,
@@ -1622,7 +1736,7 @@ fn run_measurement_scan(
     if !measure {
         return Ok((quick, BTreeMap::new()));
     }
-    let progress = &mut Progress { callback, done: 0, total, cancel };
+    let progress = &mut Progress { callback, measured, done: 0, total, cancel };
     let full =
         scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, keep_partial, true)?;
     // The PGS caption tallies and dimensions only exist after the full pass
@@ -2139,7 +2253,13 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
 /// is set — otherwise (and always on a failed open) the file is skipped, its
 /// playlists falling back to the clip-info detail. The one exception is
 /// [`BdError::ScanCancelled`] (the caller's flag in the [`Progress`]), which
-/// aborts the pass in both modes without being recorded.
+/// aborts the pass in both modes without being recorded — and which therefore
+/// reports neither the boundary of the file it stopped in nor a snapshot of
+/// it.
+///
+/// Every other completed file boundary reports twice: the progress snap, then
+/// the [`MeasuredSnapshot`] of the playlists that play the file, when the
+/// caller installed an observer for them.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scan orchestration threads the per-open context (dirs, maps, selection, progress, sink) one level down"
@@ -2196,6 +2316,13 @@ fn scan_stream_files(
             return Err(BdError::ScanCancelled);
         }
         progress.finish_file(&name, target);
+        // The file's tallies are final and its playlists are no longer
+        // borrowed by the demux, so this is the pass's coarsest honest
+        // snapshot point: one per stream file, after the boundary it belongs
+        // to is reported. A file that failed partway is snapshotted too — the
+        // demux wrote its windows into the playlists as it read them, and
+        // dropping the partial file does not take them back.
+        progress.emit_measured(&name, playlists);
         // This one absorb call is the whole keep/drop policy: strict mode
         // propagates the failure (partial state and all), resilient mode
         // records it and yields the fallback — the partial file itself under
@@ -2441,14 +2568,14 @@ mod tests {
 
     use super::{
         ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, CountingReader,
-        MAX_METADATA_BYTES, MVC_PID, PlaylistFilter, PlaylistSummary, Progress,
-        SOURCE_PACKET_BYTES, ScanMode, ScanOptions, ScanProgress, ScanReport, ScanStage, Sink,
-        TsPlaylistFile, TsStreamFile, backup_subdir_files, build_chapter_summaries,
-        build_clip_summaries, build_sorted_streams, clear_measurements, clip_has_50hz_video,
-        clip_stem, collect_backups, directory_size, fixtures, has_aacs_key_file, merge_stream,
-        rate_over, read_disc_title, read_file, read_file_capped, resolve_playlist_streams,
-        scan_stream_files, scan_total, select_reference, stream_content_encrypted, stream_summary,
-        unit_shows_encryption, walked_disc_root,
+        MAX_METADATA_BYTES, MVC_PID, MeasuredSnapshot, PlaylistFilter, PlaylistSummary, Progress,
+        SOURCE_PACKET_BYTES, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport,
+        ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
+        build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
+        clip_has_50hz_video, clip_stem, collect_backups, directory_size, fixtures,
+        has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
+        resolve_playlist_streams, scan_stream_files, scan_total, select_reference,
+        stream_content_encrypted, stream_summary, unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::clpi::clips::build_clpi;
@@ -4962,6 +5089,7 @@ mod tests {
             let mut noop = |_: ScanProgress<'_>| {};
             let mut progress = Progress {
                 callback: &mut noop,
+                measured: None,
                 done: 0,
                 total: 200,
                 cancel: &AtomicBool::new(false),
@@ -5618,6 +5746,7 @@ Total Bitrate:  0.00 Mbps
                 |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
             let mut progress = Progress {
                 callback: &mut callback,
+                measured: None,
                 done: 0,
                 total: 100,
                 cancel: &AtomicBool::new(false),
@@ -5647,6 +5776,7 @@ Total Bitrate:  0.00 Mbps
                 |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
             let mut progress = Progress {
                 callback: &mut callback,
+                measured: None,
                 done: 0,
                 total: 100,
                 cancel: &AtomicBool::new(false),
@@ -5669,6 +5799,7 @@ Total Bitrate:  0.00 Mbps
                 |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done, p.total));
             let mut progress = Progress {
                 callback: &mut callback,
+                measured: None,
                 done: 0,
                 total: 5,
                 cancel: &AtomicBool::new(false),
@@ -5852,6 +5983,161 @@ Total Bitrate:  0.00 Mbps
         assert_eq!(full.last().map(|(_, done, _)| *done), Some(size));
     }
 
+    // ── the measured-snapshot observer ───────────────────────────────────────
+
+    /// A small demuxable video-only `*.m2ts`: PAT, a PMT declaring AVC on PID
+    /// `0x1011`, then one video frame per entry of `seconds` (its
+    /// presentation time). Every frame closes the previous frame's window, so
+    /// the demux attributes packets to the clip as it reads.
+    fn video_m2ts(seconds: &[u64]) -> Vec<u8> {
+        let mut m2ts = packet(0, true, &pat_payload(0x0100));
+        m2ts.extend(packet(0x0100, true, &pmt_payload(&[(0x1B, 0x1011)])));
+        for &second in seconds {
+            let ticks = second.wrapping_mul(90_000);
+            m2ts.extend(packet(0x1011, true, &pes_dts(0xE0, ticks, ticks, &sps_payload())));
+        }
+        m2ts
+    }
+
+    /// A three-playlist mock disc over three clips of different lengths, one
+    /// of them shared: `00000.MPLS` plays `00011`, `00001.MPLS` plays `00022`,
+    /// and `00002.MPLS` plays `00033` then `00011`. The stream directory holds
+    /// them in `00011`, `00022`, `00033` order, which is the order the scan
+    /// reads them in, so the shared clip is measured first and the playlist
+    /// that also plays `00033` only completes at the last file.
+    fn shared_clip_disc() -> MockDir {
+        let clip = || clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        tripping_disc_of(
+            &[
+                MockClip { stem: "00011", clip: clip(), m2ts: video_m2ts(&[1, 2, 3]), serve: None },
+                MockClip { stem: "00022", clip: clip(), m2ts: video_m2ts(&[1, 2]), serve: None },
+                MockClip { stem: "00033", clip: clip(), m2ts: video_m2ts(&[1]), serve: None },
+            ],
+            &[("00000", &["00011"]), ("00001", &["00022"]), ("00002", &["00033", "00011"])],
+        )
+    }
+
+    /// Every measured snapshot a `mode` open of `disc` hands out, alongside the
+    /// disc it scanned.
+    fn observed_scan(disc: &MockDir, mode: ScanMode) -> (BdRom, Vec<MeasuredSnapshot>) {
+        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
+        let bd = {
+            let mut watch = |snapshot: MeasuredSnapshot| snapshots.push(snapshot);
+            let mut collect = |_: ScanProgress<'_>| {};
+            BdRom::open_observed(
+                disc,
+                mode,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut collect, &never_cancel()).with_measured(&mut watch),
+            )
+            .expect("the healthy mock disc scans")
+        };
+        (bd, snapshots)
+    }
+
+    #[test]
+    fn a_measured_observer_sees_each_stream_file_of_the_measurement_pass_once() {
+        let (_, snapshots) = observed_scan(&shared_clip_disc(), ScanMode::Full);
+        // One snapshot per stream file, in read order. Both passes read all
+        // three files, so a quick pass that reported would double this list.
+        let files: Vec<&str> = snapshots.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(files, ["00011.M2TS", "00022.M2TS", "00033.M2TS"]);
+        // Each covers exactly the playlists that sequence its file.
+        let covered: Vec<Vec<&str>> = snapshots
+            .iter()
+            .map(|s| s.playlists.iter().map(|p| p.name.as_str()).collect())
+            .collect();
+        assert_eq!(
+            covered,
+            [vec!["00000.MPLS", "00002.MPLS"], vec!["00001.MPLS"], vec!["00002.MPLS"]]
+        );
+    }
+
+    #[test]
+    fn measured_snapshots_climb_and_end_on_the_finished_scans_numbers() {
+        let (bd, snapshots) = observed_scan(&shared_clip_disc(), ScanMode::Full);
+        // Nothing a playlist reports ever shrinks: the pass only adds to the
+        // tallies, so a display patching cells from these never regresses one.
+        let mut seen: BTreeMap<&str, u64> = BTreeMap::new();
+        for playlist in snapshots.iter().flat_map(|s| &s.playlists) {
+            let previous = seen.insert(&playlist.name, playlist.measured_bytes).unwrap_or(0);
+            assert!(
+                playlist.measured_bytes >= previous,
+                "{} fell from {previous} to {}",
+                playlist.name,
+                playlist.measured_bytes
+            );
+        }
+        // The last file's snapshot is the whole scan's answer for the playlist
+        // it completes: bytes, per-clip rows and per-stream rates all land on
+        // the summary the scan returns.
+        let last = snapshots.last().expect("the pass snapshots its last file");
+        let live = last.playlists.first().expect("the last file completes 00002.MPLS");
+        let summary =
+            bd.playlists.iter().find(|p| p.name == live.name).expect("the playlist is summarised");
+        assert!(live.measured_bytes > 0, "the fixture demuxes packets");
+        assert_eq!(live.measured_bytes, summary.total_angle_packet_size());
+        let rows: Vec<(&str, i32, u64)> = summary
+            .clips
+            .iter()
+            .map(|clip| (clip.name.as_str(), clip.angle_index, clip.packet_size()))
+            .collect();
+        assert_eq!(
+            live.clips
+                .iter()
+                .map(|clip| (clip.name.as_str(), clip.angle_index, clip.measured_bytes))
+                .collect::<Vec<_>>(),
+            rows
+        );
+        let rates: Vec<(Pid, usize, i64, i64)> = summary
+            .streams
+            .iter()
+            .map(|stream| (stream.pid, stream.angle_index, stream.bitrate, stream.active_bitrate))
+            .collect();
+        assert!(rates.iter().any(|&(_, _, bitrate, _)| bitrate > 0), "the video row is measured");
+        assert_eq!(
+            live.streams
+                .iter()
+                .map(|stream| {
+                    (stream.pid, stream.angle_index, stream.bitrate, stream.active_bitrate)
+                })
+                .collect::<Vec<_>>(),
+            rates
+        );
+    }
+
+    #[test]
+    fn a_scan_only_snapshots_when_it_measures_and_scans_the_same_either_way() {
+        let disc = shared_clip_disc();
+        // The bounded codec pass is not a measurement pass: it has no observer
+        // to report to, and the tallies it leaves are discarded anyway.
+        let (codecs, none) = observed_scan(&disc, ScanMode::Codecs);
+        assert!(none.is_empty(), "the quick pass reports no measured tallies");
+        assert!(codecs.playlists.iter().all(|p| p.total_angle_packet_size() == 0));
+        // Installing an observer changes nothing about what the scan produces.
+        let (observed, snapshots) = observed_scan(&disc, ScanMode::Full);
+        assert_eq!(snapshots.len(), 3);
+        let plain = BdRom::open(&disc, ScanMode::Full).expect("the healthy mock disc scans");
+        assert_eq!(observed, plain);
+    }
+
+    #[test]
+    fn scan_observers_print_what_they_watch_and_whether_they_stop() {
+        let cancel = AtomicBool::new(false);
+        let mut collect = |_: ScanProgress<'_>| {};
+        let mut watch = |_: MeasuredSnapshot| {};
+        assert_eq!(
+            format!("{:?}", ScanObservers::new(&mut collect, &cancel)),
+            "ScanObservers { measured: false, cancelled: false, .. }"
+        );
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(
+            format!("{:?}", ScanObservers::new(&mut collect, &cancel).with_measured(&mut watch)),
+            "ScanObservers { measured: true, cancelled: true, .. }"
+        );
+    }
+
     // ── cooperative cancellation ─────────────────────────────────────────────
 
     /// The two-playlist / two-stream-file on-disk fixture the cancellation
@@ -5998,22 +6284,36 @@ Total Bitrate:  0.00 Mbps
         let mut playlists =
             vec![TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap()];
         let cancel = AtomicBool::new(false);
-        let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
-        let mut progress = Progress { callback: &mut arm, done: 0, total: 400, cancel: &cancel };
         let mut errors = Vec::new();
-        let result = scan_stream_files(
-            Some(&stream_dir),
-            None,
-            &mut playlists,
-            None,
-            &mut progress,
-            &mut Sink { errors: Some(&mut errors) },
-            true,
-            false,
-        );
+        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
+        let result = {
+            let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+            let mut watch = |snapshot: MeasuredSnapshot| snapshots.push(snapshot);
+            let mut progress = Progress {
+                callback: &mut arm,
+                measured: Some(&mut watch),
+                done: 0,
+                total: 400,
+                cancel: &cancel,
+            };
+            scan_stream_files(
+                Some(&stream_dir),
+                None,
+                &mut playlists,
+                None,
+                &mut progress,
+                &mut Sink { errors: Some(&mut errors) },
+                true,
+                false,
+            )
+        };
         let message = result.err().map(|err| err.to_string());
         assert_eq!(message.as_deref(), Some("scan cancelled"));
         assert!(errors.is_empty(), "cancellation is never a per-file failure");
+        // The abort happens before the in-flight file's boundary, so its
+        // tallies are never offered either — an aborted pass leaves the display
+        // on the last file it finished.
+        assert!(snapshots.is_empty(), "a cancelled pass snapshots nothing");
     }
 
     // ── the resilient (collect-and-continue) scan ────────────────────────────
