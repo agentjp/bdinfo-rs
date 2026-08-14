@@ -357,10 +357,18 @@ pub struct Flow {
 #[derive(Debug, Clone)]
 enum Inner {
     Idle,
-    /// Idle, but with last session's source remembered — shown in the Source
-    /// field with "Rescan" live, opened only when the user asks.
+    /// Idle, but with the source remembered — shown in the Source field with
+    /// "Rescan" live, opened only when the user asks. Reached from a boot
+    /// that recalls last session's path, and from a cancelled listing (the
+    /// input stays one click from a retry).
     Recalled(Input),
-    Listing(Input),
+    Listing {
+        input: Input,
+        /// The structural scan's live progress — `None` until the quick codec
+        /// pass's first event (the metadata open that precedes the pass
+        /// reports nothing, and an AACS-encrypted disc never runs the pass).
+        progress: Option<ProgressModel>,
+    },
     Listed(Listing),
     Scanning {
         listing: Listing,
@@ -416,7 +424,7 @@ impl Flow {
     /// A folder/`.iso` was picked — begin its structural scan.
     #[must_use]
     pub const fn start_listing(input: Input) -> Self {
-        Self { inner: Inner::Listing(input) }
+        Self { inner: Inner::Listing { input, progress: None } }
     }
 
     /// The structural scan for `input` finished. Applied only when this flow is
@@ -431,7 +439,7 @@ impl Flow {
         view: ViewSettings,
     ) -> Self {
         match &self.inner {
-            Inner::Listing(pending) if pending == input => match result {
+            Inner::Listing { input: pending, .. } if pending == input => match result {
                 Ok(structural) => {
                     Self { inner: Inner::Listed(Listing::build(input.clone(), structural, view)) }
                 }
@@ -484,7 +492,7 @@ impl Flow {
     #[must_use]
     pub fn open_failed(self, message: String) -> Self {
         match self.inner {
-            Inner::Listing(_) | Inner::Scanning { .. } => self,
+            Inner::Listing { .. } | Inner::Scanning { .. } => self,
             _ => Self { inner: Inner::Failed(message) },
         }
     }
@@ -589,6 +597,18 @@ impl Flow {
         }
     }
 
+    /// Records a structural-scan progress event — the stream file the quick
+    /// codec pass is reading, its `done`/`total` byte counts, and the wall
+    /// time elapsed since the listing started. Applied only while listing;
+    /// the shell keeps events from a superseded listing worker away from
+    /// here (its listing messages carry a generation stamp), so this needs
+    /// no generation of its own.
+    pub fn list_progress(&mut self, file: String, done: u64, total: u64, elapsed: Duration) {
+        if let Inner::Listing { progress, .. } = &mut self.inner {
+            *progress = Some(ProgressModel::compute(file, done, total, elapsed));
+        }
+    }
+
     /// Advances the wall-clock readout while a scan is in flight — the shell's
     /// ~1 s tick. `elapsed` (since the scan started) re-stamps the progress
     /// model's elapsed seconds so the readout climbs even when no progress
@@ -647,17 +667,23 @@ impl Flow {
         }
     }
 
-    /// Cancels the in-flight scan, returning to the table. The shell trips the
-    /// worker's cooperative stop flag alongside this transition, so the demux
-    /// aborts within moments; the worker's late "cancelled" failure message is
-    /// ignored — a Listed flow is no longer Scanning, so `scan_failed` (and any
-    /// straggling progress) drops it. Starting a new scan immediately is safe:
-    /// it gets a fresh generation and its own cancel flag, and the old worker
-    /// only ever reads the disc.
+    /// Cancels the in-flight scan. A measured scan returns to the table; a
+    /// structural scan (the listing) returns to the source prompt with the
+    /// input remembered, so a retry is one "Rescan" click. The shell trips
+    /// the worker's cooperative stop flag alongside this transition, so the
+    /// read loop aborts within moments — and this transition never waits for
+    /// it: a cancelled listing can produce no further event at all (the
+    /// cancel flag is polled before each read), so teardown is driven from
+    /// here, with the worker's late result message ignored — a Listed or
+    /// Recalled flow is no longer scanning or listing, so `scan_failed` /
+    /// `listed` (and any straggling progress) drop it. Starting a new scan
+    /// immediately is safe: it gets a fresh generation and its own cancel
+    /// flag, and the old worker only ever reads the disc.
     #[must_use]
     pub fn cancel(self) -> Self {
         match self.inner {
             Inner::Scanning { listing, .. } => Self { inner: Inner::Listed(listing) },
+            Inner::Listing { input, .. } => Self { inner: Inner::Recalled(input) },
             other => Self { inner: other },
         }
     }
@@ -669,7 +695,7 @@ impl Flow {
     pub const fn stage(&self) -> Stage {
         match &self.inner {
             Inner::Idle | Inner::Recalled(_) => Stage::Idle,
-            Inner::Listing(_) => Stage::Listing,
+            Inner::Listing { .. } => Stage::Listing,
             Inner::Listed(_) => Stage::Listed,
             Inner::Scanning { .. } => Stage::Scanning,
             Inner::Reported { .. } => Stage::Reported,
@@ -682,7 +708,7 @@ impl Flow {
     #[must_use]
     pub fn input_display(&self) -> Option<String> {
         self.any_listing().map(|listing| listing.input.display()).or_else(|| match &self.inner {
-            Inner::Listing(input) | Inner::Recalled(input) => Some(input.display()),
+            Inner::Listing { input, .. } | Inner::Recalled(input) => Some(input.display()),
             _ => None,
         })
     }
@@ -693,7 +719,7 @@ impl Flow {
     #[must_use]
     pub fn current_input(&self) -> Option<&Input> {
         match &self.inner {
-            Inner::Listing(input) | Inner::Recalled(input) => Some(input),
+            Inner::Listing { input, .. } | Inner::Recalled(input) => Some(input),
             _ => self.any_listing().map(|listing| &listing.input),
         }
     }
@@ -885,11 +911,12 @@ impl Flow {
         })
     }
 
-    /// The latest progress snapshot, while scanning.
+    /// The latest progress snapshot, while a measured scan — or the listing's
+    /// quick codec pass — is in flight.
     #[must_use]
     pub const fn progress_view(&self) -> Option<&ProgressModel> {
         match &self.inner {
-            Inner::Scanning { progress, .. } => progress.as_ref(),
+            Inner::Scanning { progress, .. } | Inner::Listing { progress, .. } => progress.as_ref(),
             _ => None,
         }
     }
@@ -1633,6 +1660,51 @@ mod tests {
         // A finish from the cancelled scan's generation must not reach Reported.
         let flow = flow.finished(7, "R".to_owned(), Arc::new(Vec::new()), Vec::new());
         assert_eq!(flow.stage(), Stage::Listed);
+    }
+
+    #[test]
+    fn cancelling_a_listing_recalls_the_input_and_drops_the_stray_result() {
+        let flow = Flow::start_listing(input()).cancel();
+        // Back to the source prompt, with the input one "Rescan" click away.
+        assert_eq!(flow.stage(), Stage::Idle);
+        assert_eq!(flow.current_input(), Some(&input()));
+        assert_eq!(flow.input_display(), Some("disc".to_owned()));
+        assert!(flow.table().is_empty());
+        // The cancelled worker still returns — successfully if the cancel
+        // landed after the last read, with the cancellation error otherwise.
+        // Neither outcome may apply.
+        let stray_ok = flow.clone().listed(&input(), Ok(structural()), ViewSettings::default());
+        assert_eq!(stray_ok.stage(), Stage::Idle, "a late success must not resurface the table");
+        assert!(stray_ok.table().is_empty());
+        let stray_err =
+            flow.listed(&input(), Err("scan cancelled".to_owned()), ViewSettings::default());
+        assert_eq!(stray_err.stage(), Stage::Idle, "a late failure must not turn fatal");
+        assert_eq!(stray_err.error_message(), None);
+    }
+
+    #[test]
+    fn listing_progress_projects_only_while_listing() {
+        let mut flow = Flow::start_listing(input());
+        assert!(flow.progress_view().is_none(), "no event yet — nothing to project");
+        flow.list_progress("A.M2TS".to_owned(), 1, 4, Duration::from_secs(2));
+        let model = flow.progress_view().expect("the listing projects its progress");
+        assert_eq!(model.file(), "A.M2TS");
+        assert!((model.fraction() - 0.25).abs() < f32::EPSILON);
+        assert_eq!(model.elapsed_hms(), "00:00:02");
+        // A later event replaces the snapshot.
+        flow.list_progress("B.M2TS".to_owned(), 4, 4, Duration::from_secs(3));
+        assert_eq!(
+            flow.progress_view().map(|model| model.file().to_owned()),
+            Some("B.M2TS".to_owned())
+        );
+        // Cancelling drops the snapshot with the listing…
+        let mut flow = flow.cancel();
+        flow.list_progress("A.M2TS".to_owned(), 1, 4, Duration::ZERO);
+        assert!(flow.progress_view().is_none(), "a cancelled listing projects nothing");
+        // …and off the listing stage the event is dropped entirely.
+        let mut flow = listed();
+        flow.list_progress("A.M2TS".to_owned(), 1, 4, Duration::ZERO);
+        assert!(flow.progress_view().is_none(), "a listed table has no listing progress");
     }
 
     #[test]
