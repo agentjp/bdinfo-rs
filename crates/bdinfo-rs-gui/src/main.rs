@@ -751,16 +751,18 @@ struct App {
     theme_pref: ThemePref,
     /// The last light/dark setting reported by the OS.
     os_mode: iced::theme::Mode,
-    /// Bumped on each "Scan selected"; the in-flight scan's id.
+    /// Bumped at each listing and each "Scan selected"; the in-flight
+    /// worker's id, stamped on its messages so a stale worker's are ignored.
     generation: u64,
-    /// The in-flight measured scan's cooperative cancel flag — a fresh one per
-    /// scan (so cancelling an old scan can never touch a newer one), shared
-    /// with the worker thread, set by the Cancel button. The demux polls it
-    /// per read chunk and aborts, so Cancel really frees the machine.
+    /// The in-flight worker's cooperative cancel flag — listing and measured
+    /// scan alike, a fresh one per worker (so cancelling an old worker can
+    /// never touch a newer one), shared with its thread, set by the Cancel
+    /// button. The read loop polls it per chunk and aborts, so Cancel really
+    /// frees the machine.
     scan_cancel: Option<Arc<AtomicBool>>,
-    /// When the current measured scan started.
+    /// When the current worker (listing or measured scan) started.
     scan_start: Option<Instant>,
-    /// When the in-flight scan's last progress event arrived (the scan start
+    /// When the in-flight worker's last progress event arrived (the start
     /// until the first one) — what the 1 s scanning tick measures the stall
     /// hint against ([`Flow::tick`]).
     last_progress: Option<Instant>,
@@ -986,8 +988,13 @@ enum Message {
     FileDropped(PathBuf),
     /// The hovered file(s) left the window without dropping.
     FilesHoveredLeft,
+    /// A streamed progress event from the listing worker's quick codec pass.
+    ListProgress { generation: u64, file: String, done: u64, total: u64 },
     /// The structural scan for `input` finished (or failed with a message).
-    Listed { input: Input, result: Result<Structural, String> },
+    /// `generation` is the stamp [`App::begin_listing`] issued the worker —
+    /// the flow's input match alone cannot drop a cancelled worker's late
+    /// result once the same input is picked again.
+    Listed { generation: u64, input: Input, result: Result<Structural, String> },
     /// A table row's scan checkbox toggled (0-based table position).
     RowToggled(usize),
     /// A table row clicked — make it the active (highlighted) playlist that the
@@ -1209,7 +1216,13 @@ impl App {
                     Task::none()
                 }
             }
-            Message::Listed { input, result } => self.on_listed(&input, result),
+            Message::ListProgress { generation, file, done, total } => {
+                self.on_list_progress(generation, file, done, total);
+                Task::none()
+            }
+            Message::Listed { generation, input, result } => {
+                self.on_listed(generation, &input, result)
+            }
             Message::RowToggled(index) => {
                 self.flow.toggle(index);
                 Task::none()
@@ -1643,17 +1656,42 @@ impl App {
         })
     }
 
+    /// Applies a listing worker's progress event — only the current worker's
+    /// (`generation` is the stamp `begin_listing` issued it; the flow holds no
+    /// listing generation of its own, so a cancelled worker's stragglers are
+    /// dropped here, before they could touch a re-pick of the same input).
+    fn on_list_progress(&mut self, generation: u64, file: String, done: u64, total: u64) {
+        if generation == self.generation {
+            let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+            self.last_progress = Some(Instant::now());
+            self.flow.list_progress(file, done, total, elapsed);
+        }
+    }
+
     /// Applies a finished structural scan. A successful listing becomes the
     /// remembered last path (saved now — `BDInfo` keeps `LastPath` the same
     /// way). In a debug build it also honours the capture harness's auto-scan
     /// hook (`BDINFO_GUI_SCAN=all`), selecting and scanning every playlist so
     /// a screenshot can show measured data.
-    fn on_listed(&mut self, input: &Input, result: Result<Structural, String>) -> Task<Message> {
-        // The listing outcome, next to begin_listing's start line.
+    fn on_listed(
+        &mut self,
+        generation: u64,
+        input: &Input,
+        result: Result<Structural, String>,
+    ) -> Task<Message> {
+        // The listing outcome, next to begin_listing's start line. A stale
+        // worker's outcome is logged too, then dropped: after a cancel it is
+        // the record that the blocked thread finally returned.
         match &result {
             Ok(_) => log::info!("listed {}", input.display()),
             Err(error) => log::info!("listing failed: {error}"),
         }
+        if generation != self.generation {
+            log::info!("stale listing result dropped");
+            return Task::none();
+        }
+        // The worker has returned; its cancel flag can no longer do anything.
+        self.scan_cancel = None;
         let view = ViewSettings::from_settings(&self.persisted);
         self.flow = std::mem::take(&mut self.flow).listed(input, result, view);
         // Only when THIS input just became the listing (not a superseded or
@@ -1683,14 +1721,20 @@ impl App {
         }
     }
 
-    /// Cancels the in-flight measured scan for real: trips the worker's
-    /// cooperative stop flag — the demux exits at its next read chunk, freeing
-    /// CPU and IO — then returns the UI to the table. The worker's late "scan
-    /// failed (cancelled)" message is dropped by the generation guard (the
-    /// flow is no longer Scanning), so nothing else changes.
+    /// Cancels the in-flight scan for real — the measured scan back to the
+    /// table, the listing back to the source prompt: trips the worker's
+    /// cooperative stop flag (the read loop exits at its next chunk, freeing
+    /// CPU and IO), then moves the UI on immediately — never waiting on the
+    /// worker, which a stuck read can hold for minutes with no further
+    /// message. The worker's late result is dropped by the generation guards
+    /// (the flow is no longer Scanning / Listing), so nothing else changes.
     fn cancel_scan(&mut self) -> Task<Message> {
         if let Some(cancel) = self.scan_cancel.take() {
-            log::info!("scan cancelled");
+            if self.flow.stage() == Stage::Listing {
+                log::info!("listing cancelled");
+            } else {
+                log::info!("scan cancelled");
+            }
             cancel.store(true, Ordering::Relaxed);
         }
         self.flow = std::mem::take(&mut self.flow).cancel();
@@ -1788,11 +1832,14 @@ impl App {
         }
     }
 
-    /// Begins the initial scan of `input` on iced's executor — the bounded
-    /// `Codecs` pass, which reads each stream file's head to fill the codec
-    /// detail. It runs off the UI thread, so the "scanning" overlay animates while
-    /// it works; the input is carried back so a superseded pick's result is
-    /// discarded.
+    /// Begins the initial scan of `input` — the bounded `Codecs` pass, which
+    /// reads each stream file's head to fill the codec detail — on a worker
+    /// thread, streaming its progress + result back as messages, exactly like
+    /// the measured scan below: a progress stream needs more than the one
+    /// message a one-shot task can deliver, and on damaged media the listing
+    /// can block inside a single read for minutes, which must not park one of
+    /// iced's executor threads. The generation stamp on the messages is what
+    /// discards a superseded or cancelled worker's stragglers.
     fn begin_listing(&mut self, input: Input) -> Task<Message> {
         self.status = None;
         self.showing_report = false;
@@ -1801,24 +1848,68 @@ impl App {
         self.hovered_header = None;
         self.pane_selection = None;
         self.pulse = 0;
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.scan_start = Some(Instant::now());
+        self.last_progress = self.scan_start;
         // The one log line per open: pins down whether a scan ever started
         // when a report or listing seems to be missing in the field.
         log::info!("listing {}", input.display());
         self.flow = Flow::start_listing(input.clone());
-        Task::perform(
-            async move {
-                #[cfg(debug_assertions)]
-                debug_scan_delay();
-                // The core is fuzz-held no-panic, but the exposure is exactly
-                // this untrusted-disc path — an escaped panic would lose the
-                // Listed message and stick the non-dismissable "scanning"
-                // modal, so it is caught onto the same friendly failure road
-                // a bad disc takes.
-                let result = scan::catch_scan_panic(|| scan::scan_structural(&input));
-                (input, result)
-            },
-            |(input, result)| Message::Listed { input, result },
-        )
+        // A fresh flag per listing — see the `scan_cancel` field.
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scan_cancel = Some(Arc::clone(&cancel));
+
+        let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            #[cfg(debug_assertions)]
+            debug_scan_delay();
+            // The same ~100 ms coalescing as the measured worker below — the
+            // codec pass fires its callback around every read too.
+            let mut last_sent: Option<Instant> = None;
+            let mut last_file = String::new();
+            let progress_sender = sender.clone();
+            // The core is fuzz-held no-panic, but the exposure is exactly
+            // this untrusted-disc path — an escaped panic would lose the
+            // Listed message and stick the non-dismissable "scanning"
+            // modal, so it is caught onto the same friendly failure road
+            // a bad disc takes.
+            let result = scan::catch_scan_panic(|| {
+                scan::scan_structural(
+                    &input,
+                    &mut |progress: ScanProgress<'_>| {
+                        let file_changed = progress.file != last_file;
+                        let since_last = last_sent.map(|at| at.elapsed());
+                        if !progress::emit_due(
+                            file_changed,
+                            progress.done,
+                            progress.total,
+                            since_last,
+                        ) {
+                            return;
+                        }
+                        last_sent = Some(Instant::now());
+                        if file_changed {
+                            // One log line per stream file — after a pre-scan
+                            // freeze, the last of these names the stuck file.
+                            log::info!("listing {}", progress.file);
+                            progress.file.clone_into(&mut last_file);
+                        }
+                        let _ = progress_sender.unbounded_send(Message::ListProgress {
+                            generation,
+                            file: progress.file.to_owned(),
+                            done: progress.done,
+                            total: progress.total,
+                        });
+                    },
+                    &cancel,
+                )
+            });
+            let _ = sender.unbounded_send(Message::Listed { generation, input, result });
+        });
+        // The receiver stream ends when the worker drops its sender, completing
+        // this task; each item arrives as a `Message`.
+        Task::stream(receiver)
     }
 
     /// Spawns the measured scan on a worker thread (so native demux keeps its
@@ -2056,7 +2147,7 @@ impl App {
 
         let base = container(content).width(Length::Fill).height(Length::Fill).into();
         if self.flow.stage() == Stage::Listing {
-            return scanning_modal(base, scanning_card(p));
+            return scanning_modal(base, scanning_card(p, self.pulse, self.flow.progress_view()));
         }
         if let Some(draft) = &self.settings_draft {
             return modal(base, settings_card(p, draft), Message::SettingsCancel);
@@ -2551,8 +2642,10 @@ impl App {
         let fraction = match self.flow.stage() {
             Stage::Scanning => progress.map_or(0.0, ProgressModel::fraction),
             Stage::Reported => 1.0,
-            // The initial scan has no measurable %, so the bar breathes.
-            Stage::Listing => progress::pulse_fraction(self.pulse),
+            // The listing has no measurable % until the codec pass's first
+            // event, so the bar breathes, then tracks the pass.
+            Stage::Listing => progress
+                .map_or_else(|| progress::pulse_fraction(self.pulse), ProgressModel::fraction),
             _ => 0.0,
         };
 
@@ -2574,7 +2667,10 @@ impl App {
                     || "Starting scan…".to_owned(),
                     |pr| format!("Scanning {}…", pr.file()),
                 ),
-                Stage::Listing => "Scanning disc…".to_owned(),
+                Stage::Listing => progress.map_or_else(
+                    || "Scanning disc…".to_owned(),
+                    |pr| format!("Reading {}…", pr.file()),
+                ),
                 Stage::Reported => "Report ready.".to_owned(),
                 Stage::Listed if self.flow.selected_count() > 0 => "Ready to scan.".to_owned(),
                 // Nothing checked still scans — the whole disc, like BDInfo.
@@ -3186,9 +3282,19 @@ fn scanning_modal<'a>(
 }
 
 /// The "please wait" scan overlay card: the brand mark over the same message
-/// `BDInfo` shows while it reads a disc.
-fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
-    let card = Column::new()
+/// `BDInfo` shows while it reads a disc — plus what `BDInfo`'s modal lacks
+/// and a damaged disc needs: the codec pass's live progress (the bar breathes
+/// indeterminately until its first event) and a Cancel that works, because
+/// this pre-scan pass reads every stream file's head and can stall on a bad
+/// sector exactly like the measured scan.
+fn scanning_card<'a>(
+    p: Palette,
+    pulse: u16,
+    progress: Option<&ProgressModel>,
+) -> Element<'a, Message> {
+    let fraction =
+        progress.map_or_else(|| progress::pulse_fraction(pulse), ProgressModel::fraction);
+    let mut card = Column::new()
         .align_x(Horizontal::Center)
         .spacing(ui::GAP_4)
         .push(brand_mark_large(p))
@@ -3197,7 +3303,27 @@ fn scanning_card<'a>(p: Palette) -> Element<'a, Message> {
                 .size(ui::TEXT_MD)
                 .color(p.text)
                 .align_x(Horizontal::Center),
+        )
+        .push(
+            progress_bar(0.0..=1.0, fraction)
+                .length(Length::Fixed(320.0))
+                .girth(Length::Fixed(8.0))
+                .style(ui::progress(p)),
         );
+    if let Some(pr) = progress {
+        card = card.push(
+            text(format!("Reading {}…", pr.file()))
+                .size(ui::TEXT_SM)
+                .color(p.text_muted)
+                .align_x(Horizontal::Center),
+        );
+    }
+    card = card.push(
+        button(text("Cancel").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
+            .padding([ui::GAP_2, ui::GAP_4])
+            .style(ui::secondary_button(p))
+            .on_press(Message::Cancel),
+    );
     container(card).padding(ui::GAP_6).max_width(440.0).style(ui::hero_card(p)).into()
 }
 
@@ -3810,6 +3936,82 @@ mod interaction {
         assert_eq!(app.flow.stage(), Stage::Listed);
         // The cooperative stop flag was taken and tripped.
         assert!(app.scan_cancel.is_none());
+    }
+
+    #[test]
+    fn cancel_returns_the_listing_to_the_source_prompt() {
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        assert_eq!(app.flow.stage(), Stage::Listing);
+        assert!(app.scan_cancel.is_some(), "the listing worker owns a cancel flag");
+        let generation = app.generation;
+        // The "please wait" modal offers Cancel; clicking it returns to the
+        // source prompt without waiting on the (possibly stuck) worker.
+        click(&mut app, "Cancel");
+        assert_eq!(app.flow.stage(), Stage::Idle);
+        assert!(app.scan_cancel.is_none(), "the flag was taken and tripped");
+        assert!(sees(&app, "disc"), "the source field keeps the input for a one-click Rescan");
+        // The cancelled worker's late return applies nothing — and must not
+        // turn the idle prompt into the fatal failure screen.
+        let _ = app.update(Message::Listed {
+            generation,
+            input: bdinfo_rs_gui::scan::Input::Folder("disc".into()),
+            result: Err("scan cancelled".to_owned()),
+        });
+        assert_eq!(app.flow.stage(), Stage::Idle);
+    }
+
+    #[test]
+    fn a_cancelled_workers_result_never_resolves_a_relisting_of_the_same_input() {
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        let stale = app.generation;
+        click(&mut app, "Cancel");
+        // Rescan the SAME input: the flow's input match alone could not tell
+        // the old worker's result from the new one's — the generation stamp
+        // is what drops it.
+        let _ = app.update(Message::Rescan);
+        assert_eq!(app.flow.stage(), Stage::Listing);
+        assert_ne!(app.generation, stale);
+        let _ = app.update(Message::Listed {
+            generation: stale,
+            input: bdinfo_rs_gui::scan::Input::Folder("disc".into()),
+            result: Ok(structural()),
+        });
+        assert_eq!(app.flow.stage(), Stage::Listing, "the old worker's table must not surface");
+        // The new worker's result lands normally.
+        let _ = app.update(Message::Listed {
+            generation: app.generation,
+            input: bdinfo_rs_gui::scan::Input::Folder("disc".into()),
+            result: Ok(structural()),
+        });
+        assert_eq!(app.flow.stage(), Stage::Listed);
+    }
+
+    #[test]
+    fn a_listing_progress_event_reaches_the_modal_and_the_bar() {
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        assert!(sees(&app, "Please wait while we scan the disc..."));
+        let _ = app.update(Message::ListProgress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 1,
+            total: 2,
+        });
+        let fraction =
+            app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::fraction);
+        assert_eq!(fraction, Some(0.5));
+        assert!(sees(&app, "Reading A.M2TS…"), "the modal names the file being read");
+        // An event from a superseded worker is dropped before the flow.
+        let _ = app.update(Message::ListProgress {
+            generation: app.generation.wrapping_add(1),
+            file: "B.M2TS".to_owned(),
+            done: 2,
+            total: 2,
+        });
+        assert!(sees(&app, "Reading A.M2TS…"), "the stale event must not repaint");
+        assert!(!sees(&app, "Reading B.M2TS…"));
     }
 
     #[test]

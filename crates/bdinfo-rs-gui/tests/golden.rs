@@ -33,7 +33,9 @@ const ISO_GOLDEN: &str = include_str!("../../bdinfo-rs/tests/fixtures/golden/iso
 /// Lists `input`, selects every row, and runs the measured scan — the exact
 /// Tier-A flow the shell drives, returning the rendered report + disc label.
 fn list_select_all_and_measure(input: &Input) -> (String, String) {
-    let structural: Structural = scan::scan_structural(input).expect("the fixture lists");
+    let structural: Structural =
+        scan::scan_structural(input, &mut scan::no_progress, &AtomicBool::new(false))
+            .expect("the fixture lists");
     // Default view settings — the byte contract holds for a fresh config.
     let mut flow =
         Flow::start_listing(input.clone()).listed(input, Ok(structural), ViewSettings::default());
@@ -57,7 +59,8 @@ fn a_cancelled_measured_scan_yields_no_report() {
     // The shell's Cancel trips the flag; a scan that observes it must return
     // the cancelled error — never a partial (or empty) report.
     let input = Input::Folder(fixture("BigBuckBunny"));
-    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let structural = scan::scan_structural(&input, &mut scan::no_progress, &AtomicBool::new(false))
+        .expect("the fixture lists");
     let mut flow =
         Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
     flow.select_all();
@@ -96,7 +99,8 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
     // renders from the RETAINED disc, not the worker's) must reproduce the
     // worker's report byte-for-byte.
     let input = Input::Folder(fixture("BigBuckBunny"));
-    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let structural = scan::scan_structural(&input, &mut scan::no_progress, &AtomicBool::new(false))
+        .expect("the fixture lists");
     let mut flow =
         Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
     flow.select_all();
@@ -132,8 +136,12 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
 fn a_missing_disc_fails_the_structural_scan_with_a_message() {
     // The pick flow's hard-error road, driven through the same public seam:
     // a path with no disc yields a user-facing message, never a panic.
-    let message = scan::scan_structural(&Input::Folder(fixture("does-not-exist")))
-        .expect_err("nothing to list");
+    let message = scan::scan_structural(
+        &Input::Folder(fixture("does-not-exist")),
+        &mut scan::no_progress,
+        &AtomicBool::new(false),
+    )
+    .expect_err("nothing to list");
     assert!(!message.is_empty(), "the failure carries a user-facing message");
 }
 
@@ -148,7 +156,12 @@ fn a_broken_iso_fails_the_structural_scan_with_a_message() {
     std::fs::create_dir_all(&dir).expect("the scratch dir creates");
     let garbage = dir.join("garbage.iso");
     std::fs::write(&garbage, b"not a udf volume at all").expect("the scratch iso writes");
-    let message = scan::scan_structural(&Input::Iso(garbage)).expect_err("no UDF volume to open");
+    let message = scan::scan_structural(
+        &Input::Iso(garbage),
+        &mut scan::no_progress,
+        &AtomicBool::new(false),
+    )
+    .expect_err("no UDF volume to open");
     assert!(!message.is_empty(), "the failure carries a user-facing message");
 
     let renamed = dir.join("renamed.iso");
@@ -164,7 +177,12 @@ fn a_broken_iso_fails_the_structural_scan_with_a_message() {
         at = start.checked_add(1).expect("offset fits");
     }
     std::fs::write(&renamed, bytes).expect("the scratch iso writes");
-    let message = scan::scan_structural(&Input::Iso(renamed)).expect_err("a volume with no BDMV");
+    let message = scan::scan_structural(
+        &Input::Iso(renamed),
+        &mut scan::no_progress,
+        &AtomicBool::new(false),
+    )
+    .expect_err("a volume with no BDMV");
     assert!(!message.is_empty(), "the failure carries a user-facing message");
 }
 
@@ -173,7 +191,8 @@ fn the_structural_scan_lists_the_disc_playlist() {
     // The Listed-state projection the table renders: the fast structural scan
     // populates exactly the one filtered feature playlist.
     let input = Input::Folder(fixture("BigBuckBunny"));
-    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let structural = scan::scan_structural(&input, &mut scan::no_progress, &AtomicBool::new(false))
+        .expect("the fixture lists");
     assert!(structural.warnings.is_empty(), "the fixture lists cleanly");
     let flow =
         Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
@@ -195,7 +214,8 @@ fn the_pre_scan_report_matches_the_disc_but_reads_zero_bitrate() {
     // the structural scan, rendered from the disc with zero (unmeasured)
     // bitrates. Nothing is selected, so it covers the whole disc.
     let input = Input::Folder(fixture("BigBuckBunny"));
-    let structural = scan::scan_structural(&input).expect("the fixture lists");
+    let structural = scan::scan_structural(&input, &mut scan::no_progress, &AtomicBool::new(false))
+        .expect("the fixture lists");
     let flow =
         Flow::start_listing(input.clone()).listed(&input, Ok(structural), ViewSettings::default());
     assert!(flow.report_available(), "View Report is offered before the scan");

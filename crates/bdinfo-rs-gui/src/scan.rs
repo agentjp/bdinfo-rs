@@ -8,9 +8,10 @@
 //! module is the thin IO glue, verified by the golden-tie parity test (byte-exact
 //! report over the committed fixture) rather than line coverage.
 //!
-//! The long, blocking measured scan ([`scan_measured`]) is what the iced shell
-//! runs on a worker thread, forwarding its [`ScanProgress`] callback over a
-//! channel; the structural scan ([`scan_structural`]) is fast (no demux).
+//! Both scans block for as long as the disc makes them (a damaged sector can
+//! hold one read for minutes), so the iced shell runs each on a worker thread,
+//! forwarding its [`ScanProgress`] callback over a channel; the structural
+//! scan ([`scan_structural`]) merely reads far less (no full demux).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -156,24 +157,37 @@ fn error_lines(errors: &[ScanError]) -> Vec<String> {
 
 /// The no-op progress sink.
 ///
-/// [`scan_structural`] always uses it, and a [`scan_measured`] caller that
-/// wants no live progress — the golden ties — passes it too.
+/// For any [`scan_structural`] / [`scan_measured`] caller that wants no live
+/// progress — the golden ties pass it to both.
 pub const fn no_progress(_: ScanProgress<'_>) {}
 
-/// Runs the **structural** scan over `input` (fast — no M2TS demux) and returns
+/// Runs the **structural** scan over `input` (no full M2TS demux) and returns
 /// the playlist list + label for the selection table.
+///
+/// `progress` observes the quick codec pass ([`ScanMode::Codecs`]), which
+/// climbs to 100% of the selected byte total in per-file jumps; the metadata
+/// open that precedes it reports nothing, so the first event can arrive only
+/// after that open completes. `cancel` aborts the codec pass at its next read
+/// chunk — the flag is polled **before** each read, so a cancel honoured
+/// before the first read produces no progress event at all; a caller must
+/// never wait on one to conclude a cancelled listing is over.
 ///
 /// # Errors
 /// A short message when the input holds no readable Blu-ray structure (no
-/// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF volume).
-pub fn scan_structural(input: &Input) -> Result<Structural, String> {
+/// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF
+/// volume), or when `cancel` was set mid-listing.
+pub fn scan_structural(
+    input: &Input,
+    progress: &mut dyn FnMut(ScanProgress<'_>),
+    cancel: &AtomicBool,
+) -> Result<Structural, String> {
     let (bdrom, errors) = listing_scan(|mode| {
         // Always the default (retain), never the user's setting: the
         // partial-retention toggle scopes to the measured scan, which is the
         // one that renders a report. A listing open that hits a mid-file read
         // error therefore keeps that file's partial codec detail whatever the
         // setting says, so the panes stay as full as the disc allows.
-        open(input, mode, ScanOptions::default(), None, &mut no_progress, &AtomicBool::new(false))
+        open(input, mode, ScanOptions::default(), None, progress, cancel)
             .map_err(|err: BdError| err.to_string())
     })?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
@@ -192,14 +206,16 @@ pub fn scan_structural(input: &Input) -> Result<Structural, String> {
 /// disc.
 ///
 /// For every other disc the `Codecs` open gives the panes their full codec
-/// detail (profile / HDR / Dolby Vision) right away, like `BDInfo`, without the
-/// whole-file bitrate scan; on readable streams it ends at codec init, so it
-/// carries no cancel affordance. Reaching it costs a second parse of the clip
-/// metadata the first open just read, which the filesystem cache serves.
+/// detail (profile / HDR / Dolby Vision) right away, like `BDInfo`, without
+/// the whole-file bitrate scan; on readable streams it ends at codec init,
+/// but damaged media can hold a single read for minutes, which is why the
+/// pass is observable and cancellable through [`scan_structural`]'s
+/// parameters. Reaching it costs a second parse of the clip metadata the
+/// first open just read, which the filesystem cache serves.
 ///
 /// # Errors
 /// Whatever `open` reports, from either call.
-fn listing_scan(open: impl Fn(ScanMode) -> Opened) -> Opened {
+fn listing_scan(mut open: impl FnMut(ScanMode) -> Opened) -> Opened {
     let cheap = open(ScanMode::Metadata)?;
     if cheap.0.is_aacs_encrypted { Ok(cheap) } else { open(ScanMode::Codecs) }
 }
@@ -308,10 +324,18 @@ impl<F: FnOnce()> Drop for PanicAlarm<F> {
 mod tests {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
 
     use bdinfo_rs_core::vfs::fs::FsDir;
 
-    use super::{BdRom, Input, ScanMode, ScanOptions};
+    use super::{BdRom, Input, ScanMode, ScanOptions, Structural};
+
+    /// [`super::scan_structural`] with the silent sink and a never-set cancel
+    /// flag — every test that only cares about the scan's result goes through
+    /// this.
+    fn scan_structural(input: &Input) -> Result<Structural, String> {
+        super::scan_structural(input, &mut super::no_progress, &AtomicBool::new(false))
+    }
 
     /// A scratch directory under the crate's target dir (unique per test).
     fn scratch(name: &str) -> PathBuf {
@@ -409,7 +433,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("the scratch dir creates");
         let iso = dir.join("garbage.iso");
         std::fs::write(&iso, b"not a udf volume at all").expect("the scratch iso writes");
-        let message = super::scan_structural(&Input::Iso(iso)).expect_err("no UDF volume to open");
+        let message = scan_structural(&Input::Iso(iso)).expect_err("no UDF volume to open");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
     }
 
@@ -434,8 +458,8 @@ mod tests {
             at = start.checked_add(1).expect("offset fits");
         }
         std::fs::write(&iso, bytes).expect("the scratch iso writes");
-        let message = super::scan_structural(&Input::Iso(iso))
-            .expect_err("a volume with no BDMV cannot list");
+        let message =
+            scan_structural(&Input::Iso(iso)).expect_err("a volume with no BDMV cannot list");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
     }
 
@@ -446,7 +470,7 @@ mod tests {
         let dir = scratch("empty");
         std::fs::create_dir_all(&dir).expect("the scratch dir creates");
         let message =
-            super::scan_structural(&Input::Folder(dir)).expect_err("no Blu-ray structure to open");
+            scan_structural(&Input::Folder(dir)).expect_err("no Blu-ray structure to open");
         assert!(!message.is_empty(), "the failure carries a user-facing message");
     }
 
@@ -590,8 +614,8 @@ mod tests {
         // file to EOF — tens of gigabytes off an optical drive, for detail no
         // key can recover. The listing must stop at the metadata pass instead.
         let root = encrypted_fixture("aacs-listing");
-        let listed = super::scan_structural(&Input::Folder(root.clone()))
-            .expect("an encrypted disc still lists");
+        let listed =
+            scan_structural(&Input::Folder(root.clone())).expect("an encrypted disc still lists");
         assert!(listed.bdrom.is_aacs_encrypted);
         assert!(!listed.bdrom.playlists.is_empty(), "the structure still lists");
 
@@ -616,12 +640,50 @@ mod tests {
         // scanned codec detail the panes show, so the listing has to be the
         // deeper pass rather than the metadata one.
         let root = fixture("BigBuckBunny");
-        let listed =
-            super::scan_structural(&Input::Folder(root.clone())).expect("the fixture lists");
+        let listed = scan_structural(&Input::Folder(root.clone())).expect("the fixture lists");
         assert!(!listed.bdrom.is_aacs_encrypted);
         let codecs =
             BdRom::open(&FsDir::new(&root), ScanMode::Codecs).expect("the codec pass opens");
         assert_eq!(listed.bdrom.playlists, codecs.playlists, "the listing skipped the codec pass");
+    }
+
+    #[test]
+    fn the_listing_reports_the_codec_pass_to_completion() {
+        // The quick codec pass reports through the caller's callback (the
+        // metadata open that precedes it reports nothing): first event at
+        // zero, one fixed byte total throughout, monotonic, closing exactly
+        // on the total — the shape the shell's progress bar projects.
+        let mut events: Vec<(String, u64, u64)> = Vec::new();
+        let listed = super::scan_structural(
+            &Input::Folder(fixture("BigBuckBunny")),
+            &mut |progress| events.push((progress.file.to_owned(), progress.done, progress.total)),
+            &AtomicBool::new(false),
+        )
+        .expect("the fixture lists");
+        assert!(!listed.bdrom.playlists.is_empty());
+        let (file, first_done, total) = events.first().expect("the codec pass reports").clone();
+        assert_eq!(file, "00000.M2TS", "the fixture's one stream file is what the pass reads");
+        assert_eq!(first_done, 0, "the pass opens at zero");
+        assert!(events.iter().all(|(_, _, each)| *each == total), "one fixed byte total");
+        assert!(events.windows(2).all(|pair| pair[0].1 <= pair[1].1), "done never regresses");
+        assert_eq!(events.last().map(|(_, done, _)| *done), Some(total), "the pass closes full");
+    }
+
+    #[test]
+    fn a_preset_cancel_flag_aborts_the_listing_before_any_progress() {
+        // The cancel flag is polled before each read, so a cancel honoured
+        // before the first read produces NO progress event at all — a caller
+        // waiting on one to conclude a cancelled listing is over would wait
+        // forever.
+        let mut events: Vec<u64> = Vec::new();
+        let message = super::scan_structural(
+            &Input::Folder(fixture("BigBuckBunny")),
+            &mut |progress| events.push(progress.done),
+            &AtomicBool::new(true),
+        )
+        .expect_err("a cancelled listing yields no table");
+        assert_eq!(message, "scan cancelled");
+        assert!(events.is_empty(), "no event precedes the cancel poll");
     }
 
     #[test]
@@ -635,7 +697,7 @@ mod tests {
         std::fs::write(root.join("BDMV/PLAYLIST/00000.mpls"), b"garbage")
             .expect("the playlist corrupts");
         let structural =
-            super::scan_structural(&Input::Folder(root)).expect("the resilient scan still opens");
+            scan_structural(&Input::Folder(root)).expect("the resilient scan still opens");
         assert!(!structural.warnings.is_empty(), "the corrupt playlist is recorded");
         assert!(
             structural.warnings.iter().any(|warning| warning.contains("00000.mpls")),
