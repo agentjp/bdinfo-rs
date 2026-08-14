@@ -32,6 +32,7 @@ use super::interleaved::TsInterleavedFile;
 use super::m2ts::{TsStreamFile, bytes_to_f64, round_long};
 use super::mpls::TsPlaylistFile;
 use super::order::{self, PlaylistFilter};
+use super::shortfall::{self, ShortStreamFile};
 use crate::discovery::{BdFileKind, BdmvDir};
 use crate::error::{BdError, ScanError, ScanStage};
 use crate::index;
@@ -1111,6 +1112,27 @@ impl BdRom {
             (self.is_psp, "PSP Digital Copy"),
         ];
         flags.into_iter().filter(|&(set, _)| set).map(|(_, label)| label).collect()
+    }
+
+    /// The stream files this scan measured materially less of than the disc
+    /// declares — a truncated or unreadably short `*.m2ts`, whose reads end in
+    /// a clean end of file and which is therefore recorded nowhere else (see
+    /// [`shortfall::short_stream_files`] for the thresholds and the shortfall
+    /// each entry carries).
+    ///
+    /// Derived from the per-clip summaries on every call, over whatever this
+    /// [`BdRom`] holds: empty after an open that measured nothing
+    /// ([`ScanMode::Metadata`]/[`ScanMode::Codecs`]), and silent about the
+    /// files a `scan_files` selection left out.
+    ///
+    /// A stream file whose read FAILED partway is named here too when its
+    /// partial state was kept ([`ScanOptions::keep_partial`]) — its measured
+    /// span is genuinely short. That file is also a [`ScanError`] of the
+    /// resilient scan, and this type carries no error list, so a surface
+    /// showing both pairs them by file name.
+    #[must_use]
+    pub fn short_stream_files(&self) -> Vec<ShortStreamFile> {
+        shortfall::short_stream_files(&self.playlists)
     }
 }
 
@@ -4264,6 +4286,72 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_file_that_ends_before_its_declared_span_is_reported_short() {
+        // The stream file holds three video frames — four demuxed seconds — and
+        // its reads end in a clean end of file, so a play item declaring 100 s
+        // of it fails nothing and records nothing: the measured span is the
+        // only evidence that most of the file is missing.
+        let clip = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let mut m2ts = packet(0, true, &pat_payload(0x0100));
+        m2ts.extend(packet(0x0100, true, &pmt_payload(&[(0x1B, 0x1011)])));
+        for ticks in [90_000_u64, 180_000, 270_000] {
+            m2ts.extend(packet(0x1011, true, &pes_dts(0xE0, ticks, ticks, &sps_payload())));
+        }
+        let build = |out_t: u32| {
+            TempDisc::build(
+                &[],
+                &[
+                    ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, out_t, &[])),
+                    ("BDMV/CLIPINF/00000.clpi", clip.clone()),
+                    ("BDMV/STREAM/00000.m2ts", m2ts.clone()),
+                ],
+            )
+        };
+
+        let short = build(4_500_000); // 100 s declared over a 4 s file
+        let scanned = short.open_scanned().expect("measured scan");
+        let reported = scanned.short_stream_files();
+        assert_eq!(reported.len(), 1);
+        let file = reported.first().unwrap();
+        assert_eq!(file.file(), "00000.M2TS");
+        assert_eq!(file.declared_seconds().to_bits(), 100.0_f64.to_bits());
+        assert_eq!(file.measured_seconds().to_bits(), 4.0_f64.to_bits());
+        assert_eq!(file.missing_seconds().to_bits(), 96.0_f64.to_bits());
+
+        // The same bytes under a play item declaring the four seconds they
+        // carry: the check reports the disagreement between the two spans, not
+        // the fixture's size.
+        let whole = build(180_000).open_scanned().expect("measured scan");
+        assert!(whole.short_stream_files().is_empty());
+
+        // Neither unmeasured mode demuxes a span to compare, so the short disc
+        // is silent in both.
+        assert!(short.open().expect("metadata scan").short_stream_files().is_empty());
+        assert!(short.open_codecs().expect("codec scan").short_stream_files().is_empty());
+
+        // So is a full scan that left this file out of its selection: an
+        // unscanned file measures nothing, which is not evidence of a short
+        // one. The progress sink is called once here, before the scan, so that
+        // the count below proves the scan itself demuxed nothing.
+        let mut reported = 0_usize;
+        let unselected = {
+            let mut progress = |_: ScanProgress<'_>| reported = reported.saturating_add(1);
+            progress(ScanProgress { file: "00000.M2TS", done: 0, total: 0 });
+            BdRom::open_with(
+                &FsDir::new(short.root.clone()),
+                ScanMode::Full,
+                ScanOptions::default(),
+                Some(&BTreeSet::new()),
+                &mut progress,
+                &AtomicBool::new(false),
+            )
+            .expect("selective scan")
+        };
+        assert_eq!(reported, 1, "an empty selection reads no stream file");
+        assert!(unselected.short_stream_files().is_empty());
+    }
+
+    #[test]
     fn clip_summaries_skip_a_registration_order_entry_without_a_stream() {
         // The two registration fields are public: a caller can desync them, so
         // an order entry whose stream is gone is skipped, not trusted.
@@ -5117,6 +5205,41 @@ mod tests {
             crate::report::text::render(&off.bdrom, &off.errors),
             DAMAGED_OFF_REPORT.replace('\n', "\r\n").replace("<TAB>", "\t")
         );
+    }
+
+    #[test]
+    fn a_file_that_died_partway_is_reported_short_only_while_its_partial_scan_is_kept() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        // A read failure leaves the same measured shortfall a truncated file
+        // does, so the file is reported short as well as recorded — the two
+        // lists deliberately overlap, and the caller pairs them by name.
+        let kept =
+            BdRom::open_resilient(&tripping_disc(m2ts.clone(), Some(DATA_SIZE)), ScanMode::Full)
+                .expect("resilient scan continues");
+        let short = kept.bdrom.short_stream_files();
+        assert_eq!(short.len(), 1);
+        assert_eq!(short.first().unwrap().file(), "00000.M2TS");
+        assert_eq!(kept.errors.len(), 1);
+        assert_eq!(
+            kept.errors.first().unwrap().file.to_ascii_uppercase(),
+            short.first().unwrap().file()
+        );
+
+        // Retention off drops the dead file's demux state, so it carries no
+        // measured tallies at all — indistinguishable from a file the scan
+        // never opened, and named by the recorded failure alone.
+        let off = BdRom::open_resilient_with(
+            &tripping_disc(m2ts, Some(DATA_SIZE)),
+            ScanMode::Full,
+            ScanOptions { keep_partial: false },
+            None,
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .expect("resilient scan continues");
+        assert_eq!(off.errors.len(), 1);
+        assert!(off.bdrom.short_stream_files().is_empty());
     }
 
     /// The whole expected report of the `keep_partial: false` scan of the

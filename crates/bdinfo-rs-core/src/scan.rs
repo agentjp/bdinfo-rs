@@ -183,6 +183,19 @@ mod tests {
     }
 
     #[test]
+    fn a_healthy_disc_holds_no_stream_file_short_of_its_declared_span() {
+        // Authored media demuxes at or just past every declared clip span, so
+        // the short-file check stays silent over the whole disc — on both
+        // backends of the same one, since only the IO differs.
+        let folder_scan =
+            folder(&fixture("BigBuckBunny"), ScanMode::Full).expect("the fixture folder opens");
+        assert!(folder_scan.bdrom.short_stream_files().is_empty());
+        let iso_scan =
+            iso(&fixture("BigBuckBunny.iso"), ScanMode::Full).expect("the fixture image opens");
+        assert!(iso_scan.bdrom.short_stream_files().is_empty());
+    }
+
+    #[test]
     fn a_folder_without_a_bd_structure_fails() {
         let scratch = Scratch::new();
         let err = folder(&scratch.root, ScanMode::Metadata).expect_err("no BDMV to locate");
