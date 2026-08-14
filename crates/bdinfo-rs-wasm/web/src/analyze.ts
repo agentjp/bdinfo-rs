@@ -336,6 +336,11 @@ export function inspect(source: DiscSource, options?: ScanOptions): Promise<Disc
  * `result.disc` and {@link renderReport} re-renders the report from it with
  * other sections, without reading the disc again.
  *
+ * {@link Disc.shortStreamNotices} names any stream file measured shorter than
+ * the disc declares. Such a file reads to a clean end of file — no entry in
+ * `disc.errors`, no report `WARNING:` line — so the field is the scan's only
+ * trace of the loss; show it beside the report.
+ *
  * Everything runs locally: no bytes leave the page.
  */
 export function scan(

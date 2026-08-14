@@ -34,7 +34,10 @@
 //! the readable rest is still reported (the failures land in the report's
 //! WARNING block and are summarized on stderr), and the live scan progress
 //! draws on stderr; the flow narration (table, picker, analysis preamble,
-//! classic epilogue, saved-report message) prints on stdout.
+//! classic epilogue, saved-report message) prints on stdout. A stream file
+//! measured shorter than the disc declares (a truncated file reads to a clean
+//! end of file, so it records no error) gets a stderr notice after the report
+//! is saved; the report bytes and the exit code are unchanged by it.
 //!
 //! `-h`/`--help` and a bare invocation all print the same one-screen help
 //! card, headed by a banner, a colour chip or a plain line depending on what
@@ -86,6 +89,7 @@ use bdinfo_rs_core::bdrom::order::{
     selection_stream_files, table_rows,
 };
 use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
+use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 use bdinfo_rs_core::{report, scan};
@@ -218,6 +222,36 @@ fn report_errors(errors: &[ScanError]) {
     eprintln!("warning: scan completed with {} error(s):", errors.len());
     for err in errors {
         eprintln!("warning:   {err}");
+    }
+}
+
+/// The notice for one stream file the demux measured shorter than the disc
+/// declares — raised beside the report, because the locked report format has no
+/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
+///
+/// The wording is shared with the other surfaces' copies of this format
+/// (`bdinfo-rs-gui`'s `flow::short_stream_notice`, `bdinfo-rs-wasm`'s
+/// `mirror::short_stream_notice`); each copy is pinned by an identical test, so
+/// a change here reworks all three together or fails a sibling gate.
+fn short_stream_notice(short: &ShortStreamFile) -> String {
+    format!(
+        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
+        short.file(),
+        short.measured_seconds(),
+        short.declared_seconds(),
+        short.missing_seconds()
+    )
+}
+
+/// Prints the short-stream notices on stderr, one line per affected file —
+/// nothing for a disc with none.
+///
+/// Notices are advisory: unlike [`report_errors`] they carry no exit code,
+/// because the scan itself completed cleanly (a truncated file reads to a
+/// clean end of file).
+fn report_short_streams(bdrom: &BdRom) {
+    for short in bdrom.short_stream_files() {
+        eprintln!("warning: {}", short_stream_notice(&short));
     }
 }
 
@@ -376,6 +410,7 @@ fn scan_and_report(
                 return code;
             }
             println!("Report saved to: {}", dest.display());
+            report_short_streams(&bdrom);
             finish_early(&errors)
         }
         Err(BdError::ScanCancelled) => {
@@ -1024,10 +1059,14 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
-    use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress, fixtures};
+    use bdinfo_rs_core::bdrom::disc::{
+        BdRom, ClipStreamTally, PlaylistSummary, ScanProgress, fixtures,
+    };
     use bdinfo_rs_core::bdrom::order::{PlaylistFilter, table_rows};
     use bdinfo_rs_core::error::{BdError, ScanError, ScanStage};
+    use bdinfo_rs_core::primitives::Pid;
     use bdinfo_rs_core::report::text::RenderOptions;
+    use bdinfo_rs_core::stream::TsStreamType;
     use clap::Parser;
     use clap::error::ErrorKind;
 
@@ -2056,6 +2095,65 @@ Options:
             reason: BdError::StructureNotFound,
         }];
         assert_eq!(finish_early(&errors), 3);
+    }
+
+    /// A scanned disc whose one stream file was demuxed to 500 of its declared
+    /// 1640 seconds — past both shortfall thresholds — with the per-stream
+    /// tally that marks the file as measured.
+    fn short_disc() -> BdRom {
+        let clip = bdinfo_rs_core::bdrom::disc::ClipSummary {
+            packet_seconds: 500.0,
+            streams: vec![ClipStreamTally {
+                pid: Pid::new(0x1011),
+                stream_type: TsStreamType::AvcVideo,
+                codec_short_name: "AVC".to_owned(),
+                payload_bytes: 1024,
+                packet_count: 8,
+            }],
+            ..fixtures::clip("00011.M2TS", 1640.0)
+        };
+        BdRom {
+            volume_label: "DISC".to_owned(),
+            disc_title: None,
+            size: 0,
+            interleaved_size: 0,
+            is_3d: false,
+            is_50hz: false,
+            is_uhd: false,
+            is_aacs_encrypted: false,
+            is_bd_plus: false,
+            is_bd_java: false,
+            is_dbox: false,
+            is_psp: false,
+            playlists: vec![fixtures::playlist("00000.MPLS", 1640.0, vec![clip])],
+        }
+    }
+
+    #[test]
+    fn the_short_stream_notice_spells_the_shared_wording() {
+        // The exact sentence, pinned: the GUI and wasm crates carry the same
+        // format and pin the same bytes, which is what keeps the three
+        // surfaces' wording identical.
+        let shorts = short_disc().short_stream_files();
+        let short = shorts.first().expect("the truncated file is reported");
+        assert_eq!(
+            super::short_stream_notice(short),
+            "00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s missing)"
+        );
+    }
+
+    #[test]
+    fn a_clean_scan_with_a_short_stream_file_still_exits_0() {
+        // The notice is advisory: the scan recorded no error, so the report is
+        // written and the exit code stays the clean 0.
+        let dest = TempDest::new();
+        let code = super::scan_and_report(
+            &mut |_, _| Ok((short_disc(), Vec::new())),
+            &dest.root,
+            &["00000.MPLS".to_owned()],
+            RenderOptions::default(),
+        );
+        assert_eq!(code, 0);
     }
 
     #[test]
