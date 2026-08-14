@@ -665,7 +665,7 @@ mod tests {
         assert_eq!(file, "00000.M2TS", "the fixture's one stream file is what the pass reads");
         assert_eq!(first_done, 0, "the pass opens at zero");
         assert!(events.iter().all(|(_, _, each)| *each == total), "one fixed byte total");
-        assert!(events.windows(2).all(|pair| pair[0].1 <= pair[1].1), "done never regresses");
+        assert!(events.is_sorted_by_key(|(_, done, _)| *done), "done never regresses");
         assert_eq!(events.last().map(|(_, done, _)| *done), Some(total), "the pass closes full");
     }
 

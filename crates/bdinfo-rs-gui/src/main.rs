@@ -1217,8 +1217,7 @@ impl App {
                 }
             }
             Message::ListProgress { generation, file, done, total } => {
-                self.on_list_progress(generation, file, done, total);
-                Task::none()
+                self.on_list_progress(generation, file, done, total)
             }
             Message::Listed { generation, input, result } => {
                 self.on_listed(generation, &input, result)
@@ -1660,12 +1659,19 @@ impl App {
     /// (`generation` is the stamp `begin_listing` issued it; the flow holds no
     /// listing generation of its own, so a cancelled worker's stragglers are
     /// dropped here, before they could touch a re-pick of the same input).
-    fn on_list_progress(&mut self, generation: u64, file: String, done: u64, total: u64) {
+    fn on_list_progress(
+        &mut self,
+        generation: u64,
+        file: String,
+        done: u64,
+        total: u64,
+    ) -> Task<Message> {
         if generation == self.generation {
             let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
             self.last_progress = Some(Instant::now());
             self.flow.list_progress(file, done, total, elapsed);
         }
+        Task::none()
     }
 
     /// Applies a finished structural scan. A successful listing becomes the
