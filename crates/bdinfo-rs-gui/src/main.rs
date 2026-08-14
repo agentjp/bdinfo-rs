@@ -1034,9 +1034,9 @@ enum Message {
     ScanSelected,
     /// A streamed scan-progress event from the worker thread.
     Progress { generation: u64, file: String, done: u64, total: u64 },
-    /// The measured cells the running scan has tallied, one entry per playlist
-    /// the worker's latest snapshot covered — the grids' live numbers, sent at
-    /// most once a second ([`bdinfo_rs_gui::progress::measure_due`]).
+    /// The measured cells the running scan has tallied — the grids' live
+    /// numbers, one entry per playlist the worker's latest snapshot covered,
+    /// sent at most once a second.
     Measured { generation: u64, playlists: Vec<(String, LivePlaylist)> },
     /// The worker's measured scan finished. The errors are typed (shared —
     /// `ScanError` is not `Clone`) so the flow can re-render the report when
@@ -1725,10 +1725,11 @@ impl App {
         Task::none()
     }
 
-    /// Applies the running scan's measured cells to the grids. A pure flow
-    /// transition — the generation guard and the cells-only rule are
-    /// [`Flow::measured`]'s — so the only shell-side effect is the repaint the
-    /// returned (empty) task lets iced do.
+    /// Applies the running scan's measured cells to the grids.
+    ///
+    /// A pure flow transition — the generation guard and the cells-only rule
+    /// are [`Flow::measured`]'s — so the only shell-side effect is the repaint
+    /// the returned (empty) task lets iced do.
     fn on_measured(
         &mut self,
         generation: u64,

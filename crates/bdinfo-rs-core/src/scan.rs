@@ -55,10 +55,12 @@ pub fn open_folder(
     open_folder_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
 }
 
-/// Opens the Blu-ray folder at `path` like [`open_folder`], taking its progress
-/// callback and cancel flag as a [`ScanObservers`] bundle — the form that can
-/// carry a measured observer too ([`ScanObservers::with_measured`]), so a
-/// path-driven surface can watch the tallies build up during the scan.
+/// Opens the Blu-ray folder at `path` like [`open_folder`], observed.
+///
+/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
+/// the form that can carry a measured observer too
+/// ([`ScanObservers::with_measured`]), so a path-driven surface can watch the
+/// tallies build up during the scan.
 ///
 /// # Errors
 /// As [`open_folder`].
@@ -103,9 +105,10 @@ pub fn open_iso(
     open_iso_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
 }
 
-/// Opens the Blu-ray `.iso` image at `path` like [`open_iso`], taking its
-/// progress callback and cancel flag as a [`ScanObservers`] bundle — the `.iso`
-/// twin of [`open_folder_observed`].
+/// Opens the Blu-ray `.iso` image at `path` like [`open_iso`], observed.
+///
+/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
+/// the `.iso` twin of [`open_folder_observed`].
 ///
 /// # Errors
 /// As [`open_iso`].

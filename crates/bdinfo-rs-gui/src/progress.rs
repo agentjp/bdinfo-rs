@@ -77,9 +77,10 @@ pub fn emit_due(file_changed: bool, done: u64, total: u64, since_last: Option<Du
 /// second is the rate classic `BDInfo` samples its live grids at.
 const MEASURE_EVERY: Duration = Duration::from_secs(1);
 
-/// Whether a measured snapshot should become a UI message. `since_last` is the
-/// time since the last emitted one (`None` before the first, which always
-/// emits).
+/// Whether a measured snapshot should become a UI message.
+///
+/// `since_last` is the time since the last emitted one (`None` before the
+/// first, which always emits).
 #[must_use]
 pub fn measure_due(since_last: Option<Duration>) -> bool {
     since_last.is_none_or(|elapsed| elapsed >= MEASURE_EVERY)

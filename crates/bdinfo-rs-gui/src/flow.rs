@@ -632,10 +632,11 @@ impl Flow {
         }
     }
 
-    /// Records the measured cells a scan in flight has reported — one entry per
-    /// playlist the snapshot covered ([`crate::live::updates`]). Applied only
-    /// while scanning **and** when `generation` matches the in-flight scan, like
-    /// [`Flow::progress`].
+    /// Records the measured cells a scan in flight has reported.
+    ///
+    /// `playlists` is one entry per playlist the snapshot covered
+    /// ([`crate::live::updates`]). Applied only while scanning **and** when
+    /// `generation` matches the in-flight scan, like [`Flow::progress`].
     ///
     /// **Cells only.** Each entry replaces that playlist's previous one and
     /// nothing else moves: the row set, the sort order, the checked set, the
@@ -848,9 +849,10 @@ impl Flow {
     }
 
     /// The "Stream Files" pane rows for the active playlist (empty when none),
-    /// their size cells rendered under the human-readable toggle — and, while a
-    /// scan is reporting that playlist, its measured sizes as of the last
-    /// snapshot.
+    /// their size cells rendered under the human-readable toggle.
+    ///
+    /// While a scan is reporting that playlist, the measured column carries its
+    /// sizes as of the last snapshot.
     #[must_use]
     pub fn stream_file_rows(&self) -> Vec<StreamFileRow> {
         self.any_listing()
