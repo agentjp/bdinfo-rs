@@ -66,7 +66,7 @@ use bdinfo_rs_core::bdrom::order::{
 };
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::discovery::BdmvDir;
-use bdinfo_rs_core::error::BdError;
+use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 #[cfg(any(target_arch = "wasm32", test))]
 use bdinfo_rs_core::vfs::fs::glob_ci;
@@ -195,22 +195,46 @@ struct WebReader {
 
 /// Renders a `JsValue` error to a short message for an [`io::Error`].
 ///
-/// A thrown string comes back directly; an `Error`/`DOMException` is an object
-/// whose `message` property carries the human-readable text (e.g. a
-/// `NotFoundError` from a revoked `File`), so reach for that before falling
-/// back to a generic label.
+/// JavaScript can throw any value at all, and this message is all a user of a
+/// damaged disc gets, so it walks down four steps and only names the type when
+/// every one of them comes back with nothing:
+///
+/// 1. a thrown string comes back directly;
+/// 2. an `Error`/`DOMException` is an object whose `message` property carries the human-readable
+///    text (e.g. a `NotFoundError` from a revoked `File`);
+/// 3. an exotic throw with no `message` may still be classified by its `name` (a `DOMException`
+///    subclass thrown with an empty message);
+/// 4. anything else is rendered as the value itself, `JSON.stringify`, so a thrown payload reaches
+///    the report instead of being flattened away;
+/// 5. and only a value that renders as nothing at all — `undefined`, a symbol, a function, an
+///    object whose serialization throws — falls back to a placeholder, which at least names its
+///    type.
+///
+/// The literal placeholder is the last resort rather than the second step: a
+/// browser scan of a damaged disc was observed reporting nothing but that
+/// placeholder, which threw away the only diagnostic the failure carried.
 #[cfg(target_arch = "wasm32")]
 fn js_message(value: &JsValue) -> String {
     if let Some(text) = value.as_string() {
         return text;
     }
-    if let Ok(message) = js_sys::Reflect::get(value, &JsValue::from_str("message"))
-        && let Some(text) = message.as_string()
+    for property in ["message", "name"] {
+        if let Ok(found) = js_sys::Reflect::get(value, &JsValue::from_str(property))
+            && let Some(text) = found.as_string()
+            && !text.is_empty()
+        {
+            return text;
+        }
+    }
+    if let Ok(json) = js_sys::JSON::stringify(value)
+        && let Some(text) = json.as_string()
         && !text.is_empty()
     {
         return text;
     }
-    "JavaScript exception".to_owned()
+    // `typeof` is what is left to say about it.
+    let kind = value.js_typeof().as_string().unwrap_or_default();
+    format!("JavaScript exception ({kind})")
 }
 
 /// The byte window `[start, end)` a [`WebReader`] read of `buf_len` bytes at
@@ -692,7 +716,9 @@ fn inspect_disc(
     filter: &PlaylistFilter,
 ) -> Result<Disc, BdError> {
     let report = BdRom::open_resilient(root, mode)?;
-    Ok(Disc::from_scan(&report.bdrom, &report.errors, false, filter))
+    // No report was rendered, so the mirror carries no report order and a later
+    // render of it falls back to the whole-disc presentation order.
+    Ok(Disc::from_scan(&report.bdrom, &report.errors, false, filter, None))
 }
 
 /// Why a by-name [`scan_selection`] could not produce a report.
@@ -803,6 +829,34 @@ impl Scan {
     fn render(&self, options: RenderOptions) -> String {
         text::render_with(&self.report.bdrom, &self.order, &self.report.errors, options)
     }
+
+    /// The playlists this scan renders, by name and in rendered order.
+    ///
+    /// Only the mirror needs them, so this shares its gate.
+    ///
+    /// The [`order`](Self::order) spelled the way a mirror can hold it: names
+    /// survive the round trip through JavaScript that indices into a rebuilt
+    /// disc could not be trusted to. This is what [`Disc::report_order`] takes,
+    /// so a re-render of the mirror prints the blocks this scan printed.
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn playlist_names(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter_map(|&index| self.report.bdrom.playlists.get(index))
+            .map(|playlist| playlist.name.clone())
+            .collect()
+    }
+
+    /// Merges failures a source recorded itself into this scan's.
+    ///
+    /// The `.iso` reader records a bad sector and serves the unreadable span as
+    /// zeros, so the demux above it succeeds and the scan records nothing —
+    /// draining the reader is the only way that damage reaches the report
+    /// `WARNING:` block (the composition [`bdinfo_rs_core::scan::open_iso`]
+    /// makes for the command line).
+    fn merge_errors(&mut self, errors: Vec<ScanError>) {
+        self.report.errors.extend(errors);
+    }
 }
 
 /// Runs the full **measured** scan over `root`, in the CLI's `--whole` playlist
@@ -863,6 +917,25 @@ fn render_options(options: Option<&ScanOptions>) -> RenderOptions {
     }
 }
 
+/// The playlist order a [`Disc`] renders in — indices into `bdrom`'s playlists.
+///
+/// `names` is the mirror's [`Disc::report_order`]: the playlists the scan that
+/// produced it printed, in printed order, which map back to indices in that
+/// same order (a name no playlist on the disc carries is skipped, exactly as a
+/// by-name scan skips it). Rendering over them is what keeps a re-render inside
+/// the scanned selection — the whole-disc presentation order below would print
+/// every never-scanned playlist as a block of zeros beside the measured ones.
+///
+/// Their absence is a disc no report was rendered from ([`inspect_files`],
+/// [`inspect_iso`]), which renders as the standard filtered whole-disc set.
+#[cfg(any(target_arch = "wasm32", test))]
+fn render_order(bdrom: &BdRom, names: Option<&[String]>) -> Vec<usize> {
+    names.map_or_else(
+        || bdrom.presentation_order(&PlaylistFilter::default()),
+        |names| selection_order(&bdrom.playlists, names),
+    )
+}
+
 /// The scan switches `options` asks for. An absent `keepPartial` — or no options
 /// object at all — leaves [`CoreScanOptions::default`] in force, which keeps the
 /// measured state of a stream file whose read fails partway.
@@ -887,8 +960,16 @@ fn scan_options(options: Option<&ScanOptions>) -> CoreScanOptions {
 fn measured_result(scan: &Scan, options: RenderOptions, filter: &PlaylistFilter) -> ScanResult {
     ScanResult {
         report: scan.render(options),
-        // A `Scan` is always the packet scan, so the mirror says measured.
-        disc: Disc::from_scan(&scan.report.bdrom, &scan.report.errors, true, filter),
+        // A `Scan` is always the packet scan, so the mirror says measured. It
+        // carries the scan's own playlist order too, so re-rendering the mirror
+        // reproduces the report beside it rather than the whole disc.
+        disc: Disc::from_scan(
+            &scan.report.bdrom,
+            &scan.report.errors,
+            true,
+            filter,
+            Some(scan.playlist_names()),
+        ),
     }
 }
 
@@ -949,13 +1030,23 @@ pub fn run_report(data: &[u8]) -> String {
 /// `wasm_bindgen` export that adds progress, selection, and error reporting
 /// around the same wiring.
 ///
+/// The reader's own bad-sector recordings are drained into the scan's failures
+/// before the render, so an unreadable span — which the reader serves as zeros,
+/// leaving the demux above it none the wiser — reaches the report's `WARNING:`
+/// block. Draining inside keeps the signature a plain image in, report out.
+///
 /// An image that is not a readable UDF volume, or that opens but holds no
 /// `BDMV` structure, renders as the empty string — matching [`run_report`]'s
 /// resilient-open absence path.
 #[must_use]
 pub fn run_iso_report(reader: Box<dyn IsoReader>) -> String {
     let Ok(source) = UdfSource::open_resilient(reader) else { return String::new() };
-    render_disc(&source.root(), RenderOptions::default(), &mut |_| {}).unwrap_or_default()
+    scan_whole(&source.root(), CoreScanOptions::default(), &mut |_| {})
+        .map(|mut scan| {
+            scan.merge_errors(source.take_errors());
+            scan.render(RenderOptions::default())
+        })
+        .unwrap_or_default()
 }
 
 /// The in-memory entry point: feed it BDMV bytes (the six `u32`-BE
@@ -1067,18 +1158,20 @@ pub fn inspect_iso(file: web_sys::File, options: Option<ScanOptions>) -> Result<
 /// [`Disc`] into report text. Formatting the model by hand produces something
 /// that merely resembles the locked format.
 ///
-/// The playlists print in the disc's presentation order — the standard
-/// `--whole` set, grouped by shared clip files and longest first, the same
-/// order a whole-disc scan renders. Any disc renders, including one whose
-/// values were never measured: a disc from a by-name scan holds every playlist
-/// but measured values only for the ones that scan named, and one from
-/// [`inspect_files`] holds none at all, so both print the rest at zero.
+/// The playlists print in the order the scan that produced the disc printed
+/// them — its `reportOrder`, so a disc from a by-name scan re-renders as that
+/// scan reported it and a playlist it never measured never appears. A disc from
+/// [`inspect_files`] or [`inspect_iso`] carries no such order and prints in the
+/// disc's presentation order instead — the standard `--whole` set, grouped by
+/// shared clip files and longest first — every value of it zero, because an
+/// inspect measures none.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 #[must_use]
-pub fn render_report(disc: Disc, options: Option<ScanOptions>) -> String {
+pub fn render_report(mut disc: Disc, options: Option<ScanOptions>) -> String {
+    let printed = disc.report_order.take();
     let (bdrom, errors) = disc.into_scan();
-    let order = bdrom.presentation_order(&PlaylistFilter::default());
+    let order = render_order(&bdrom, printed.as_deref());
     text::render_with(&bdrom, &order, &errors, render_options(options.as_ref()))
 }
 
@@ -1140,6 +1233,13 @@ pub fn scan_files(
 /// behaves exactly as [`scan_files`] — one demux, both results, and the same
 /// meaning for every parameter it shares.
 ///
+/// One failure mode is the `.iso` path's own: a sector the image cannot serve
+/// is recorded by the UDF reader and served to the demux as zeros, so the scan
+/// itself sees no error. Those recordings are merged into the result, so they
+/// reach `result.disc.errors` and the report's `WARNING:` block like any other
+/// read failure. A folder scan has no such layer — a failing read aborts that
+/// file instead (see `DIFFERENCES.md`).
+///
 /// # Errors
 /// Returns a `JsValue` if the image is not a readable UDF `.iso`, no readable
 /// Blu-ray structure is found inside it, or a non-empty `selection` names no
@@ -1158,9 +1258,14 @@ pub fn scan_iso(
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    let scan = scan_root(&source.root(), &selection, scan_options(options.as_ref()), &mut |p| {
-        notify(on_progress.as_ref(), &p);
-    })?;
+    let mut scan =
+        scan_root(&source.root(), &selection, scan_options(options.as_ref()), &mut |p| {
+            notify(on_progress.as_ref(), &p);
+        })?;
+    // The reader's bad sectors, which it zero-filled past — invisible to the
+    // demux, and reported nowhere unless drained here (as `run_iso_report` and
+    // the command line's `open_iso` both drain them).
+    scan.merge_errors(source.take_errors());
     Ok(measured_result(&scan, render_options(options.as_ref()), &filter))
 }
 
@@ -1474,6 +1579,68 @@ mod tests {
         assert_eq!(result.disc.volume_label, "WASMDISC");
     }
 
+    #[test]
+    fn a_re_render_of_the_mirror_prints_the_playlists_the_scan_printed() {
+        use bdinfo_rs_core::bdrom::disc::ScanProgress;
+        use bdinfo_rs_core::report::text;
+
+        use super::{CoreScanOptions, measured_result, render_order, scan_whole};
+
+        let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
+        let scan = scan_whole(&framed_tree(&fixture_blob()), CoreScanOptions::default(), &mut sink)
+            .expect("the fixture opens");
+        let filter = super::classification_filter(None).expect("an absent threshold is valid");
+        let result = measured_result(&scan, RenderOptions::default(), &filter);
+
+        // The mirror carries the scan's own playlist order, by name.
+        assert_eq!(result.disc.report_order.as_deref(), Some(scan.playlist_names().as_slice()));
+
+        // Re-rendering the mirror over that order — the three lines the browser
+        // `render_report` export is — reproduces the scan's report byte for
+        // byte. On this one-playlist fixture the two orders agree; the browser
+        // harness drives the subset scan where they do not.
+        let mut disc = result.disc;
+        let printed = disc.report_order.take();
+        let (bdrom, errors) = disc.into_scan();
+        let order = render_order(&bdrom, printed.as_deref());
+        let rendered = text::render_with(&bdrom, &order, &errors, RenderOptions::default());
+        assert_eq!(rendered, result.report);
+    }
+
+    #[test]
+    fn a_render_follows_the_scans_order_and_falls_back_to_the_presentation_one() {
+        use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, ScanProgress};
+
+        use super::{CoreScanOptions, render_order, scan_whole};
+
+        // Two playlists off the scanned fixture, long enough that neither is
+        // withheld as short: the shorter one sorts SECOND in presentation order
+        // (longest first), so an order that follows the scan is visibly not the
+        // presentation one.
+        let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
+        let scan = scan_whole(&framed_tree(&fixture_blob()), CoreScanOptions::default(), &mut sink)
+            .expect("the fixture opens");
+        let mut bdrom = scan.report.bdrom;
+        let one = bdrom.playlists.first().expect("the fixture has a playlist").clone();
+        bdrom.playlists = vec![
+            PlaylistSummary { name: "00000.MPLS".to_owned(), total_length: 30.0, ..one.clone() },
+            PlaylistSummary { name: "00001.MPLS".to_owned(), total_length: 100.0, ..one },
+        ];
+
+        // No order recorded: the whole disc, longest first.
+        assert_eq!(render_order(&bdrom, None), vec![1, 0]);
+        // A scan of one playlist prints that playlist and nothing else.
+        assert_eq!(render_order(&bdrom, Some(&["00000.MPLS".to_owned()])), vec![0]);
+        // Several print in the order the scan named them, not the table's.
+        let named = ["00000.MPLS".to_owned(), "00001.MPLS".to_owned()];
+        assert_eq!(render_order(&bdrom, Some(&named)), vec![0, 1]);
+        // A name the disc does not carry is skipped, as a by-name scan skips
+        // it; an order that names nothing prints nothing.
+        let nothing: Vec<usize> = Vec::new();
+        assert_eq!(render_order(&bdrom, Some(&["NOSUCH.MPLS".to_owned()])), nothing);
+        assert_eq!(render_order(&bdrom, Some(&[])), nothing);
+    }
+
     /// An options object with every option left out — the base each test below
     /// sets the one option it is about on.
     fn no_options() -> super::ScanOptions {
@@ -1640,6 +1807,71 @@ mod tests {
             run_iso_report(Box::new(MemIso(Arc::from(vec![0_u8; 1 << 16])))).is_empty(),
             "a non-UDF image renders as the empty string"
         );
+    }
+
+    #[test]
+    fn an_unreadable_iso_sector_reaches_the_report_warning_block() {
+        use std::io::{Cursor, Read, Seek};
+        use std::sync::Arc;
+
+        use bdinfo_rs_core::vfs::ReadSeek;
+        use bdinfo_rs_core::vfs::udf::source::IsoReader;
+
+        use super::run_iso_report;
+
+        /// The unreadable window: one 2 KiB sector deep inside the image, which
+        /// is 11 of its 12.3 MiB of stream file. Reading it is what the browser
+        /// cannot do on a damaged disc.
+        const BAD_AT: u64 = 8 << 20;
+        const BAD_LEN: u64 = 2048;
+
+        /// An [`IsoReader`] over an image with one unreadable window — the
+        /// `.iso` analogue of the core reader tests' `FaultyIso`. Every cursor
+        /// it opens fails any read overlapping `[BAD_AT, BAD_AT + BAD_LEN)`,
+        /// which is what a bad sector does to a `FileReaderSync` read.
+        #[derive(Debug)]
+        struct FaultyIso(Arc<[u8]>);
+
+        struct FaultyCursor(Cursor<Arc<[u8]>>);
+
+        impl Read for FaultyCursor {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let start = self.0.position();
+                let end = start.saturating_add(buf.len() as u64);
+                if start < BAD_AT.saturating_add(BAD_LEN) && end > BAD_AT {
+                    return Err(std::io::Error::other("simulated bad sector"));
+                }
+                self.0.read(buf)
+            }
+        }
+
+        impl Seek for FaultyCursor {
+            fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(from)
+            }
+        }
+
+        impl IsoReader for FaultyIso {
+            fn open(&self) -> std::io::Result<Box<dyn ReadSeek>> {
+                Ok(Box::new(FaultyCursor(Cursor::new(Arc::clone(&self.0)))))
+            }
+        }
+
+        const ISO: &[u8] = include_bytes!("../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
+
+        // The resilient UDF reader records the bad sector and serves the span
+        // as zeros, so the demux above it succeeds and records nothing: without
+        // the drain the report would come back clean and the damage would be
+        // reported nowhere at all.
+        let report = run_iso_report(Box::new(FaultyIso(Arc::from(ISO))));
+        assert!(
+            report.contains("WARNING: File errors were encountered during scan:"),
+            "a bad sector must reach the report:\n{report}"
+        );
+        assert!(report.contains("00000.M2TS"), "the WARNING must name the file:\n{report}");
+        // The rest of the disc still rendered — one unreadable window is not a
+        // failed scan.
+        assert!(report.contains("PLAYLIST: 00000.MPLS"), "the report still renders:\n{report}");
     }
 
     #[test]

@@ -267,6 +267,9 @@ async function main() {
   const fullOk =
     full.disc.measured === true &&
     full.disc.playlists[0].streams[0].bitrateBps > 0 &&
+    // The playlists the scan printed travel with the model, which is what makes
+    // the re-render reproduce THIS report rather than the whole disc.
+    JSON.stringify(full.disc.reportOrder) === JSON.stringify(["00000.MPLS"]) &&
     reRendered.equals(golden) &&
     !noDiagnostics.includes("STREAM DIAGNOSTICS:") &&
     noDiagnostics.includes("QUICK SUMMARY:") &&
@@ -309,6 +312,9 @@ async function main() {
   const isoInspected = inspect_iso(isoFile);
   const isoInspectOk =
     isoInspected.measured === false &&
+    // An inspect rendered no report, so it records no order and a render of it
+    // falls back to the disc presentation order.
+    isoInspected.reportOrder === undefined &&
     isoInspected.volumeLabel === "Blu-Ray" &&
     isoInspected.playlists.length === 1 &&
     isoInspected.playlists[0].name === "00000.MPLS" &&
