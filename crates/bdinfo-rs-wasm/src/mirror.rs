@@ -4,7 +4,7 @@
 //!
 //! | Mirror | Core |
 //! |---|---|
-//! | [`Disc`] | [`BdRom`] plus the scan mode and the recorded failures |
+//! | [`Disc`] | [`BdRom`] plus the scan mode, the recorded failures and the report order |
 //! | [`Playlist`] | [`PlaylistSummary`] |
 //! | [`Clip`] | [`ClipSummary`] |
 //! | [`Stream`] | [`StreamSummary`] |
@@ -220,6 +220,21 @@ pub struct Disc {
     /// Per-file failures the scan recorded and continued past. Empty for a
     /// scan of healthy media.
     pub errors: Vec<ScanError>,
+    /// The playlists the scan that produced this disc printed, in printed
+    /// order, naming each one as its `name` does.
+    ///
+    /// `renderReport` prints exactly these, so re-rendering a disc from a scan
+    /// of a named selection reproduces that scan report rather than the whole
+    /// disc — a playlist the scan never measured cannot reappear as a block of
+    /// zeros. Absent on a disc that no report was rendered from (`inspectFiles`
+    /// and `inspectIso` return one), where `renderReport` falls back to the disc
+    /// presentation order: the standard whole-disc set, grouped by shared clip
+    /// files and longest first.
+    ///
+    /// This is an order over the playlists, not a filter on them: `playlists`
+    /// still holds every playlist the disc declares, measured or not.
+    #[tsify(optional)]
+    pub report_order: Option<Vec<String>>,
 }
 
 /// One playlist (`*.MPLS`) with its streams, clips and chapters.
@@ -593,12 +608,17 @@ impl Disc {
     /// `filter` supplies the short-playlist threshold each playlist is
     /// classified against for its `hiddenBy`; its two switches are not read,
     /// because no playlist is ever dropped here.
+    ///
+    /// `report_order` is the playlist order the scan rendered its report in, by
+    /// name — [`report_order`](Self::report_order), which a re-render prints.
+    /// `None` for a scan that rendered no report.
     #[must_use]
     pub fn from_scan(
         bdrom: &BdRom,
         errors: &[error::ScanError],
         measured: bool,
         filter: &PlaylistFilter,
+        report_order: Option<Vec<String>>,
     ) -> Self {
         // The table numbering describes the disc, not a view of it, so it is
         // taken over every playlist: a group or a position that shifted when a
@@ -640,6 +660,7 @@ impl Disc {
                 .collect(),
             measured,
             errors: errors.iter().map(ScanError::from).collect(),
+            report_order,
         }
     }
 }
@@ -877,9 +898,11 @@ impl Disc {
     /// Rebuilds the disc this mirror describes: the [`BdRom`] and the per-file
     /// failures, the two halves a report is rendered from.
     ///
-    /// The inverse of [`from_scan`](Self::from_scan) but for `measured`, which
-    /// describes how the values were obtained rather than being one of them —
-    /// a disc carries no such flag, so it is dropped here.
+    /// The inverse of [`from_scan`](Self::from_scan) but for `measured` and
+    /// [`report_order`](Self::report_order), which describe how the values were
+    /// obtained and how they were printed rather than being values of the disc
+    /// — a disc carries neither, so both are dropped here. A caller rendering
+    /// this mirror reads the order off the [`Disc`] before taking it apart.
     #[must_use]
     pub fn into_scan(self) -> (BdRom, Vec<error::ScanError>) {
         let bdrom = BdRom {
@@ -1296,6 +1319,7 @@ mod tests {
             playlists: vec![a_playlist()],
             measured: true,
             errors: vec![a_scan_error()],
+            report_order: Some(vec!["00000.MPLS".to_owned()]),
         }
     }
 
@@ -1317,6 +1341,7 @@ mod tests {
             "playlists": [a_playlist_json()],
             "measured": true,
             "errors": [a_scan_error_json()],
+            "reportOrder": ["00000.MPLS"],
         })
     }
 
@@ -1378,6 +1403,21 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_report_order_may_be_left_out_of_the_wire_form() {
+        // The key simply missing is what makes the field additive: a `Disc`
+        // built before it existed still crosses, and reads as the disc having
+        // no report order rather than as a malformed object.
+        let mut wire = a_disc_json();
+        wire.as_object_mut().expect("the wire form is an object").remove("reportOrder");
+        let back: Disc = serde_json::from_value(wire).expect("deserialize a disc with no order");
+        assert_eq!(back, Disc { report_order: None, ..a_disc() });
+
+        // Going back out it is an explicit null, as an absent disc title is.
+        let out = serde_json::to_value(&back).expect("serialize a disc with no order");
+        assert_eq!(out.get("reportOrder"), Some(&Value::Null));
+    }
+
+    #[test]
     fn the_encrypted_flag_crosses_and_rebuilds_at_both_values() {
         // Both values, both directions. The whole-fields fixtures pin the flag
         // set; an unencrypted disc is the value a consumer sees on nearly every
@@ -1385,7 +1425,7 @@ mod tests {
         // there.
         for encrypted in [false, true] {
             let bdrom = BdRom { is_aacs_encrypted: encrypted, ..a_core_bdrom() };
-            let disc = Disc::from_scan(&bdrom, &[], false, &PlaylistFilter::default());
+            let disc = Disc::from_scan(&bdrom, &[], false, &PlaylistFilter::default(), None);
             assert_eq!(disc.is_aacs_encrypted, encrypted);
 
             let wire = serde_json::to_value(&disc).expect("serialize the mirror");
@@ -1616,6 +1656,7 @@ mod tests {
             &report.errors,
             mode == ScanMode::Full,
             &PlaylistFilter::default(),
+            None,
         )
     }
 
@@ -1626,7 +1667,8 @@ mod tests {
                 &a_core_bdrom(),
                 &[a_core_scan_error()],
                 true,
-                &PlaylistFilter::default()
+                &PlaylistFilter::default(),
+                a_disc().report_order,
             ),
             a_disc()
         );
@@ -1636,10 +1678,17 @@ mod tests {
     fn the_scan_mode_alone_decides_the_measured_flag() {
         // Same disc, same values: only the flag differs, and it says whether a
         // zero below was measured or never looked at.
-        let unmeasured = Disc::from_scan(&a_core_bdrom(), &[], false, &PlaylistFilter::default());
+        let unmeasured =
+            Disc::from_scan(&a_core_bdrom(), &[], false, &PlaylistFilter::default(), None);
         assert!(!unmeasured.measured);
         assert!(unmeasured.errors.is_empty(), "a scan with no failures mirrors none");
-        assert_eq!(Disc { measured: true, ..unmeasured }, Disc { errors: Vec::new(), ..a_disc() });
+        assert!(unmeasured.report_order.is_none(), "a scan that rendered nothing carries no order");
+        // The three fields that describe the scan rather than the disc are set
+        // aside; everything the disc itself has must match.
+        assert_eq!(
+            Disc { measured: true, report_order: a_disc().report_order, ..unmeasured },
+            Disc { errors: Vec::new(), ..a_disc() }
+        );
     }
 
     #[test]
@@ -1649,7 +1698,7 @@ mod tests {
         // the filter only ever decides what `hiddenBy` names.
         let bdrom = a_mixed_core_bdrom();
         for filter in [PlaylistFilter::default(), PlaylistFilter::everything()] {
-            let disc = Disc::from_scan(&bdrom, &[a_core_scan_error()], true, &filter);
+            let disc = Disc::from_scan(&bdrom, &[a_core_scan_error()], true, &filter, None);
             assert_eq!(names(&disc), ["00000.MPLS", "00001.MPLS", "00002.MPLS"], "{filter:?}");
             assert_eq!(disc.errors, vec![a_scan_error()], "the failures are not filtered");
         }
@@ -1659,7 +1708,7 @@ mod tests {
     fn every_playlist_carries_the_rules_that_withhold_it() {
         let bdrom = a_mixed_core_bdrom();
         let rules = |filter: &PlaylistFilter| {
-            Disc::from_scan(&bdrom, &[], false, filter)
+            Disc::from_scan(&bdrom, &[], false, filter, None)
                 .playlists
                 .into_iter()
                 .map(|playlist| playlist.hidden_by)
@@ -1679,7 +1728,7 @@ mod tests {
         // A playlist that is both short and looping names both, Short first.
         let both =
             BdRom { playlists: vec![filtered_playlist("00003.MPLS", 5.0, true)], ..a_core_bdrom() };
-        let disc = Disc::from_scan(&both, &[], false, &PlaylistFilter::default());
+        let disc = Disc::from_scan(&both, &[], false, &PlaylistFilter::default(), None);
         let playlist = disc.playlists.first().expect("the one playlist");
         assert_eq!(playlist.hidden_by, [HiddenRule::Short, HiddenRule::Looping]);
     }
@@ -1717,7 +1766,7 @@ mod tests {
         // The standard filter would withhold the 5 s playlist; the numbering
         // must not notice, since it describes the disc rather than a view.
         let numbering = |filter: &PlaylistFilter| {
-            Disc::from_scan(&bdrom, &[], true, filter)
+            Disc::from_scan(&bdrom, &[], true, filter, None)
                 .playlists
                 .into_iter()
                 .map(|playlist| (playlist.name, playlist.group, playlist.position))

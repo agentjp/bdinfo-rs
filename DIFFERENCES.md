@@ -33,6 +33,7 @@ actually see on a normal disc.
 | [PAT `table_id` validation](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — no conforming disc carries a wrong PAT table id |
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
+| [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
 
 ---
 
@@ -224,6 +225,34 @@ has no raw-device read to skip).
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`),
 `crates/bdinfo-rs-core/src/vfs/volume.rs` (the label-read gate).</sub>
+
+### Read errors: folder input vs `.iso` input
+
+A read that fails is handled at a different layer for the two inputs, so the same damaged
+disc measures differently depending on which one it is scanned through. Both are
+deliberate; neither has a BDInfo counterpart, which reads folders only.
+
+- **Folder input** — the failing read aborts that stream file. Everything demuxed before
+  it is kept (unless the retention switch discards it) and everything after it is never
+  read, so the file's chapter rows and tallies stop at the failure and stay zero past it.
+  The failure is recorded against the file and printed in the report `WARNING:` block.
+- **`.iso` input** — the UDF reader sits under the demux and is resilient there: it records
+  the unreadable sectors and serves that span **as zeros**, so the demux reads on to the
+  end of the file. The damage shows up as depressed rates across the affected span rather
+  than as a truncated file, the values after it are measured normally, and the retention
+  switch has nothing to decide. The reader's recordings are drained into the scan and
+  printed in the same `WARNING:` block. Only file data degrades this way: the volume
+  structures stay strict, since a damaged filesystem descriptor has no readable rest to
+  degrade to, so an image damaged there does not open at all.
+
+Zero-fill is what lets one bad sector cost its own sector rather than the rest of a 30 GB
+stream file, which is why the `.iso` path keeps it. Every surface that takes an `.iso`
+drains those recordings — the command line, the desktop app and the browser package alike
+— so an unreadable image is never reported as a clean scan.
+
+<sub>Source: `crates/bdinfo-rs-core/src/vfs/udf/source.rs` (`UdfSource::open_resilient`,
+`take_errors`), `crates/bdinfo-rs-core/src/scan.rs` (`open_iso`),
+`crates/bdinfo-rs-wasm/src/lib.rs` (`scan_iso`, `run_iso_report`).</sub>
 
 ---
 

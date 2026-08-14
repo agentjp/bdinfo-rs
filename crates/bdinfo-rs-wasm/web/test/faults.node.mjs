@@ -338,16 +338,35 @@ async function main() {
     }
   }
 
-  // Re-rendering the disc model of a damaged subset scan is NOT the scan's own
-  // report. The scan renders the selection the caller named; the re-render walks
-  // every playlist the disc declares, in the presentation order of the selection
-  // table (longest first, 00002 before 00000 here) — so the two playlists the
-  // caller never selected come back as blocks of zeros beside the one it did.
-  const rerendered = reportBlocks(render_report(subsetDisc));
-  if (rerendered.join(",") !== "00002,00000,00001") {
+  // Re-rendering the disc model of a damaged subset scan IS the scan's own
+  // report: the model carries the playlists the scan printed (`reportOrder`),
+  // so the re-render prints those and only those — byte for byte, the two
+  // playlists the caller never selected absent rather than blocks of zeros.
+  // Before this was fixed the re-render walked every playlist the disc
+  // declares, in selection-table order (`00002,00000,00001` here).
+  const rerendered = render_report(subsetDisc);
+  if (reportBlocks(rerendered).join(",") !== "00002") {
     failures.push(
-      `re-render blocks were ${rerendered.join(",")}, not the whole disc in table order`,
+      `re-render blocks were ${reportBlocks(rerendered).join(",")}, not the scanned selection`,
     );
+  }
+  if (rerendered !== reports.get("twoClips/defectiveOnly")) {
+    failures.push("re-rendering the subset scan model did not reproduce its own report");
+  }
+
+  // A read that throws a value with no message and no name still reports what
+  // it threw: the seam renders the thrown payload itself rather than collapsing
+  // every exotic throw to one literal, which is what a field report of a
+  // damaged disc came back carrying.
+  const thrown = reports
+    .get("sharedClip/all")
+    .split("\r\n")
+    .filter((line) => line.includes("io error:"));
+  if (!thrown.every((line) => line.includes("unreadable from byte 40000"))) {
+    failures.push(`the WARNING lines lost the thrown value: ${JSON.stringify(thrown)}`);
+  }
+  if (thrown.some((line) => line.includes("JavaScript exception"))) {
+    failures.push(`a WARNING line fell back to the placeholder: ${JSON.stringify(thrown)}`);
   }
 
   // Damage deep inside a multi-chunk clip is named ONCE per file, not twice.

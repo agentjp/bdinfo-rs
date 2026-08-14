@@ -144,9 +144,10 @@ const trimmed = await renderReport(disc, { streamDiagnostics: false });
 ```
 
 `streamDiagnostics` and `quickSummary` both default to on, which is the report
-the CLI writes. A `disc` from a `scan` with a `selection` holds every playlist
-but measured values only for the ones that scan named, so re-rendering it prints
-the rest at zero — scan again to measure them.
+the CLI writes. A `disc` from a `scan` with a `selection` re-renders as that scan
+reported it: `disc.reportOrder` records the playlists it printed, so a playlist
+the scan never measured cannot reappear as a block of zeros. The model still
+holds every playlist on the disc — scan again to measure more of them.
 
 ### Stream files that cannot be read to the end
 
@@ -162,6 +163,13 @@ const { disc } = await scan(picked, undefined, { keepPartial: false });
 `keepPartial: false` discards that measured span instead, leaving those values
 zero throughout. The failure is reported in `disc.errors` either way, and a
 disc that reads cleanly produces the same bytes under both settings.
+
+An `.iso` behaves differently one layer down, deliberately: a sector the image
+cannot serve is recorded by the UDF reader and served to the scan as zeros, so
+the scan reads on through the gap and the file is measured to its end. Those
+recordings reach `disc.errors` and the report `WARNING:` block like any other
+read failure — a damaged span shows up as depressed rates rather than as a
+truncated file, and `keepPartial` does not apply to it.
 
 ### Saving the report
 

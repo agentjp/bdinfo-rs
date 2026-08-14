@@ -60,11 +60,12 @@ export function readLog() {
 /**
  * The value a failing read throws.
  *
- * Deliberately not an `Error` and deliberately without a `message`: the wasm
- * side reads `.message` off the thrown value and falls back to the literal
- * string `JavaScript exception` when there is none, which is what a browser
- * scan of a damaged disc has been observed to report. Throwing an `Error` here
- * would pin the fallback out of the harness.
+ * Deliberately not an `Error` and deliberately without a `message` or a `name`:
+ * a browser scan of a damaged disc was observed reporting nothing but the wasm
+ * side's placeholder, so the harness throws the value that reaches the very end
+ * of its fallback chain. What the report says about this object is therefore
+ * the weakest message the seam can produce — `faults.node.mjs` asserts it still
+ * carries the payload below.
  *
  * @param {string} why
  * @param {string} name

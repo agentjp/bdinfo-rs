@@ -368,11 +368,14 @@ export function scan(
  * formatting the model by hand produces something that merely resembles the
  * locked format.
  *
- * The playlists print in the disc's presentation order: the standard `--whole`
- * set, grouped by shared clip files and longest first. A `disc` from a
- * {@link scan} with a `selection` holds every playlist but measured values only
- * for the ones that scan named, so re-rendering it prints the rest at zero —
- * scan again to measure them.
+ * The playlists print in the order the scan that produced the `disc` printed
+ * them ({@link Disc.reportOrder}), so a `disc` from a {@link scan} with a
+ * `selection` re-renders as that scan reported it — a playlist it never
+ * measured cannot reappear as a block of zeros. The model still holds every
+ * playlist on the disc; scan again to measure more of them. A `disc` from
+ * {@link inspect} was never rendered from and prints in the disc's presentation
+ * order instead — the standard `--whole` set, grouped by shared clip files and
+ * longest first — with every measured value zero.
  */
 export function renderReport(disc: Disc, options?: ScanOptions): Promise<string> {
   return request(
