@@ -368,6 +368,12 @@ enum Inner {
         /// pass's first event (the metadata open that precedes the pass
         /// reports nothing, and an AACS-encrypted disc never runs the pass).
         progress: Option<ProgressModel>,
+        /// Whether progress events have gone quiet past the stall threshold —
+        /// the same slot, threshold and wording the measured scan uses
+        /// (`Scanning::stalled`). The listing reads the head of every stream
+        /// file, so on damaged media it is the FIRST place a read sticks,
+        /// minutes before any measured scan starts.
+        stalled: bool,
     },
     Listed(Listing),
     Scanning {
@@ -424,7 +430,7 @@ impl Flow {
     /// A folder/`.iso` was picked — begin its structural scan.
     #[must_use]
     pub const fn start_listing(input: Input) -> Self {
-        Self { inner: Inner::Listing { input, progress: None } }
+        Self { inner: Inner::Listing { input, progress: None, stalled: false } }
     }
 
     /// The structural scan for `input` finished. Applied only when this flow is
@@ -602,25 +608,36 @@ impl Flow {
     /// time elapsed since the listing started. Applied only while listing;
     /// the shell keeps events from a superseded listing worker away from
     /// here (its listing messages carry a generation stamp), so this needs
-    /// no generation of its own.
+    /// no generation of its own. Like the measured scan's [`Flow::progress`],
+    /// a real event is proof the read loop is moving, so it also clears the
+    /// stall flag [`Flow::tick`] may have raised.
     pub fn list_progress(&mut self, file: String, done: u64, total: u64, elapsed: Duration) {
-        if let Inner::Listing { progress, .. } = &mut self.inner {
+        if let Inner::Listing { progress, stalled, .. } = &mut self.inner {
             *progress = Some(ProgressModel::compute(file, done, total, elapsed));
+            *stalled = false;
         }
     }
 
     /// Advances the wall-clock readout while a scan is in flight — the shell's
-    /// ~1 s tick. `elapsed` (since the scan started) re-stamps the progress
+    /// display tick. `elapsed` (since the scan started) re-stamps the progress
     /// model's elapsed seconds so the readout climbs even when no progress
     /// event arrives (a read stuck in drive-firmware retries emits none), and
     /// `since_progress` (since the last progress event) drives the stall flag
     /// (its fixed threshold lives in [`crate::progress`], beside the model's
     /// other display constants). The remaining estimate is untouched —
-    /// it is meaningful only against real progress. A no-op off
-    /// [`Stage::Scanning`], and before the first progress event only the
-    /// stall flag moves (there is no model to re-stamp).
+    /// it is meaningful only against real progress.
+    ///
+    /// Both in-flight stages take it, on identical terms: the measured scan
+    /// ([`Stage::Scanning`]) and the structural listing ([`Stage::Listing`]),
+    /// which reads every stream file's head and stalls on damaged media the
+    /// same way. A no-op in every other stage, and before the first progress
+    /// event only the stall flag moves (there is no model to re-stamp) — the
+    /// listing's clock therefore runs from its start, since a cancelled or
+    /// pre-cancelled listing can emit no event at all.
     pub fn tick(&mut self, elapsed: Duration, since_progress: Duration) {
-        if let Inner::Scanning { progress, stalled, .. } = &mut self.inner {
+        if let Inner::Scanning { progress, stalled, .. }
+        | Inner::Listing { progress, stalled, .. } = &mut self.inner
+        {
             if let Some(model) = progress.as_mut() {
                 model.set_elapsed(elapsed);
             }
@@ -924,10 +941,16 @@ impl Flow {
     /// Whether the in-flight scan's progress events have gone quiet past the
     /// stall threshold — the status line then says "still reading" so a read
     /// stuck on damaged media looks like a struggling drive, not a dead app.
-    /// Always false off [`Stage::Scanning`].
+    /// One flag for both reading stages, the structural listing
+    /// ([`Stage::Listing`]) and the measured scan ([`Stage::Scanning`]), so
+    /// they share one stall vocabulary; always false in the stages that read
+    /// nothing.
     #[must_use]
     pub const fn scan_stalled(&self) -> bool {
-        matches!(self.inner, Inner::Scanning { stalled: true, .. })
+        matches!(
+            self.inner,
+            Inner::Scanning { stalled: true, .. } | Inner::Listing { stalled: true, .. }
+        )
     }
 
     /// Whether a report can be shown / saved / copied now — true whenever a disc
@@ -1395,6 +1418,47 @@ mod tests {
         flow.tick(Duration::from_secs(9), Duration::from_secs(9));
         assert!(!flow.scan_stalled());
         assert_eq!(flow.stage(), Stage::Listed);
+    }
+
+    #[test]
+    fn quiet_ticks_flag_a_stalled_listing_and_an_event_clears_it() {
+        let mut flow = Flow::start_listing(input());
+        assert!(!flow.scan_stalled(), "a listing starts with the flag down");
+        flow.list_progress("A.M2TS".to_owned(), 1, 4, Duration::from_secs(1));
+        assert!(!flow.scan_stalled());
+        // The listing takes the measured scan's threshold unchanged — 5 s,
+        // inclusive — so one silence means the same thing in both stages.
+        flow.tick(Duration::from_secs(6), Duration::from_millis(4_999));
+        assert!(!flow.scan_stalled());
+        flow.tick(Duration::from_secs(7), Duration::from_secs(5));
+        assert!(flow.scan_stalled());
+        flow.tick(Duration::from_secs(8), Duration::from_secs(6));
+        assert!(flow.scan_stalled());
+        // The listing's readout climbs across those ticks, and nothing else
+        // in its snapshot moves.
+        let model = flow.progress_view().expect("the listing keeps its snapshot");
+        assert_eq!(model.elapsed_hms(), "00:00:08");
+        assert_eq!(model.file(), "A.M2TS");
+        assert_eq!(model.percent, 25);
+        // A fresh event is proof the read loop is moving.
+        flow.list_progress("A.M2TS".to_owned(), 2, 4, Duration::from_secs(9));
+        assert!(!flow.scan_stalled());
+    }
+
+    #[test]
+    fn a_listing_stalls_before_its_first_progress_event() {
+        // The listing's stall clock runs from its start, never from a first
+        // event: the metadata open reports nothing, and a listing cancelled
+        // early emits no event at all — so the flag must rise with no
+        // snapshot to re-stamp and no file to name.
+        let mut flow = Flow::start_listing(input());
+        flow.tick(Duration::from_secs(9), Duration::from_secs(9));
+        assert!(flow.progress_view().is_none());
+        assert!(flow.scan_stalled());
+        // Cancelling out of the stalled listing leaves nothing flagged.
+        let flow = flow.cancel();
+        assert_eq!(flow.stage(), Stage::Idle);
+        assert!(!flow.scan_stalled());
     }
 
     #[test]

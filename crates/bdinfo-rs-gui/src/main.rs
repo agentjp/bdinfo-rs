@@ -763,8 +763,9 @@ struct App {
     /// When the current worker (listing or measured scan) started.
     scan_start: Option<Instant>,
     /// When the in-flight worker's last progress event arrived (the start
-    /// until the first one) — what the 1 s scanning tick measures the stall
-    /// hint against ([`Flow::tick`]).
+    /// until the first one, so the clock runs even for a worker that emits
+    /// nothing at all) — what the display tick measures the stall hint
+    /// against ([`Flow::tick`]), for the listing and the measured scan alike.
     last_progress: Option<Instant>,
     /// A one-line status (e.g. `Report saved to: …`), shown in the bottom bar.
     status: Option<String>,
@@ -1075,9 +1076,10 @@ enum Message {
     SettingsCancel,
     /// The OS reported (or changed) its light/dark setting.
     OsTheme(iced::theme::Mode),
-    /// A display tick with no payload: per-frame while listing (advances the
-    /// indeterminate bar), ~1 s while scanning (re-reads the wall clock for
-    /// the elapsed readout and the stall hint).
+    /// A display tick with no payload, at two cadences: per-frame while
+    /// listing (which also advances the indeterminate bar), ~1 s while
+    /// scanning. Either way it re-reads the wall clock for the elapsed
+    /// readout and the stall hint.
     Tick,
     /// A pane splitter was dragged — resize the two panes it divides.
     PaneResized(pane_grid::ResizeEvent),
@@ -1506,11 +1508,11 @@ impl App {
         }
     }
 
-    /// The live subscriptions: the OS light/dark change feed, plus — only while
-    /// the initial scan is in flight — a per-frame tick that animates the
-    /// indeterminate progress bar, and — only while the measured scan is — a
-    /// ~1 s wall-clock tick that keeps the elapsed readout and the stall hint
-    /// moving. The ticks are off in every other state, so the window is not
+    /// The live subscriptions: the OS light/dark change feed, plus the display
+    /// tick that keeps the elapsed readout and the stall hint moving — at two
+    /// cadences, per-frame while the initial scan is in flight (it animates
+    /// the indeterminate progress bar too) and ~1 s while the measured scan
+    /// is. The ticks are off in every other state, so the window is not
     /// redrawing continuously when idle.
     fn subscription(&self) -> iced::Subscription<Message> {
         let mut subs = vec![iced::system::theme_changes().map(Message::OsTheme)];
@@ -1714,17 +1716,17 @@ impl App {
         Task::none()
     }
 
-    /// Applies a display tick: advances the indeterminate bar's phase, and —
-    /// while the measured scan is in flight — re-reads the wall clock so the
-    /// elapsed readout and the stall hint move even when no progress event
-    /// arrives ([`Flow::tick`]).
+    /// Applies a display tick: advances the indeterminate bar's phase, then
+    /// re-reads the wall clock so the elapsed readout and the stall hint move
+    /// even when no progress event arrives. The listing and the measured scan
+    /// are fed the same two durations off the same two fields — the stage
+    /// gate is [`Flow::tick`]'s own, which ignores a tick from any other
+    /// stage.
     fn on_tick(&mut self) {
         self.pulse = progress::pulse_advance(self.pulse);
-        if self.flow.stage() == Stage::Scanning {
-            let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
-            let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
-            self.flow.tick(elapsed, since_progress);
-        }
+        let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+        let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
+        self.flow.tick(elapsed, since_progress);
     }
 
     /// Cancels the in-flight scan for real — the measured scan back to the
@@ -2153,7 +2155,9 @@ impl App {
 
         let base = container(content).width(Length::Fill).height(Length::Fill).into();
         if self.flow.stage() == Stage::Listing {
-            return scanning_modal(base, scanning_card(p, self.pulse, self.flow.progress_view()));
+            let card =
+                scanning_card(p, self.pulse, self.flow.progress_view(), self.flow.scan_stalled());
+            return scanning_modal(base, card);
         }
         if let Some(draft) = &self.settings_draft {
             return modal(base, settings_card(p, draft), Message::SettingsCancel);
@@ -2672,6 +2676,12 @@ impl App {
                 Stage::Scanning => progress.map_or_else(
                     || "Starting scan…".to_owned(),
                     |pr| format!("Scanning {}…", pr.file()),
+                ),
+                // The listing reads every stream file's head, so it stalls on
+                // damaged media the same way and says so in the same words.
+                Stage::Listing if self.flow.scan_stalled() => progress.map_or_else(
+                    || "Scanning disc…".to_owned(),
+                    |pr| format!("Still reading {}…", pr.file()),
                 ),
                 Stage::Listing => progress.map_or_else(
                     || "Scanning disc…".to_owned(),
@@ -3290,13 +3300,18 @@ fn scanning_modal<'a>(
 /// The "please wait" scan overlay card: the brand mark over the same message
 /// `BDInfo` shows while it reads a disc — plus what `BDInfo`'s modal lacks
 /// and a damaged disc needs: the codec pass's live progress (the bar breathes
-/// indeterminately until its first event) and a Cancel that works, because
-/// this pre-scan pass reads every stream file's head and can stall on a bad
-/// sector exactly like the measured scan.
+/// indeterminately until its first event), the stall hint when `stalled`, and
+/// a Cancel that works, because this pre-scan pass reads every stream file's
+/// head and can stall on a bad sector exactly like the measured scan.
+///
+/// A stall before the first event has no file to name, so it leaves the card's
+/// wording alone rather than inventing a readout — the breathing bar and the
+/// live Cancel are the liveness proof there.
 fn scanning_card<'a>(
     p: Palette,
     pulse: u16,
     progress: Option<&ProgressModel>,
+    stalled: bool,
 ) -> Element<'a, Message> {
     let fraction =
         progress.map_or_else(|| progress::pulse_fraction(pulse), ProgressModel::fraction);
@@ -3317,12 +3332,13 @@ fn scanning_card<'a>(
                 .style(ui::progress(p)),
         );
     if let Some(pr) = progress {
-        card = card.push(
-            text(format!("Reading {}…", pr.file()))
-                .size(ui::TEXT_SM)
-                .color(p.text_muted)
-                .align_x(Horizontal::Center),
-        );
+        let line = if stalled {
+            format!("Still reading {}…", pr.file())
+        } else {
+            format!("Reading {}…", pr.file())
+        };
+        card =
+            card.push(text(line).size(ui::TEXT_SM).color(p.text_muted).align_x(Horizontal::Center));
     }
     card = card.push(
         button(text("Cancel").size(ui::TEXT_SM).font(ui::UI_MEDIUM))
@@ -4018,6 +4034,44 @@ mod interaction {
         });
         assert!(sees(&app, "Reading A.M2TS…"), "the stale event must not repaint");
         assert!(!sees(&app, "Reading B.M2TS…"));
+    }
+
+    #[test]
+    fn a_quiet_listing_turns_both_progress_lines_into_the_stall_hint() {
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        let _ = app.update(Message::ListProgress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 1,
+            total: 2,
+        });
+        assert!(sees(&app, "Reading A.M2TS…"));
+        // Re-date the listing's start and its last event into the past — the
+        // wall time a stuck ReadFile would let pass with no event at all.
+        app.scan_start = Instant::now().checked_sub(Duration::from_secs(90));
+        app.last_progress = Instant::now().checked_sub(Duration::from_secs(30));
+        let _ = app.update(Message::Tick);
+        assert!(app.flow.scan_stalled());
+        assert!(sees(&app, "Still reading A.M2TS…"), "the stall hint names the stuck file");
+        // The modal card and the bottom bar both carry this line, and `sees`
+        // matches either — so the absence of the plain wording is what proves
+        // BOTH switched, not just whichever the search reaches first.
+        assert!(!sees(&app, "Reading A.M2TS…"), "the plain wording is replaced, not doubled");
+        // The listing's elapsed readout climbs off the same tick.
+        assert_eq!(
+            app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::elapsed_hms),
+            Some("00:01:30".to_owned())
+        );
+        // The next real event is proof of life: the hint goes away again.
+        let _ = app.update(Message::ListProgress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 2,
+            total: 2,
+        });
+        assert!(!app.flow.scan_stalled());
+        assert!(sees(&app, "Reading A.M2TS…"));
     }
 
     #[test]
