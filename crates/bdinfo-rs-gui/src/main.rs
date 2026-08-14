@@ -1256,10 +1256,7 @@ impl App {
             }
             Message::ScanSelected => self.start_scan(),
             Message::Progress { generation, file, done, total } => {
-                let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
-                self.last_progress = Some(Instant::now());
-                self.flow.progress(generation, file, done, total, elapsed);
-                Task::none()
+                self.on_progress(generation, file, done, total)
             }
             Message::Measured { generation, playlists } => self.on_measured(generation, playlists),
             Message::Finished { generation, report, errors, playlists } => {
@@ -1722,6 +1719,24 @@ impl App {
             self.flow.select_all();
             return self.start_scan();
         }
+        Task::none()
+    }
+
+    /// Applies a measured worker's progress event.
+    ///
+    /// The stale-event guard is [`Flow::progress`]'s own generation match; the
+    /// two shell-side fields here are the wall clock the elapsed readout and
+    /// the stall hint are computed from.
+    fn on_progress(
+        &mut self,
+        generation: u64,
+        file: String,
+        done: u64,
+        total: u64,
+    ) -> Task<Message> {
+        let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+        self.last_progress = Some(Instant::now());
+        self.flow.progress(generation, file, done, total, elapsed);
         Task::none()
     }
 
