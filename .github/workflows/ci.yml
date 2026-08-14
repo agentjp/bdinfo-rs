@@ -36,6 +36,18 @@ name: CI
 # only the job-level result feeds ci-ok, which is what branch protection
 # requires. For the same reason, never rename or delete a job whose `name:`
 # string is a live required context (contexts match on that string).
+#
+# A master push first asks whether its run is needed at all. master takes
+# only squash merges of branches required to be up to date, so the pushed
+# commit's TREE is byte-identical to the PR head tree a successful
+# pull_request run already verified — and no required context reads a push
+# run's verdict. The plan job compares the pushed tree id against the head
+# trees of recent successful pull_request runs and on a match emits
+# should_run=false, which every downstream job's `if:` consumes, ending the
+# run with plan alone. Tree identity also pins the workflow definition
+# itself (the tree contains .github), so the matched run executed exactly
+# this gate. Any API failure fails open to should_run=true, and sweep.yml
+# still runs everything on master daily, so environment drift stays caught.
 
 on:
   push:
@@ -86,13 +98,25 @@ jobs:
   # hand it.
   #
   # Fail-safes: if the diff cannot be computed (missing before-SHA,
-  # force-push, git error) every area fires; so does the `ci-full` PR label.
-  # Labels are read from the event payload, so apply the label BEFORE a push
-  # or a close/reopen — a bare re-run replays the old payload without it.
+  # force-push, an API error, a files list at an endpoint's cap) every area
+  # fires; so does the `ci-full` PR label. Labels are read from the event
+  # payload, so apply the label BEFORE a push or a close/reopen — a bare
+  # re-run replays the old payload without it.
   plan:
     name: plan (classify the diff into areas)
     runs-on: ubuntu-latest
+    # The default token carries contents: read only; the tree-identity skip
+    # lists workflow runs (actions) and the classifier reads the PR's files
+    # (pull-requests).
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     outputs:
+      # 'false' only when the tree-identity step proved this pushed tree
+      # already passed a pull_request run; defaults to 'true' on every other
+      # event, where the step is skipped and its output empty.
+      should_run: ${{ steps.skip.outputs.should_run || 'true' }}
       core: ${{ steps.classify.outputs.core }}
       gui: ${{ steps.classify.outputs.gui }}
       wasm: ${{ steps.classify.outputs.wasm }}
@@ -109,14 +133,14 @@ jobs:
       test: ${{ steps.classify.outputs.test }}
       test-os: ${{ steps.classify.outputs.test-os }}
     steps:
-      # Full commit graph, no blobs (a name-only diff walks trees), no
-      # working-tree payload beyond .github — the fixture discs never
-      # materialize here.
+      # Depth 1, .github only: the diff comes from the API, so the checkout
+      # exists for the classifier and its self-test — whose `git ls-files`
+      # still sees every tracked path, because a sparse checkout filters the
+      # working tree, not the index. The fixture discs never materialize
+      # here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
-          filter: blob:none
           sparse-checkout: .github
 
       # The classifier gates every job below, so prove it still holds its own
@@ -127,11 +151,57 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/classify-diff.ps1 -SelfTest
 
+      # Tree identity, not commit identity (see the header): a pull_request
+      # run's head_sha is the merged branch's tip — still API-reachable after
+      # the merge — and only the TREE survives the squash, so each
+      # candidate's tree id comes from its commit object. Bounded at the last
+      # 20 successful runs; no match, an empty list, or any API failure falls
+      # open to should_run=true.
+      - name: Skip a push whose tree a pull_request run already verified
+        id: skip
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PUSHED: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $should = 'true'
+          $matched = ''
+          $pushedTree = gh api "repos/$env:REPO/commits/$env:PUSHED" --jq '.commit.tree.sha'
+          if ($LASTEXITCODE -eq 0 -and $pushedTree) {
+            $heads = @(gh api "repos/$env:REPO/actions/workflows/ci.yml/runs?event=pull_request&status=success&per_page=20" --jq '.workflow_runs[].head_sha')
+            if ($LASTEXITCODE -ne 0) { $heads = @() }
+            foreach ($sha in $heads) {
+              $tree = gh api "repos/$env:REPO/commits/$sha" --jq '.commit.tree.sha'
+              if ($LASTEXITCODE -eq 0 -and $tree -eq $pushedTree) {
+                $should = 'false'
+                $matched = $sha
+                break
+              }
+            }
+          }
+          "should_run=$should" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ($should -eq 'false') {
+            Write-Host "tree $pushedTree already verified by the pull_request run on $matched — skipping"
+          }
+          else {
+            Write-Host 'no successful pull_request run with an identical tree — running everything'
+          }
+          # A gh failure handled fail-open above leaves a non-zero exit code
+          # that the pwsh step wrapper would otherwise propagate as a step
+          # failure.
+          exit 0
+
       - name: Classify the changed files into areas
         id: classify
         shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
           CI_FULL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
@@ -141,23 +211,34 @@ jobs:
           $reason = ''
           $changed = @()
 
+          # Each TSV line is one changed file: new path, TAB, previous path
+          # (empty unless renamed). Both endpoints report a rename as one
+          # entry carrying previous_filename, so feeding both sides keeps a
+          # pure move-out-of-an-area firing the old area's gates — fail-open,
+          # it can only classify MORE areas, never fewer.
+          $fileTsv = '[.filename, .previous_filename // ""] | @tsv'
+          function ConvertTo-Paths {
+              param([string[]] $TsvLines)
+              return @(foreach ($line in $TsvLines) {
+                      $new, $old = $line -split "`t", 2
+                      if ($new) { $new }
+                      if ($old) { $old }
+                  })
+          }
+
           if ($env:CI_FULL -eq 'true') {
             $mode = 'all'; $reason = 'ci-full label'
           }
           elseif ($env:EVENT -eq 'pull_request') {
-            # HEAD is the PR merge commit, so parent 1 is the up-to-date base
-            # tip and this two-dot diff is exactly the PR's effective diff
-            # against master.
-            #
-            # --no-renames on both name-only diffs here: rename detection
-            # (git's default) lists only the NEW path of a moved file, so a
-            # pure move-out-of-an-area diff would never fire the old area's
-            # gates. Listing both paths is fail-open — it can only classify
-            # MORE areas, never fewer. Measured 2026-08-05 on a pull request
-            # moving one source file between crates: the deleted path was
-            # absent with detection on, present with --no-renames.
-            $changed = @(git diff --name-only --no-renames 'HEAD^1' HEAD)
-            if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
+            # The PR files endpoint diffs head against the merge base — the
+            # changes the PR itself introduces, which is what the merge
+            # commit this run tests adds to master. The endpoint stops at
+            # 3000 files, so a count that reaches that cap may be truncated
+            # and fails safe.
+            $lines = @(gh api "repos/$env:REPO/pulls/$env:PR/files?per_page=100" --paginate --jq ".[] | $fileTsv")
+            if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'PR files API failed' }
+            elseif ($lines.Count -ge 3000) { $mode = 'all'; $reason = 'at the PR files cap (3000 files), possibly truncated' }
+            else { $changed = ConvertTo-Paths $lines }
           }
           elseif ($env:EVENT -eq 'push') {
             # before...after is exactly the squash-merge's diff. A zero or
@@ -166,8 +247,13 @@ jobs:
               $mode = 'all'; $reason = 'no usable before SHA'
             }
             else {
-              $changed = @(git diff --name-only --no-renames $env:BEFORE $env:AFTER)
-              if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'git diff failed' }
+              # The compare endpoint pages its files list at up to 300 per
+              # page; --paginate follows the pages, and the same 3000-file
+              # guard as the PR path bounds the walk.
+              $lines = @(gh api "repos/$env:REPO/compare/$($env:BEFORE)...$($env:AFTER)?per_page=250" --paginate --jq ".files[]? | $fileTsv")
+              if ($LASTEXITCODE -ne 0) { $mode = 'all'; $reason = 'compare API failed' }
+              elseif ($lines.Count -ge 3000) { $mode = 'all'; $reason = 'at the compare files cap (3000 files), possibly truncated' }
+              else { $changed = ConvertTo-Paths $lines }
             }
           }
           else {
@@ -191,6 +277,10 @@ jobs:
           }
           Write-Host 'areas:'
           $areas | ForEach-Object { Write-Host "  $_" }
+          # A gh failure handled fail-open above leaves a non-zero exit code
+          # that the pwsh step wrapper would otherwise propagate as a step
+          # failure.
+          exit 0
 
   # Incremental mutation testing on the PR diff: every line a pull request
   # changes must be killed by a test that FAILS when the line is mutated. The
@@ -213,7 +303,7 @@ jobs:
   mutants:
     name: mutation testing (PR diff)
     needs: plan
-    if: github.event_name == 'pull_request' && needs.plan.outputs.core == 'true'
+    if: github.event_name == 'pull_request' && needs.plan.outputs.should_run != 'false' && needs.plan.outputs.core == 'true'
     # x64: taiki-e/install-action's cargo-mutants manifest carries no aarch64
     # Linux asset (x86_64-unknown-linux-gnu, x86_64 macOS and x86_64 Windows
     # only), and `fallback: none` turns a missing prebuilt into a hard failure.
@@ -254,7 +344,7 @@ jobs:
   gui-mutants:
     name: gui mutation testing (PR diff)
     needs: plan
-    if: github.event_name == 'pull_request' && needs.plan.outputs.gui == 'true'
+    if: github.event_name == 'pull_request' && needs.plan.outputs.should_run != 'false' && needs.plan.outputs.gui == 'true'
     runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -289,7 +379,7 @@ jobs:
   wasm-mutants:
     name: wasm mutation testing (PR diff)
     needs: plan
-    if: github.event_name == 'pull_request' && needs.plan.outputs.wasm == 'true'
+    if: github.event_name == 'pull_request' && needs.plan.outputs.should_run != 'false' && needs.plan.outputs.wasm == 'true'
     runs-on: ubuntu-latest   # no aarch64 cargo-mutants prebuilt — see `mutants`
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -316,12 +406,13 @@ jobs:
     name: core
     needs: plan
     if: >-
-      needs.plan.outputs.core == 'true' ||
+      needs.plan.outputs.should_run != 'false' &&
+      (needs.plan.outputs.core == 'true' ||
       needs.plan.outputs.deps == 'true' ||
       needs.plan.outputs.dist == 'true' ||
       needs.plan.outputs.fuzz == 'true' ||
       needs.plan.outputs.pkg == 'true' ||
-      needs.plan.outputs.test == 'true'
+      needs.plan.outputs.test == 'true')
     uses: ./.github/workflows/core.yml
     with:
       core: ${{ needs.plan.outputs.core }}
@@ -338,11 +429,12 @@ jobs:
     name: repo
     needs: plan
     if: >-
-      needs.plan.outputs.yaml == 'true' ||
+      needs.plan.outputs.should_run != 'false' &&
+      (needs.plan.outputs.yaml == 'true' ||
       needs.plan.outputs.toml == 'true' ||
       needs.plan.outputs.workflows == 'true' ||
       needs.plan.outputs.typos == 'true' ||
-      needs.plan.outputs.links == 'true'
+      needs.plan.outputs.links == 'true')
     uses: ./.github/workflows/repo.yml
     with:
       yaml: ${{ needs.plan.outputs.yaml }}
@@ -362,13 +454,13 @@ jobs:
   gui:
     name: gui
     needs: plan
-    if: needs.plan.outputs.gui == 'true'
+    if: needs.plan.outputs.should_run != 'false' && needs.plan.outputs.gui == 'true'
     uses: ./.github/workflows/gui.yml
 
   wasm:
     name: wasm
     needs: plan
-    if: needs.plan.outputs.wasm == 'true'
+    if: needs.plan.outputs.should_run != 'false' && needs.plan.outputs.wasm == 'true'
     uses: ./.github/workflows/wasm.yml
 
   # The fan-in: the ONE result branch protection requires (plus the three
@@ -386,10 +478,17 @@ jobs:
   # 4-core runners must not block unrelated PRs), which stay visible on the PR
   # but do not gate. `!cancelled()` rather than `always()`: a manually-
   # cancelled run must not end green.
+  #
+  # `should_run != 'false'` rather than `== 'true'`, here and on every job
+  # that consumes it: when plan itself fails its outputs are EMPTY, and an
+  # equality test would skip ci-ok — a skipped required check satisfies
+  # branch protection, so a plan failure would open the merge gate instead
+  # of blocking it. The inequality skips only on the one value the
+  # tree-identity step deliberately emits.
   ci-ok:
     name: ci-ok
     needs: [plan, core, repo, gui, wasm]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.plan.outputs.should_run != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - name: Fail unless every gate job succeeded or was skipped
