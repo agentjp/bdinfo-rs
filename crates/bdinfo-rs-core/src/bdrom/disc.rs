@@ -6169,6 +6169,21 @@ Total Bitrate:  0.00 Mbps
         let mut watch = |_: MeasuredSnapshot| {
             snapshots.fetch_add(1, Ordering::Relaxed);
         };
+        // Control: the same observer over the same disc with nothing armed,
+        // so what the cancelled run below loses is the whole pass, not a
+        // fixture that never reported.
+        let mut quiet = |_: ScanProgress<'_>| {};
+        drop(
+            BdRom::open_observed(
+                &disc,
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut quiet, &cancel).with_measured(&mut watch),
+            )
+            .expect("the healthy mock disc scans"),
+        );
+        assert_eq!(snapshots.swap(0, Ordering::Relaxed), 3);
         // Armed by the measurement pass's first progress event: the pass aborts
         // at its next read chunk, before the file it is in reaches a boundary,
         // so the observer is left holding the last complete file's numbers —
