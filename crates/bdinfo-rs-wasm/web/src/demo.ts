@@ -5,7 +5,10 @@
 // playlist table is the master of a master-detail flow: the active (highlighted)
 // row populates the two detail panes below it — the playlist's stream files and
 // its codecs — the same lower panes the bdinfo-rs desktop app and the classic
-// BDInfo window show. The settings dialog mirrors the desktop app's: the two
+// BDInfo window show. The measured cells of all three tables tick WHILE a scan
+// runs, from the snapshots the scan reports (`applyMeasured`): cells only, so
+// the row set and the sort the user set up never move under a running scan.
+// The settings dialog mirrors the desktop app's: the two
 // playlist-filter opt-outs, the size format and the chapter-count suffix are
 // pure re-projections of the model the page already holds; only the
 // short-playlist threshold (a fresh `inspect`) and the two report sections (a
@@ -18,6 +21,8 @@ import {
   type Disc,
   type HiddenRule,
   inspect,
+  type MeasuredPlaylist,
+  type MeasuredSnapshot,
   type Playlist,
   renderReport,
   reportFileName,
@@ -42,6 +47,11 @@ interface PlaylistRow {
   lengthTicks: number;
   /** Interleaved `*.ssif` size, else `*.m2ts` size, else null (the `—` cell). */
   estimatedBytes: number | null;
+  /**
+   * Packet-derived bytes over the playlist's clips — zero until a scan measures
+   * them, and the cell a running scan ticks (see {@link live}).
+   */
+  measuredBytes: number;
   /** Whether the playlist hides any stream (the CLI's `(*)` note). */
   hasHidden: boolean;
   hiddenBy: HiddenRule[];
@@ -51,6 +61,9 @@ interface PlaylistRow {
 
 /** The ticks in one second — the unit `totalLengthTicks` counts. */
 const TICKS_PER_SECOND = 10_000_000;
+
+/** Bytes per transport packet — what turns a packet count into a size cell. */
+const PACKET_BYTES = 192;
 
 /** A row per playlist, in the table order `position` records. */
 function playlistRows(playlists: Playlist[]): PlaylistRow[] {
@@ -62,6 +75,10 @@ function playlistRows(playlists: Playlist[]): PlaylistRow[] {
       length: tableLength(playlist.totalLengthTicks),
       lengthTicks: playlist.totalLengthTicks,
       estimatedBytes: playlist.interleavedFileSizeBytes || playlist.fileSizeBytes || null,
+      measuredBytes: playlist.clips.reduce(
+        (bytes, clip) => bytes + clip.packetCount * PACKET_BYTES,
+        0,
+      ),
       hasHidden: playlist.streams.some((stream) => stream.isHidden),
       hiddenBy: playlist.hiddenBy,
       chapterCount: playlist.chapterCount,
@@ -177,6 +194,20 @@ let allRows: PlaylistRow[] = [];
 let displayed: PlaylistRow[] = [];
 /** The playlists the user has unticked, by name — persists across a redraw. */
 const unchecked = new Set<string>();
+/**
+ * What the RUNNING scan has measured so far, by playlist name: the overlay the
+ * table and the panes prefer over the held disc while a scan is in flight, and
+ * the only place a mid-scan number lives.
+ *
+ * It is an overlay rather than a patch of the held disc for the reason the
+ * desktop app keeps one too: the disc the page holds is what the report, the
+ * sort keys and the row set are derived from, so writing half-measured numbers
+ * into it would make those disagree with the report beside them. Clearing the
+ * map is therefore all a scan's end takes — {@link adoptDisc} does it when the
+ * measured disc arrives, and a cancelled scan does it to return the cells to
+ * what the held disc knows.
+ */
+const live = new Map<string, MeasuredPlaylist>();
 /** The playlist whose details the panes show; null before the first draw. */
 let activeName: string | null = null;
 
@@ -408,6 +439,9 @@ async function loadSource(src: Source): Promise<void> {
  * what the user set up.
  */
 function adoptDisc(next: Disc, threshold: number): void {
+  // A new disc supersedes whatever a scan was ticking: its numbers are the
+  // final form of the very cells the overlay was raising.
+  live.clear();
   disc = next;
   discThreshold = threshold;
   playlists = next.playlists;
@@ -451,7 +485,7 @@ function isShown(row: PlaylistRow): boolean {
 // ── sorting ──────────────────────────────────────────────────────────────────
 
 /** A sortable playlist-table column; the sort key is the row's raw value. */
-type SortColumn = "position" | "name" | "group" | "length" | "size";
+type SortColumn = "position" | "name" | "group" | "length" | "size" | "measured";
 
 /** The playlist table's active sort — a column and a direction. */
 interface Sort {
@@ -484,7 +518,17 @@ function compareRows(a: PlaylistRow, b: PlaylistRow, by: Sort): number {
         return (a.estimatedBytes === null ? 1 : 0) - (b.estimatedBytes === null ? 1 : 0);
       }
       return dir(a.estimatedBytes - b.estimatedBytes);
+    case "measured":
+      // Unmeasured is a zero, not an absent value like the estimated size
+      // above: a scan measured nothing there yet, so it sorts as the smallest
+      // number rather than being pushed to the bottom in both directions.
+      return dir(measuredBytes(a) - measuredBytes(b));
   }
+}
+
+/** The measured bytes a row shows: the running scan's, else the held disc's. */
+function measuredBytes(row: PlaylistRow): number {
+  return live.get(row.name)?.measuredBytes ?? row.measuredBytes;
 }
 
 /** Whether `rows` already read ascending by `column` (ties allowed). */
@@ -637,6 +681,12 @@ function playlistRow(row: PlaylistRow, position: number, group: number): HTMLTab
   tr.appendChild(textCell(row.length));
   tr.appendChild(textCell(sizeCell(row.estimatedBytes), "num"));
 
+  // The measured cell a running scan ticks: tagged so a snapshot can find it
+  // without knowing the column order (see `applyMeasured`).
+  const measured = textCell(sizeCell(measuredBytes(row) || null), "num");
+  measured.dataset.cell = "measured";
+  tr.appendChild(measured);
+
   // The check cell toggles the tick; the rest of the row activates the
   // playlist and fills the detail panes, like the desktop table.
   tr.addEventListener("click", (event) => {
@@ -730,8 +780,9 @@ function renderPanes(): void {
   }
   show(panesBox);
   paneLabel.textContent = playlist.name;
-  filesBody.replaceChildren(...streamFileRows(playlist.clips));
-  codecsBody.replaceChildren(...playlist.streams.map(codecRow));
+  const measured = live.get(playlist.name);
+  filesBody.replaceChildren(...streamFileRows(playlist.clips, measured));
+  codecsBody.replaceChildren(...playlist.streams.map((stream) => codecRow(stream, measured)));
 }
 
 /**
@@ -740,10 +791,14 @@ function renderPanes(): void {
  * main clip's index and gets a ` (N)` angle suffix on the file name; the
  * estimated size prefers the interleaved `*.ssif` over the plain `*.m2ts`; a
  * size that is not yet known (no file on disk / nothing demuxed) shows as `—`.
+ *
+ * `measured` is the running scan's tallies for this playlist, whose per-clip
+ * rows line up with `clips` one for one; without it the cells come from the
+ * held disc.
  */
-function streamFileRows(clips: Clip[]): HTMLTableRowElement[] {
+function streamFileRows(clips: Clip[], measured?: MeasuredPlaylist): HTMLTableRowElement[] {
   let index = 0;
-  return clips.map((clip) => {
+  return clips.map((clip, position) => {
     if (clip.angleIndex === 0) {
       index += 1;
     }
@@ -758,8 +813,12 @@ function streamFileRows(clips: Clip[]): HTMLTableRowElement[] {
     // table-time rule every `hh:mm:ss` cell follows.
     tr.appendChild(textCell(tableLength(Math.trunc(clip.lengthSeconds * TICKS_PER_SECOND))));
     tr.appendChild(textCell(sizeCell(estimated > 0 ? estimated : null), "num"));
-    // The packet-derived size: 192 bytes per transport packet.
-    tr.appendChild(textCell(sizeCell(clip.packetCount > 0 ? clip.packetCount * 192 : null), "num"));
+    // The packet-derived size: 192 bytes per transport packet. Tagged like the
+    // table's measured cell, so a snapshot can patch it where it stands.
+    const bytes = measured?.clips.at(position)?.measuredBytes ?? clip.packetCount * PACKET_BYTES;
+    const packets = textCell(sizeCell(bytes > 0 ? bytes : null), "num");
+    packets.dataset.cell = "clip-measured";
+    tr.appendChild(packets);
     return tr;
   });
 }
@@ -768,9 +827,16 @@ function streamFileRows(clips: Clip[]): HTMLTableRowElement[] {
  * One "Streams" (codec) row, formatted like the desktop pane. The description
  * is `fullDescription` — the same string the locked report prints — so the
  * pane matches the report; a hidden stream's codec name is marked with `*`.
+ *
+ * The rate comes from `measured` — the running scan's tallies for this
+ * playlist — when it carries this row, and from the held disc otherwise. The
+ * row records the pair that names it, since the snapshot orders its streams
+ * differently and can only be matched by `(pid, angleIndex)`.
  */
-function codecRow(stream: Stream): HTMLTableRowElement {
+function codecRow(stream: Stream, measured?: MeasuredPlaylist): HTMLTableRowElement {
   const tr = document.createElement("tr");
+  tr.dataset.pid = String(stream.pid);
+  tr.dataset.angle = String(stream.angleIndex);
   const codecCell = cell();
   codecCell.textContent = stream.codecName;
   if (stream.isHidden) {
@@ -778,15 +844,75 @@ function codecRow(stream: Stream): HTMLTableRowElement {
   }
   tr.appendChild(codecCell);
   tr.appendChild(textCell(stream.languageName));
-  tr.appendChild(textCell(bitrateCell(stream.bitrateBps), "num"));
+  const rate = textCell(bitrateCell(liveRate(measured, stream) ?? stream.bitrateBps), "num");
+  rate.dataset.cell = "bitrate";
+  tr.appendChild(rate);
   tr.appendChild(textCell(stream.fullDescription));
   return tr;
+}
+
+/** `measured`'s rate for the row `(pid, angleIndex)` names, when it has one. */
+function liveRate(measured: MeasuredPlaylist | undefined, stream: Stream): number | undefined {
+  return measured?.streams.find(
+    (row) => row.pid === stream.pid && row.angleIndex === stream.angleIndex,
+  )?.bitrateBps;
 }
 
 /** The bit-rate cell: `N kbps` (thousands-grouped), or `—` while unmeasured. */
 function bitrateCell(bitsPerSecond: number): string {
   const kbps = Math.trunc(bitsPerSecond / 1000);
   return kbps > 0 ? `${kbps.toLocaleString("en-US")} kbps` : "—";
+}
+
+// ── live measured cells ──────────────────────────────────────────────────────
+
+/**
+ * Takes one snapshot of the running scan and writes the cells it moved, in
+ * place: the playlist table's measured column, and the two panes when the
+ * snapshot covers the active playlist.
+ *
+ * Cells only — no row is added, removed, re-sorted or re-numbered, and the
+ * report is not re-rendered. That is what makes ticking safe during a scan: the
+ * table the user set up (its sort, its ticks, its active row) is the same table
+ * a second later, with different numbers in it. A snapshot covers only the
+ * playlists that play the stream file it was taken over, so every other row
+ * keeps the number it already shows.
+ */
+function applyMeasured(snapshot: MeasuredSnapshot): void {
+  for (const playlist of snapshot.playlists) {
+    live.set(playlist.name, playlist);
+  }
+  for (const tr of playlistBody.querySelectorAll("tr")) {
+    const measured = live.get(tr.dataset.name ?? "");
+    const cell = tr.querySelector('[data-cell="measured"]');
+    if (measured !== undefined && cell !== null) {
+      cell.textContent = sizeCell(measured.measuredBytes || null);
+    }
+  }
+  const active = activeName === null ? undefined : live.get(activeName);
+  if (active !== undefined) {
+    patchPanes(active);
+  }
+}
+
+/** Writes `measured` into the open panes' cells, leaving their rows alone. */
+function patchPanes(measured: MeasuredPlaylist): void {
+  Array.from(filesBody.rows).forEach((tr, position) => {
+    const clip = measured.clips.at(position);
+    const cell = tr.querySelector('[data-cell="clip-measured"]');
+    if (clip !== undefined && cell !== null) {
+      cell.textContent = sizeCell(clip.measuredBytes || null);
+    }
+  });
+  for (const tr of codecsBody.rows) {
+    const rate = measured.streams.find(
+      (row) => String(row.pid) === tr.dataset.pid && String(row.angleIndex) === tr.dataset.angle,
+    );
+    const cell = tr.querySelector('[data-cell="bitrate"]');
+    if (rate !== undefined && cell !== null) {
+      cell.textContent = bitrateCell(rate.bitrateBps);
+    }
+  }
 }
 
 // ── scan + report ────────────────────────────────────────────────────────────
@@ -830,12 +956,20 @@ async function runScan(): Promise<void> {
     streamDiagnostics: settings.reportStreamDiagnostics,
     quickSummary: settings.reportQuickSummary,
   };
+  // The live cells: guarded by the same stamp the completion is, so a snapshot
+  // from a scan the page has already moved on from writes nothing.
+  const onMeasured = (snapshot: MeasuredSnapshot) => {
+    if (gen === generation) {
+      applyMeasured(snapshot);
+    }
+  };
   try {
     const result = await scan(src.kind === "folder" ? src.files : src.file, onProgress, {
       selection,
       signal: controller.signal,
       shortPlaylistSeconds: threshold,
       keepPartial: settings.keepPartialScans,
+      onMeasured,
       ...sections,
     });
     if (gen !== generation) {
@@ -859,6 +993,12 @@ async function runScan(): Promise<void> {
     scanController = null;
     hide(progressCard);
     scanBtn.disabled = selectedNames().length === 0 || !scanOffered();
+    // The overlay dies with the scan that fed it. A finished scan cleared it
+    // already, adopting the measured disc; a cancelled or failed one clears it
+    // here, and the redraw puts back what the held disc knows — partial numbers
+    // beside a report that does not carry them would be the worse half-state.
+    live.clear();
+    renderRows();
   }
   // A report switch flipped while the scan ran was deferred (the disc it would
   // have rendered was about to be replaced); one cheap re-render catches up,
