@@ -6123,19 +6123,67 @@ Total Bitrate:  0.00 Mbps
     }
 
     #[test]
-    fn scan_observers_print_what_they_watch_and_whether_they_stop() {
+    fn scan_observers_carry_both_callbacks_and_print_what_they_watch() {
+        let disc = shared_clip_disc();
         let cancel = AtomicBool::new(false);
-        let mut collect = |_: ScanProgress<'_>| {};
-        let mut watch = |_: MeasuredSnapshot| {};
+        let events = AtomicUsize::new(0);
+        let snapshots = AtomicUsize::new(0);
+        let mut collect = |_: ScanProgress<'_>| {
+            events.fetch_add(1, Ordering::Relaxed);
+        };
+        let mut watch = |_: MeasuredSnapshot| {
+            snapshots.fetch_add(1, Ordering::Relaxed);
+        };
+        // A bundle prints what a reader can act on, its two callbacks being
+        // closures with nothing to print.
         assert_eq!(
             format!("{:?}", ScanObservers::new(&mut collect, &cancel)),
             "ScanObservers { measured: false, cancelled: false, .. }"
         );
+        // Both callbacks reach the scan through the bundle.
+        drop(
+            BdRom::open_observed(
+                &disc,
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut collect, &cancel).with_measured(&mut watch),
+            )
+            .expect("the healthy mock disc scans"),
+        );
+        assert!(events.load(Ordering::Relaxed) > 0, "the progress callback fired");
+        assert_eq!(snapshots.load(Ordering::Relaxed), 3, "one snapshot per stream file");
+        // A flag already set prints as the scan it would stop.
         cancel.store(true, Ordering::Relaxed);
         assert_eq!(
             format!("{:?}", ScanObservers::new(&mut collect, &cancel).with_measured(&mut watch)),
             "ScanObservers { measured: true, cancelled: true, .. }"
         );
+    }
+
+    #[test]
+    fn a_cancelled_measurement_pass_snapshots_nothing() {
+        let disc = shared_clip_disc();
+        let cancel = AtomicBool::new(false);
+        let snapshots = AtomicUsize::new(0);
+        let mut watch = |_: MeasuredSnapshot| {
+            snapshots.fetch_add(1, Ordering::Relaxed);
+        };
+        // Armed by the measurement pass's first progress event: the pass aborts
+        // at its next read chunk, before the file it is in reaches a boundary,
+        // so the observer is left holding the last complete file's numbers —
+        // here none at all.
+        let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+        let err = BdRom::open_observed(
+            &disc,
+            ScanMode::Full,
+            ScanOptions::default(),
+            None,
+            ScanObservers::new(&mut arm, &cancel).with_measured(&mut watch),
+        )
+        .expect_err("the armed flag aborts the scan");
+        assert_eq!(err.to_string(), "scan cancelled");
+        assert_eq!(snapshots.load(Ordering::Relaxed), 0);
     }
 
     // ── cooperative cancellation ─────────────────────────────────────────────
@@ -6284,36 +6332,23 @@ Total Bitrate:  0.00 Mbps
         let mut playlists =
             vec![TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap()];
         let cancel = AtomicBool::new(false);
+        let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+        let mut progress =
+            Progress { callback: &mut arm, measured: None, done: 0, total: 400, cancel: &cancel };
         let mut errors = Vec::new();
-        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
-        let result = {
-            let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
-            let mut watch = |snapshot: MeasuredSnapshot| snapshots.push(snapshot);
-            let mut progress = Progress {
-                callback: &mut arm,
-                measured: Some(&mut watch),
-                done: 0,
-                total: 400,
-                cancel: &cancel,
-            };
-            scan_stream_files(
-                Some(&stream_dir),
-                None,
-                &mut playlists,
-                None,
-                &mut progress,
-                &mut Sink { errors: Some(&mut errors) },
-                true,
-                false,
-            )
-        };
+        let result = scan_stream_files(
+            Some(&stream_dir),
+            None,
+            &mut playlists,
+            None,
+            &mut progress,
+            &mut Sink { errors: Some(&mut errors) },
+            true,
+            false,
+        );
         let message = result.err().map(|err| err.to_string());
         assert_eq!(message.as_deref(), Some("scan cancelled"));
         assert!(errors.is_empty(), "cancellation is never a per-file failure");
-        // The abort happens before the in-flight file's boundary, so its
-        // tallies are never offered either — an aborted pass leaves the display
-        // on the last file it finished.
-        assert!(snapshots.is_empty(), "a cancelled pass snapshots nothing");
     }
 
     // ── the resilient (collect-and-continue) scan ────────────────────────────
