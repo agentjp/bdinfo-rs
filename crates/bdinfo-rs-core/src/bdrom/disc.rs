@@ -582,8 +582,15 @@ impl<'a> ScanObservers<'a> {
     }
 
     /// The same observers with `measured` watching the tallies build up: it is
-    /// handed an owned [`MeasuredSnapshot`] as each stream file of the
-    /// measurement pass finishes.
+    /// handed an owned [`MeasuredSnapshot`] after each read chunk the
+    /// measurement pass demuxes and as each of its stream files finishes — the
+    /// file-boundary snapshot is the one whose per-stream rates include the
+    /// demux's end-of-file flush, so it can settle rates the last chunk's
+    /// snapshot reported slightly differently, while every byte tally only
+    /// grows. The chunk cadence is a byte cadence (one snapshot per demux read
+    /// chunk), deliberately untimed: a consumer wanting a wall-clock rate —
+    /// classic `BDInfo` samples its live grids at 1 Hz — throttles these
+    /// itself.
     ///
     /// Only the measurement pass ([`ScanMode::Full`]) reports here. The bounded
     /// codec pass ahead of it reads an unpredictable sliver of each file and
@@ -614,8 +621,8 @@ impl fmt::Debug for ScanObservers<'_> {
 /// pass's total, reported through the caller's callback before and after
 /// every demux read and at every file boundary, plus the caller's
 /// cooperative cancel flag the demux polls per read chunk and the measured
-/// observer its file boundaries snapshot to. Each pass builds its own;
-/// `run_measurement_scan` decides which of them the caller observes.
+/// observer its chunk and file boundaries snapshot to. Each pass builds its
+/// own; `run_measurement_scan` decides which of them the caller observes.
 struct Progress<'a> {
     /// The observer of this pass: the caller's callback for the reported
     /// pass, a no-op for an unreported one and for the plain `open`s.
@@ -2317,11 +2324,13 @@ fn scan_stream_files(
         }
         progress.finish_file(&name, target);
         // The file's tallies are final and its playlists are no longer
-        // borrowed by the demux, so this is the pass's coarsest honest
-        // snapshot point: one per stream file, after the boundary it belongs
-        // to is reported. A file that failed partway is snapshotted too — the
-        // demux wrote its windows into the playlists as it read them, and
-        // dropping the partial file does not take them back.
+        // borrowed by the demux, so this snapshot — unlike the per-chunk ones
+        // the demux emitted while reading — includes the demux's end-of-file
+        // flush in its per-stream rates; it fires once per stream file, after
+        // the boundary progress event it belongs to. A file that failed
+        // partway is snapshotted too — the demux wrote its windows into the
+        // playlists as it read them, and dropping the partial file does not
+        // take them back.
         progress.emit_measured(&name, playlists);
         // This one absorb call is the whole keep/drop policy: strict mode
         // propagates the failure (partial state and all), resilient mode
@@ -2384,11 +2393,22 @@ fn scan_one_stream_file(
         Some(interleaved) => interleaved.open_read().map_err(BdError::Io)?,
         None => file.open_read()?,
     };
-    // The shared reference is copied out before the reader mutably borrows
-    // the progress, so the demux can poll it alongside the counting reads.
+    // The shared reference and the measured observer are moved out before the
+    // reader mutably borrows the progress, so the demux can poll the flag and
+    // report chunk-boundary snapshots alongside the counting reads; the
+    // observer is restored below for the file-boundary snapshot.
     let cancel = progress.cancel;
-    let mut reader = CountingReader { inner, name: file.name().to_ascii_uppercase(), progress };
-    let scan = stream_file.scan_cancellable(&mut reader, playlists, is_full_scan, cancel);
+    let mut measured = progress.measured.take();
+    let mut reader =
+        CountingReader { inner, name: file.name().to_ascii_uppercase(), progress: &mut *progress };
+    let scan = stream_file.scan_cancellable(
+        &mut reader,
+        playlists,
+        is_full_scan,
+        cancel,
+        measured.as_deref_mut(),
+    );
+    progress.measured = measured;
     // The scan's public outputs — complete or partial — are now captured; free
     // the demux scratch (its per-PID PES buffers) before the file is handed
     // back, so a multi-clip disc holds only the in-flight clip's buffers, not
@@ -6037,21 +6057,26 @@ Total Bitrate:  0.00 Mbps
     }
 
     #[test]
-    fn a_measured_observer_sees_each_stream_file_of_the_measurement_pass_once() {
+    fn a_measured_observer_sees_each_files_chunks_and_then_its_boundary() {
         let (_, snapshots) = observed_scan(&shared_clip_disc(), ScanMode::Full);
-        // One snapshot per stream file, in read order. Both passes read all
-        // three files, so a quick pass that reported would double this list.
+        // Per stream file, in read order: one snapshot per parsed chunk (each
+        // of these files fits one read chunk) and then the file-boundary
+        // snapshot. Both passes read all three files, so a quick pass that
+        // reported would double this list.
         let files: Vec<&str> = snapshots.iter().map(|s| s.file.as_str()).collect();
-        assert_eq!(files, ["00011.M2TS", "00022.M2TS", "00033.M2TS"]);
+        assert_eq!(
+            files,
+            ["00011.M2TS", "00011.M2TS", "00022.M2TS", "00022.M2TS", "00033.M2TS", "00033.M2TS"]
+        );
         // Each covers exactly the playlists that sequence its file.
         let covered: Vec<Vec<&str>> = snapshots
             .iter()
             .map(|s| s.playlists.iter().map(|p| p.name.as_str()).collect())
             .collect();
-        assert_eq!(
-            covered,
-            [vec!["00000.MPLS", "00002.MPLS"], vec!["00001.MPLS"], vec!["00002.MPLS"]]
-        );
+        let per_file = [vec!["00000.MPLS", "00002.MPLS"], vec!["00001.MPLS"], vec!["00002.MPLS"]];
+        let expected: Vec<Vec<&str>> =
+            per_file.iter().flat_map(|playlists| [playlists.clone(), playlists.clone()]).collect();
+        assert_eq!(covered, expected);
     }
 
     #[test]
@@ -6117,7 +6142,7 @@ Total Bitrate:  0.00 Mbps
         assert!(codecs.playlists.iter().all(|p| p.total_angle_packet_size() == 0));
         // Installing an observer changes nothing about what the scan produces.
         let (observed, snapshots) = observed_scan(&disc, ScanMode::Full);
-        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots.len(), 6);
         let plain = BdRom::open(&disc, ScanMode::Full).expect("the healthy mock disc scans");
         assert_eq!(observed, plain);
     }
@@ -6152,7 +6177,11 @@ Total Bitrate:  0.00 Mbps
             .expect("the healthy mock disc scans"),
         );
         assert!(events.load(Ordering::Relaxed) > 0, "the progress callback fired");
-        assert_eq!(snapshots.load(Ordering::Relaxed), 3, "one snapshot per stream file");
+        assert_eq!(
+            snapshots.load(Ordering::Relaxed),
+            6,
+            "one snapshot per parsed chunk and one per stream file"
+        );
         // A flag already set prints as the scan it would stop.
         cancel.store(true, Ordering::Relaxed);
         assert_eq!(
@@ -6162,7 +6191,7 @@ Total Bitrate:  0.00 Mbps
     }
 
     #[test]
-    fn a_cancelled_measurement_pass_snapshots_nothing() {
+    fn a_cancelled_measurement_pass_keeps_only_the_chunks_it_parsed() {
         let disc = shared_clip_disc();
         let cancel = AtomicBool::new(false);
         let snapshots = AtomicUsize::new(0);
@@ -6170,7 +6199,7 @@ Total Bitrate:  0.00 Mbps
             snapshots.fetch_add(1, Ordering::Relaxed);
         };
         // Control: the same observer over the same disc with nothing armed,
-        // so what the cancelled run below loses is the whole pass, not a
+        // so what the cancelled run below loses is most of the pass, not a
         // fixture that never reported.
         let mut quiet = |_: ScanProgress<'_>| {};
         drop(
@@ -6183,11 +6212,13 @@ Total Bitrate:  0.00 Mbps
             )
             .expect("the healthy mock disc scans"),
         );
-        assert_eq!(snapshots.swap(0, Ordering::Relaxed), 3);
-        // Armed by the measurement pass's first progress event: the pass aborts
-        // at its next read chunk, before the file it is in reaches a boundary,
-        // so the observer is left holding the last complete file's numbers —
-        // here none at all.
+        assert_eq!(snapshots.swap(0, Ordering::Relaxed), 6);
+        // Armed by the measurement pass's first progress event — the heartbeat
+        // before the first file's first read, whose chunk is then served and
+        // parsed before the flag's next per-chunk poll aborts the pass. The
+        // observer keeps that one parsed chunk's snapshot; the cancelled
+        // file's boundary snapshot never fires, and neither does any later
+        // file's.
         let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
         let err = BdRom::open_observed(
             &disc,
@@ -6198,7 +6229,35 @@ Total Bitrate:  0.00 Mbps
         )
         .expect_err("the armed flag aborts the scan");
         assert_eq!(err.to_string(), "scan cancelled");
-        assert_eq!(snapshots.load(Ordering::Relaxed), 0);
+        assert_eq!(snapshots.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_file_spanning_chunks_snapshots_inside_the_file_and_at_its_boundary() {
+        // A stream just past one read chunk: the demux parses two chunks, so
+        // the observer sees the tallies move INSIDE the file — the cadence a
+        // display needs on a real disc, where one file is hours of reading —
+        // and then the file boundary settles them on the summary's numbers.
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        let (bd, snapshots) = observed_scan(&tripping_disc(m2ts, None), ScanMode::Full);
+        assert_eq!(snapshots.len(), 3, "two chunk snapshots, then the boundary one");
+        assert!(snapshots.iter().all(|s| s.file == "00000.M2TS"));
+        let tallies: Vec<u64> = snapshots
+            .iter()
+            .map(|s| s.playlists.first().expect("the playlist plays the clip").measured_bytes)
+            .collect();
+        let [first, second, boundary]: [u64; 3] =
+            tallies.try_into().expect("two chunk snapshots and the boundary one");
+        // The second chunk's snapshot strictly exceeds the first — the
+        // intra-file movement this cadence exists for; the boundary snapshot
+        // adds no bytes here (this stream's last window was already flushed by
+        // the tail frames), it settles the rates.
+        assert!(first > 0, "the first chunk's snapshot already tallies");
+        assert!(first < second, "the tallies climb between the chunks");
+        assert!(second <= boundary, "the boundary snapshot never regresses");
+        // The boundary snapshot's total is the finished scan's answer.
+        let summary = bd.playlists.first().expect("the playlist is summarised");
+        assert_eq!(boundary, summary.total_angle_packet_size());
     }
 
     // ── cooperative cancellation ─────────────────────────────────────────────
