@@ -6246,19 +6246,19 @@ Total Bitrate:  0.00 Mbps
             .iter()
             .map(|s| s.playlists.first().expect("the playlist plays the clip").measured_bytes)
             .collect();
+        let [first, second, boundary] = tallies.as_slice() else {
+            panic!("three tallies expected: {tallies:?}");
+        };
         // The second chunk's snapshot strictly exceeds the first — the
         // intra-file movement this cadence exists for; the boundary snapshot
         // adds no bytes here (this stream's last window was already flushed by
         // the tail frames), it settles the rates.
-        assert!(
-            tallies.first().is_some_and(|&first| first > 0)
-                && tallies.first() < tallies.get(1)
-                && tallies.get(1) <= tallies.get(2),
-            "the tallies climb inside the file and never regress: {tallies:?}"
-        );
+        assert!(*first > 0, "the first chunk's snapshot already tallies");
+        assert!(first < second, "the tallies climb between the chunks");
+        assert!(second <= boundary, "the boundary snapshot never regresses");
         // The boundary snapshot's total is the finished scan's answer.
         let summary = bd.playlists.first().expect("the playlist is summarised");
-        assert_eq!(tallies.last().copied(), Some(summary.total_angle_packet_size()));
+        assert_eq!(*boundary, summary.total_angle_packet_size());
     }
 
     // ── cooperative cancellation ─────────────────────────────────────────────
