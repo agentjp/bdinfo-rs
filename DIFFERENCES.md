@@ -270,8 +270,7 @@ Not carried over:
   per-frame measurements; bdinfo-rs keeps only the aggregate statistics the report prints, so
   there is nothing to plot. The chart-tied image-prefix setting is absent with them.
 - **Custom playlist builder.** Playlists are selected from the disc's own table, not assembled.
-- **Taskbar progress and live in-grid numbers.** Progress is shown in the window, not painted into
-  the taskbar button or streamed into the playlist grid mid-scan.
+- **Taskbar progress.** Progress is shown in the window, not painted into the taskbar button.
 - **The `KeepStreamOrder`, `EnableSSIF`, and `ExtendedStreamDiagnostics` toggles.**
 - **Selectable report text.** The text widgets in use cannot span-select; *Copy report* and
   *Save report…* cover the same need.

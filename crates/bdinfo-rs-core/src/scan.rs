@@ -3,10 +3,12 @@
 //! [`BdRom::open_resilient_with`] reads through the [`crate::vfs`] seam and
 //! knows nothing about paths. A caller holding one must pick the backend, open
 //! it, and merge that backend's own recorded failures into the scan's — and for
-//! a folder repair the label the scan derived. These two functions are that
-//! composition, so every path-driven surface shares one implementation of it.
+//! a folder repair the label the scan derived. These functions are that
+//! composition, so every path-driven surface shares one implementation of it —
+//! one pair per backend: the plain form and an `_observed` one for a caller that
+//! also watches the measured tallies build up.
 //! A browser caller has no paths and builds its [`BdDir`](crate::vfs::BdDir)
-//! itself, so it uses neither.
+//! itself, so it uses none of them.
 //!
 //! How deep to read stays the caller's choice: `mode` is passed through
 //! untouched.
@@ -15,7 +17,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use crate::bdrom::disc::{BdRom, ScanMode, ScanOptions, ScanProgress, ScanReport};
+use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport};
 use crate::error::BdError;
 use crate::vfs::fs::FsDir;
 use crate::vfs::udf::source::{PathIso, UdfSource};
@@ -50,9 +52,27 @@ pub fn open_folder(
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<ScanReport, BdError> {
+    open_folder_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
+}
+
+/// Opens the Blu-ray folder at `path` like [`open_folder`], observed.
+///
+/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
+/// the form that can carry a measured observer too
+/// ([`ScanObservers::with_measured`]), so a path-driven surface can watch the
+/// tallies build up during the scan.
+///
+/// # Errors
+/// As [`open_folder`].
+pub fn open_folder_observed(
+    path: &Path,
+    mode: ScanMode,
+    options: ScanOptions,
+    scan_files: Option<&BTreeSet<String>>,
+    observers: ScanObservers<'_>,
+) -> Result<ScanReport, BdError> {
     let root = FsDir::new(path);
-    let mut report =
-        BdRom::open_resilient_with(&root, mode, options, scan_files, progress, cancel)?;
+    let mut report = BdRom::open_resilient_observed(&root, mode, options, scan_files, observers)?;
     report.errors.extend(root.take_errors());
     report.bdrom.volume_label =
         volume::resolve_folder_label_after_scan(&report.bdrom.volume_label, &report.errors);
@@ -82,9 +102,26 @@ pub fn open_iso(
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<ScanReport, BdError> {
+    open_iso_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
+}
+
+/// Opens the Blu-ray `.iso` image at `path` like [`open_iso`], observed.
+///
+/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
+/// the `.iso` twin of [`open_folder_observed`].
+///
+/// # Errors
+/// As [`open_iso`].
+pub fn open_iso_observed(
+    path: &Path,
+    mode: ScanMode,
+    options: ScanOptions,
+    scan_files: Option<&BTreeSet<String>>,
+    observers: ScanObservers<'_>,
+) -> Result<ScanReport, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
     let mut report =
-        BdRom::open_resilient_with(&source.root(), mode, options, scan_files, progress, cancel)?;
+        BdRom::open_resilient_observed(&source.root(), mode, options, scan_files, observers)?;
     report.errors.extend(source.take_errors());
     Ok(report)
 }
@@ -94,7 +131,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::{BdError, ScanMode, ScanOptions, ScanReport, open_folder, open_iso};
+    use super::{
+        BdError, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport, open_folder,
+        open_folder_observed, open_iso, open_iso_observed,
+    };
+    use crate::bdrom::measured::MeasuredSnapshot;
 
     /// The committed real-disc fixtures, one crate over: `BigBuckBunny` (a BDMV
     /// folder) and `BigBuckBunny.iso` (the same disc as a UDF image, whose UDF
@@ -157,6 +198,64 @@ mod tests {
         );
         assert_eq!(reported != 0, report.is_ok() && mode != ScanMode::Metadata);
         report
+    }
+
+    /// Asserts that the last snapshot an observed open delivered carries the
+    /// very numbers the finished scan reports: same stream file, same playlist,
+    /// same measured bytes. A display that ticks the snapshots and then takes
+    /// the summaries therefore never jumps at the handover.
+    fn assert_the_live_tallies_land_on_the_summaries(
+        report: &ScanReport,
+        snapshots: &[MeasuredSnapshot],
+    ) {
+        let playlist = report.bdrom.playlists.first().expect("the fixture lists one playlist");
+        let last = snapshots.last().expect("the measurement pass reported");
+        assert_eq!(last.file, "00000.M2TS", "the fixture's one stream file");
+        let measured = last.playlists.first().expect("the playlist plays that file");
+        assert_eq!(measured.name, playlist.name);
+        assert_eq!(measured.measured_bytes, playlist.total_angle_packet_size());
+    }
+
+    #[test]
+    fn an_observed_folder_open_streams_the_measured_tallies() {
+        // The bundle form is what a live display opens through — the same scan
+        // as `open_folder`, plus the snapshots.
+        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
+        let cancel = AtomicBool::new(false);
+        let mut quiet = |_: ScanProgress<'_>| {};
+        let report = {
+            let mut watch = |snapshot| snapshots.push(snapshot);
+            open_folder_observed(
+                &fixture("BigBuckBunny"),
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut quiet, &cancel).with_measured(&mut watch),
+            )
+        }
+        .expect("the fixture folder opens");
+        assert_eq!(report.bdrom.volume_label, "BigBuckBunny", "the label repair still runs");
+        assert_the_live_tallies_land_on_the_summaries(&report, &snapshots);
+    }
+
+    #[test]
+    fn an_observed_iso_open_streams_the_measured_tallies() {
+        let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
+        let cancel = AtomicBool::new(false);
+        let mut quiet = |_: ScanProgress<'_>| {};
+        let report = {
+            let mut watch = |snapshot| snapshots.push(snapshot);
+            open_iso_observed(
+                &fixture("BigBuckBunny.iso"),
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut quiet, &cancel).with_measured(&mut watch),
+            )
+        }
+        .expect("the fixture image opens");
+        assert_eq!(report.bdrom.volume_label, "Blu-Ray", "the UDF volume label still reads");
+        assert_the_live_tallies_land_on_the_summaries(&report, &snapshots);
     }
 
     #[test]

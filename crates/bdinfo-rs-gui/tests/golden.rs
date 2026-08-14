@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
+use bdinfo_rs_core::bdrom::disc::ScanObservers;
 use bdinfo_rs_gui::flow::Flow;
 use bdinfo_rs_gui::model::ViewSettings;
 use bdinfo_rs_gui::scan::{self, Input, Structural};
@@ -47,8 +48,7 @@ fn list_select_all_and_measure(input: &Input) -> (String, String) {
         &request.scan_files,
         request.options,
         request.scan_options,
-        &mut scan::no_progress,
-        &AtomicBool::new(false),
+        ScanObservers::new(&mut scan::no_progress, &AtomicBool::new(false)),
     )
     .expect("the fixture scans");
     (measured.report, measured.label)
@@ -71,8 +71,7 @@ fn a_cancelled_measured_scan_yields_no_report() {
         &request.scan_files,
         request.options,
         request.scan_options,
-        &mut scan::no_progress,
-        &AtomicBool::new(true),
+        ScanObservers::new(&mut scan::no_progress, &AtomicBool::new(true)),
     )
     .expect_err("a cancelled scan yields no report");
     assert_eq!(err, "scan cancelled");
@@ -112,8 +111,7 @@ fn a_report_toggle_rerender_reproduces_the_worker_bytes() {
         &request.scan_files,
         request.options,
         request.scan_options,
-        &mut scan::no_progress,
-        &AtomicBool::new(false),
+        ScanObservers::new(&mut scan::no_progress, &AtomicBool::new(false)),
     )
     .expect("the fixture scans");
     let mut flow = flow.finished(1, measured.report, measured.errors, measured.playlists);

@@ -12,6 +12,7 @@ use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::{ClipSummary, PlaylistSummary, StreamSummary};
 use bdinfo_rs_core::report::text;
 
+use crate::live::LivePlaylist;
 use crate::model::byte_cell;
 
 /// One "Stream File" pane row: a clip of the selected playlist, pre-formatted.
@@ -61,23 +62,38 @@ pub struct CodecRow {
 /// `human_sizes` switches the size cells to the human-readable form —
 /// `BDInfo` applies its `SizeFormatHR` setting to this grid exactly as to the
 /// playlist table.
+///
+/// `live` is the playlist's cells as a scan in flight last reported them
+/// ([`crate::live`]): present, its per-clip counts fill the `Measured Size`
+/// column instead of the summaries', which stay at zero until the scan ends.
 #[must_use]
-pub fn stream_file_rows(playlist: &PlaylistSummary, human_sizes: bool) -> Vec<StreamFileRow> {
+pub fn stream_file_rows(
+    playlist: &PlaylistSummary,
+    human_sizes: bool,
+    live: Option<&LivePlaylist>,
+) -> Vec<StreamFileRow> {
     let mut rows = Vec::new();
     let mut index: usize = 0;
-    for clip in &playlist.clips {
+    for (position, clip) in playlist.clips.iter().enumerate() {
         if clip.angle_index == 0 {
             index = index.saturating_add(1);
         }
-        rows.push(stream_file_row(clip, index, human_sizes));
+        let measured = live.and_then(|live| live.clip_bytes(position));
+        rows.push(stream_file_row(clip, index, human_sizes, measured));
     }
     rows
 }
 
 /// Formats one clip into its stream-file row, mirroring `BDInfo`: an extra-angle
 /// clip gets a ` (N)` suffix, and a size that is not yet known (no file /
-/// nothing demuxed) shows as `-`.
-fn stream_file_row(clip: &ClipSummary, index: usize, human_sizes: bool) -> StreamFileRow {
+/// nothing demuxed) shows as `-`. `measured` is the live count for this row when
+/// a scan is reporting one, else the clip's own tally is used.
+fn stream_file_row(
+    clip: &ClipSummary,
+    index: usize,
+    human_sizes: bool,
+    measured: Option<u64>,
+) -> StreamFileRow {
     let file = if clip.angle_index > 0 {
         format!("{} ({})", clip.display_name, clip.angle_index)
     } else {
@@ -88,7 +104,7 @@ fn stream_file_row(clip: &ClipSummary, index: usize, human_sizes: bool) -> Strea
         index: index.to_string(),
         length: text::time_hh_short(seconds_to_ticks(clip.length)),
         estimated: size_cell(clip.estimated_bytes().unwrap_or(0), human_sizes),
-        measured: size_cell(clip.packet_size(), human_sizes),
+        measured: size_cell(measured.unwrap_or_else(|| clip.packet_size()), human_sizes),
     }
 }
 
@@ -100,19 +116,29 @@ fn size_cell(bytes: u64, human: bool) -> String {
 
 /// Builds the "Streams" (codec) rows for `playlist` — one per presented stream,
 /// in the playlist's own stream order.
+///
+/// `live` is the playlist's cells as a scan in flight last reported them
+/// ([`crate::live`]): present, the rate it carries for a row fills that row's
+/// `Bit Rate` cell instead of the summary's.
 #[must_use]
-pub fn codec_rows(playlist: &PlaylistSummary) -> Vec<CodecRow> {
-    playlist.streams.iter().map(codec_row).collect()
+pub fn codec_rows(playlist: &PlaylistSummary, live: Option<&LivePlaylist>) -> Vec<CodecRow> {
+    playlist.streams.iter().map(|stream| codec_row(stream, live)).collect()
 }
 
 /// Formats one stream into its codec row. Uses `full_description` — the same
 /// string the locked report prints (video profile/level, audio kbps / bit depth
 /// / embedded core) — so the pane matches the report and the original `BDInfo`.
-fn codec_row(stream: &StreamSummary) -> CodecRow {
+/// The description is left as the scan last built it: only the rate ticks during
+/// a scan, and a rate folded into an audio description settles when the scan
+/// finishes.
+fn codec_row(stream: &StreamSummary, live: Option<&LivePlaylist>) -> CodecRow {
+    let bitrate = live
+        .and_then(|live| live.bitrate(stream.pid, stream.angle_index))
+        .unwrap_or(stream.bitrate);
     CodecRow {
         codec: stream.codec_name.clone(),
         language: stream.language_name.clone(),
-        bitrate: bitrate_cell(stream.bitrate),
+        bitrate: bitrate_cell(bitrate),
         description: stream.full_description.clone(),
         hidden: stream.is_hidden,
     }
@@ -136,6 +162,7 @@ mod tests {
     use bdinfo_rs_core::stream::TsStreamType;
 
     use super::{CodecRow, StreamFileRow, bitrate_cell, codec_rows, stream_file_rows};
+    use crate::live::{LivePlaylist, LiveStream};
 
     /// A clip carrying the fields the stream-file row reads.
     fn clip(name: &str, angle_index: i32, length: f64, packet_count: u64) -> ClipSummary {
@@ -208,7 +235,7 @@ mod tests {
 
     #[test]
     fn stream_files_carry_index_length_and_both_sizes() {
-        let rows = stream_file_rows(&playlist(), false);
+        let rows = stream_file_rows(&playlist(), false, None);
         assert_eq!(
             rows,
             [
@@ -239,7 +266,7 @@ mod tests {
         // An extra-angle clip with both a plain and an interleaved size: the row
         // shows the interleaved size and a ` (2)` angle suffix.
         p.clips = vec![sized_clip("00007.M2TS", 2, 40.0, 0, 700_000, 900_000)];
-        let rows = stream_file_rows(&p, false);
+        let rows = stream_file_rows(&p, false, None);
         assert_eq!(
             rows,
             [StreamFileRow {
@@ -262,7 +289,7 @@ mod tests {
             clip("00002.M2TS", 0, 50.0, 0),
         ];
         let indices: Vec<_> =
-            stream_file_rows(&p, false).into_iter().map(|row| row.index).collect();
+            stream_file_rows(&p, false, None).into_iter().map(|row| row.index).collect();
         assert_eq!(indices, ["1", "1", "2"]);
     }
 
@@ -270,7 +297,7 @@ mod tests {
     fn the_human_readable_toggle_reaches_the_size_cells() {
         // The same grid BDInfo formats with SizeFormatHR: known sizes switch
         // to the short form, the unknown `-` stays a dash.
-        let rows = stream_file_rows(&playlist(), true);
+        let rows = stream_file_rows(&playlist(), true, None);
         let cells: Vec<_> = rows.into_iter().map(|row| (row.estimated, row.measured)).collect();
         assert_eq!(
             cells,
@@ -280,7 +307,7 @@ mod tests {
 
     #[test]
     fn codec_rows_carry_codec_language_bitrate_description() {
-        let rows = codec_rows(&playlist());
+        let rows = codec_rows(&playlist(), None);
         assert_eq!(
             rows,
             [
@@ -300,6 +327,43 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn live_counts_fill_the_measured_column_while_a_scan_reports() {
+        // Mid-scan the summaries still carry the pre-scan tallies, so the cells
+        // come from the live counts — including the row whose summary has none
+        // (`-` until the scan reaches it).
+        let live = LivePlaylist { clips: vec![384, 192], ..LivePlaylist::default() };
+        let cells: Vec<_> = stream_file_rows(&playlist(), false, Some(&live))
+            .into_iter()
+            .map(|row| row.measured)
+            .collect();
+        assert_eq!(cells, ["384", "192"]);
+        // A live playlist that carries no row for a clip leaves that clip's own
+        // tally showing (1000 packets * 192 bytes), never a dash.
+        let partial = LivePlaylist::default();
+        let cells: Vec<_> = stream_file_rows(&playlist(), false, Some(&partial))
+            .into_iter()
+            .map(|row| row.measured)
+            .collect();
+        assert_eq!(cells, ["192,000", "-"]);
+    }
+
+    #[test]
+    fn a_live_rate_fills_the_bit_rate_cell_of_its_own_row() {
+        // Two rows share PID 0x1011 — the main presentation row and an angle
+        // copy — so a live rate keyed on the PID alone would land on both.
+        let mut p = playlist();
+        let video = p.streams.first().expect("the fixture presents a video stream").clone();
+        p.streams.push(StreamSummary { angle_index: 1, ..video });
+        let live = LivePlaylist {
+            streams: vec![LiveStream { pid: Pid::new(0x1011), angle_index: 1, bitrate: 7_000_000 }],
+            ..LivePlaylist::default()
+        };
+        let cells: Vec<_> =
+            codec_rows(&p, Some(&live)).into_iter().map(|row| row.bitrate).collect();
+        assert_eq!(cells, ["-", "3,948 kbps", "7,000 kbps"]);
     }
 
     #[test]
