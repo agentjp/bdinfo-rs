@@ -2,14 +2,20 @@ name: gui
 
 # The PROPORTIONATE Posture-C gate for the native desktop GUI
 # (crates/bdinfo-rs-gui), mirrored 1:1 by the local scripts/gui-compliance.ps1.
-# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the `gui`
-# area (a crate-dir change, a core change via the encoded path-dep edge —
-# root-Cargo.lock-only bumps excluded — or an edit to this file / the
-# .github/scripts/gui-*.ps1 helpers, since a gate's implementation files
-# re-fire the gate), and the daily sweep re-runs it ungated through the same
-# orchestrator. This file carries no triggers or concurrency
-# of its own — both are the caller's — so it can never fire on its own and
-# never needs a paths filter.
+# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires any of
+# the three areas passed through as inputs, and each job below keys on its
+# own input. `gui` (a crate-dir change, a core change via the encoded
+# path-dep edge — root-Cargo.lock-only bumps excluded — or an edit to this
+# file / the .github/scripts/gui-*.ps1 helpers, since a gate's implementation
+# files re-fire the gate) runs build + test and the checks job. `full` (the
+# classifier's gui-full area: a gui-path or toolchain change, never the core
+# edge alone) adds the drive, packaging and mosaic jobs — the expensive
+# real-window legs a core-only edit cannot redden beyond what build + test
+# already proves. `deps` runs the msrv job. The daily sweep re-runs
+# everything ungated through the same orchestrator (its plan fires every
+# area), so the jobs a pull request skips still run daily. This file carries
+# no triggers or concurrency of its own — both are the caller's — so it can
+# never fire on its own and never needs a paths filter.
 #
 # Tier A — the crate's LIBRARY (flow / model / selection / panes / progress /
 # paths / clipboard / columns / settings / theme / icon / winres / scan) — is held to the
@@ -41,6 +47,21 @@ name: gui
 
 on:
   workflow_call:
+    inputs:
+      gui:
+        description: The gui crate, its gate files, or bdinfo-rs-core (a path dependency) changed.
+        required: true
+        type: string
+      full:
+        description: >-
+          The classifier's gui-full area — a gui-path or toolchain change, so
+          the drive, packaging and mosaic jobs run too.
+        required: true
+        type: string
+      deps:
+        description: The dependency graph or the audit policy changed.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -70,6 +91,7 @@ jobs:
   # a hung window would burn the 6-hour default.
   test:
     name: gui build + test (${{ matrix.os }})
+    if: inputs.gui == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -285,6 +307,7 @@ jobs:
   # moved to sweep.yml + the release-tag leg; see the header.)
   checks:
     name: gui checks (lint + coverage + deny)
+    if: inputs.gui == 'true'
     # One Linux runner, arch-invariant verdict — arm64 (rationale in core.yml).
     # The snapshot ties this job's coverage step runs are pinned per OS FAMILY
     # and hold across arches within one, which is what `gui build + test`
@@ -373,8 +396,11 @@ jobs:
   # The GUI crate's leg of the MSRV gate — the shared body, the rationale and
   # the build-only posture live in .github/actions/msrv-check. Build-only costs
   # nothing here in particular: iced_test may float its own MSRV.
+  # Keyed on `deps` like `msrv` in core.yml, which carries the rationale; the
+  # daily sweep fires every area and so still runs this daily.
   msrv:
     name: gui msrv
+    if: inputs.deps == 'true'
     # One Linux runner, arch-invariant verdict — arm64 (rationale in core.yml).
     runs-on: ubuntu-24.04-arm
     steps:
@@ -402,6 +428,7 @@ jobs:
   # arm64 MSI's platform tag there).
   package:
     name: gui packaging smoke (${{ matrix.os }})
+    if: inputs.full == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -475,21 +502,24 @@ jobs:
   #             (calibrated to the 880-wide layout): a deliberate layout
   #             change must update it in the same PR, snapshot-test semantics.
   #
-  # Blocking on ALL FIVE legs — Linux/Windows x86 AND arm plus macos-15, hard
-  # like the launch smoke in build + test: macOS is a crucial supported
-  # platform, and a gate that ignores its own signal is not a gate. Known
-  # macos-15 failure modes (residual risks, not reasons to soften): the
-  # paravirtual Metal path has no software fallback, and the injected walk
-  # carries the Sequoia screen-capture re-approval residual. If a leg ever
-  # flakes for environment reasons, fix the harness (the scripts already handle
-  # window polling and capture pre-authorization) or deliberately re-soften —
-  # never a silent retry loop. macos-15-intel is absent because its hosted VMs
-  # expose no Metal at all. The x86 legs ride the proven display recipes (xvfb
-  # + lavapipe, DX12 WARP); every leg runs at a 1920x1080 desktop with shots
+  # A hard gate on every leg that runs, like the launch smoke in build + test:
+  # if a leg ever flakes for environment reasons, fix the harness (the
+  # scripts already handle window polling and capture pre-authorization) or
+  # deliberately re-soften — never a silent retry loop. The matrix is keyed
+  # on the event: pull requests drive the two x64 legs (ubuntu-latest +
+  # windows-2025, the proven display recipes — xvfb + lavapipe, DX12 WARP),
+  # while the arm legs and macos-15 run on master pushes and the daily sweep,
+  # which re-runs this workflow ungated and files the rolling issue on a
+  # scheduled red — the ~9.5 min windows-11-arm leg paced every pull-request
+  # run before the shrink. Shrinking by expression rather than a job-level
+  # `if:` keeps each remaining leg reporting normally (a skipped matrix job
+  # reports once, unexpanded). Known macos-15 failure modes (residual risks,
+  # not reasons to soften): the paravirtual Metal path has no software
+  # fallback, and the injected walk carries the Sequoia screen-capture
+  # re-approval residual. macos-15-intel is absent because its hosted VMs
+  # expose no Metal at all. Every leg runs at a 1920x1080 desktop with shots
   # cropped to the 880x960 window, so the galleries are comparable across
-  # OSes. Scheduled coverage comes from the daily sweep, which re-runs this
-  # whole workflow ungated and files the rolling issue on a scheduled red; a
-  # red leg here reddens the `gui` caller job and therefore ci-ok.
+  # OSes; a red leg here reddens the `gui` caller job and therefore ci-ok.
   #
   # Both walks share one job per arch because they need the byte-identical
   # debug binary: building it once and walking it twice removes a second
@@ -498,6 +528,7 @@ jobs:
   # hides it, and each walk keeps its own gallery directory and artifact.
   drive:
     name: gui drive (${{ matrix.os }})
+    if: inputs.full == 'true'
     runs-on: ${{ matrix.os }}
     # Two walks plus the build, against per-arch p90s (2026-08-02, 20 runs per
     # leg): the slowest arch, windows-2025, spends ~200 s assisted + ~175 s
@@ -508,12 +539,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-2025
-          - ubuntu-24.04-arm
-          - windows-11-arm
-          - macos-15
+        os: >-
+          ${{ fromJson(github.event_name == 'pull_request'
+          && '["ubuntu-latest","windows-2025"]'
+          || '["ubuntu-latest","windows-2025","ubuntu-24.04-arm","windows-11-arm","macos-15"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -639,16 +668,19 @@ jobs:
 
   # The run's showcase artifact: every drive leg's `00-listed` shot at NATIVE
   # resolution in one labelled 2x5 image (assisted top row, inject bottom,
-  # matrix column order) — all ten rendered windows at a glance without
-  # opening ten gallery artifacts. Fan-in over the leg uploads; `!cancelled()`
-  # so a red leg still yields the partial evidence (a missing shot renders as
-  # a labelled dark tile; only zero shots fails, by which point the legs have
-  # already reddened the gate). A WINDOWS runner because the composer is
-  # System.Drawing (GDI+) with the true Segoe UI / Consolas faces.
+  # matrix column order) — the rendered windows at a glance without opening
+  # each gallery artifact. Fan-in over the leg uploads; `!cancelled()` so a
+  # red leg still yields the partial evidence (a missing shot renders as a
+  # labelled dark tile — on pull requests the three demoted legs' tiles are
+  # dark by design; only zero shots fails, by which point the legs have
+  # already reddened the gate). Gated with `drive` on the same input: with no
+  # drive legs there is nothing to compose, and zero shots would fail. A
+  # WINDOWS runner because the composer is System.Drawing (GDI+) with the
+  # true Segoe UI / Consolas faces.
   drive-mosaic:
     name: gui drive mosaic
     needs: [drive]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && inputs.full == 'true' }}
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

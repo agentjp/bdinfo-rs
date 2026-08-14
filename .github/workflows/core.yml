@@ -62,7 +62,12 @@ on:
         required: true
         type: string
       test-os:
-        description: The build + test matrix as a JSON array — six legs for `core`, two for `canary`.
+        description: >-
+          The build + test matrix as a JSON array. The classifier emits six
+          legs for `core` and two for `canary`; on pull requests the caller
+          passes the classifier's shrunk variant instead, which drops the two
+          aarch64 Linux/Windows legs (those run on master pushes and the
+          daily sweep).
         required: true
         type: string
 
@@ -85,10 +90,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     # One native runner per RELEASED binary — x86_64 AND aarch64 across Linux,
     # Windows and macOS — so `cargo test` (including the real-disc end-to-end scan
-    # in tests/cli.rs) runs on every architecture we ship: no shipped arch goes
-    # unscanned. arm64 Linux/Windows and Intel macOS are standard GitHub-hosted
-    # runners, free for public repos. The OS list arrives as an input — the full
-    # six for `core`, one leg per shell family for `canary`; keep the list in
+    # in tests/cli.rs) runs on every architecture we ship. arm64 Linux/Windows
+    # and Intel macOS are standard GitHub-hosted runners, free for public
+    # repos. The OS list arrives as an input — the full six for `core`, one
+    # leg per shell family for `canary`, and on pull requests the caller's
+    # shrunk `core` variant without the two aarch64 Linux/Windows legs, whose
+    # verdicts come from master pushes and the daily sweep instead (the
+    # windows-11-arm legs were the whole run's pacing jobs); keep the lists in
     # classify-diff.ps1 in lockstep with the six dist-workspace.toml targets.
     strategy:
       fail-fast: false
@@ -339,9 +347,17 @@ jobs:
   # and the build-only posture live in .github/actions/msrv-check.
   # `gui msrv` in gui.yml holds the same bar for the GUI crate and `wasm msrv`
   # in wasm.yml for the wasm crate.
+  #
+  # Keyed on `deps`, not `core`: a manifest or lockfile change can raise the
+  # resolved tree's effective floor invisibly, so dependency changes prove
+  # the floor on the pull-request path. A source edit that uses an API newer
+  # than the floor builds green on the pinned stable and is caught by the
+  # daily sweep instead, which fires every area — at most a day of staleness,
+  # traded for removing one of the two ~10 min jobs that paced whole
+  # pull-request runs.
   msrv:
     name: msrv
-    if: inputs.core == 'true'
+    if: inputs.deps == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -366,6 +382,15 @@ jobs:
   # parallel costs nothing but wall-clock. (Running the binary in TOTAL
   # isolation — FROM scratch, zero runtime deps — is the separate `isolation`
   # job below; docker.yml ships that same scratch image on release.)
+  #
+  # The matrix is keyed on the event, mirroring the build + test shrink: pull
+  # requests skip the two aarch64 Linux/Windows legs (the windows-11-arm legs
+  # were the whole run's pacing jobs), whose verdicts come from master pushes
+  # and the daily sweep; a called workflow sees the caller's original event,
+  # so the sweep's schedule/dispatch runs and master pushes keep all six.
+  # Shrinking by expression rather than a job-level `if:` keeps each
+  # remaining leg reporting normally — a skipped matrix job would report
+  # once, unexpanded.
   e2e:
     name: real-world install + scan (${{ matrix.os }})
     if: inputs.core == 'true'
@@ -373,13 +398,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - {os: ubuntu-latest, target: x86_64-unknown-linux-musl}
-          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
-          - {os: windows-2025, target: ""}
-          - {os: windows-11-arm, target: ""}
-          - {os: macos-15-intel, target: ""}
-          - {os: macos-15, target: ""}
+        include: >-
+          ${{ fromJson(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},
+               {"os":"windows-2025","target":""},
+               {"os":"macos-15-intel","target":""},
+               {"os":"macos-15","target":""}]'
+          || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},
+               {"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl"},
+               {"os":"windows-2025","target":""},
+               {"os":"windows-11-arm","target":""},
+               {"os":"macos-15-intel","target":""},
+               {"os":"macos-15","target":""}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

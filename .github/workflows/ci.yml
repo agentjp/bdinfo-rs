@@ -119,6 +119,7 @@ jobs:
       should_run: ${{ steps.skip.outputs.should_run || 'true' }}
       core: ${{ steps.classify.outputs.core }}
       gui: ${{ steps.classify.outputs.gui }}
+      gui-full: ${{ steps.classify.outputs.gui-full }}
       wasm: ${{ steps.classify.outputs.wasm }}
       fuzz: ${{ steps.classify.outputs.fuzz }}
       deps: ${{ steps.classify.outputs.deps }}
@@ -132,6 +133,7 @@ jobs:
       typos: ${{ steps.classify.outputs.typos }}
       test: ${{ steps.classify.outputs.test }}
       test-os: ${{ steps.classify.outputs.test-os }}
+      test-os-pr: ${{ steps.classify.outputs.test-os-pr }}
     steps:
       # Depth 1, .github only: the diff comes from the API, so the checkout
       # exists for the classifier and its self-test — whose `git ls-files`
@@ -421,7 +423,12 @@ jobs:
       fuzz: ${{ needs.plan.outputs.fuzz }}
       pkg: ${{ needs.plan.outputs.pkg }}
       test: ${{ needs.plan.outputs.test }}
-      test-os: ${{ needs.plan.outputs.test-os }}
+      # Pull requests take the classifier's shrunk matrix — no aarch64
+      # Linux/Windows legs; those run on master pushes and the daily sweep,
+      # which pass the full list here. A matrix shrunk by expression still
+      # reports each remaining leg normally; nothing here is a required
+      # context, so the absent legs hang no PR.
+      test-os: ${{ github.event_name == 'pull_request' && needs.plan.outputs.test-os-pr || needs.plan.outputs.test-os }}
 
   # The whole-tree scanners: YAML, TOML, workflow security, spelling, links.
   # Same caller shape as `core` above.
@@ -447,21 +454,40 @@ jobs:
   # content stays with their crates while the plan gates them here. Their
   # check-runs render prefixed (`gui / gui build + test (…)`,
   # `wasm / wasm gate (…)`); a red anywhere inside reddens the caller job and
-  # therefore ci-ok. When the area is skipped, the single caller job reports
-  # `skipped` — the inner jobs never appear, which is fine because only the
-  # caller jobs feed ci-ok and no inner name is a required context. One area
-  # each, so these two need no input plumbing.
+  # therefore ci-ok. When every consumed area is skipped, the single caller
+  # job reports `skipped` — the inner jobs never appear, which is fine because
+  # only the caller jobs feed ci-ok and no inner name is a required context.
+  # Same caller shape as `core` above: the `if:` is the UNION of the areas the
+  # inner jobs consume, each passed through as an input. `gui` alone (a
+  # bdinfo-rs-core edit reaching the crate through the path-dependency edge)
+  # runs the gui build + test and checks jobs; `gui-full` (a gui-path or
+  # toolchain change) adds the drive, packaging and mosaic jobs; `deps` runs
+  # both crates' msrv jobs.
   gui:
     name: gui
     needs: plan
-    if: needs.plan.outputs.should_run != 'false' && needs.plan.outputs.gui == 'true'
+    if: >-
+      needs.plan.outputs.should_run != 'false' &&
+      (needs.plan.outputs.gui == 'true' ||
+      needs.plan.outputs.gui-full == 'true' ||
+      needs.plan.outputs.deps == 'true')
     uses: ./.github/workflows/gui.yml
+    with:
+      gui: ${{ needs.plan.outputs.gui }}
+      full: ${{ needs.plan.outputs.gui-full }}
+      deps: ${{ needs.plan.outputs.deps }}
 
   wasm:
     name: wasm
     needs: plan
-    if: needs.plan.outputs.should_run != 'false' && needs.plan.outputs.wasm == 'true'
+    if: >-
+      needs.plan.outputs.should_run != 'false' &&
+      (needs.plan.outputs.wasm == 'true' ||
+      needs.plan.outputs.deps == 'true')
     uses: ./.github/workflows/wasm.yml
+    with:
+      wasm: ${{ needs.plan.outputs.wasm }}
+      deps: ${{ needs.plan.outputs.deps }}
 
   # The fan-in: the ONE result branch protection requires (plus the three
   # standalone checks outside this workflow). Green = every gate job either

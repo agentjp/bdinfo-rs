@@ -10,10 +10,12 @@ name: wasm
 # native CLI e2e test scans) — proven in Node and in real headless browsers
 # (Chrome + Firefox via wasm-bindgen-test).
 #
-# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires the
-# `wasm` area (a crate-dir change, or a core change via the encoded path-dep
-# edge — root-Cargo.lock-only bumps excluded), and the daily sweep re-runs it
-# ungated through the same orchestrator. Trigger/concurrency policy is the
+# A workflow_call REUSABLE: ci.yml invokes it when its plan job fires either
+# of the two areas passed through as inputs, and each job below keys on its
+# own input: `wasm` (a crate-dir change, or a core change via the encoded
+# path-dep edge — root-Cargo.lock-only bumps excluded) runs the gate job, and
+# `deps` runs the msrv job. The daily sweep re-runs everything ungated
+# through the same orchestrator (its plan fires every area). Trigger/concurrency policy is the
 # caller's; the gate still deliberately NEVER runs on tags, so its build
 # caches are never a publishing-time cache-poisoning vector (the tag-driven
 # npm publish lives beside publish-crates.yml in publish-npm.yml). The
@@ -27,6 +29,15 @@ name: wasm
 
 on:
   workflow_call:
+    inputs:
+      wasm:
+        description: The wasm crate, its gate files, or bdinfo-rs-core (a path dependency) changed.
+        required: true
+        type: string
+      deps:
+        description: The dependency graph or the audit policy changed.
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -42,6 +53,7 @@ env:
 jobs:
   gate:
     name: wasm gate (build + size + parity)
+    if: inputs.wasm == 'true'
     # x64: two steps below need Google Chrome and chromedriver, and the arm64
     # Ubuntu runner image ships neither (its browser set is Firefox +
     # geckodriver; CHROMEWEBDRIVER is empty there). `msrv` below stays beside
@@ -245,8 +257,11 @@ jobs:
   # target-specific MSRV breakage in js-sys/web-sys/wasm-bindgen would otherwise
   # pass unnoticed. `msrv` in core.yml and `gui msrv` in gui.yml hold the same
   # bar for the other two shipping surfaces.
+  # Keyed on `deps` like `msrv` in core.yml, which carries the rationale; the
+  # daily sweep fires every area and so still runs this daily.
   msrv:
     name: wasm msrv
+    if: inputs.deps == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -19,10 +19,11 @@
     Areas and the jobs they gate:
 
       core       build + test, lint, coverage, mutants, install + scan, musl scan
-      gui        the gui reusable workflow and its mutation job
+      gui        the gui workflow's build + test and checks jobs, and its mutation job
+      gui-full   the gui workflow's drive, packaging and mosaic jobs
       wasm       the wasm reusable workflow and its mutation job
       fuzz       corpus replay
-      deps       cargo deny, cargo vet
+      deps       cargo deny, cargo vet, and all three workspaces' msrv jobs
       yaml       action-validator + ryl
       workflows  zizmor
       canary     build + test on one leg per shell family
@@ -31,6 +32,13 @@
       toml       taplo
       links      lychee
       typos      typos
+
+    gui-full always rides with gui: it marks the diffs whose verdict the gui
+    workflow's expensive real-window and packaging legs could change — a
+    gui-path or toolchain change — while a bdinfo-rs-core edit reaching gui
+    through the path-dependency edge fires gui alone, running only the gui
+    build + test and checks jobs on the pull-request path. The daily sweep
+    fires every area, so the legs gui alone skips still run there daily.
 
     A rule with an empty Areas list is a deliberate declaration that no job on
     the pull-request path reads the file. -SelfTest requires every tracked path
@@ -71,7 +79,7 @@ begin {
     # Every area this script can emit. The workflow reads each as a job output,
     # so adding one here without adding the matching `if:` gates nothing.
     $script:AllAreas = @(
-        'core', 'gui', 'wasm', 'fuzz', 'deps', 'yaml', 'workflows',
+        'core', 'gui', 'gui-full', 'wasm', 'fuzz', 'deps', 'yaml', 'workflows',
         'canary', 'dist', 'pkg', 'toml', 'links', 'typos'
     )
 
@@ -151,9 +159,9 @@ begin {
         },
         @{
             Name       = 'gui crate'
-            Areas      = @('gui')
+            Areas      = @('gui', 'gui-full')
             Structural = $true
-            Why        = 'Sources, the generated icon set the packaging step consumes, and the crate manifest all feed the gui workflow.'
+            Why        = 'Sources, the generated icon set the packaging step consumes, and the crate manifest all feed the gui workflow — including the drive, packaging and mosaic jobs that gui-full gates.'
             Match      = { param($f) (Test-Match $f @('crates/bdinfo-rs-gui/*')) -and -not (Test-Prose $f) }
         },
         @{
@@ -186,23 +194,23 @@ begin {
         },
         @{
             Name       = 'toolchain and formatting configuration'
-            Areas      = $script:CoreDependents + @('toml')
+            Areas      = $script:CoreDependents + @('gui-full', 'toml')
             Structural = $true
-            Why        = 'rust-toolchain.toml pins the compiler for every workspace in the tree; rustfmt reads the nearest rustfmt.toml walking up from each file, so the root file governs the sibling crates too.'
+            Why        = 'rust-toolchain.toml pins the compiler for every workspace in the tree; rustfmt reads the nearest rustfmt.toml walking up from each file, so the root file governs the sibling crates too. gui-full because a toolchain change changes the binary the gui drive and packaging jobs build.'
             Match      = { param($f) Test-Match $f @('rust-toolchain.toml', 'rustfmt.toml') }
         },
         @{
             Name       = 'root clippy configuration'
-            Areas      = $script:CoreDependents + @('toml')
+            Areas      = $script:CoreDependents + @('gui-full', 'toml')
             Structural = $true
-            Why        = 'crates/bdinfo-rs-gui carries its own clippy.toml but crates/bdinfo-rs-wasm does not; rather than depend on clippy resolving a configuration across workspace roots, this fires every lint that could read it.'
+            Why        = 'crates/bdinfo-rs-gui carries its own clippy.toml but crates/bdinfo-rs-wasm does not; rather than depend on clippy resolving a configuration across workspace roots, this fires every lint that could read it. gui-full for the same conservative reach: a toolchain-rule file fires the whole gui stack.'
             Match      = { param($f) $f -eq 'clippy.toml' }
         },
         @{
             Name       = 'cargo configuration'
-            Areas      = $script:CoreDependents + @('toml')
+            Areas      = $script:CoreDependents + @('gui-full', 'toml')
             Structural = $true
-            Why        = 'Cargo merges configuration from every ancestor directory of the invocation, so the root aliases and build settings apply inside the sibling workspaces as well.'
+            Why        = 'Cargo merges configuration from every ancestor directory of the invocation, so the root aliases and build settings apply inside the sibling workspaces as well — including the builds the gui drive and packaging jobs run, hence gui-full.'
             Match      = { param($f) $f -eq '.cargo/config.toml' }
         },
         @{
@@ -263,9 +271,9 @@ begin {
         },
         @{
             Name       = 'gui reusable workflow'
-            Areas      = @('yaml', 'workflows', 'gui')
+            Areas      = @('yaml', 'workflows', 'gui', 'gui-full')
             Structural = $true
-            Why        = 'The file is the gui gate: an edit to it, including a pinned action digest, changes what those jobs do.'
+            Why        = 'The file is the gui gate: an edit to it, including a pinned action digest, changes what those jobs do — the drive, packaging and mosaic jobs gui-full gates included.'
             Match      = { param($f) $f -eq '.github/workflows/gui.yml' }
         },
         @{
@@ -361,9 +369,9 @@ begin {
         },
         @{
             Name       = 'gui packaging composite action'
-            Areas      = @('gui', 'yaml', 'workflows')
+            Areas      = @('gui', 'gui-full', 'yaml', 'workflows')
             Structural = $true
-            Why        = 'The gui-package composite is the body of gui.yml''s packaging smoke, the only pull-request job that runs it; the gui-release.yml lane shares it but runs on a tag or a dispatch. action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
+            Why        = 'The gui-package composite is the body of gui.yml''s packaging smoke — a gui-full job, so the area that runs it must fire — and the only pull-request job that runs it; the gui-release.yml lane shares it but runs on a tag or a dispatch. action-validator and zizmor read the action definitions under .github/actions as well as the workflows.'
             Match      = { param($f) Test-Match $f @('.github/actions/gui-package/*') }
         },
         @{
@@ -375,9 +383,9 @@ begin {
         },
         @{
             Name       = 'gui gate scripts'
-            Areas      = @('gui')
+            Areas      = @('gui', 'gui-full')
             Structural = $true
-            Why        = 'The gui workflow runs these directly, and _gui-walk.ps1 is the click-target table its three injected drive legs dot-source. The publishing helpers are named publish-gui-* so that this pattern cannot reach them.'
+            Why        = 'The gui workflow runs these directly, and _gui-walk.ps1 is the click-target table its injected drive legs dot-source; the drive and mosaic scripts belong to the jobs gui-full gates. The publishing helpers are named publish-gui-* so that this pattern cannot reach them.'
             Match      = { param($f) (Test-Match $f @('.github/scripts/gui-*.ps1', '.github/scripts/_gui-walk.ps1')) }
         },
         @{
@@ -558,9 +566,11 @@ end {
             @{ Path = 'crates/bdinfo-rs/tests/fixtures/golden/folder.txt'; Areas = 'core' }
             @{ Path = 'crates/bdinfo-rs/src/main.rs'; Areas = 'core links typos' }
             @{ Path = 'crates/bdinfo-rs-core/src/bdrom/m2ts.rs'; Areas = 'core fuzz gui links typos wasm' }
-            @{ Path = 'crates/bdinfo-rs-gui/packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png'; Areas = 'gui' }
-            @{ Path = 'crates/bdinfo-rs-gui/src/main.rs'; Areas = 'gui links typos' }
-            @{ Path = '.cargo/config.toml'; Areas = 'core fuzz gui links toml typos wasm' }
+            @{ Path = 'crates/bdinfo-rs-gui/packaging/icons/hicolor/32x32/apps/bdinfo-rs-gui.png'; Areas = 'gui gui-full' }
+            @{ Path = 'crates/bdinfo-rs-gui/src/main.rs'; Areas = 'gui gui-full links typos' }
+            @{ Path = '.cargo/config.toml'; Areas = 'core fuzz gui gui-full links toml typos wasm' }
+            @{ Path = 'rust-toolchain.toml'; Areas = 'core fuzz gui gui-full links toml typos wasm' }
+            @{ Path = 'clippy.toml'; Areas = 'core fuzz gui gui-full links toml typos wasm' }
             @{ Path = '.cargo/mutants.toml'; Areas = 'core links toml typos' }
             @{ Path = '.config/nextest.toml'; Areas = 'core links toml typos' }
             @{ Path = 'Cargo.lock'; Areas = 'core deps pkg' }
@@ -572,7 +582,7 @@ end {
             @{ Path = '.github/workflows/ci.yml'; Areas = 'canary links typos workflows yaml' }
             @{ Path = '.github/workflows/core.yml'; Areas = 'core deps dist fuzz links pkg typos workflows yaml' }
             @{ Path = '.github/workflows/repo.yml'; Areas = 'links toml typos workflows yaml' }
-            @{ Path = '.github/workflows/gui.yml'; Areas = 'gui links typos workflows yaml' }
+            @{ Path = '.github/workflows/gui.yml'; Areas = 'gui gui-full links typos workflows yaml' }
             @{ Path = '.github/workflows/sweep-mutants.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/workflows/docker.yml'; Areas = 'links typos workflows yaml' }
             @{ Path = '.github/actions/mutate-crate/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
@@ -582,9 +592,9 @@ end {
             @{ Path = '.github/actions/msrv-check/action.yml'; Areas = 'core gui links typos wasm workflows yaml' }
             @{ Path = '.github/actions/fuzz-toolchain/action.yml'; Areas = 'fuzz links typos workflows yaml' }
             @{ Path = '.github/actions/lint-crate/action.yml'; Areas = 'gui links typos wasm workflows yaml' }
-            @{ Path = '.github/actions/gui-package/action.yml'; Areas = 'gui links typos workflows yaml' }
-            @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui links typos' }
-            @{ Path = '.github/scripts/_gui-walk.ps1'; Areas = 'gui links typos' }
+            @{ Path = '.github/actions/gui-package/action.yml'; Areas = 'gui gui-full links typos workflows yaml' }
+            @{ Path = '.github/scripts/gui-package-windows.ps1'; Areas = 'gui gui-full links typos' }
+            @{ Path = '.github/scripts/_gui-walk.ps1'; Areas = 'gui gui-full links typos' }
             @{ Path = '.github/scripts/wasm-rules.ps1'; Areas = 'links typos wasm' }
             @{ Path = '.github/scripts/cov-floor.ps1'; Areas = 'gui links typos wasm' }
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }
@@ -646,12 +656,20 @@ end {
 
     # build + test runs one leg per released target when the root workspace is
     # in play, and one leg per shell family when only the orchestrator changed.
+    # test-os-pr is the pull-request variant of the same matrix: the caller
+    # (ci.yml) passes it instead of test-os on pull_request events, dropping
+    # the two aarch64 Linux/Windows legs — those run on master pushes and the
+    # daily sweep, while the x64 legs of all three OS families plus
+    # Apple-silicon macOS hold the pull-request verdict.
     $testOs = '[]'
+    $testOsPr = '[]'
     if ($fired.Contains('core')) {
         $testOs = '["ubuntu-latest","ubuntu-24.04-arm","windows-2025","windows-11-arm","macos-15-intel","macos-15"]'
+        $testOsPr = '["ubuntu-latest","windows-2025","macos-15-intel","macos-15"]'
     }
     elseif ($fired.Contains('canary')) {
         $testOs = '["ubuntu-latest","windows-2025"]'
+        $testOsPr = $testOs
     }
 
     foreach ($a in $script:AllAreas) {
@@ -659,4 +677,5 @@ end {
     }
     "test=$(($testOs -ne '[]').ToString().ToLowerInvariant())"
     "test-os=$testOs"
+    "test-os-pr=$testOsPr"
 }
