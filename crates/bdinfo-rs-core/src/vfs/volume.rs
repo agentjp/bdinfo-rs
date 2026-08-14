@@ -19,14 +19,14 @@
 //! uses, the identical string Windows Explorer and classic `BDInfo` show —
 //! falling back to the drive letter when that read is unavailable. A folder
 //! backend's caller applies it to the scanned label; an `.iso` scan already
-//! reads the genuine UDF label and needs no repair. A scan that recorded
-//! stream read failures resolves through `resolve_folder_label_after_scan`
-//! instead, which skips the raw-device read outright.
+//! reads the genuine UDF label and needs no repair. A scan that recorded io
+//! failures resolves through `resolve_folder_label_after_scan` instead, which
+//! skips the raw-device read outright.
 
 #[cfg(any(windows, test))]
 use std::io::{self, Read, Seek, SeekFrom};
 
-use crate::error::{ScanError, ScanStage};
+use crate::error::{BdError, ScanError};
 #[cfg(any(windows, test))]
 use crate::vfs::ReadSeek;
 #[cfg(windows)]
@@ -57,11 +57,11 @@ fn drive_root_letter(label: &str) -> Option<char> {
 /// a `J:\` scan.
 #[must_use]
 pub fn resolve_folder_label(scanned: &str) -> String {
-    resolve_with(scanned, real_volume_label)
+    resolve_folder_label_after_scan(scanned, &[])
 }
 
-/// The pure core of [`resolve_folder_label`], with the raw-device read injected
-/// as `read` so the decision logic is exercised without a real device.
+/// The label resolution both entry points end in, with the raw-device read
+/// injected as `read` so the decision logic is exercised without a real device.
 fn resolve_with(scanned: &str, read: impl FnOnce(char) -> Option<String>) -> String {
     drive_root_letter(scanned).map_or_else(
         || scanned.to_owned(),
@@ -70,12 +70,14 @@ fn resolve_with(scanned: &str, read: impl FnOnce(char) -> Option<String>) -> Str
 }
 
 /// [`resolve_folder_label`] for a scan that may have recorded failures: when
-/// `errors` records a stream read failure ([`ScanStage::StreamFile`]), the
+/// `errors` carries an io failure ([`BdError::Io`]) from any stage, the
 /// raw-device read is skipped and a bare drive-root label degrades straight
 /// to the drive letter. The label read grinds the same device that just
-/// failed mid-stream, sector by sector, and on damaged media one raw read
-/// can stall for minutes inside the drive's retries — a cosmetic label is
-/// not worth that after a scan that already recorded failures. A real name
+/// failed, sector by sector, and on damaged media one raw read can stall for
+/// minutes inside the drive's retries — a cosmetic label is not worth that
+/// after the device has demonstrated read errors. Every other [`BdError`]
+/// describes the disc's *bytes* — malformed or missing metadata — which is no
+/// evidence against the device, so those leave the read in play. A real name
 /// resolves to itself either way.
 #[must_use]
 pub(crate) fn resolve_folder_label_after_scan(scanned: &str, errors: &[ScanError]) -> String {
@@ -90,7 +92,7 @@ fn resolve_after_scan_with(
     errors: &[ScanError],
     read: impl FnOnce(char) -> Option<String>,
 ) -> String {
-    if errors.iter().any(|e| e.stage == ScanStage::StreamFile) {
+    if errors.iter().any(|e| matches!(e.reason, BdError::Io(_))) {
         resolve_with(scanned, |_| None)
     } else {
         resolve_with(scanned, read)
@@ -297,11 +299,11 @@ mod tests {
     use std::io::{Cursor, Read as _, Seek as _, SeekFrom};
 
     use super::{
-        AlignedReader, SECTOR, ScanError, ScanStage, add_signed, drive_root_letter,
+        AlignedReader, BdError, SECTOR, ScanError, add_signed, drive_root_letter,
         resolve_after_scan_with, resolve_folder_label, resolve_folder_label_after_scan,
         resolve_with,
     };
-    use crate::error::BdError;
+    use crate::error::ScanStage;
 
     #[test]
     fn drive_root_letter_matches_every_bare_drive_root_spelling() {
@@ -342,8 +344,8 @@ mod tests {
         assert_eq!(resolve_folder_label("BigBuckBunny"), "BigBuckBunny");
     }
 
-    /// A recorded failure at `stage`, for driving the post-scan gate.
-    fn error_at(stage: ScanStage) -> ScanError {
+    /// A recorded device failure at `stage` — the reason that closes the gate.
+    fn io_error_at(stage: ScanStage) -> ScanError {
         ScanError {
             file: "00000.m2ts".to_owned(),
             stage,
@@ -351,32 +353,48 @@ mod tests {
         }
     }
 
+    /// A recorded failure at `stage` blaming the disc's bytes rather than the
+    /// device, which leaves the gate open.
+    fn parse_error_at(stage: ScanStage) -> ScanError {
+        ScanError { file: "00000.clpi".to_owned(), stage, reason: BdError::UnexpectedEof }
+    }
+
     #[test]
-    fn a_recorded_stream_read_failure_skips_the_device_read() {
-        // One injected reader for every shape: consulted only when no stream
-        // read failure is on record, so its label wins exactly there.
+    fn a_recorded_io_failure_at_any_stage_skips_the_device_read() {
+        // One injected reader for every shape: consulted only when the gate is
+        // open, so its label wins exactly there.
         let read = |letter: char| Some(format!("VOL{letter}"));
-        // A stream read failure degrades a drive root straight to the letter…
-        assert_eq!(resolve_after_scan_with(r"J:\", &[error_at(ScanStage::StreamFile)], read), "J");
-        // …also when failures at other stages surround it…
+        // An io failure degrades a drive root straight to the letter, whatever
+        // stage recorded it — a stream read is what a damaged disc trips first,
+        // but a metadata-only scan never reaches that stage at all.
+        for stage in [
+            ScanStage::Discovery,
+            ScanStage::ClipInfo,
+            ScanStage::Playlist,
+            ScanStage::StreamFile,
+            ScanStage::SectorRead,
+        ] {
+            assert_eq!(resolve_after_scan_with(r"J:\", &[io_error_at(stage)], read), "J");
+        }
+        // A parse failure is no evidence against the device, so it leaves the
+        // read in play — as does a clean scan.
+        assert_eq!(
+            resolve_after_scan_with(r"J:\", &[parse_error_at(ScanStage::ClipInfo)], read),
+            "VOLJ"
+        );
+        assert_eq!(resolve_after_scan_with(r"J:\", &[], read), "VOLJ");
+        // One io failure among parse failures still closes the gate.
         assert_eq!(
             resolve_after_scan_with(
                 r"J:\",
-                &[error_at(ScanStage::Discovery), error_at(ScanStage::StreamFile)],
+                &[parse_error_at(ScanStage::ClipInfo), io_error_at(ScanStage::Playlist)],
                 read
             ),
             "J"
         );
-        // …while non-stream failures alone leave the device read in play…
-        assert_eq!(
-            resolve_after_scan_with(r"J:\", &[error_at(ScanStage::Discovery)], read),
-            "VOLJ"
-        );
-        // …as does a clean scan.
-        assert_eq!(resolve_after_scan_with(r"J:\", &[], read), "VOLJ");
         // A real name resolves to itself whatever is on record.
         assert_eq!(
-            resolve_after_scan_with("BigBuckBunny", &[error_at(ScanStage::StreamFile)], read),
+            resolve_after_scan_with("BigBuckBunny", &[io_error_at(ScanStage::StreamFile)], read),
             "BigBuckBunny"
         );
     }
@@ -388,7 +406,7 @@ mod tests {
         // drive-root road is validated end-to-end on real hardware).
         assert_eq!(resolve_folder_label_after_scan("BigBuckBunny", &[]), "BigBuckBunny");
         assert_eq!(
-            resolve_folder_label_after_scan("BigBuckBunny", &[error_at(ScanStage::StreamFile)]),
+            resolve_folder_label_after_scan("BigBuckBunny", &[io_error_at(ScanStage::StreamFile)]),
             "BigBuckBunny"
         );
     }

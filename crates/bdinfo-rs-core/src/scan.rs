@@ -31,9 +31,10 @@ use crate::vfs::volume;
 ///
 /// The label is the [`volume`] repair's: a folder scan names the disc after
 /// its root directory, which a bare Windows drive root (`J:\`) does not have.
-/// When the scan recorded stream read failures the repair skips its
-/// raw-device read — the drive just failed mid-stream, and another raw read
-/// could stall — so the label degrades to the bare drive letter there.
+/// When the scan recorded an io failure at any stage the repair skips its
+/// raw-device read — the device just demonstrated read errors, and another
+/// raw read could stall — so the label degrades to the bare drive letter
+/// there.
 ///
 /// `mode`, `options`, `scan_files`, `progress` and `cancel` are
 /// [`BdRom::open_resilient_with`]'s, passed through unchanged.

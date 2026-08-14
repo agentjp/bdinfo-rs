@@ -35,9 +35,8 @@ pub enum Input {
     /// inside it (the scan walks up to the disc root). The label is the
     /// directory name — or, when the disc root is a nameless Windows drive
     /// root, the real UDF label the [`bdinfo_rs_core::vfs::volume`] repair
-    /// recovers; after a scan that recorded stream read errors the repair
-    /// skips its raw-device read and the label degrades to the bare drive
-    /// letter.
+    /// recovers; after a scan that recorded an io error the repair skips its
+    /// raw-device read and the label degrades to the bare drive letter.
     Folder(PathBuf),
     /// A single `.iso` image. The label is the real UDF volume label.
     Iso(PathBuf),

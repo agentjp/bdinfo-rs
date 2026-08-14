@@ -216,12 +216,14 @@ deliberately diverge from BDInfo 0.8:
   than a 5 MiB one — 16 KiB in the quick codec pass (which runs first in every
   measurement scan and alone in a codec-only browse), 256 KiB in the full pass.
 
-A damaged scan of a bare Windows drive root also keeps a degraded disc label: once
-stream read errors are recorded, the raw-device read that recovers the UDF volume label
-is skipped — one more sector-by-sector grind of a failing drive for a cosmetic string —
-so the report and its file name carry the bare drive letter. Classic BDInfo shows the
-OS-reported volume label there (it reads it through the filesystem before scanning and
-has no raw-device read to skip).
+A damaged scan of a bare Windows drive root also keeps a degraded disc label: once any
+io error is recorded — at any scan stage, so a metadata-only browse counts too — the
+raw-device read that recovers the UDF volume label is skipped — one more sector-by-sector
+grind of a failing drive for a cosmetic string — so the report and its file name carry
+the bare drive letter. A failure blaming the disc's bytes rather than the device (a
+malformed playlist, a missing clip file) leaves the label read in place. Classic BDInfo
+shows the OS-reported volume label there (it reads it through the filesystem before
+scanning and has no raw-device read to skip).
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`),
 `crates/bdinfo-rs-core/src/vfs/volume.rs` (the label-read gate).</sub>
