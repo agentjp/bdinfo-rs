@@ -2315,6 +2315,12 @@ impl App {
         for warning in self.flow.warnings() {
             content = content.push(banner(p, p.warning, warning.as_str()));
         }
+        // Stream files a measured scan found shorter than the disc declares:
+        // a truncated file reads to a clean end of file, so this banner is the
+        // only place the loss shows (the report has no line for it).
+        for notice in self.flow.short_stream_notices() {
+            content = content.push(banner(p, p.warning, notice.as_str()));
+        }
 
         content =
             content.push(container(self.disc_panes(p)).width(Length::Fill).height(Length::Fill));

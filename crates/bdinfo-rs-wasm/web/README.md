@@ -171,6 +171,15 @@ recordings reach `disc.errors` and the report `WARNING:` block like any other
 read failure — a damaged span shows up as depressed rates rather than as a
 truncated file, and `keepPartial` does not apply to it.
 
+A stream file whose bytes simply **stop** before the span the disc declares is
+different again: it reads to a clean end of file, so nothing lands in
+`disc.errors`, the report carries no `WARNING:` line, and every value measured
+from it is silently smaller than the disc says. A `scan` names such files in
+`disc.shortStreamNotices` — one sentence per short file, worded exactly as the
+`bdinfo-rs` CLI's stderr notices and the desktop app's banner; the field is
+absent when nothing is short. The report bytes never change for it: raise the
+notices beside the report, the way the demo shows them above it.
+
 ### Saving the report
 
 `reportFileName` gives the name a report is saved under — `BDINFO.<label>.txt`,

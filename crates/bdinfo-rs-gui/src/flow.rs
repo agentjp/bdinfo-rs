@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanOptions};
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, selection_order, selection_stream_files};
+use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error::ScanError;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
@@ -323,6 +324,24 @@ pub fn scan_notice(errors: usize) -> String {
     } else {
         format!("Scan completed with {errors} error(s).\nThe report below was still written.")
     }
+}
+
+/// The notice for one stream file the demux measured shorter than the disc
+/// declares — raised beside the report, because the locked report format has no
+/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
+///
+/// The wording is shared with the other surfaces' copies of this format
+/// (the `bdinfo-rs` CLI's `short_stream_notice`, `bdinfo-rs-wasm`'s
+/// `mirror::short_stream_notice`); each copy is pinned by an identical test, so
+/// a change here reworks all three together or fails a sibling gate.
+fn short_stream_notice(short: &ShortStreamFile) -> String {
+    format!(
+        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
+        short.file(),
+        short.measured_seconds(),
+        short.declared_seconds(),
+        short.missing_seconds()
+    )
 }
 
 /// What a measured scan needs, read from the [`Flow`] before spawning the worker.
@@ -824,6 +843,22 @@ impl Flow {
     #[must_use]
     pub fn warnings(&self) -> &[String] {
         self.any_listing().map_or(&[], |listing| listing.warnings.as_slice())
+    }
+
+    /// The short-stream notices — one sentence per stream file the measured
+    /// scan demuxed materially less of than the disc declares
+    /// ([`BdRom::short_stream_files`]), banner material beside the structural
+    /// warnings. Empty before a measured scan: an unmeasured disc carries no
+    /// per-stream tallies, so the derivation stays silent.
+    ///
+    /// Derived from the retained disc on every call rather than stored, so a
+    /// later scan that replaces the measured playlists can never leave a stale
+    /// notice behind.
+    #[must_use]
+    pub fn short_stream_notices(&self) -> Vec<String> {
+        self.any_listing().map_or_else(Vec::new, |listing| {
+            listing.bdrom.short_stream_files().iter().map(short_stream_notice).collect()
+        })
     }
 
     /// The selectable table rows (empty unless a disc is loaded).
@@ -1871,6 +1906,41 @@ mod tests {
         assert!(
             rows.first().is_some_and(|row| row.hidden && row.codec == "MPEG-4 AVC Video"),
             "the codec row carries the name and the hidden flag: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_measured_short_stream_file_surfaces_the_notice_with_the_shared_wording() {
+        use bdinfo_rs_core::bdrom::disc::ClipStreamTally;
+        use bdinfo_rs_core::primitives::Pid;
+        use bdinfo_rs_core::stream::TsStreamType;
+
+        // No disc, and an unmeasured (structural) disc: silent.
+        assert!(Flow::idle().short_stream_notices().is_empty());
+        let flow = listed().start_scanning(1);
+        assert!(flow.short_stream_notices().is_empty(), "unmeasured clips raise no notice");
+
+        // The measured result comes back with the first clip demuxed to 500 of
+        // its declared 1640 seconds, carrying the per-stream tally that marks
+        // the file as measured.
+        let mut measured = structural().bdrom.playlists;
+        let clip = measured.first_mut().and_then(|p| p.clips.first_mut()).expect("the first clip");
+        clip.length = 1640.0;
+        clip.packet_seconds = 500.0;
+        clip.streams = vec![ClipStreamTally {
+            pid: Pid::new(0x1011),
+            stream_type: TsStreamType::AvcVideo,
+            codec_short_name: "AVC".to_owned(),
+            payload_bytes: 1024,
+            packet_count: 8,
+        }];
+        let flow = flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
+        // The exact sentence, pinned: the CLI and wasm crates carry the same
+        // format and pin the same bytes, which is what keeps the three
+        // surfaces' wording identical.
+        assert_eq!(
+            flow.short_stream_notices(),
+            ["A.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s missing)"]
         );
     }
 

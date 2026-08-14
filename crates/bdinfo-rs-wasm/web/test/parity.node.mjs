@@ -270,6 +270,8 @@ async function main() {
     // The playlists the scan printed travel with the model, which is what makes
     // the re-render reproduce THIS report rather than the whole disc.
     JSON.stringify(full.disc.reportOrder) === JSON.stringify(["00000.MPLS"]) &&
+    // Healthy media measures its declared span, so the scan notices nothing.
+    full.disc.shortStreamNotices === undefined &&
     reRendered.equals(golden) &&
     !noDiagnostics.includes("STREAM DIAGNOSTICS:") &&
     noDiagnostics.includes("QUICK SUMMARY:") &&
@@ -292,6 +294,39 @@ async function main() {
   if (!fullOk) {
     console.error(
       `FAIL — scan_files/render_report round trip: report ${full.report.length} B, re-rendered ${reRendered.length} B, golden ${golden.length} B, measured ${full.disc.measured}.`,
+    );
+  }
+
+  // A truncated stream file. Cutting the clip's bytes reads to a clean end of
+  // file: no error is recorded and the report carries no WARNING block — the
+  // scan's only trace of the loss is `disc.shortStreamNotices`, one sentence
+  // per short file in the wording the CLI prints on stderr (the clip declares
+  // 30.1 s; the measured seconds depend on where the cut lands, so the notice
+  // is shape-checked rather than byte-pinned).
+  const truncFiles = await Promise.all(
+    LAYOUT.map(async (item) => {
+      const bytes =
+        item.file === null ? new Uint8Array(0) : new Uint8Array(await readFile(item.file));
+      const name = item.path.split("/").pop();
+      return new ShimFile(
+        item.path.endsWith("00000.m2ts") ? bytes.slice(0, 3_000_000) : bytes,
+        name,
+      );
+    }),
+  );
+  const truncated = scan_files(paths, truncFiles, []);
+  const notices = truncated.disc.shortStreamNotices;
+  const truncatedOk =
+    truncated.disc.errors.length === 0 &&
+    !truncated.report.includes("WARNING") &&
+    Array.isArray(notices) &&
+    notices.length === 1 &&
+    /^00000\.M2TS is shorter than declared: measured \d+\.\d s of 30\.1 s \(\d+\.\d s missing\)$/.test(
+      notices[0],
+    );
+  if (!truncatedOk) {
+    console.error(
+      `FAIL — truncated-clip scan unexpected: errors ${truncated.disc.errors.length}, notices ${JSON.stringify(notices)}.`,
     );
   }
 
@@ -369,13 +404,14 @@ async function main() {
     fileNameOk &&
     fullOk &&
     keepPartialOk &&
+    truncatedOk &&
     isoOk &&
     isoSelOk &&
     isoInspectOk &&
     isoFullOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + selection + round trip + retention + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + selection + round trip + retention + short-stream notices + .iso OK.`,
     );
     process.exit(0);
   }

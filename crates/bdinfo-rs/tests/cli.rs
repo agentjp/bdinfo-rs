@@ -976,6 +976,60 @@ fn the_multi_playlist_disc_lists_three_playlists_and_scans_them_clean() {
 }
 
 #[test]
+fn a_truncated_stream_file_scans_clean_and_raises_the_stderr_notice() {
+    // A copy of the disc with its shared clip cut to 500 of its declared
+    // 1640 seconds (the fixture's cadence is exactly 3840 bytes per clip
+    // second). Truncation reads to a clean end of file — no io error, no
+    // WARNING block, exit 0 — so the stderr notice is the only place the
+    // loss shows.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create copy dir");
+        for entry in std::fs::read_dir(from).expect("list fixture") {
+            let entry = entry.expect("fixture entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("entry type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy fixture file");
+            }
+        }
+    }
+    let parent = std::env::temp_dir().join(format!("bdinfo-rs-short-{}", std::process::id()));
+    let root = parent.join("MultiPlaylist");
+    copy_tree(&real_fixture("MultiPlaylist"), &root);
+    let clip = root.join("BDMV").join("STREAM").join("00011.M2TS");
+    let bytes = std::fs::read(&clip).expect("read the stream file");
+    // 1,920,000 bytes = 500 clip seconds at the fixture's 3840 bytes/second.
+    let kept = bytes.get(..1_920_000).expect("the clip is 6,297,600 bytes");
+    std::fs::write(&clip, kept).expect("truncate the stream file");
+
+    let output =
+        bdinfo_rs().args([root.as_os_str(), "-w".as_ref()]).output().expect("spawn bdinfo-rs");
+    let report =
+        std::fs::read_to_string(root.join("BDINFO.MultiPlaylist.txt")).expect("read the report");
+    let _ = std::fs::remove_dir_all(&parent).is_ok();
+
+    // Clean exit: the truncation records no scan error.
+    assert_eq!(output.status.code(), Some(0), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: 00011.M2TS is shorter than declared: measured "),
+        "the notice names the truncated file: {stderr}"
+    );
+    assert!(stderr.contains(" of 1640.0 s ("), "the notice carries the declared span: {stderr}");
+    // One entry per file: two playlists play the truncated clip, one notice.
+    assert_eq!(
+        stderr.matches("is shorter than declared").count(),
+        1,
+        "one notice per affected file: {stderr}"
+    );
+    // The report itself is untouched by the feature: no WARNING block (nothing
+    // errored) and no notice wording (the locked format has no line for it).
+    assert!(!report.contains("WARNING"), "a clean scan reports no warnings: {report}");
+    assert!(!report.contains("shorter than declared"), "the notice never enters the report");
+}
+
+#[test]
 fn a_real_list_shows_the_filtered_table_without_writing_a_report() {
     let disc = real_fixture("BigBuckBunny");
     let output =

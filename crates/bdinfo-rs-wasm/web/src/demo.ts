@@ -113,6 +113,8 @@ const copyLabel = el("copy-label");
 const downloadBtn = el<HTMLButtonElement>("download-btn");
 const errorBox = el("error");
 const errorText = el("error-text");
+const shortStreams = el("short-streams");
+const shortStreamsList = el("short-streams-list");
 const mainEl = el("main");
 const listingBox = el("listing");
 const settingsBtn = el<HTMLButtonElement>("settings-btn");
@@ -411,6 +413,17 @@ function adoptDisc(next: Disc, threshold: number): void {
   playlists = next.playlists;
   allRows = playlistRows(next.playlists);
   encryptedNote.hidden = !next.isAacsEncrypted;
+  // Only a measured scan can carry short-stream notices, so a re-inspected
+  // (structural) disc clears the strip along with everything else measured.
+  const notices = next.shortStreamNotices ?? [];
+  shortStreamsList.replaceChildren(
+    ...notices.map((notice) => {
+      const item = document.createElement("li");
+      item.textContent = notice;
+      return item;
+    }),
+  );
+  shortStreams.hidden = notices.length === 0;
   renderRows();
 }
 

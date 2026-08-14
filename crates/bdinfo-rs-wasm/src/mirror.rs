@@ -4,7 +4,7 @@
 //!
 //! | Mirror | Core |
 //! |---|---|
-//! | [`Disc`] | [`BdRom`] plus the scan mode, the recorded failures and the report order |
+//! | [`Disc`] | [`BdRom`] plus the scan mode, the recorded failures, the report order and the short-stream notices |
 //! | [`Playlist`] | [`PlaylistSummary`] |
 //! | [`Clip`] | [`ClipSummary`] |
 //! | [`Stream`] | [`StreamSummary`] |
@@ -60,6 +60,7 @@ use bdinfo_rs_core::bdrom::disc::{
     BdRom, ClipStreamTally, ClipSummary, PlaylistSummary, StreamSummary,
 };
 use bdinfo_rs_core::bdrom::order::{self, PlaylistFilter, table_rows};
+use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error;
 use bdinfo_rs_core::primitives::Pid;
 use bdinfo_rs_core::stream::TsStreamType;
@@ -235,6 +236,20 @@ pub struct Disc {
     /// still holds every playlist the disc declares, measured or not.
     #[tsify(optional)]
     pub report_order: Option<Vec<String>>,
+    /// The short-stream notices of the scan that produced this disc — one
+    /// sentence per stream file the measured scan demuxed materially less of
+    /// than the disc declares, sorted by file name. Such a file reads to a
+    /// clean end of file: nothing lands in `errors`, the report carries no
+    /// `WARNING:` line for it, and every value measured from it is silently
+    /// smaller than the disc says — this field is where that shows. Absent
+    /// when no file is short, which includes every unmeasured disc: an
+    /// inspect measures nothing, so it can name nothing short.
+    ///
+    /// The sentences match the `bdinfo-rs` command line's stderr notices and
+    /// the desktop app's banner word for word; the numbers behind them are in
+    /// `playlists` (each clip's `length` against its `packetSeconds`).
+    #[tsify(optional)]
+    pub short_stream_notices: Option<Vec<String>>,
 }
 
 /// One playlist (`*.MPLS`) with its streams, clips and chapters.
@@ -661,8 +676,35 @@ impl Disc {
             measured,
             errors: errors.iter().map(ScanError::from).collect(),
             report_order,
+            short_stream_notices: short_stream_notices(bdrom),
         }
     }
+}
+
+/// The notice for one stream file the demux measured shorter than the disc
+/// declares — raised beside the report, because the locked report format has no
+/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
+///
+/// The wording is shared with the other surfaces' copies of this format
+/// (the `bdinfo-rs` CLI's `short_stream_notice`, `bdinfo-rs-gui`'s
+/// `flow::short_stream_notice`); each copy is pinned by an identical test, so
+/// a change here reworks all three together or fails a sibling gate.
+fn short_stream_notice(short: &ShortStreamFile) -> String {
+    format!(
+        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
+        short.file(),
+        short.measured_seconds(),
+        short.declared_seconds(),
+        short.missing_seconds()
+    )
+}
+
+/// [`Disc::short_stream_notices`] for a scanned disc: the notice sentences, or
+/// `None` when no stream file is short — the field's "nothing to say" spelling,
+/// so a healthy disc's wire form carries no empty list.
+fn short_stream_notices(bdrom: &BdRom) -> Option<Vec<String>> {
+    let notices: Vec<String> = bdrom.short_stream_files().iter().map(short_stream_notice).collect();
+    (!notices.is_empty()).then_some(notices)
 }
 
 impl Playlist {
@@ -898,10 +940,12 @@ impl Disc {
     /// Rebuilds the disc this mirror describes: the [`BdRom`] and the per-file
     /// failures, the two halves a report is rendered from.
     ///
-    /// The inverse of [`from_scan`](Self::from_scan) but for `measured` and
-    /// [`report_order`](Self::report_order), which describe how the values were
-    /// obtained and how they were printed rather than being values of the disc
-    /// — a disc carries neither, so both are dropped here. A caller rendering
+    /// The inverse of [`from_scan`](Self::from_scan) but for `measured`,
+    /// [`report_order`](Self::report_order) and
+    /// [`short_stream_notices`](Self::short_stream_notices), which describe how
+    /// the values were obtained, how they were printed and what the scan
+    /// noticed about them rather than being values of the disc — a disc
+    /// carries none of the three, so all are dropped here. A caller rendering
     /// this mirror reads the order off the [`Disc`] before taking it apart.
     #[must_use]
     pub fn into_scan(self) -> (BdRom, Vec<error::ScanError>) {
@@ -1320,6 +1364,11 @@ mod tests {
             measured: true,
             errors: vec![a_scan_error()],
             report_order: Some(vec!["00000.MPLS".to_owned()]),
+            // Derived, not injectable: [`a_core_clip`] measures past its
+            // declared span, so its scan has nothing short to notice. The
+            // populated form is pinned where a genuinely short clip builds it
+            // (`a_short_stream_file_crosses_as_the_shared_notice_wording`).
+            short_stream_notices: None,
         }
     }
 
@@ -1342,6 +1391,7 @@ mod tests {
             "measured": true,
             "errors": [a_scan_error_json()],
             "reportOrder": ["00000.MPLS"],
+            "shortStreamNotices": null,
         })
     }
 
@@ -1415,6 +1465,65 @@ mod tests {
         // Going back out it is an explicit null, as an absent disc title is.
         let out = serde_json::to_value(&back).expect("serialize a disc with no order");
         assert_eq!(out.get("reportOrder"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn absent_short_stream_notices_may_be_left_out_of_the_wire_form() {
+        // The key simply missing is what makes the field additive: a `Disc`
+        // built before it existed still crosses, and reads as the scan having
+        // noticed nothing rather than as a malformed object.
+        let mut wire = a_disc_json();
+        wire.as_object_mut().expect("the wire form is an object").remove("shortStreamNotices");
+        let back: Disc = serde_json::from_value(wire).expect("deserialize a disc with no notices");
+        assert_eq!(back, a_disc());
+
+        // Going back out it is an explicit null, as an absent report order is.
+        let out = serde_json::to_value(&back).expect("serialize a disc with no notices");
+        assert_eq!(out.get("shortStreamNotices"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn a_short_stream_file_crosses_as_the_shared_notice_wording() {
+        // A clip demuxed to 500 of its declared 1640 seconds, carrying the
+        // per-stream tally that marks its file as measured.
+        let clip = ClipSummary {
+            packet_seconds: 500.0,
+            streams: vec![a_core_clip_stream()],
+            ..fixtures::clip("00011.M2TS", 1640.0)
+        };
+        let bdrom = BdRom {
+            playlists: vec![fixtures::playlist("00000.MPLS", 1640.0, vec![clip])],
+            ..a_core_bdrom()
+        };
+        let disc = Disc::from_scan(&bdrom, &[], true, &PlaylistFilter::default(), None);
+        // The exact sentence, pinned: the CLI and GUI crates carry the same
+        // format and pin the same bytes, which is what keeps the three
+        // surfaces' wording identical.
+        assert_eq!(
+            disc.short_stream_notices.as_deref(),
+            Some(
+                &["00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s \
+                   missing)"
+                    .to_owned()][..]
+            )
+        );
+
+        // The wire carries the sentences as a plain array, and they survive
+        // the round trip.
+        let wire = serde_json::to_value(&disc).expect("serialize the mirror");
+        assert_eq!(
+            wire.get("shortStreamNotices"),
+            Some(&json!([
+                "00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s \
+                 missing)"
+            ]))
+        );
+        let back: Disc = serde_json::from_value(wire).expect("deserialize the mirror");
+        assert_eq!(back, disc);
+
+        // Rebuilding drops the derived notices and nothing else: the disc
+        // comes back exactly, short clip included.
+        assert_eq!(back.into_scan().0, bdrom);
     }
 
     #[test]
@@ -1683,8 +1792,9 @@ mod tests {
         assert!(!unmeasured.measured);
         assert!(unmeasured.errors.is_empty(), "a scan with no failures mirrors none");
         assert!(unmeasured.report_order.is_none(), "a scan that rendered nothing carries no order");
-        // The three fields that describe the scan rather than the disc are set
-        // aside; everything the disc itself has must match.
+        // The fields that describe the scan rather than the disc are set aside
+        // (`shortStreamNotices` is derived and already `None` on both sides —
+        // nothing here is short); everything the disc itself has must match.
         assert_eq!(
             Disc { measured: true, report_order: a_disc().report_order, ..unmeasured },
             Disc { errors: Vec::new(), ..a_disc() }
@@ -1842,6 +1952,7 @@ mod tests {
         assert_eq!(disc.volume_label, "WASMDISC");
         assert_eq!(disc.size_bytes, 11_146_324);
         assert!(disc.errors.is_empty(), "the fixture is healthy media");
+        assert!(disc.short_stream_notices.is_none(), "healthy media measures its declared span");
 
         let playlist = disc.playlists.first().expect("the fixture has one playlist");
         assert_eq!(names(&disc), ["00000.MPLS"]);
