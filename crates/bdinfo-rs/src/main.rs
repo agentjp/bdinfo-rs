@@ -929,6 +929,12 @@ fn stalled(since_progress: Duration) -> bool {
     since_progress >= STALL_AFTER
 }
 
+/// Whether a wall-clock repaint is due: a whole [`TICK_EVERY`] since the last
+/// paint, inclusive.
+fn tick_due(since_paint: Duration) -> bool {
+    since_paint >= TICK_EVERY
+}
+
 /// Where the display's painted bytes go: stderr in a real run
 /// ([`write_stderr`]), a recorder under test.
 type Ink = Box<dyn FnMut(&str) + Send>;
@@ -1010,22 +1016,11 @@ impl ProgressDisplay {
     /// Observes one scan-progress event, redrawing the display when due.
     fn observe(&mut self, progress: &ScanProgress<'_>) {
         self.evented = Some(Instant::now());
-        // The file name is re-owned only when it changes: this runs once per
-        // read, hundreds of thousands of times on a feature disc, and the
-        // counts are all that move within a file.
-        match &mut self.last {
-            Some(last) if last.file == progress.file => {
-                last.done = progress.done;
-                last.total = progress.total;
-            }
-            _ => {
-                self.last = Some(LastProgress {
-                    file: progress.file.to_owned(),
-                    done: progress.done,
-                    total: progress.total,
-                });
-            }
-        }
+        self.last = Some(LastProgress {
+            file: progress.file.to_owned(),
+            done: progress.done,
+            total: progress.total,
+        });
         let due = progress.done == progress.total
             || self.drawn.is_none_or(|at| at.elapsed() >= DRAW_EVERY);
         if due {
@@ -1047,7 +1042,7 @@ impl ProgressDisplay {
         if !self.styled || self.holding {
             return;
         }
-        if self.drawn.is_none_or(|at| at.elapsed() < TICK_EVERY) {
+        if !self.drawn.is_some_and(|at| tick_due(at.elapsed())) {
             return;
         }
         let Some(last) = self.last.clone() else {
@@ -2586,6 +2581,11 @@ Options:
         assert!(!super::stalled(Duration::from_millis(4_999)));
         assert!(super::stalled(Duration::from_secs(5)));
         assert!(super::stalled(Duration::from_secs(90)));
+        // And the repaint interval, on the same inclusive boundary — a whole
+        // second since the last paint, which no wall clock lands on exactly.
+        assert!(!super::tick_due(Duration::from_millis(999)));
+        assert!(super::tick_due(Duration::from_secs(1)));
+        assert!(super::tick_due(Duration::from_secs(40)));
     }
 
     #[test]
@@ -2725,5 +2725,11 @@ Options:
         let last = repaints.last().expect("a painted line");
         assert!(last.contains("Still reading ["), "{last}");
         assert!(last.contains("00011.M2TS | Elapsed: 00:00:4"), "the clock climbed: {last}");
+
+        // Stopping really stops it: with the clocks pushed back into the past
+        // again, a running ticker would repaint inside its poll interval.
+        quiet_for(&mut super::locked(&display), 80);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(paints(&painted), repaints, "no paint arrives after the ticker is stopped");
     }
 }
