@@ -21,7 +21,7 @@
 //! behind it were unreachable from this harness. The directory is absent when
 //! the seed supplies no seventh section, so the 2D shape is unchanged.
 
-use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode};
+use bdinfo_rs_core::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions};
 use bdinfo_rs_core::report::text;
 use bdinfo_rs_core::vfs::mem::{self, MemDir};
 use libfuzzer_sys::fuzz_target;
@@ -41,7 +41,14 @@ fn build_tree(data: &[u8]) -> MemDir {
 
 fuzz_target!(|data: &[u8]| {
     let root = build_tree(data);
-    if let Ok(report) = BdRom::open_resilient(&root, ScanMode::Full) {
+    let opened = BdRom::open_resilient(
+        &root,
+        ScanMode::Full,
+        ScanOptions::default(),
+        None,
+        ScanObservers::none(),
+    );
+    if let Ok(report) = opened {
         let _ = text::render(&report.bdrom, &report.errors);
     }
 });

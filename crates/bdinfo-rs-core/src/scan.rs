@@ -1,23 +1,21 @@
 //! Opening a disc from a path — the one place folder and `.iso` input diverge.
 //!
-//! [`BdRom::open_resilient_with`] reads through the [`crate::vfs`] seam and
-//! knows nothing about paths. A caller holding one must pick the backend, open
-//! it, and merge that backend's own recorded failures into the scan's — and for
-//! a folder repair the label the scan derived. These functions are that
-//! composition, so every path-driven surface shares one implementation of it —
-//! one pair per backend: the plain form and an `_observed` one for a caller that
-//! also watches the measured tallies build up.
+//! [`BdRom::open_resilient`] reads through the [`crate::vfs`] seam and knows
+//! nothing about paths. A caller holding one must pick the backend, open it,
+//! and merge that backend's own recorded failures into the scan's — and for a
+//! folder repair the label the scan derived. These functions are that
+//! composition, one per backend, so every path-driven surface shares one
+//! implementation of it.
 //! A browser caller has no paths and builds its [`BdDir`](crate::vfs::BdDir)
-//! itself, so it uses none of them.
+//! itself, so it uses neither.
 //!
 //! How deep to read stays the caller's choice: `mode` is passed through
 //! untouched.
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 
-use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport};
+use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions, ScanReport};
 use crate::error::BdError;
 use crate::vfs::fs::FsDir;
 use crate::vfs::udf::source::{PathIso, UdfSource};
@@ -38,33 +36,13 @@ use crate::vfs::volume;
 /// raw read could stall — so the label degrades to the bare drive letter
 /// there.
 ///
-/// `mode`, `options`, `scan_files`, `progress` and `cancel` are
-/// [`BdRom::open_resilient_with`]'s, passed through unchanged.
+/// `mode`, `options`, `scan_files` and `observers` are
+/// [`BdRom::open_resilient`]'s, passed through unchanged.
 ///
 /// # Errors
-/// As [`BdRom::open_resilient_with`]: only the failures with no readable rest
-/// to degrade to.
+/// As [`BdRom::open_resilient`]: only the failures with no readable rest to
+/// degrade to.
 pub fn open_folder(
-    path: &Path,
-    mode: ScanMode,
-    options: ScanOptions,
-    scan_files: Option<&BTreeSet<String>>,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
-) -> Result<ScanReport, BdError> {
-    open_folder_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
-}
-
-/// Opens the Blu-ray folder at `path` like [`open_folder`], observed.
-///
-/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
-/// the form that can carry a measured observer too
-/// ([`ScanObservers::with_measured`]), so a path-driven surface can watch the
-/// tallies build up during the scan.
-///
-/// # Errors
-/// As [`open_folder`].
-pub fn open_folder_observed(
     path: &Path,
     mode: ScanMode,
     options: ScanOptions,
@@ -72,7 +50,7 @@ pub fn open_folder_observed(
     observers: ScanObservers<'_>,
 ) -> Result<ScanReport, BdError> {
     let root = FsDir::new(path);
-    let mut report = BdRom::open_resilient_observed(&root, mode, options, scan_files, observers)?;
+    let mut report = BdRom::open_resilient(&root, mode, options, scan_files, observers)?;
     report.errors.extend(root.take_errors());
     report.bdrom.volume_label =
         volume::resolve_folder_label_after_scan(&report.bdrom.volume_label, &report.errors);
@@ -88,31 +66,13 @@ pub fn open_folder_observed(
 /// scan's own recorded failures **plus** the reader's bad-sector recordings
 /// ([`UdfSource::take_errors`]).
 ///
-/// `mode`, `options`, `scan_files`, `progress` and `cancel` are
-/// [`BdRom::open_resilient_with`]'s, passed through unchanged.
+/// `mode`, `options`, `scan_files` and `observers` are
+/// [`BdRom::open_resilient`]'s, passed through unchanged.
 ///
 /// # Errors
 /// [`BdError::StructureNotFound`] or [`BdError::Io`] when `path` holds no
-/// readable UDF volume, else as [`BdRom::open_resilient_with`].
+/// readable UDF volume, else as [`BdRom::open_resilient`].
 pub fn open_iso(
-    path: &Path,
-    mode: ScanMode,
-    options: ScanOptions,
-    scan_files: Option<&BTreeSet<String>>,
-    progress: &mut dyn FnMut(ScanProgress<'_>),
-    cancel: &AtomicBool,
-) -> Result<ScanReport, BdError> {
-    open_iso_observed(path, mode, options, scan_files, ScanObservers::new(progress, cancel))
-}
-
-/// Opens the Blu-ray `.iso` image at `path` like [`open_iso`], observed.
-///
-/// Takes the progress callback and cancel flag as a [`ScanObservers`] bundle —
-/// the `.iso` twin of [`open_folder_observed`].
-///
-/// # Errors
-/// As [`open_iso`].
-pub fn open_iso_observed(
     path: &Path,
     mode: ScanMode,
     options: ScanOptions,
@@ -120,8 +80,7 @@ pub fn open_iso_observed(
     observers: ScanObservers<'_>,
 ) -> Result<ScanReport, BdError> {
     let source = UdfSource::open_resilient(Box::new(PathIso::new(path)))?;
-    let mut report =
-        BdRom::open_resilient_observed(&source.root(), mode, options, scan_files, observers)?;
+    let mut report = BdRom::open_resilient(&source.root(), mode, options, scan_files, observers)?;
     report.errors.extend(source.take_errors());
     Ok(report)
 }
@@ -131,10 +90,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::{
-        BdError, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport, open_folder,
-        open_folder_observed, open_iso, open_iso_observed,
-    };
+    use super::{BdError, ScanMode, ScanObservers, ScanOptions, ScanReport, open_folder, open_iso};
+    use crate::bdrom::disc::ScanProgress;
     use crate::bdrom::measured::MeasuredSnapshot;
 
     /// The committed real-disc fixtures, one crate over: `BigBuckBunny` (a BDMV
@@ -173,14 +130,17 @@ mod tests {
     /// and [`ScanMode::Metadata`] reads no packets to report.
     fn folder(path: &Path, mode: ScanMode) -> Result<ScanReport, BdError> {
         let mut reported = 0_usize;
-        let report = open_folder(
-            path,
-            mode,
-            ScanOptions::default(),
-            None,
-            &mut |_| reported = reported.saturating_add(1),
-            &AtomicBool::new(false),
-        );
+        let cancel = AtomicBool::new(false);
+        let report = {
+            let mut count = |_: ScanProgress<'_>| reported = reported.saturating_add(1);
+            open_folder(
+                path,
+                mode,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut count, &cancel),
+            )
+        };
         assert_eq!(reported != 0, report.is_ok() && mode != ScanMode::Metadata);
         report
     }
@@ -188,14 +148,17 @@ mod tests {
     /// [`folder`]'s `.iso` twin.
     fn iso(path: &Path, mode: ScanMode) -> Result<ScanReport, BdError> {
         let mut reported = 0_usize;
-        let report = open_iso(
-            path,
-            mode,
-            ScanOptions::default(),
-            None,
-            &mut |_| reported = reported.saturating_add(1),
-            &AtomicBool::new(false),
-        );
+        let cancel = AtomicBool::new(false);
+        let report = {
+            let mut count = |_: ScanProgress<'_>| reported = reported.saturating_add(1);
+            open_iso(
+                path,
+                mode,
+                ScanOptions::default(),
+                None,
+                ScanObservers::new(&mut count, &cancel),
+            )
+        };
         assert_eq!(reported != 0, report.is_ok() && mode != ScanMode::Metadata);
         report
     }
@@ -218,14 +181,14 @@ mod tests {
 
     #[test]
     fn an_observed_folder_open_streams_the_measured_tallies() {
-        // The bundle form is what a live display opens through — the same scan
-        // as `open_folder`, plus the snapshots.
+        // A measured observer is what a live display opens through — the same
+        // scan the other folder tests run, plus the snapshots.
         let mut snapshots: Vec<MeasuredSnapshot> = Vec::new();
         let cancel = AtomicBool::new(false);
         let mut quiet = |_: ScanProgress<'_>| {};
         let report = {
             let mut watch = |snapshot| snapshots.push(snapshot);
-            open_folder_observed(
+            open_folder(
                 &fixture("BigBuckBunny"),
                 ScanMode::Full,
                 ScanOptions::default(),
@@ -245,7 +208,7 @@ mod tests {
         let mut quiet = |_: ScanProgress<'_>| {};
         let report = {
             let mut watch = |snapshot| snapshots.push(snapshot);
-            open_iso_observed(
+            open_iso(
                 &fixture("BigBuckBunny.iso"),
                 ScanMode::Full,
                 ScanOptions::default(),

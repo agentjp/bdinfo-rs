@@ -366,14 +366,13 @@ mod tests {
         let read = |letter: char| Some(format!("VOL{letter}"));
         // An io failure degrades a drive root straight to the letter, whatever
         // stage recorded it — a stream read is what a damaged disc trips first,
-        // but a metadata-only scan never reaches that stage at all.
-        for stage in [
-            ScanStage::Discovery,
-            ScanStage::ClipInfo,
-            ScanStage::Playlist,
-            ScanStage::StreamFile,
-            ScanStage::SectorRead,
-        ] {
+        // but a metadata-only scan never reaches that stage at all. These are
+        // the four a folder scan can record; `ScanStage::SectorRead` comes
+        // from the UDF `.iso` reader, and an `.iso` carries a genuine volume
+        // label that never reaches this repair.
+        for stage in
+            [ScanStage::Discovery, ScanStage::ClipInfo, ScanStage::Playlist, ScanStage::StreamFile]
+        {
             assert_eq!(resolve_after_scan_with(r"J:\", &[io_error_at(stage)], read), "J");
         }
         // A parse failure is no evidence against the device, so it leaves the
