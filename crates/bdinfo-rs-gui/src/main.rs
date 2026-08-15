@@ -3092,6 +3092,9 @@ fn resizable_header<'a>(
 /// [`ui::row_surface`] container wrapped in a `mouse_area`, so hover lifts the
 /// **entire** row as a single band (no checkbox-vs-cells seam) and the **active**
 /// row carries the amber wash. `hovered` is whether the cursor is over this row.
+///
+/// `editable` gates the checkbox alone — the cells stay clickable while a scan
+/// runs, so the master-detail panes can follow a different playlist mid-scan.
 fn table_row<'a>(
     p: Palette,
     row_data: &SelectableRow,
@@ -3148,7 +3151,10 @@ fn table_row<'a>(
             .height(Length::Fill)
             .padding(0.0)
             .style(ui::flat_button(p))
-            .on_press_maybe(editable.then_some(Message::RowActivated(index)));
+            // Not gated on `editable`: the highlight follows the click during a
+            // scan too, so the panes can be re-targeted while it runs
+            // ([`Flow::set_active`]). Only the checkbox above freezes.
+            .on_press(Message::RowActivated(index));
 
     let row = Row::new()
         .width(Length::Fill)
@@ -4306,6 +4312,110 @@ mod interaction {
         // The toggle re-labels; clicking it clears the selection.
         click(&mut app, "Unselect All");
         assert_eq!(app.flow.selected_count(), 0);
+    }
+
+    #[test]
+    fn a_row_click_during_a_scan_moves_the_highlight_and_the_panes() {
+        use bdinfo_rs_gui::live::LivePlaylist;
+
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates"); // nothing checked — scan-all
+        assert_eq!(app.flow.stage(), Stage::Scanning);
+        let cells = |name: &str, bytes: u64| {
+            (
+                name.to_owned(),
+                LivePlaylist { measured_bytes: bytes, clips: vec![bytes], streams: Vec::new() },
+            )
+        };
+        let _ = app.update(Message::Measured {
+            generation: app.generation,
+            playlists: vec![cells("00000.MPLS", 111_000), cells("00001.MPLS", 222_000)],
+        });
+        assert_eq!(app.flow.active_index(), Some(0));
+
+        // The cells button is live mid-scan, so the click dispatches — and the
+        // panes re-target to the newly active playlist's live count.
+        let messages = click(&mut app, "00001.MPLS");
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::RowActivated(1))),
+            "the row stays clickable while the scan runs: {messages:?}"
+        );
+        assert_eq!(app.flow.stage(), Stage::Scanning, "the scan runs on");
+        assert_eq!(app.flow.active_index(), Some(1));
+        assert_eq!(
+            app.flow.stream_file_rows().first().map(|row| row.measured.clone()),
+            Some("222,000".to_owned())
+        );
+        // The checkbox beside it is still frozen: nothing the scan set is
+        // derived from can move under the running scan.
+        assert_eq!(app.flow.selected_count(), 0);
+        let _ = app.update(Message::RowToggled(1));
+        assert_eq!(app.flow.selected_count(), 0, "the checkbox stays locked");
+    }
+
+    #[test]
+    fn cancelling_a_scan_keeps_the_values_it_measured() {
+        use bdinfo_rs_gui::live::LivePlaylist;
+
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Measured {
+            generation: app.generation,
+            playlists: vec![(
+                "00000.MPLS".to_owned(),
+                LivePlaylist {
+                    measured_bytes: 1_234_560,
+                    clips: vec![1_234_560],
+                    ..LivePlaylist::default()
+                },
+            )],
+        });
+        assert!(sees(&app, "1,234,560"));
+
+        click(&mut app, "Cancel");
+        assert_eq!(app.flow.stage(), Stage::Listed);
+        // What the partial scan gathered is still on screen and in the pane.
+        assert!(sees(&app, "1,234,560"), "the cancelled scan's count stays on the table");
+        assert_eq!(
+            app.flow.stream_file_rows().first().map(|row| row.measured.clone()),
+            Some("1,234,560".to_owned())
+        );
+        // Starting the next scan clears them — that pass counts from zero.
+        click(&mut app, "Scan Bitrates");
+        assert!(!sees(&app, "1,234,560"));
+    }
+
+    #[test]
+    fn a_stalled_scans_remaining_estimate_climbs_with_the_clock() {
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Progress {
+            generation: app.generation,
+            file: "A.M2TS".to_owned(),
+            done: 1,
+            total: 2,
+        });
+        let remaining = |app: &App| {
+            app.flow.progress_view().map(bdinfo_rs_gui::progress::ProgressModel::remaining_hms)
+        };
+        // Ticks arrive with no progress event in between (a read stuck in
+        // drive-firmware retries emits none): each one re-derives a longer
+        // estimate from the cumulative average, never the frozen last value.
+        let mut previous = String::new();
+        for seconds in [30_u64, 60, 120] {
+            app.scan_start = Instant::now().checked_sub(Duration::from_secs(seconds));
+            app.last_progress = Instant::now().checked_sub(Duration::from_secs(seconds));
+            let _ = app.update(Message::Tick);
+            let now = remaining(&app).expect("the model survives the tick");
+            assert!(
+                now > previous,
+                "the estimate must climb at {seconds} s: {now} after {previous}"
+            );
+            previous = now;
+        }
+        // Half the bytes read in 120 s projects 120 s more.
+        assert_eq!(previous, "00:02:00");
+        assert!(app.flow.scan_stalled(), "and the quiet is flagged as a stall");
     }
 
     #[test]

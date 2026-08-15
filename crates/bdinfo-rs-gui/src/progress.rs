@@ -94,6 +94,13 @@ pub fn measure_due(since_last: Option<Duration>) -> bool {
 pub struct ProgressModel {
     /// The stream file currently being demuxed (the CLI line's middle field).
     pub(crate) file: String,
+    /// The bytes read as of the last progress event — retained so a
+    /// wall-clock tick can re-derive the estimate
+    /// ([`set_elapsed`](Self::set_elapsed)).
+    done: u64,
+    /// The bytes the pass will read, as of the last progress event — the other
+    /// half of that re-derivation.
+    total: u64,
     /// Completion percent (0–100; 100 when there is nothing to read).
     pub(crate) percent: u64,
     /// Whole seconds elapsed since the scan started.
@@ -107,16 +114,22 @@ impl ProgressModel {
     /// and the wall time elapsed since the scan started.
     pub(crate) fn compute(file: String, done: u64, total: u64, elapsed: Duration) -> Self {
         let (percent, elapsed_seconds, remaining_seconds) = progress_stats(done, total, elapsed);
-        Self { file, percent, elapsed_seconds, remaining_seconds }
+        Self { file, done, total, percent, elapsed_seconds, remaining_seconds }
     }
 
-    /// Re-stamps the elapsed wall time from the clock, leaving `file`,
-    /// `percent` and `remaining_seconds` at their last computed values — the
-    /// remaining estimate is meaningful only against real progress, so a
-    /// wall-clock tick may never touch it. Whole seconds, truncated, like
-    /// every displayed time.
-    pub(crate) const fn set_elapsed(&mut self, elapsed: Duration) {
-        self.elapsed_seconds = elapsed.as_secs();
+    /// Re-stamps the wall clock, re-deriving the estimate from the retained
+    /// byte counts at the new elapsed time — the same cumulative-average math
+    /// [`compute`](Self::compute) ran, so a tick during a stall makes the
+    /// estimate CLIMB (more time, no more bytes) instead of holding the value a
+    /// now-stale event left. Classic `BDInfo` recomputes its remaining time on
+    /// every 1 Hz tick the same way. `file` and `percent` cannot move without a
+    /// progress event and do not. Whole seconds, truncated, like every
+    /// displayed time.
+    pub(crate) fn set_elapsed(&mut self, elapsed: Duration) {
+        let (_, elapsed_seconds, remaining_seconds) =
+            progress_stats(self.done, self.total, elapsed);
+        self.elapsed_seconds = elapsed_seconds;
+        self.remaining_seconds = remaining_seconds;
     }
 
     /// The bar fill, a fraction in `0.0..=1.0` (the progress bar's value over a
@@ -189,16 +202,49 @@ mod tests {
     }
 
     #[test]
-    fn set_elapsed_restamps_only_the_wall_clock() {
+    fn set_elapsed_restamps_the_clock_and_re_derives_the_estimate() {
         let mut model =
             ProgressModel::compute("00000.M2TS".to_owned(), 50, 200, Duration::from_secs(4));
-        // 65.999 s truncates to 00:01:05; percent, remaining and the file
-        // hold their last computed values.
+        // 65.999 s truncates to 00:01:05, and the estimate re-derives from the
+        // retained counts at that time: 65.999 s for a quarter of the bytes
+        // projects 3 * 65.999 s = 00:03:17 still to read. The file and the
+        // percent cannot move without a progress event.
         model.set_elapsed(Duration::from_millis(65_999));
         assert_eq!(model.elapsed_hms(), "00:01:05");
         assert_eq!(model.percent, 25);
-        assert_eq!(model.remaining_hms(), "00:00:12");
+        assert_eq!(model.remaining_hms(), "00:03:17");
         assert_eq!(model.file(), "00000.M2TS");
+    }
+
+    #[test]
+    fn the_estimate_climbs_while_a_read_is_stuck() {
+        // No progress event arrives, so `done` stands still while the clock
+        // runs: every tick projects a longer remaining time, never the frozen
+        // value the last event computed.
+        let mut model =
+            ProgressModel::compute("00000.M2TS".to_owned(), 50, 200, Duration::from_secs(4));
+        let mut previous = model.remaining_seconds;
+        assert_eq!(previous, 12);
+        for seconds in 5..=10 {
+            model.set_elapsed(Duration::from_secs(seconds));
+            assert!(
+                model.remaining_seconds > previous,
+                "the estimate must climb at {seconds} s: {} is not past {previous}",
+                model.remaining_seconds
+            );
+            previous = model.remaining_seconds;
+        }
+    }
+
+    #[test]
+    fn a_tick_before_any_bytes_estimates_nothing() {
+        // `done == 0` gives the cumulative average nothing to extrapolate from,
+        // so the readout stays at zero however long the clock runs — the same
+        // blind window `progress_stats` defines for the first event.
+        let mut model = ProgressModel::compute("00000.M2TS".to_owned(), 0, 200, Duration::ZERO);
+        model.set_elapsed(Duration::from_secs(30));
+        assert_eq!(model.elapsed_hms(), "00:00:30");
+        assert_eq!(model.remaining_hms(), "00:00:00");
     }
 
     #[test]

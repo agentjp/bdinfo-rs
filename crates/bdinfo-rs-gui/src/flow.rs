@@ -96,6 +96,21 @@ struct Listing {
     /// A failed measured scan returns here with its message — a banner over the
     /// still-usable table, so the user can re-select and retry.
     error: Option<String>,
+    /// The measured cells the last scan reported, by playlist name — what the
+    /// table's `Measured Bytes` column and the two panes show over the
+    /// summaries ([`crate::live`]). Filled by [`Flow::measured`] while a scan
+    /// runs and **kept** when that scan ends without summaries (a cancel, a
+    /// failure), so the values a partial scan gathered stay on the grids, as
+    /// classic `BDInfo`'s do. Cleared when a scan starts (a fresh pass restarts
+    /// the tallies) and when a finished scan's summaries take over
+    /// ([`apply_measured`](Self::apply_measured)). Empty until the first
+    /// snapshot, so an unreported playlist keeps showing the summaries' zeros.
+    ///
+    /// **Cells only.** Nothing here reaches the rows, their order or the
+    /// rendered report: a cancelled scan leaves the retained structural
+    /// (zero-bitrate) report exactly as it was, which is what the report path
+    /// then saves.
+    live: BTreeMap<String, LivePlaylist>,
     /// The rendered structural (zero-bitrate) report over the playlists a scan
     /// would cover now — `BDInfo`'s pre-scan "View Report", stored so the view
     /// borrows it per rebuild instead of re-rendering per frame. Kept fresh by
@@ -124,6 +139,7 @@ impl Listing {
             show_hidden,
             warnings: structural.warnings,
             error: None,
+            live: BTreeMap::new(),
             structural_report: String::new(),
         };
         listing.refresh_report();
@@ -264,6 +280,10 @@ impl Listing {
     /// re-attached by playlist NAME, so they survive any reordering. The
     /// disc-level facts are unchanged by measurement, so only `bdrom.playlists`
     /// is swapped.
+    ///
+    /// The live cells are a display of these same numbers on their way here, so
+    /// they are dropped: the summaries are the finished truth for every row,
+    /// including the ones the last snapshot never covered.
     fn apply_measured(&mut self, playlists: Vec<PlaylistSummary>) {
         let checked: BTreeSet<String> = self.selected_names().into_iter().collect();
         let active_name = self.rows.get(self.active).map(|row| row.name.clone());
@@ -278,6 +298,7 @@ impl Listing {
         self.show_hidden = model::any_hidden(&rows);
         self.bdrom.playlists = playlists;
         self.rows = rows;
+        self.live.clear();
         // The retained structural render must follow the measured disc — it
         // is what a LATER scan serves while in flight.
         self.refresh_report();
@@ -408,14 +429,6 @@ enum Inner {
         /// every applied progress event. The status line then reads "still
         /// reading" instead of implying normal progress.
         stalled: bool,
-        /// The measured cells the scan has reported so far, by playlist name —
-        /// what the table's `Measured Bytes` column and the two panes show
-        /// while the scan runs ([`crate::live`]). Merged per playlist by
-        /// [`Flow::measured`] and read only here: the rows, their order and the
-        /// retained report never see it, and the finished scan's summaries
-        /// replace it rather than adding to it. Empty until the first snapshot,
-        /// so an unreported playlist keeps showing the summaries' zeros.
-        live: BTreeMap<String, LivePlaylist>,
     },
     Reported {
         listing: Listing,
@@ -544,8 +557,14 @@ impl Flow {
     /// Sets the active (highlighted) row — the playlist whose clips and streams
     /// the master-detail panes show. A row click drives this; it is independent
     /// of the scan-selection checkboxes. An out-of-range index is ignored.
+    ///
+    /// Live **during a scan** too ([`Stage::Scanning`], unlike every selection
+    /// edit): classic `BDInfo` never disables its playlist list, and the panes
+    /// re-target to the clicked row's live cells on the next repaint. Only the
+    /// highlight moves — the row set, the order and the checked set stay frozen
+    /// under the running scan, so the scan set cannot change under it.
     pub const fn set_active(&mut self, index: usize) {
-        if let Some(listing) = self.editable_listing_mut()
+        if let Some(listing) = self.any_listing_mut()
             && index < listing.rows.len()
         {
             listing.active = index;
@@ -587,6 +606,10 @@ impl Flow {
     /// state that has at least one listed playlist (the same gate as
     /// [`Flow::scan_request`]); the selection may be empty (scan-all). No-op
     /// otherwise.
+    ///
+    /// A new pass restarts the tallies from zero, so any live cells an earlier
+    /// cancelled or failed scan left on the grids are cleared here rather than
+    /// left to be overwritten playlist by playlist.
     #[must_use]
     pub fn start_scanning(self, generation: u64) -> Self {
         match self.inner {
@@ -594,6 +617,7 @@ impl Flow {
                 if !listing.rows.is_empty() =>
             {
                 listing.error = None;
+                listing.live.clear();
                 let scanned = listing.scan_names();
                 Self {
                     inner: Inner::Scanning {
@@ -602,7 +626,6 @@ impl Flow {
                         progress: None,
                         scanned,
                         stalled: false,
-                        live: BTreeMap::new(),
                     },
                 }
             }
@@ -645,11 +668,14 @@ impl Flow {
     /// playlist no snapshot has covered yet keeps showing the (zero) summary
     /// values, and the scan's completion ([`Flow::finished`]) replaces every
     /// cell with the measured summaries.
+    ///
+    /// The cells live on the [`Listing`], not on the scan, so a cancel keeps
+    /// what the partial scan gathered on the grids.
     pub fn measured(&mut self, generation: u64, playlists: Vec<(String, LivePlaylist)>) {
-        if let Inner::Scanning { generation: active, live, .. } = &mut self.inner
+        if let Inner::Scanning { generation: active, listing, .. } = &mut self.inner
             && *active == generation
         {
-            live.extend(playlists);
+            listing.live.extend(playlists);
         }
     }
 
@@ -674,8 +700,10 @@ impl Flow {
     /// event arrives (a read stuck in drive-firmware retries emits none), and
     /// `since_progress` (since the last progress event) drives the stall flag
     /// (its fixed threshold lives in [`crate::progress`], beside the model's
-    /// other display constants). The remaining estimate is untouched —
-    /// it is meaningful only against real progress.
+    /// other display constants). The re-stamp re-derives the remaining estimate
+    /// from the same clock ([`ProgressModel::set_elapsed`]), so it climbs
+    /// through a stall instead of holding a value the stuck read has already
+    /// invalidated.
     ///
     /// Both in-flight stages take it, on identical terms: the measured scan
     /// ([`Stage::Scanning`]) and the structural listing ([`Stage::Listing`]),
@@ -723,6 +751,8 @@ impl Flow {
     /// The measured scan failed — applied only when `generation` matches; returns
     /// to [`Stage::Listed`] with the message as a banner over the still-usable
     /// table, so the user can retry (mirroring the CLI's resilient posture).
+    /// The cells it managed to measure stay on the grids, like a cancel's
+    /// ([`Flow::cancel`]).
     #[must_use]
     pub fn scan_failed(self, generation: u64, message: String) -> Self {
         match self.inner {
@@ -746,6 +776,12 @@ impl Flow {
     /// `listed` (and any straggling progress) drop it. Starting a new scan
     /// immediately is safe: it gets a fresh generation and its own cancel
     /// flag, and the old worker only ever reads the disc.
+    ///
+    /// The measured cells the partial scan gathered stay on the grids, as
+    /// classic `BDInfo`'s do — they live on the listing, so returning it is
+    /// enough. The report is untouched by them: what "View Report" and Save
+    /// serve after a cancel is the same structural (zero-bitrate) render as
+    /// before the scan, which classic likewise leaves unmarked as partial.
     #[must_use]
     pub fn cancel(self) -> Self {
         match self.inner {
@@ -851,8 +887,9 @@ impl Flow {
     /// The "Stream Files" pane rows for the active playlist (empty when none),
     /// their size cells rendered under the human-readable toggle.
     ///
-    /// While a scan is reporting that playlist, the measured column carries its
-    /// sizes as of the last snapshot.
+    /// Once a scan has reported that playlist, the measured column carries its
+    /// sizes as of the last snapshot — ticking while the scan runs, and holding
+    /// there if it is cancelled.
     #[must_use]
     pub fn stream_file_rows(&self) -> Vec<StreamFileRow> {
         self.any_listing()
@@ -902,9 +939,10 @@ impl Flow {
 
     /// The selectable table rows (empty unless a disc is loaded).
     ///
-    /// A row whose playlist a scan in flight has reported shows that scan's
-    /// running `Measured Bytes` count in place of the summary's; every other
-    /// cell, and the row order, is the same one a settled table renders.
+    /// A row whose playlist the last scan reported shows that scan's
+    /// `Measured Bytes` count in place of the summary's — while it runs, and
+    /// afterwards if it was cancelled; every other cell, and the row order, is
+    /// the same one a settled table renders.
     #[must_use]
     pub fn table(&self) -> Vec<SelectableRow> {
         let Some(listing) = self.any_listing() else { return Vec::new() };
@@ -950,8 +988,9 @@ impl Flow {
         self.any_listing().is_some_and(|listing| listing.reveal.is_some())
     }
 
-    /// Whether the table checkboxes + selection controls are live (the table is
-    /// frozen while a scan is in flight).
+    /// Whether the table checkboxes + selection controls are live (the scan set
+    /// is frozen while a scan is in flight). The active-row highlight is not
+    /// gated on this — it stays live mid-scan ([`Flow::set_active`]).
     #[must_use]
     pub const fn editable(&self) -> bool {
         matches!(self.inner, Inner::Listed(_) | Inner::Reported { .. })
@@ -1105,13 +1144,28 @@ impl Flow {
         }
     }
 
-    /// The named playlist's cells as the in-flight scan last reported them, or
-    /// `None` outside a scan and for a playlist no snapshot has covered yet.
-    /// Only [`Stage::Scanning`] answers: a settled table's numbers come from
-    /// the summaries themselves.
+    /// The named playlist's cells as the last scan reported them, or `None` for
+    /// a playlist no snapshot has covered.
+    ///
+    /// Looked up by playlist NAME, so a row that moved (a sort applied before
+    /// the scan, a re-derived row set) still reads its own numbers and an
+    /// unmatched name reads none — the same identity guard the panes' per-clip
+    /// and per-stream lookups use ([`crate::live`]). Answers in every
+    /// disc-loaded stage: a scan in flight fills the map, a cancelled or failed
+    /// scan leaves its partial cells there, and a finished one empties it so
+    /// the measured summaries show through.
     fn live_playlist(&self, name: &str) -> Option<&LivePlaylist> {
-        match &self.inner {
-            Inner::Scanning { live, .. } => live.get(name),
+        self.any_listing().and_then(|listing| listing.live.get(name))
+    }
+
+    /// The mutable listing behind any disc-loaded state (Listed / Scanning /
+    /// Reported) — the write side of [`any_listing`](Self::any_listing), for
+    /// the one mutation a running scan allows ([`set_active`](Self::set_active)).
+    const fn any_listing_mut(&mut self) -> Option<&mut Listing> {
+        match &mut self.inner {
+            Inner::Listed(listing)
+            | Inner::Scanning { listing, .. }
+            | Inner::Reported { listing, .. } => Some(listing),
             _ => None,
         }
     }
@@ -1519,10 +1573,12 @@ mod tests {
         flow.tick(Duration::from_secs(65), Duration::from_secs(2));
         let after = flow.progress_view().expect("the model survives the tick");
         assert_eq!(after.elapsed_hms(), "00:01:05");
-        // …and only elapsed follows: the percent, the remaining estimate and
-        // the file hold, and 2 s of quiet is not yet a stall.
+        // …and the estimate follows it: half the bytes in 65 s projects 65 s
+        // more, so the readout climbs instead of holding the 4 s the last
+        // event computed. The percent and the file cannot move without a
+        // progress event, and 2 s of quiet is not yet a stall.
         assert_eq!(after.percent, 50);
-        assert_eq!(after.remaining_hms(), "00:00:04");
+        assert_eq!(after.remaining_hms(), "00:01:05");
         assert_eq!(after.file(), "A.M2TS");
         assert!(!flow.scan_stalled());
     }
@@ -1924,6 +1980,65 @@ mod tests {
     }
 
     #[test]
+    fn the_highlight_moves_during_a_scan_and_the_panes_follow_it() {
+        // Both playlists present a stream, so each has a live rate of its own
+        // for the panes to show.
+        let mut structural = structural();
+        for (index, playlist) in structural.bdrom.playlists.iter_mut().enumerate() {
+            playlist.streams = vec![stream_summary(Pid::new(0x1011), 0)];
+            playlist.clips = fixtures::clips(&[if index == 0 { "A.M2TS" } else { "B.M2TS" }], 50.0);
+        }
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        let mut flow = flow.start_scanning(1);
+        flow.measured(
+            1,
+            vec![
+                live_cells("00000.MPLS", 960, &[960], 19_000),
+                live_cells("00001.MPLS", 480, &[480], 7_000),
+            ],
+        );
+        assert_eq!(flow.active_index(), Some(0));
+        assert_eq!(pane_sizes(&flow), ["960"]);
+        assert_eq!(pane_rates(&flow), ["19 kbps"]);
+
+        // The click lands mid-scan: the highlight moves and both panes
+        // re-target to the newly active playlist's own live cells.
+        flow.set_active(1);
+        assert_eq!(flow.stage(), Stage::Scanning, "the scan runs on");
+        assert_eq!(flow.active_index(), Some(1));
+        assert_eq!(flow.active_playlist_name(), Some("00001.MPLS".to_owned()));
+        assert_eq!(pane_sizes(&flow), ["480"]);
+        assert_eq!(pane_rates(&flow), ["7 kbps"]);
+        // A later snapshot ticks the row the user moved to, not the one the
+        // scan started on.
+        flow.measured(1, vec![live_cells("00001.MPLS", 960, &[960], 9_000)]);
+        assert_eq!(pane_sizes(&flow), ["960"]);
+        assert_eq!(pane_rates(&flow), ["9 kbps"]);
+        // An out-of-range index is still ignored, mid-scan as anywhere.
+        flow.set_active(9);
+        assert_eq!(flow.active_index(), Some(1));
+    }
+
+    #[test]
+    fn the_scan_set_stays_frozen_while_the_highlight_moves() {
+        // Only the highlight is live mid-scan: every edit that could change
+        // WHAT is scanned, or which row is which, is still refused.
+        let mut flow = listed3();
+        flow.toggle(0);
+        let mut flow = flow.start_scanning(1);
+        assert!(!flow.editable());
+        flow.set_active(2);
+        assert_eq!(flow.active_index(), Some(2), "the highlight moves");
+        flow.toggle(1);
+        flow.select_all();
+        assert_eq!(flow.selected_count(), 1, "the checked set is frozen");
+        flow.sort_by(SortColumn::Length);
+        assert_eq!(flow.sort(), None, "the row order is frozen");
+        assert_eq!(row_names(&flow), ["00000.MPLS", "00001.MPLS", "00002.MPLS"]);
+    }
+
+    #[test]
     fn measured_cells_reach_only_the_scan_they_belong_to() {
         // A snapshot from a superseded scan is dropped, like a stale progress
         // event…
@@ -1961,10 +2076,57 @@ mod tests {
             .packet_count = 1000; // 1000 * 192 = 192,000 bytes
         let done = flow.clone().finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
         assert_eq!(measured_cells(&done), ["192,000", "0"]);
-        // Cancelling ends the scan without measured summaries to show, so the
-        // table returns to the pre-scan zeros rather than keeping the numbers
-        // of a scan that never completed.
-        assert_eq!(measured_cells(&flow.cancel()), ["0", "0"]);
+        // Cancelling has no summaries to swap in, so the partial cells stay
+        // exactly where the last snapshot left them — what the scan gathered
+        // is what the user keeps.
+        assert_eq!(measured_cells(&flow.cancel()), ["960", "0"]);
+    }
+
+    #[test]
+    fn a_cancelled_scan_keeps_its_partial_values_on_the_grids() {
+        // Two clips and one presented stream on the active playlist, so the
+        // table cell and both panes have a partial value to keep.
+        let mut structural = structural();
+        let feature = structural.bdrom.playlists.first_mut().expect("the feature playlist");
+        feature.clips = fixtures::clips(&["A.M2TS", "B.M2TS"], 50.0);
+        feature.streams = vec![stream_summary(Pid::new(0x1011), 0)];
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        let mut flow = flow.start_scanning(1);
+        flow.measured(1, vec![live_cells("00000.MPLS", 960, &[768, 192], 19_000)]);
+
+        let report = flow.report().expect("the pre-scan report").to_owned();
+        let flow = flow.cancel();
+
+        assert_eq!(flow.stage(), Stage::Listed);
+        assert_eq!(measured_cells(&flow), ["960", "0"], "the table keeps the partial count");
+        assert_eq!(pane_sizes(&flow), ["768", "192"], "the Stream Files pane keeps its sizes");
+        assert_eq!(pane_rates(&flow), ["19 kbps"], "the Streams pane keeps its rates");
+        // The report is untouched by the partial cells: a cancel still serves
+        // the structural (zero-bitrate) render, unmarked as partial.
+        assert_eq!(flow.report(), Some(report.as_str()));
+        assert!(flow.editable(), "the table is usable again");
+    }
+
+    #[test]
+    fn a_new_scan_clears_the_partial_cells_of_the_cancelled_one() {
+        // A fresh pass restarts the tallies, so last attempt's numbers go
+        // rather than lingering on rows the new pass has not reached.
+        let mut flow = listed().start_scanning(1);
+        flow.measured(1, vec![live_cells("00000.MPLS", 960, &[960], 19_000)]);
+        let flow = flow.cancel().start_scanning(2);
+        assert_eq!(measured_cells(&flow), ["0", "0"]);
+    }
+
+    #[test]
+    fn a_failed_scan_keeps_its_partial_values_too() {
+        // The banner road ends the scan without summaries as well; what it
+        // measured before the failure stays visible for the retry.
+        let mut flow = listed().start_scanning(1);
+        flow.measured(1, vec![live_cells("00000.MPLS", 960, &[960], 19_000)]);
+        let flow = flow.scan_failed(1, "disc vanished".to_owned());
+        assert_eq!(measured_cells(&flow), ["960", "0"]);
+        assert_eq!(flow.error_message(), Some("disc vanished"));
     }
 
     #[test]
