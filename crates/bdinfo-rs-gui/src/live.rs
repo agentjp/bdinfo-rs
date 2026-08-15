@@ -5,10 +5,10 @@
 //! and is handed an owned [`MeasuredSnapshot`] as each demuxed chunk lands. The
 //! worker thread turns each one into the per-playlist [`updates`] below and
 //! sends them to the shell, which merges them into the state the playlist table
-//! and the two panes read while `Stage::Scanning`
-//! ([`crate::flow`]). Only the cells: nothing here changes which rows exist,
-//! their order, or the rendered report — the finished scan's summaries replace
-//! these values wholesale.
+//! and the two panes read ([`crate::flow`]). Only the cells: nothing here
+//! changes which rows exist, their order, or the rendered report — the finished
+//! scan's summaries replace these values wholesale, and a scan that ends
+//! without summaries (a cancel, a failure) leaves them showing.
 //!
 //! A snapshot covers only the playlists that play the stream file it was taken
 //! over, so the merge is per playlist and every other playlist keeps its last
