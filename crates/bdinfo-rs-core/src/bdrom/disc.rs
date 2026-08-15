@@ -39,7 +39,7 @@ use crate::discovery::{BdFileKind, BdmvDir};
 use crate::error::{BdError, ScanError, ScanStage};
 use crate::index;
 use crate::primitives::Pid;
-use crate::stream::{TsAudioMode, TsFrameRate, TsStream, TsStreamType};
+use crate::stream::{TsAudioMode, TsFrameRate, TsStream, TsStreamType, TsVideoStream};
 use crate::vfs::{self, BdDir, BdFile, SearchOption};
 
 /// The XML namespace of the BDMV disc-info metadata (`bdmt_*.xml`), bound to the
@@ -814,6 +814,8 @@ struct ClipMeta<'a> {
     length: f64,
     /// Whether the clip's `*.m2ts` exists on the disc.
     stream_file_present: bool,
+    /// Whether the clip's interleaved 3D `*.ssif` exists on the disc.
+    interleaved_file_present: bool,
 }
 
 /// How deep an [`open`](BdRom::open) reads the disc — the three-way choice that
@@ -876,13 +878,41 @@ pub struct ScanOptions {
     /// ([`BdRom::open`]) scan aborts on the first error regardless, and a
     /// stream file that fails to open has no demux state to keep.
     pub keep_partial: bool,
+    /// Whether a [`ScanMode::Full`] scan skips the bounded quick codec pass
+    /// and runs the measurement pass alone (`false` by default).
+    ///
+    /// For a caller whose earlier [`ScanMode::Codecs`] open already read the
+    /// codec detail, the quick pass only re-reads the same file heads — on
+    /// damaged media each such read can stall for minutes. Skipped, the scan
+    /// resolves each playlist's presented streams from the clip info alone
+    /// and back-fills the scanned codec detail from the measurement pass as
+    /// it demuxes, so the disc summaries come out as a two-pass scan's would
+    /// — with one divergence: a stream file the measurement pass failed on
+    /// and dropped ([`keep_partial`](Self::keep_partial) off) has no quick
+    /// detail to fall back to, so its streams keep clip-info detail only.
+    /// Ignored by [`ScanMode::Codecs`], whose whole scan *is* the quick pass.
+    pub skip_quick_pass: bool,
+    /// A prior open's AACS-encryption verdict to reuse as
+    /// [`BdRom::is_aacs_encrypted`], skipping this open's stream head probe;
+    /// `None` (the default) probes.
+    ///
+    /// The probe opens and samples the heads of the two largest `*.m2ts`
+    /// files, so a caller opening the same disc repeatedly (a listing open
+    /// followed by a measured one) re-pays it on every open — on damaged
+    /// media each probe read can stall for minutes. The reused verdict must
+    /// come from a probe of the same disc: it is recorded verbatim, not
+    /// verified.
+    pub aacs_encrypted: Option<bool>,
 }
 
 impl Default for ScanOptions {
-    /// Partial stream scans are kept; see
-    /// [`keep_partial`](Self::keep_partial).
+    /// Partial stream scans are kept, the quick pass runs, and the AACS
+    /// probe decides the encryption verdict; see
+    /// [`keep_partial`](Self::keep_partial),
+    /// [`skip_quick_pass`](Self::skip_quick_pass) and
+    /// [`aacs_encrypted`](Self::aacs_encrypted).
     fn default() -> Self {
-        Self { keep_partial: true }
+        Self { keep_partial: true, skip_quick_pass: false, aacs_encrypted: None }
     }
 }
 
@@ -931,10 +961,12 @@ impl BdRom {
     /// their metadata-only summaries (zero measured rates). `None` scans
     /// every stream file.
     ///
-    /// `progress` is called before and after every demux read of the reported
-    /// pass and at every file boundary with the running [`ScanProgress`],
-    /// whose [`total`](ScanProgress::total) documents which pass each mode
-    /// reports; it never fires without the packet scan.
+    /// `progress` is called before each stream file's source is opened (so a
+    /// blocking open on damaged media is already attributed to the file being
+    /// opened), before and after every demux read of the reported pass, and
+    /// at every file boundary with the running [`ScanProgress`], whose
+    /// [`total`](ScanProgress::total) documents which pass each mode reports;
+    /// it never fires without the packet scan.
     ///
     /// `cancel` — a cooperative stop flag: set it from any thread (a UI cancel
     /// button, a Ctrl+C handler, the progress callback itself) and the packet
@@ -1108,7 +1140,12 @@ impl BdRom {
         let is_uhd = read_uhd_flag(&*bdmv, &backup_index, sink)?;
         // Deliberately outside the sink: the verdict is disc state, not disc
         // damage — a failed probe is a "not encrypted" verdict, never an error.
-        let is_aacs_encrypted = detect_aacs_encryption(root, stream.as_deref());
+        // A caller-supplied verdict (`ScanOptions::aacs_encrypted`) replaces
+        // the probe wholesale, sparing its head reads of the two largest
+        // stream files.
+        let is_aacs_encrypted = options
+            .aacs_encrypted
+            .unwrap_or_else(|| detect_aacs_encryption(root, stream.as_deref()));
         let is_bd_plus =
             sink.absorb(ScanStage::Discovery, &root_name, false, has_bd_plus_dir(root))?;
         let is_bd_java = match &bdjo {
@@ -1151,13 +1188,14 @@ impl BdRom {
                 &interleaved_files,
                 scan_files,
                 mode.measures_bitrate(),
-                options.keep_partial,
+                options,
                 observers,
                 sink,
             )?
         } else {
             (BTreeMap::new(), BTreeMap::new())
         };
+        let detail = scanned_detail(mode, options, &scanned, &measured);
 
         // --- summarise each playlist (+ build its presented streams) -------
         let mut playlists = Vec::new();
@@ -1168,7 +1206,7 @@ impl BdRom {
                 &clip_files,
                 &stream_files,
                 &interleaved_files,
-                &scanned,
+                detail,
                 &measured,
             );
             if let Some((summary, hz)) =
@@ -1629,6 +1667,19 @@ fn parse_playlists(
 /// One pass's scanned stream files, keyed by upper-cased file name.
 type ScannedFiles = BTreeMap<String, TsStreamFile>;
 
+/// The summaries' scanned-detail source, following the pass that read it: the
+/// quick map, or — when [`ScanOptions::skip_quick_pass`] left it empty on a
+/// measuring open — the measurement map, whose files carry the same detail
+/// read to end of file instead of to codec initialisation.
+const fn scanned_detail<'a>(
+    mode: ScanMode,
+    options: ScanOptions,
+    scanned: &'a ScannedFiles,
+    measured: &'a ScannedFiles,
+) -> &'a ScannedFiles {
+    if options.skip_quick_pass && mode.measures_bitrate() { measured } else { scanned }
+}
+
 /// The scan's discovery maps: the `*.m2ts` sizes, the `*.ssif` sizes (both
 /// keyed by upper-cased name), and the parsed clip-information files.
 type FileMaps = (BTreeMap<String, u64>, BTreeMap<String, u64>, BTreeMap<String, TsStreamClipFile>);
@@ -1691,7 +1742,7 @@ fn run_measurement_scan(
     interleaved_files: &BTreeMap<String, u64>,
     scan_files: Option<&BTreeSet<String>>,
     measure: bool,
-    keep_partial: bool,
+    options: ScanOptions,
     observers: ScanObservers<'_>,
     sink: &mut Sink<'_>,
 ) -> Result<(ScannedFiles, ScannedFiles), BdError> {
@@ -1712,25 +1763,41 @@ fn run_measurement_scan(
     // its file boundaries have nothing to snapshot to.
     let ScanObservers { progress: callback, measured, cancel } = observers;
     let total = scan_total(stream_files, interleaved_files, scan_files);
-    let mut silent = |_: ScanProgress<'_>| {};
-    let quick_progress = &mut if measure {
-        Progress { callback: &mut silent, measured: None, done: 0, total: 0, cancel }
+    // `skip_quick_pass` only ever skips a pass that would be followed by the
+    // measurement pass — in `Codecs` mode the quick pass is the whole scan,
+    // so the option is ignored there rather than turning the mode into
+    // `Metadata`.
+    let skip_quick = options.skip_quick_pass && measure;
+    let quick = if skip_quick {
+        BTreeMap::new()
     } else {
-        Progress { callback: &mut *callback, measured: None, done: 0, total, cancel }
+        let mut silent = |_: ScanProgress<'_>| {};
+        let quick_progress = &mut if measure {
+            Progress { callback: &mut silent, measured: None, done: 0, total: 0, cancel }
+        } else {
+            Progress { callback: &mut *callback, measured: None, done: 0, total, cancel }
+        };
+        scan_stream_files(
+            stream,
+            ssif,
+            parsed,
+            scan_files,
+            quick_progress,
+            sink,
+            options.keep_partial,
+            false,
+            false,
+        )?
     };
-    let quick = scan_stream_files(
-        stream,
-        ssif,
-        parsed,
-        scan_files,
-        quick_progress,
-        sink,
-        keep_partial,
-        false,
-    )?;
+    // With the quick pass skipped, `quick` is empty and the resolution falls
+    // back to the clip-info streams alone — the measurement pass then
+    // back-fills the scanned detail it would have merged here (see
+    // `TsStreamFile::backfill_detail`).
     for playlist in parsed.iter_mut() {
-        if let Ok(metas) = collect_clip_metas(playlist, clip_files, stream_files, &quick) {
-            resolve_playlist_streams(playlist, &metas);
+        if let Ok(metas) =
+            collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &quick)
+        {
+            resolve_playlist_streams(playlist, &metas, skip_quick);
         }
     }
     // Discard the partial byte/packet tallies the bounded quick pass left in the
@@ -1744,22 +1811,57 @@ fn run_measurement_scan(
         return Ok((quick, BTreeMap::new()));
     }
     let progress = &mut Progress { callback, measured, done: 0, total, cancel };
-    let full =
-        scan_stream_files(stream, ssif, parsed, scan_files, progress, sink, keep_partial, true)?;
+    let full = scan_stream_files(
+        stream,
+        ssif,
+        parsed,
+        scan_files,
+        progress,
+        sink,
+        options.keep_partial,
+        true,
+        skip_quick,
+    )?;
     // The PGS caption tallies and dimensions only exist after the full pass
     // (the quick pass never reads the graphics payloads), so the presented
     // streams re-merge the reference clip's full-scanned graphics detail —
     // the classic GUI's post-scan refresh; without it every subtitle row
     // would present an empty description.
     for playlist in parsed.iter_mut() {
-        if let Ok(metas) = collect_clip_metas(playlist, clip_files, stream_files, &full)
+        if let Ok(metas) =
+            collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &full)
             && let Some(reference) = select_reference(&metas)
-            && let Some(file) = reference.scanned
         {
-            remerge_graphics_detail(playlist, &file.streams);
+            if skip_quick {
+                remove_mvc_placeholder(playlist, reference);
+            }
+            if let Some(file) = reference.scanned {
+                remerge_graphics_detail(playlist, &file.streams);
+            }
         }
     }
     Ok((quick, full))
+}
+
+/// Removes the placeholder dependent-view stream a
+/// [`ScanOptions::skip_quick_pass`] resolution synthesized
+/// ([`resolve_playlist_streams`]) when the measurement pass registered no MVC
+/// stream in the reference clip's demuxed file — the interleaved `*.ssif`
+/// exists but carries no dependent view, so presenting the placeholder would
+/// invent a stream row. An MVC PID the clip info itself declares is not a
+/// placeholder and stays, as does the placeholder of a reference file the
+/// pass failed on and dropped — with no demux verdict to consult, the
+/// interleaved file's existence remains the best evidence.
+fn remove_mvc_placeholder(playlist: &mut TsPlaylistFile, reference: &ClipMeta<'_>) {
+    if let Some(file) = reference.scanned
+        && !file.streams.contains_key(&MVC_PID)
+        && !reference.clip_streams.contains_key(&MVC_PID)
+    {
+        playlist.streams.remove(&MVC_PID);
+        for angle in &mut playlist.angle_streams {
+            angle.remove(&MVC_PID);
+        }
+    }
 }
 
 /// Builds the reference-clip selection candidates for `playlist` — one
@@ -1772,6 +1874,7 @@ fn collect_clip_metas<'a>(
     playlist: &TsPlaylistFile,
     clip_files: &'a BTreeMap<String, TsStreamClipFile>,
     stream_files: &BTreeMap<String, u64>,
+    interleaved_files: &BTreeMap<String, u64>,
     scanned: &'a BTreeMap<String, TsStreamFile>,
 ) -> Result<Vec<ClipMeta<'a>>, BdError> {
     let mut clips: Vec<ClipMeta<'a>> = Vec::new();
@@ -1790,6 +1893,7 @@ fn collect_clip_metas<'a>(
             relative_length: clip.relative_length,
             length: clip.length,
             stream_file_present: stream_files.contains_key(&clip.name),
+            interleaved_file_present: interleaved_files.contains_key(&format!("{stem}.SSIF")),
         });
     }
     Ok(clips)
@@ -1805,13 +1909,30 @@ const MVC_PID: u16 = 0x1012;
 /// the quick-scanned codec detail, and one reset-copy of each video stream per
 /// extra camera angle. The full scan then accumulates its measurements into
 /// these maps. A playlist with no reference clip keeps empty maps.
-fn resolve_playlist_streams(playlist: &mut TsPlaylistFile, metas: &[ClipMeta<'_>]) {
+///
+/// With `synthesize_mvc` (a [`ScanOptions::skip_quick_pass`] scan, whose
+/// `metas` carry no scanned files) a reference clip with an interleaved
+/// `*.ssif` gets a placeholder dependent-view stream instead, so the
+/// measurement pass has an entry to accumulate the MVC windows into from its
+/// first packet; [`remove_mvc_placeholder`] removes the placeholder if that
+/// pass finds no such stream.
+fn resolve_playlist_streams(
+    playlist: &mut TsPlaylistFile,
+    metas: &[ClipMeta<'_>],
+    synthesize_mvc: bool,
+) {
     let Some(reference) = select_reference(metas) else {
         return;
     };
     let mut streams: BTreeMap<u16, TsStream> = BTreeMap::new();
     for (pid, stream) in reference.clip_streams {
         streams.insert(*pid, stream.ts_clone());
+    }
+    if synthesize_mvc && reference.interleaved_file_present && !streams.contains_key(&MVC_PID) {
+        let mut mvc = TsStream::Video(TsVideoStream::default());
+        mvc.base_mut().pid = Pid::new(MVC_PID);
+        mvc.base_mut().stream_type = TsStreamType::MvcVideo;
+        streams.insert(MVC_PID, mvc);
     }
     if let Some(file) = reference.scanned {
         if file.interleaved_file.is_some()
@@ -1930,7 +2051,7 @@ fn build_summary(
     scanned: &BTreeMap<String, TsStreamFile>,
     measured: &BTreeMap<String, TsStreamFile>,
 ) -> Result<(PlaylistSummary, bool), BdError> {
-    let metas = collect_clip_metas(playlist, clip_files, stream_files, scanned)?;
+    let metas = collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, scanned)?;
 
     let mut file_size: u64 = 0;
     let mut interleaved_file_size: u64 = 0;
@@ -2141,6 +2262,29 @@ fn full_description(stream: &TsStream, row: &StreamSummary) -> String {
     }
 }
 
+/// Merges the scanned codec detail of a demuxed clip's `streams` into
+/// `playlist`'s presented-stream maps, main and angle alike (a PID a map does
+/// not carry is skipped) — the [`ScanOptions::skip_quick_pass`] stand-in for
+/// the quick-scanned detail [`resolve_playlist_streams`] merges ahead of a
+/// two-pass scan. The demux calls this after every parsed chunk of such a
+/// measurement pass ([`TsStreamFile::backfill_detail`]), because two of its
+/// own reads during the pass come from these maps and start empty without
+/// the quick merge: `is_vbr`, which gates the per-window variable-bitrate
+/// recomputation, and a `TrueHD` stream's embedded core, whose nominal rate
+/// discounts the active rate. Repetition is what keeps the final values
+/// right: the chunk that initialises a codec back-fills it before the next
+/// window recomputes, and the end-of-file flush recomputes every rate after
+/// the last chunk's merge.
+pub(crate) fn backfill_playlist_detail(
+    playlist: &mut TsPlaylistFile,
+    streams: &BTreeMap<u16, TsStream>,
+) {
+    merge_matching(&mut playlist.streams, streams, |_| true);
+    for angle in &mut playlist.angle_streams {
+        merge_matching(angle, streams, |_| true);
+    }
+}
+
 /// Merges every `src` stream `keep` selects into the `dst` stream of the same
 /// PID (a PID `dst` does not carry is skipped) — the walk both scan passes and
 /// the summary pass share.
@@ -2266,7 +2410,16 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
 ///
 /// Every other completed file boundary reports twice: the progress snap, then
 /// the [`MeasuredSnapshot`] of the playlists that play the file, when the
-/// caller installed an observer for them.
+/// caller installed an observer for them. Each file also reports one
+/// heartbeat under its own name *before* its source is opened, so an open
+/// that blocks on damaged media is already attributed to the file being
+/// opened rather than to the previously finished one.
+///
+/// `backfill_detail` marks each scanned file's demux to merge its scanned
+/// codec detail into the playlists as it goes (see
+/// [`TsStreamFile::backfill_detail`]) — the
+/// [`ScanOptions::skip_quick_pass`] measurement pass, which has no
+/// quick-merged detail to build on.
 #[expect(
     clippy::too_many_arguments,
     reason = "the scan orchestration threads the per-open context (dirs, maps, selection, progress, sink) one level down"
@@ -2280,6 +2433,7 @@ fn scan_stream_files(
     sink: &mut Sink<'_>,
     keep_partial: bool,
     is_full_scan: bool,
+    backfill_detail: bool,
 ) -> Result<BTreeMap<String, TsStreamFile>, BdError> {
     let mut scanned = BTreeMap::new();
     let Some(dir) = stream_dir else {
@@ -2314,7 +2468,26 @@ fn scan_stream_files(
         // — so the progress can snap to the file boundary either way.
         let source_size = interleaved.as_ref().map_or_else(|| file.length(), |f| f.length());
         let target = progress.done.saturating_add(source_size);
-        let scan = scan_one_stream_file(&*file, interleaved, playlists, is_full_scan, progress);
+        // Polled here as well as per read chunk, so a cancel now aborts
+        // before this file's open (not one blocking read later) and so the
+        // heartbeat below never reports on a pass that is already cancelled —
+        // a pre-cancelled scan emits no progress at all.
+        if progress.cancel.load(Ordering::Relaxed) {
+            return Err(BdError::ScanCancelled);
+        }
+        // Attribute the window between the previous file's boundary and this
+        // file's first counted read — which contains the source open, itself
+        // able to block for minutes on damaged media — to this file, before
+        // the open. A heartbeat reports the count without advancing it.
+        progress.heartbeat(&name);
+        let scan = scan_one_stream_file(
+            &*file,
+            interleaved,
+            playlists,
+            is_full_scan,
+            backfill_detail,
+            progress,
+        );
         // Cancellation aborts the whole open, in strict and resilient modes
         // alike — the sink collects disc damage, not the caller's abort, so
         // the cancelled error is never recorded per-file, and no further
@@ -2380,9 +2553,11 @@ fn scan_one_stream_file(
     interleaved: Option<Box<dyn BdFile>>,
     playlists: &mut [TsPlaylistFile],
     is_full_scan: bool,
+    backfill_detail: bool,
     progress: &mut Progress<'_>,
 ) -> Result<StreamScan, BdError> {
     let mut stream_file = TsStreamFile::new(file.name());
+    stream_file.backfill_detail = backfill_detail;
     stream_file.interleaved_file = interleaved.map(TsInterleavedFile::new);
     // The interleaved 3D `*.ssif` is the demux source in preference to the plain
     // `*.m2ts` whenever the clip has one: its base/dependent extents are just more
@@ -2581,8 +2756,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use proptest::prelude::{ProptestConfig, prop_assert, prop_assert_eq, proptest};
 
@@ -2590,12 +2765,13 @@ mod tests {
         ALIGNED_UNIT_BYTES, BdError, BdRom, ClipMeta, ClipSummary, CountingReader,
         MAX_METADATA_BYTES, MVC_PID, MeasuredSnapshot, PlaylistFilter, PlaylistSummary, Progress,
         SOURCE_PACKET_BYTES, ScanMode, ScanObservers, ScanOptions, ScanProgress, ScanReport,
-        ScanStage, Sink, TsPlaylistFile, TsStreamFile, backup_subdir_files,
-        build_chapter_summaries, build_clip_summaries, build_sorted_streams, clear_measurements,
-        clip_has_50hz_video, clip_stem, collect_backups, directory_size, fixtures,
-        has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file, read_file_capped,
-        resolve_playlist_streams, scan_stream_files, scan_total, select_reference,
-        stream_content_encrypted, stream_summary, unit_shows_encryption, walked_disc_root,
+        ScanStage, Sink, TsPlaylistFile, TsStreamFile, backfill_playlist_detail,
+        backup_subdir_files, build_chapter_summaries, build_clip_summaries, build_sorted_streams,
+        clear_measurements, clip_has_50hz_video, clip_stem, collect_backups, directory_size,
+        fixtures, has_aacs_key_file, merge_stream, rate_over, read_disc_title, read_file,
+        read_file_capped, remove_mvc_placeholder, resolve_playlist_streams, scan_stream_files,
+        scan_total, select_reference, stream_content_encrypted, stream_summary,
+        unit_shows_encryption, walked_disc_root,
     };
     use crate::bdrom::clpi::TsStreamClip;
     use crate::bdrom::clpi::clips::build_clpi;
@@ -2839,6 +3015,7 @@ mod tests {
             relative_length: relative,
             length,
             stream_file_present: has_stream_file,
+            interleaved_file_present: false,
         }
     }
 
@@ -3667,6 +3844,7 @@ mod tests {
             bytes,
             trip: trip.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let four_units = [encrypted_stream(), encrypted_stream()].concat();
         // Listed out of name order: the sample must be the largest file plus —
@@ -3709,6 +3887,7 @@ mod tests {
             bytes: Vec::new(),
             trip: trip.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let aacs = |trip: &Trip| MockDir {
             name: "AACS".to_owned(),
@@ -3750,6 +3929,7 @@ mod tests {
                 bytes: encrypted_stream(),
                 trip: Trip::new(0),
                 fail_read_at: None,
+                reads: None,
             }],
             trip: ok.clone(),
         };
@@ -3764,6 +3944,7 @@ mod tests {
                 bytes: encrypted_stream(),
                 trip: ok.clone(),
                 fail_read_at: Some(0),
+                reads: None,
             }],
             trip: ok,
         };
@@ -4183,9 +4364,10 @@ mod tests {
             relative_length: 1.0,
             length: 10.0,
             stream_file_present: true,
+            interleaved_file_present: false,
         }];
         let mut playlist = playlist_with_clips(2, Vec::new());
-        resolve_playlist_streams(&mut playlist, &metas);
+        resolve_playlist_streams(&mut playlist, &metas, false);
 
         // The presented streams: reset copies with the merged detail.
         assert_eq!(playlist.streams.len(), 2);
@@ -4210,7 +4392,7 @@ mod tests {
 
         // No reference clip → the maps stay empty.
         let mut unresolved = playlist_with_clips(1, Vec::new());
-        resolve_playlist_streams(&mut unresolved, &[]);
+        resolve_playlist_streams(&mut unresolved, &[], false);
         assert!(unresolved.streams.is_empty());
         assert!(unresolved.angle_streams.is_empty());
     }
@@ -4244,8 +4426,9 @@ mod tests {
             relative_length: 1.0,
             length: 10.0,
             stream_file_present: true,
+            interleaved_file_present: false,
         }];
-        resolve_playlist_streams(&mut playlist, &metas);
+        resolve_playlist_streams(&mut playlist, &metas, false);
         assert!(playlist.streams.contains_key(&MVC_PID), "dependent view presented");
         assert_eq!(playlist.streams.len(), 2);
 
@@ -4260,8 +4443,9 @@ mod tests {
             relative_length: 1.0,
             length: 10.0,
             stream_file_present: true,
+            interleaved_file_present: false,
         }];
-        resolve_playlist_streams(&mut playlist, &metas);
+        resolve_playlist_streams(&mut playlist, &metas, false);
         assert!(!playlist.streams.contains_key(&MVC_PID));
 
         // A clip-info-declared stream on the MVC PID is not overwritten.
@@ -4280,9 +4464,10 @@ mod tests {
             relative_length: 1.0,
             length: 10.0,
             stream_file_present: true,
+            interleaved_file_present: false,
         }];
         let mut playlist = playlist_with_clips(0, Vec::new());
-        resolve_playlist_streams(&mut playlist, &metas);
+        resolve_playlist_streams(&mut playlist, &metas, false);
         assert_eq!(playlist.streams.get(&MVC_PID).unwrap().stream_type(), TsStreamType::Ac3Audio);
     }
 
@@ -4584,6 +4769,434 @@ mod tests {
         assert_eq!((base.payload_bytes, base.packet_count), (200, 3));
     }
 
+    // ── orchestration: the quick-pass-skipping scan ─────────────────────────
+
+    /// Opens `root` at `mode` twice — with the default two-pass options and
+    /// with [`ScanOptions::skip_quick_pass`] — returning `(two_pass,
+    /// skipped)` for the equality assertions the skipping scan is held to.
+    fn scan_both_ways(root: &dyn BdDir, mode: ScanMode) -> (BdRom, BdRom) {
+        let two_pass = BdRom::open_with(
+            root,
+            mode,
+            ScanOptions::default(),
+            None,
+            &mut |_| {},
+            &never_cancel(),
+        )
+        .expect("the two-pass scan opens");
+        let options = ScanOptions { skip_quick_pass: true, ..ScanOptions::default() };
+        let skipped = BdRom::open_with(root, mode, options, None, &mut |_| {}, &never_cancel())
+            .expect("the quick-pass-skipping scan opens");
+        (two_pass, skipped)
+    }
+
+    /// The interleaved 3D `*.ssif` bytes of
+    /// [`open_scanned_reads_the_interleaved_source_and_presents_the_dependent_view`],
+    /// with the dependent view (PMT entry and packet) included or not.
+    fn interleaved_ssif(with_mvc: bool) -> Vec<u8> {
+        let mut ssif = packet(0, true, &pat_payload(0x0100));
+        let mut streams = vec![(0x1B, 0x1011)];
+        if with_mvc {
+            streams.push((0x20, 0x1012));
+        }
+        ssif.extend(packet(0x0100, true, &pmt_payload(&streams)));
+        ssif.extend(packet(0x1011, true, &pes_dts(0xE0, 90_000, 90_000, &sps_payload())));
+        if with_mvc {
+            ssif.extend(packet(0x1012, true, &pes_pts(0xE1, 90_000, &[0xCC; 50])));
+        }
+        ssif.extend(packet(0x1011, true, &pes_dts(0xE0, 180_000, 180_000, &sps_payload())));
+        ssif.extend(packet(0x1011, true, &pes_dts(0xE0, 270_000, 270_000, &sps_payload())));
+        ssif
+    }
+
+    /// The one-clip interleaved disc around `ssif` those equality tests scan.
+    fn interleaved_disc(ssif: Vec<u8>) -> TempDisc {
+        TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00000.clpi", clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])])),
+                ("BDMV/STREAM/00000.m2ts", vec![0_u8; 192]),
+                ("BDMV/STREAM/SSIF/00000.ssif", ssif),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_full_scan_without_the_quick_pass_presents_the_two_pass_result() {
+        // The hardest resolution case: the dependent view exists only in the
+        // demuxed `*.ssif`, so the skipping scan has to synthesize its
+        // presented entry before the measurement pass (or its windows would
+        // never accumulate) and keep it afterwards.
+        let disc = interleaved_disc(interleaved_ssif(true));
+        let root = FsDir::new(disc.root.clone());
+        let (two_pass, skipped) = scan_both_ways(&root, ScanMode::Full);
+        assert_eq!(skipped, two_pass);
+        // Not vacuous: the dependent view really is presented, with its
+        // measured rate.
+        let pl = skipped.playlists.first().unwrap();
+        let mvc = pl.streams.iter().find(|s| s.pid == Pid::new(0x1012)).unwrap();
+        assert!(mvc.ssif_only, "the dependent view is the SSIF-only row");
+        assert!(mvc.bitrate > 0, "the dependent view carries its measured rate");
+
+        // `Codecs` ignores the switch — the quick pass IS that mode's scan —
+        // so the skipping open still carries the quick-scanned detail.
+        let (codecs, codecs_skipped) = scan_both_ways(&root, ScanMode::Codecs);
+        assert_eq!(codecs_skipped, codecs);
+        let codec_pl = codecs.playlists.first().unwrap();
+        assert!(codec_pl.streams.iter().any(|s| s.pid == Pid::new(0x1012)));
+    }
+
+    #[test]
+    fn a_skipping_scan_withdraws_a_dependent_view_the_measurement_finds_absent() {
+        // The interleaved source exists but its PMT declares no dependent
+        // view: the placeholder the skipping resolution synthesized must not
+        // survive into the presented rows — the two-pass scan presents none.
+        let disc = interleaved_disc(interleaved_ssif(false));
+        let root = FsDir::new(disc.root.clone());
+        let (two_pass, skipped) = scan_both_ways(&root, ScanMode::Full);
+        assert_eq!(skipped, two_pass);
+        let pl = skipped.playlists.first().unwrap();
+        assert!(pl.streams.iter().all(|s| s.pid != Pid::new(0x1012)), "no phantom row");
+    }
+
+    #[test]
+    fn a_skipping_scan_measures_shared_clips_like_the_two_pass_scan() {
+        // Three playlists over three clips, one clip shared: the per-chunk
+        // detail back-fill has to reach every playlist a file plays in.
+        let disc = shared_clip_disc();
+        let (two_pass, skipped) = scan_both_ways(&disc, ScanMode::Full);
+        assert_eq!(skipped, two_pass);
+        // Not vacuous: the measurement really resolved rates to compare.
+        assert!(
+            two_pass.playlists.iter().all(|p| p.streams.iter().any(|s| s.bitrate > 0)),
+            "every playlist carries a measured rate"
+        );
+    }
+
+    #[test]
+    fn a_skipping_resilient_scan_keeps_partials_like_the_two_pass_scan() {
+        use crate::bdrom::m2ts::DATA_SIZE;
+        // The reader dies at the read-chunk boundary, so the kept partial
+        // file carries the head frames — the skipping scan must present the
+        // same partial rows the two-pass scan does.
+        let m2ts = two_chunk_m2ts(&[(0x1B, 0x1011)], &[1, 2, 3], &[46, 47, 48]);
+        let scan = |options: ScanOptions| {
+            let disc = tripping_disc(m2ts.clone(), Some(DATA_SIZE));
+            BdRom::open_resilient_with(
+                &disc,
+                ScanMode::Full,
+                options,
+                None,
+                &mut |_| {},
+                &never_cancel(),
+            )
+            .expect("the resilient scan continues")
+        };
+        let two_pass = scan(ScanOptions::default());
+        let skipped = scan(ScanOptions { skip_quick_pass: true, ..ScanOptions::default() });
+        assert_eq!(skipped.bdrom, two_pass.bdrom);
+        assert_eq!(two_pass.errors.len(), 1, "the mid-file failure is recorded");
+        assert_eq!(skipped.errors.len(), 1, "the skipping scan records it too");
+        // Not vacuous: the kept partial really measured the head frames.
+        let pl = skipped.bdrom.playlists.first().unwrap();
+        assert!(pl.streams.iter().any(|s| s.bitrate > 0), "the partial carries a rate");
+    }
+
+    /// A one-clip mock disc whose stream file logs every read's requested
+    /// size into `reads`; `aacs` adds the `AACS/Unit_Key_RO.inf` key file the
+    /// encryption probe looks for (the stream bytes carry no fingerprint, so
+    /// a probe that runs resolves to unencrypted).
+    fn logged_disc(m2ts: Vec<u8>, reads: &Arc<Mutex<Vec<usize>>>, aacs: bool) -> MockDir {
+        let trip = Trip::new(usize::MAX);
+        let file = |name: &str, bytes: Vec<u8>, reads: Option<Arc<Mutex<Vec<usize>>>>| MockFile {
+            name: name.to_owned(),
+            extension: extension_of_name(name),
+            bytes,
+            trip: trip.clone(),
+            fail_read_at: None,
+            reads,
+        };
+        let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
+            name: name.to_owned(),
+            dirs,
+            files,
+            trip: trip.clone(),
+        };
+        let mut top = vec![dir(
+            "BDMV",
+            vec![
+                dir(
+                    "CLIPINF",
+                    vec![],
+                    vec![file("00000.clpi", clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]), None)],
+                ),
+                dir(
+                    "PLAYLIST",
+                    vec![],
+                    vec![file("00000.mpls", mpls("00000", 0, 4_500_000, &[]), None)],
+                ),
+                dir("STREAM", vec![], vec![file("00000.m2ts", m2ts, Some(Arc::clone(reads)))]),
+            ],
+            vec![],
+        )];
+        if aacs {
+            top.push(dir("AACS", vec![], vec![file("Unit_Key_RO.inf", b"key".to_vec(), None)]));
+        }
+        dir("disc", top, vec![])
+    }
+
+    #[test]
+    fn a_skipping_full_scan_issues_no_quick_sized_reads() {
+        use crate::bdrom::m2ts::{DATA_SIZE, QUICK_DATA_SIZE};
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let disc = logged_disc(video_m2ts(&[1, 2, 3]), &log, false);
+        let scan = |options: ScanOptions| {
+            log.lock().unwrap().clear();
+            drop(
+                BdRom::open_with(
+                    &disc,
+                    ScanMode::Full,
+                    options,
+                    None,
+                    &mut |_| {},
+                    &never_cancel(),
+                )
+                .expect("the mock disc scans"),
+            );
+            log.lock().unwrap().clone()
+        };
+        // The two passes are told apart by their read-chunk sizes alone.
+        let two_pass = scan(ScanOptions::default());
+        assert!(two_pass.contains(&QUICK_DATA_SIZE), "the quick pass requests its own chunk size");
+        assert!(two_pass.contains(&DATA_SIZE), "the measurement pass requests full chunks");
+        let skipped = scan(ScanOptions { skip_quick_pass: true, ..ScanOptions::default() });
+        assert_eq!(skipped.first(), Some(&DATA_SIZE), "the scan opens on a full chunk");
+        assert!(
+            skipped.iter().all(|&size| size > QUICK_DATA_SIZE),
+            "no quick-pass read remains: {skipped:?}"
+        );
+    }
+
+    #[test]
+    fn a_supplied_aacs_verdict_replaces_the_stream_head_probe() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let disc = logged_disc(video_m2ts(&[1]), &log, true);
+        let progressed = AtomicBool::new(false);
+        let open = |mode: ScanMode, options: ScanOptions| {
+            log.lock().unwrap().clear();
+            let mut observe = |_: ScanProgress<'_>| progressed.store(true, Ordering::Relaxed);
+            BdRom::open_with(&disc, mode, options, None, &mut observe, &never_cancel())
+                .expect("the mock disc opens")
+        };
+        // Probing (the default): the key file is present, so the probe reads
+        // the stream head — a `Metadata` open's only stream read — and the
+        // fingerprint-free bytes resolve to unencrypted.
+        let probed = open(ScanMode::Metadata, ScanOptions::default());
+        assert!(!probed.is_aacs_encrypted);
+        assert!(!log.lock().unwrap().is_empty(), "the probe reads the stream head");
+        // A supplied verdict is recorded verbatim with no read at all —
+        // `true` could not have come from probing this unencrypted disc.
+        let told =
+            |verdict| ScanOptions { aacs_encrypted: Some(verdict), ..ScanOptions::default() };
+        assert!(open(ScanMode::Metadata, told(true)).is_aacs_encrypted);
+        assert!(log.lock().unwrap().is_empty(), "no probe read with a supplied verdict");
+        assert!(!open(ScanMode::Metadata, told(false)).is_aacs_encrypted);
+        assert!(log.lock().unwrap().is_empty(), "no probe read either way");
+        assert!(!progressed.load(Ordering::Relaxed), "a Metadata open reports no progress");
+        // A `Codecs` open with a reused verdict — the shape of a listing's
+        // second open — keeps its packet scan: the quick pass reads (and
+        // reports progress); only the probe stays silent.
+        let coded = open(ScanMode::Codecs, told(false));
+        assert!(!coded.is_aacs_encrypted);
+        assert!(!log.lock().unwrap().is_empty(), "the quick pass still reads packets");
+        assert!(progressed.load(Ordering::Relaxed), "the quick pass reports progress");
+    }
+
+    #[test]
+    fn a_logged_reader_seeks_through_to_its_source() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut reader =
+            LoggedReads { inner: Box::new(Cursor::new(vec![1, 2, 3, 4])), log: Arc::clone(&log) };
+        assert_eq!(reader.seek(SeekFrom::Start(2)).unwrap(), 2);
+        let mut buf = [0_u8; 2];
+        assert_eq!(reader.read(&mut buf).unwrap(), 2);
+        assert_eq!(buf, [3, 4]);
+        assert_eq!(*log.lock().unwrap(), [2], "the seek is silent; the read is logged");
+    }
+
+    #[test]
+    fn the_pre_open_heartbeat_names_the_file_being_opened() {
+        // Two clips, the second failing its first read: the window between
+        // the first file's boundary and the second file's first read — the
+        // window a blocking open on damaged media stalls in — must already be
+        // reported under the second file's name. Two count-preserving events
+        // name it there: the pre-open heartbeat and the first read's.
+        let clip = || clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let disc = tripping_disc_of(
+            &[
+                MockClip { stem: "00011", clip: clip(), m2ts: video_m2ts(&[1, 2]), serve: None },
+                MockClip { stem: "00022", clip: clip(), m2ts: video_m2ts(&[1]), serve: Some(0) },
+            ],
+            &[("00000", &["00011"]), ("00001", &["00022"])],
+        );
+        let mut events: Vec<(String, u64)> = Vec::new();
+        let mut collect = |p: ScanProgress<'_>| events.push((p.file.to_owned(), p.done));
+        drop(
+            BdRom::open_resilient_with(
+                &disc,
+                ScanMode::Full,
+                ScanOptions::default(),
+                None,
+                &mut collect,
+                &never_cancel(),
+            )
+            .expect("the resilient scan continues over the failed read"),
+        );
+        let first_boundary = u64::try_from(video_m2ts(&[1, 2]).len()).unwrap();
+        let attributed = events
+            .iter()
+            .filter(|(file, done)| file == "00022.M2TS" && *done == first_boundary)
+            .count();
+        assert!(
+            attributed >= 2,
+            "pre-open and pre-read heartbeats both name the second file: {events:?}"
+        );
+        // The boundary snap still closes the failed file out.
+        assert_eq!(events.last().map(|(file, _)| file.as_str()), Some("00022.M2TS"));
+    }
+
+    #[test]
+    fn remove_mvc_placeholder_withdraws_only_an_unconfirmed_synthetic_entry() {
+        let mvc = || {
+            let mut stream = TsVideoStream::default();
+            stream.base.pid = Pid::new(MVC_PID);
+            stream.base.stream_type = TsStreamType::MvcVideo;
+            TsStream::Video(stream)
+        };
+        let placeholder_playlist = || {
+            let mut playlist = playlist_with_clips(1, Vec::new());
+            playlist.streams = BTreeMap::from([(MVC_PID, mvc())]);
+            playlist.angle_streams = vec![BTreeMap::from([(MVC_PID, mvc())])];
+            playlist
+        };
+        let empty = BTreeMap::new();
+        let meta = |clip_streams, scanned| ClipMeta {
+            clip_streams,
+            scanned,
+            has_50hz_video: false,
+            relative_length: 1.0,
+            length: 10.0,
+            stream_file_present: true,
+            interleaved_file_present: true,
+        };
+
+        // The measurement registered no MVC stream: the placeholder goes,
+        // from the main map and every angle map.
+        let unconfirmed = TsStreamFile::new("00000.m2ts");
+        let mut playlist = placeholder_playlist();
+        remove_mvc_placeholder(&mut playlist, &meta(&empty, Some(&unconfirmed)));
+        assert!(playlist.streams.is_empty());
+        assert!(playlist.angle_streams.iter().all(BTreeMap::is_empty));
+
+        // The measurement registered the dependent view: the entry stays.
+        let mut confirmed = TsStreamFile::new("00000.m2ts");
+        confirmed.streams.insert(MVC_PID, mvc());
+        let mut playlist = placeholder_playlist();
+        remove_mvc_placeholder(&mut playlist, &meta(&empty, Some(&confirmed)));
+        assert!(playlist.streams.contains_key(&MVC_PID));
+
+        // No measured file to consult (a dropped partial): the entry stays —
+        // the interleaved file's existence remains the best evidence.
+        let mut playlist = placeholder_playlist();
+        remove_mvc_placeholder(&mut playlist, &meta(&empty, None));
+        assert!(playlist.streams.contains_key(&MVC_PID));
+
+        // A clip-info-declared MVC PID is not a placeholder and stays even
+        // when the measured file carries none.
+        let declared = BTreeMap::from([(MVC_PID, mvc())]);
+        let mut playlist = placeholder_playlist();
+        remove_mvc_placeholder(&mut playlist, &meta(&declared, Some(&unconfirmed)));
+        assert!(playlist.streams.contains_key(&MVC_PID));
+    }
+
+    #[test]
+    fn resolve_synthesizes_the_dependent_view_only_for_an_interleaved_clip() {
+        let mut clip_streams = BTreeMap::new();
+        let mut video = TsVideoStream::default();
+        video.base.pid = Pid::new(0x1011);
+        video.base.stream_type = TsStreamType::AvcVideo;
+        clip_streams.insert(0x1011, TsStream::Video(video));
+        let meta = |interleaved: bool| ClipMeta {
+            clip_streams: &clip_streams,
+            scanned: None,
+            has_50hz_video: false,
+            relative_length: 1.0,
+            length: 10.0,
+            stream_file_present: true,
+            interleaved_file_present: interleaved,
+        };
+
+        // Interleaved + synthesize: the placeholder appears, typed as the
+        // dependent view, and is cloned per angle like any video stream.
+        let mut playlist = playlist_with_clips(1, Vec::new());
+        resolve_playlist_streams(&mut playlist, &[meta(true)], true);
+        let placeholder = playlist.streams.get(&MVC_PID).expect("the placeholder is presented");
+        assert_eq!(placeholder.stream_type(), TsStreamType::MvcVideo);
+        assert_eq!(placeholder.pid(), Pid::new(MVC_PID));
+        assert!(playlist.angle_streams.first().is_some_and(|a| a.contains_key(&MVC_PID)));
+
+        // No interleaved file, or no synthesize switch: no placeholder.
+        let mut playlist = playlist_with_clips(0, Vec::new());
+        resolve_playlist_streams(&mut playlist, &[meta(false)], true);
+        assert!(!playlist.streams.contains_key(&MVC_PID));
+        let mut playlist = playlist_with_clips(0, Vec::new());
+        resolve_playlist_streams(&mut playlist, &[meta(true)], false);
+        assert!(!playlist.streams.contains_key(&MVC_PID));
+    }
+
+    #[test]
+    fn backfill_playlist_detail_merges_matching_pids_into_every_map() {
+        // The playlist presents a clip-info video copy (no scanned detail) on
+        // the main map and an angle map; the demuxed clip has learned the
+        // codec detail and also carries a PID the playlist does not present.
+        let clip_video = || {
+            let mut stream = TsVideoStream::default();
+            stream.base.pid = Pid::new(0x1011);
+            stream.base.stream_type = TsStreamType::AvcVideo;
+            TsStream::Video(stream)
+        };
+        let mut playlist = playlist_with_clips(1, Vec::new());
+        playlist.streams = BTreeMap::from([(0x1011, clip_video())]);
+        playlist.angle_streams = vec![BTreeMap::from([(0x1011, clip_video())])];
+
+        let mut scanned_video = TsVideoStream::default();
+        scanned_video.base.pid = Pid::new(0x1011);
+        scanned_video.base.stream_type = TsStreamType::AvcVideo;
+        scanned_video.base.is_vbr = true;
+        scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
+        let mut unpresented = TsVideoStream::default();
+        unpresented.base.pid = Pid::new(0x1012);
+        unpresented.base.stream_type = TsStreamType::MvcVideo;
+        let streams = BTreeMap::from([
+            (0x1011, TsStream::Video(scanned_video)),
+            (0x1012, TsStream::Video(unpresented)),
+        ]);
+
+        backfill_playlist_detail(&mut playlist, &streams);
+        let main = playlist.streams.get(&0x1011).unwrap();
+        assert!(main.base().is_vbr, "the demux-read switch is back-filled");
+        assert_eq!(
+            as_video(main).and_then(|v| v.encoding_profile.as_deref()),
+            Some("High Profile 4.1")
+        );
+        let angle = playlist.angle_streams.first().and_then(|a| a.get(&0x1011)).unwrap();
+        assert!(angle.base().is_vbr, "angle copies are back-filled too");
+        // A PID the playlist does not present is merged nowhere — the
+        // back-fill only enriches, it never adds a presented stream.
+        assert!(!playlist.streams.contains_key(&0x1012));
+    }
+
     // ── orchestration: error paths ──────────────────────────────────────────
 
     #[test]
@@ -4825,6 +5438,11 @@ mod tests {
         /// (exercising `read_file`'s `read_to_end`, not `open_read`, failure
         /// arm), a larger count models a file whose tail is unreadable.
         fail_read_at: Option<usize>,
+        /// When set, every read served through `open_read` appends its
+        /// requested size here, shared across the file's clones — the
+        /// instrument that tells the passes (and the AACS probe) apart by
+        /// their distinct read sizes, and proves a skipped pass by silence.
+        reads: Option<Arc<Mutex<Vec<usize>>>>,
     }
 
     impl BdFile for MockFile {
@@ -4850,7 +5468,7 @@ mod tests {
 
         fn open_read(&self) -> io::Result<Box<dyn ReadSeek>> {
             self.trip.tick()?;
-            Ok(self.fail_read_at.map_or_else(
+            let inner = self.fail_read_at.map_or_else(
                 || -> Box<dyn ReadSeek> { Box::new(Cursor::new(self.bytes.clone())) },
                 |serve| {
                     Box::new(ServeThenFail {
@@ -4858,13 +5476,37 @@ mod tests {
                         remaining: serve,
                     })
                 },
-            ))
+            );
+            Ok(match &self.reads {
+                Some(log) => Box::new(LoggedReads { inner, log: Arc::clone(log) }),
+                None => inner,
+            })
         }
 
         fn open_text(&self) -> io::Result<Box<dyn BufRead>> {
             // `open` reads metadata via `open_read`; `open_text` exists only to
             // satisfy the trait, so it never participates in the failure injection.
             Ok(Box::new(BufReader::new(Cursor::new(self.bytes.clone()))))
+        }
+    }
+
+    /// A reader that appends each read's requested size to its shared log
+    /// before serving it — the recording half of [`MockFile::reads`].
+    struct LoggedReads {
+        inner: Box<dyn ReadSeek>,
+        log: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Read for LoggedReads {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(buf.len());
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for LoggedReads {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.inner.seek(pos)
         }
     }
 
@@ -4971,6 +5613,7 @@ mod tests {
             bytes,
             trip: trip.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -5046,6 +5689,7 @@ mod tests {
             bytes: vec![0; len],
             trip: trip.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let dir = MockDir {
             name: "SSIF".to_owned(),
@@ -5099,6 +5743,7 @@ mod tests {
             bytes: vec![0_u8; 200],
             trip: trip.clone(),
             fail_read_at: Some(0),
+            reads: None,
         };
         let stream_dir =
             MockDir { name: "STREAM".to_owned(), dirs: Vec::new(), files: vec![m2ts], trip };
@@ -5122,6 +5767,7 @@ mod tests {
                 &mut progress,
                 sink,
                 keep_partial,
+                false,
                 false,
             );
             // The failed file still consumes its progress budget (the snap to
@@ -5212,6 +5858,7 @@ mod tests {
             bytes,
             trip: trip.clone(),
             fail_read_at,
+            reads: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -5323,7 +5970,7 @@ mod tests {
         let off = BdRom::open_resilient_with(
             &tripping_disc(m2ts, Some(DATA_SIZE)),
             ScanMode::Full,
-            ScanOptions { keep_partial: false },
+            ScanOptions { keep_partial: false, ..ScanOptions::default() },
             None,
             &mut |_| {},
             &AtomicBool::new(false),
@@ -5380,7 +6027,7 @@ mod tests {
         let off = BdRom::open_resilient_with(
             &tripping_disc(m2ts, Some(DATA_SIZE)),
             ScanMode::Full,
-            ScanOptions { keep_partial: false },
+            ScanOptions { keep_partial: false, ..ScanOptions::default() },
             None,
             &mut |_| {},
             &AtomicBool::new(false),
@@ -5517,7 +6164,7 @@ Total Bitrate:  0.00 Mbps
         let off = BdRom::open_resilient_with(
             &tripping_disc_with(clip, m2ts, Some(DATA_SIZE)),
             ScanMode::Full,
-            ScanOptions { keep_partial: false },
+            ScanOptions { keep_partial: false, ..ScanOptions::default() },
             None,
             &mut |_| {},
             &AtomicBool::new(false),
@@ -5830,6 +6477,7 @@ Total Bitrate:  0.00 Mbps
                         .iter()
                         .find(|(file, _)| file.eq_ignore_ascii_case(&entry_name))
                         .map(|&(_, serve)| serve),
+                    reads: None,
                     name: entry_name,
                 });
             }
@@ -6118,12 +6766,15 @@ Total Bitrate:  0.00 Mbps
 
         // `Full`: the quick pass ahead of the measurement pass stays silent.
         // Its first read would be a 16 KiB quick chunk followed by its own
-        // snap to 100%; the trail instead opens on a full-pass chunk and
-        // climbs to 100% once, so nothing of it reaches the caller.
+        // snap to 100%; the trail instead opens on the measurement pass's
+        // pre-open and pre-read heartbeats (both count 0), then a full-pass
+        // chunk, and climbs to 100% once, so nothing of the quick pass
+        // reaches the caller.
         let full = trail(ScanMode::Full);
         assert!(full.iter().all(|(file, _, total)| file == "00000.M2TS" && *total == size));
         assert_eq!(full.first().map(|(_, done, _)| *done), Some(0));
-        assert_eq!(full.get(1).map(|(_, done, _)| *done), Some(chunk));
+        assert_eq!(full.get(1).map(|(_, done, _)| *done), Some(0));
+        assert_eq!(full.get(2).map(|(_, done, _)| *done), Some(chunk));
         assert!(climbs(&full), "the count never restarts");
         assert_eq!(full.last().map(|(_, done, _)| *done), Some(size));
     }
@@ -6338,13 +6989,17 @@ Total Bitrate:  0.00 Mbps
             .expect("the healthy mock disc scans"),
         );
         assert_eq!(snapshots.swap(0, Ordering::Relaxed), 6);
-        // Armed by the measurement pass's first progress event — the heartbeat
-        // before the first file's first read, whose chunk is then served and
-        // parsed before the flag's next per-chunk poll aborts the pass. The
-        // observer keeps that one parsed chunk's snapshot; the cancelled
-        // file's boundary snapshot never fires, and neither does any later
-        // file's.
-        let mut arm = |_: ScanProgress<'_>| cancel.store(true, Ordering::Relaxed);
+        // Armed by the measurement pass's first counted read (the first event
+        // whose count advanced — the pre-open and pre-read heartbeats report
+        // count 0 and must not arm, or the flag's pre-read poll would abort
+        // before any chunk is parsed). The armed chunk is already parsed, so
+        // the observer keeps its snapshot; the cancelled file's boundary
+        // snapshot never fires, and neither does any later file's.
+        let mut arm = |p: ScanProgress<'_>| {
+            if p.done > 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        };
         let err = BdRom::open_observed(
             &disc,
             ScanMode::Full,
@@ -6521,6 +7176,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![0_u8; 200],
             trip: trip.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let stream_dir = MockDir {
             name: "STREAM".to_owned(),
@@ -6543,6 +7199,7 @@ Total Bitrate:  0.00 Mbps
             &mut progress,
             &mut Sink { errors: Some(&mut errors) },
             true,
+            false,
             false,
         );
         let message = result.err().map(|err| err.to_string());
@@ -6636,6 +7293,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![0],
             trip: trip.clone(),
             fail_read_at: Some(0),
+            reads: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -6716,6 +7374,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![1],
             trip: Trip::new(usize::MAX),
             fail_read_at: Some(0),
+            reads: None,
         };
         assert!(read_file(&unreadable).is_err()); // open_read ok, read_to_end fails
         // Exercise the failing reader's seek.
@@ -6786,6 +7445,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![7; 8],
             trip: Trip::new(usize::MAX),
             fail_read_at: None,
+            reads: None,
         };
         // Exactly `cap` bytes is legal — only the byte *past* the cap is not.
         assert_eq!(read_file_capped(&file, 8).expect("at the cap"), vec![7; 8]);
@@ -6799,6 +7459,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![7; 9],
             trip: Trip::new(usize::MAX),
             fail_read_at: None,
+            reads: None,
         };
         let err = read_file_capped(&file, 8).expect_err("one byte over the cap");
         assert!(matches!(
@@ -6854,6 +7515,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![1],
             trip,
             fail_read_at: None,
+            reads: None,
         };
         assert_eq!(mock_file.full_name(), "x");
         assert!(!mock_file.is_dir());
@@ -6959,6 +7621,7 @@ Total Bitrate:  0.00 Mbps
             bytes,
             trip: trip.clone(),
             fail_read_at: fail_read.then_some(0),
+            reads: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),
@@ -7037,6 +7700,7 @@ Total Bitrate:  0.00 Mbps
             bytes: vec![1],
             trip: ok.clone(),
             fail_read_at: None,
+            reads: None,
         };
         let playlist = MockDir {
             name: "PLAYLIST".to_owned(),
@@ -7070,6 +7734,7 @@ Total Bitrate:  0.00 Mbps
                 bytes: vec![1],
                 trip: bt.clone(),
                 fail_read_at: None,
+                reads: None,
             };
             let sub = |name: &str, file: &str| MockDir {
                 name: name.to_owned(),
@@ -7210,6 +7875,7 @@ Total Bitrate:  0.00 Mbps
             bytes,
             trip: trip.clone(),
             fail_read_at: fail_read.then_some(0),
+            reads: None,
         };
         let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
             name: name.to_owned(),

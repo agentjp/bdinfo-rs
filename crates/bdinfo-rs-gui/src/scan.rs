@@ -183,16 +183,17 @@ pub fn scan_structural(
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<Structural, String> {
-    let (bdrom, errors) = listing_scan(|mode| {
-        // Always the default (retain), never the user's setting: the
-        // partial-retention toggle scopes to the measured scan, which is the
-        // one that renders a report. A listing open that hits a mid-file read
-        // error therefore keeps that file's partial codec detail whatever the
-        // setting says, so the panes stay as full as the disc allows.
+    let (bdrom, errors) = listing_scan(|mode, options| {
+        // The options come from `listing_scan` (the default plus its AACS
+        // verdict reuse), never the user's settings: the partial-retention
+        // toggle scopes to the measured scan, which is the one that renders
+        // a report. A listing open that hits a mid-file read error therefore
+        // keeps that file's partial codec detail whatever the setting says,
+        // so the panes stay as full as the disc allows.
         //
         // A fresh bundle per open: the listing makes two of them, and the
         // observers hold the callback exclusively for one call.
-        open(input, mode, ScanOptions::default(), None, ScanObservers::new(&mut *progress, cancel))
+        open(input, mode, options, None, ScanObservers::new(&mut *progress, cancel))
             .map_err(|err: BdError| err.to_string())
     })?;
     let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
@@ -216,13 +217,22 @@ pub fn scan_structural(
 /// but damaged media can hold a single read for minutes, which is why the
 /// pass is observable and cancellable through [`scan_structural`]'s
 /// parameters. Reaching it costs a second parse of the clip metadata the
-/// first open just read, which the filesystem cache serves.
+/// first open just read, which the filesystem cache serves — but not a
+/// second AACS probe of the stream heads: the second open reuses the first
+/// open's verdict ([`ScanOptions::aacs_encrypted`]), so one listing probes
+/// the disc once.
 ///
 /// # Errors
 /// Whatever `open` reports, from either call.
-fn listing_scan(mut open: impl FnMut(ScanMode) -> Opened) -> Opened {
-    let cheap = open(ScanMode::Metadata)?;
-    if cheap.0.is_aacs_encrypted { Ok(cheap) } else { open(ScanMode::Codecs) }
+fn listing_scan(mut open: impl FnMut(ScanMode, ScanOptions) -> Opened) -> Opened {
+    let cheap = open(ScanMode::Metadata, ScanOptions::default())?;
+    if cheap.0.is_aacs_encrypted {
+        Ok(cheap)
+    } else {
+        let mut options = ScanOptions::default();
+        options.aacs_encrypted = Some(cheap.0.is_aacs_encrypted);
+        open(ScanMode::Codecs, options)
+    }
 }
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.
@@ -262,6 +272,7 @@ pub fn scan_measured(
     scan_options: ScanOptions,
     observers: ScanObservers<'_>,
 ) -> Result<Measured, String> {
+    let scan_options = measured_scan_options(scan_options);
     let (bdrom, errors) = open(input, ScanMode::Full, scan_options, Some(scan_files), observers)
         .map_err(|err| err.to_string())?;
     let order = selection_order(&bdrom.playlists, selection);
@@ -272,6 +283,17 @@ pub fn scan_measured(
         errors: Arc::new(errors),
         playlists: bdrom.playlists,
     })
+}
+
+/// The caller's scan switches adjusted for the measured scan: the quick
+/// codec pass is skipped ([`ScanOptions::skip_quick_pass`]). The listing
+/// that produced every measured scan's selection already read each stream
+/// file's codec detail, so the quick pass could only re-read the same file
+/// heads — and on damaged media each of those reads can stall for minutes
+/// before the measurement even starts.
+const fn measured_scan_options(mut options: ScanOptions) -> ScanOptions {
+    options.skip_quick_pass = true;
+    options
 }
 
 /// Runs `scan`, mapping a panic — a violation of the core's fuzz-held
@@ -560,14 +582,15 @@ mod tests {
         (BdRom { is_aacs_encrypted, ..bdrom }, Vec::new())
     }
 
-    /// Records every mode the seam asks for, answering each from `answer`.
-    fn opened_modes<F>(answer: F) -> (super::Opened, Vec<ScanMode>)
+    /// Records every mode the seam asks for — paired with the AACS verdict
+    /// the open's options carry — answering each from `answer`.
+    fn opened_modes<F>(answer: F) -> (super::Opened, Vec<(ScanMode, Option<bool>)>)
     where
         F: Fn(ScanMode) -> super::Opened,
     {
         let modes = RefCell::new(Vec::new());
-        let result = super::listing_scan(|mode| {
-            modes.borrow_mut().push(mode);
+        let result = super::listing_scan(|mode, options| {
+            modes.borrow_mut().push((mode, options.aacs_encrypted));
             answer(mode)
         });
         (result, modes.into_inner())
@@ -579,7 +602,7 @@ mod tests {
         // *asked for*, because asking is what reads the disc end to end.
         let (result, modes) = opened_modes(|_| Ok(cheap_open(true)));
         let (bdrom, errors) = result.expect("the metadata open stands in");
-        assert_eq!(modes, [ScanMode::Metadata], "the codec pass must not be reached");
+        assert_eq!(modes, [(ScanMode::Metadata, None)], "the codec pass must not be reached");
         assert!(bdrom.is_aacs_encrypted);
         assert!(errors.is_empty());
     }
@@ -592,7 +615,13 @@ mod tests {
             Ok((BdRom { volume_label: label.to_owned(), ..bdrom }, Vec::new()))
         });
         let (bdrom, _) = result.expect("the codec pass answers");
-        assert_eq!(modes, [ScanMode::Metadata, ScanMode::Codecs], "both opens, in that order");
+        // The second open carries the first open's verdict, so one listing
+        // probes the stream heads once.
+        assert_eq!(
+            modes,
+            [(ScanMode::Metadata, None), (ScanMode::Codecs, Some(false))],
+            "both opens, in that order; only the first probes"
+        );
         assert_eq!(bdrom.volume_label, "DEEP", "the codec pass is what the listing keeps");
     }
 
@@ -603,14 +632,14 @@ mod tests {
         // listing's failure rather than a silently degraded table.
         let (result, modes) = opened_modes(|_| Err("no disc".to_owned()));
         assert_eq!(result.expect_err("the metadata failure propagates"), "no disc");
-        assert_eq!(modes, [ScanMode::Metadata], "a failed first open reaches no further");
+        assert_eq!(modes, [(ScanMode::Metadata, None)], "a failed first open reaches no further");
 
         let (result, modes) = opened_modes(|mode| match mode {
             ScanMode::Metadata => Ok(cheap_open(false)),
             _ => Err("the disc vanished".to_owned()),
         });
         assert_eq!(result.expect_err("the codec failure propagates"), "the disc vanished");
-        assert_eq!(modes, [ScanMode::Metadata, ScanMode::Codecs]);
+        assert_eq!(modes, [(ScanMode::Metadata, None), (ScanMode::Codecs, Some(false))]);
     }
 
     #[test]
