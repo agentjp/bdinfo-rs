@@ -94,7 +94,10 @@ impl TsPlaylistFile {
 
         let mut stream_clips: Vec<TsStreamClip> = Vec::new();
         let mut chapter_clips: Vec<usize> = Vec::new();
-        let mut playlist_streams: BTreeMap<u16, TsStream> = BTreeMap::new();
+        // Stream-Number-table entries, each with its play item's length, queued
+        // for the duplicate-PID resolution after the loop — the rule needs the
+        // finished playlist length, unknowable mid-parse.
+        let mut pending_streams: Vec<(f64, TsStream)> = Vec::new();
         let mut angle_count: i32 = 0;
 
         for _ in 0..item_count {
@@ -110,11 +113,12 @@ impl TsPlaylistFile {
             let time_in = read_time(data, item_start.saturating_add(14))?;
             let time_out = read_time(data, item_start.saturating_add(18))?;
 
-            // Build the main clip; relative_time_in is the playlist length so far.
+            // Build the main clip; relative_time_in is the playlist length so
+            // far, while relative_length waits for the finished total after
+            // the loop.
             let relative_time_in = total_length(&stream_clips);
             let length = time_out - time_in;
             let relative_time_out = relative_time_in + length;
-            let relative_length = length / relative_time_in;
             let clip = TsStreamClip {
                 name: format!("{item_name}{}", clip_extension(&codec_id)),
                 time_in,
@@ -122,7 +126,6 @@ impl TsPlaylistFile {
                 length,
                 relative_time_in,
                 relative_time_out,
-                relative_length,
                 ..TsStreamClip::default()
             };
             let main_index = stream_clips.len();
@@ -177,13 +180,13 @@ impl TsPlaylistFile {
             pos = pos_item.saturating_add(16);
 
             for _ in 0..count_video {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             for _ in 0..count_audio {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             for _ in 0..count_presentation {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             // PiP-PG entries sit in-line in the PG section, before the IG
             // entries; they are consumed to keep the walk aligned but not
@@ -193,15 +196,15 @@ impl TsPlaylistFile {
                 pos = next;
             }
             for _ in 0..count_interactive {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             for _ in 0..count_secondary_audio {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
                 // One comb-info block: the primary-audio refs.
                 pos = skip_comb_info(data, pos)?;
             }
             for _ in 0..count_secondary_video {
-                pos = add_playlist_stream(data, pos, &mut playlist_streams, relative_length)?;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
                 // Two comb-info blocks: the secondary-audio refs, then the
                 // PiP-PG refs.
                 pos = skip_comb_info(data, pos)?;
@@ -212,12 +215,35 @@ impl TsPlaylistFile {
             pos = item_start.saturating_add(item_length).saturating_add(2);
         }
 
+        // relative_length is each clip's share of the finished playlist, so it
+        // and the duplicate-PID rule it gates resolve only now that every play
+        // item's length is summed. Classic BDInfo divides by the running total
+        // before the clip is appended (`TSPlaylistFile.LoadPlaylist`), so its
+        // first clip divides by zero into `+Infinity` and always overwrites —
+        // see DIFFERENCES.md. Angle clips keep the default `0.0`, as in
+        // classic. An unseen PID is always inserted; a duplicate overwrites
+        // only when its clip's share exceeds `0.01`.
+        let final_total = total_length(&stream_clips);
+        for clip in &mut stream_clips {
+            if clip.angle_index == 0 {
+                clip.relative_length = clip.length / final_total;
+            }
+        }
+        let mut playlist_streams: BTreeMap<u16, TsStream> = BTreeMap::new();
+        for (length, stream) in pending_streams {
+            // The map is keyed by the raw wire PID; read the stream's typed
+            // PID back out.
+            let pid = stream.base().pid.get();
+            if !playlist_streams.contains_key(&pid) || length / final_total > 0.01 {
+                playlist_streams.insert(pid, stream);
+            }
+        }
+
         // PlayListMark: 4-byte length, then a u16 count, then 14-byte entries.
         let mut chapters: Vec<f64> = Vec::new();
         let mut chap_pos = chapters_offset.saturating_add(4);
         let chapter_count = u16_be(data, chap_pos)?;
         chap_pos = chap_pos.saturating_add(2);
-        let final_total = total_length(&stream_clips);
         for _ in 0..chapter_count {
             let chapter_type = byte(data, chap_pos.saturating_add(1))?;
             if chapter_type == 1 {
@@ -258,12 +284,13 @@ impl TsPlaylistFile {
 }
 
 /// Sum of the main clips' (`angle_index == 0`) lengths — the playlist length
-/// accumulated over the clips collected so far.
+/// over the clips collected so far, and the finished total once every play
+/// item is parsed.
 ///
 /// Written as an explicit `length = 0.0; for …` accumulation rather than
-/// `Iterator::sum`, whose `f64` identity is `-0.0` — that would make the first
-/// clip's `length / total` evaluate to `-inf` instead of the defined `+inf`
-/// (`40.0 / +0.0`), flipping the sign on the empty-prefix case.
+/// `Iterator::sum`, whose `f64` identity is `-0.0` — that would flip the
+/// first clip's `relative_time_in` (the empty-prefix call) to `-0.0`, a
+/// different bit pattern on a public field than the `0.0` it holds today.
 fn total_length(clips: &[TsStreamClip]) -> f64 {
     let mut length = 0.0;
     for clip in clips {
@@ -303,22 +330,18 @@ fn skip_comb_info(data: &[u8], pos: usize) -> Result<usize, BdError> {
 }
 
 /// Parses one Stream-Number-table entry at `pos` and, if it yields a stream,
-/// records it in `playlist_streams`: an unseen PID is always inserted, and a
-/// duplicate only overwrites when the clip's `relative_length` exceeds `0.01`.
+/// queues it with its play item's `length` for the duplicate-PID resolution
+/// that runs once the whole playlist is parsed (see [`TsPlaylistFile::scan`]).
 /// Returns the position after the entry.
 fn add_playlist_stream(
     data: &[u8],
     pos: usize,
-    playlist_streams: &mut BTreeMap<u16, TsStream>,
-    relative_length: f64,
+    pending: &mut Vec<(f64, TsStream)>,
+    length: f64,
 ) -> Result<usize, BdError> {
     let (stream, new_pos) = create_playlist_stream(data, pos)?;
     if let Some(stream) = stream {
-        // The map is keyed by the raw wire PID; read the stream's typed PID back out.
-        let pid = stream.base().pid.get();
-        if !playlist_streams.contains_key(&pid) || relative_length > 0.01 {
-            playlist_streams.insert(pid, stream);
-        }
+        pending.push((length, stream));
     }
     Ok(new_pos)
 }
@@ -594,13 +617,13 @@ mod tests {
         assert_eq!(clip0.length.to_bits(), 40.0_f64.to_bits());
         assert_eq!(clip0.relative_time_in.to_bits(), 0.0_f64.to_bits());
         assert_eq!(clip0.relative_time_out.to_bits(), 40.0_f64.to_bits()); // rel_in + length
-        assert!(clip0.relative_length.is_infinite()); // length / 0 for the first clip
+        assert_eq!(clip0.relative_length.to_bits(), (40.0_f64 / 60.0).to_bits()); // of 60s total
         assert_eq!(clip0.chapters, vec![60.0]); // one chapter landed in this clip
         let clip1 = file.stream_clips.get(1).unwrap();
         assert_eq!(clip1.name, "00017.M2TS");
         assert_eq!(clip1.relative_time_in.to_bits(), 40.0_f64.to_bits());
         assert_eq!(clip1.relative_time_out.to_bits(), 60.0_f64.to_bits());
-        assert_eq!(clip1.relative_length.to_bits(), 0.5_f64.to_bits()); // 20 / 40
+        assert_eq!(clip1.relative_length.to_bits(), (20.0_f64 / 60.0).to_bits()); // of 60s total
 
         // Playlist streams keyed by PID (MVC produced nothing).
         let pids: Vec<u16> = file.playlist_streams.keys().copied().collect();
@@ -624,7 +647,7 @@ mod tests {
         audio.base.stream_type = TsStreamType::DtsHdMasterAudio;
         assert_eq!(file.playlist_streams.get(&0x1100), Some(&TsStream::Audio(audio)));
 
-        // PID 0x1011 was overwritten by item 1's clip (relative_length 0.5 > 0.01):
+        // PID 0x1011 was overwritten by item 1's clip (20s of 60s > 0.01):
         // it now carries item 1's coding (576i / 29.97), not item 0's.
         let mut video = TsVideoStream::default();
         video.set_video_format(TsVideoFormat::Videoformat576i);
@@ -692,6 +715,13 @@ mod tests {
         assert_eq!(angle.length.to_bits(), 20.0_f64.to_bits());
         assert_eq!(angle.relative_time_in.to_bits(), 40.0_f64.to_bits());
         assert_eq!(angle.relative_time_out.to_bits(), 60.0_f64.to_bits());
+        // Main clips carry their share of the 60s total; angle clips keep the
+        // default 0.0 (only `angle_index == 0` lengths count and are filled).
+        assert_eq!(
+            file.stream_clips.first().unwrap().relative_length.to_bits(),
+            (40.0_f64 / 60.0).to_bits()
+        );
+        assert_eq!(angle.relative_length.to_bits(), 0.0_f64.to_bits());
         assert!(!file.mvc_base_view_r); // misc flags 0
     }
 
@@ -721,17 +751,18 @@ mod tests {
     #[test]
     fn duplicate_pid_at_the_relative_length_threshold_is_not_overwritten() {
         // Item 0 is a long clip (PID 0x1011, 1080p); item 1 reuses PID 0x1011 with
-        // different coding but its relative_length is exactly 0.01 (1s / 100s). The
-        // rule is `> 0.01`, so it does NOT overwrite — item 0's stream is kept.
+        // different coding but its share of the playlist is exactly 0.01
+        // (1s of a 99s + 1s = 100s total). The rule is `> 0.01`, so it does NOT
+        // overwrite — item 0's stream is kept.
         // (This pins the `>` boundary: a `>=` would wrongly overwrite.)
         let v0 = pl_stream(1, 0x1011, 0x1B, [0x62, 0x30, 0, 0]); // 1080p / 24 / 16:9
-        let item0 = build_item("00000", 0, 4_500_000, None, [1, 0, 0, 0, 0, 0, 0], &v0); // 100s
+        let item0 = build_item("00000", 0, 4_455_000, None, [1, 0, 0, 0, 0, 0, 0], &v0); // 99s
         let v1 = pl_stream(1, 0x1011, 0x1B, [0x24, 0x20, 0, 0]); // 576i / 29.97 / 4:3
         let item1 = build_item("00017", 0, 45_000, None, [1, 0, 0, 0, 0, 0, 0], &v1); // 1s
         let buf = build_mpls(0, &[item0, item1], &[]);
         let file = TsPlaylistFile::scan("p.mpls", &buf).unwrap();
 
-        // relative_length of item 1 is 1.0 / 100.0 == 0.01 (not > 0.01) → kept.
+        // Item 1's share is 1.0 / 100.0 == 0.01 (not > 0.01) → kept.
         let mut video = TsVideoStream::default();
         video.set_video_format(TsVideoFormat::Videoformat1080p);
         video.set_frame_rate(TsFrameRate::Framerate24);

@@ -837,11 +837,13 @@ impl TsAudioStream {
     pub fn codec_name(&self) -> &str {
         match self.base.stream_type {
             // MPEG-1/2 audio and AAC report their codec-supplied `ext_data`
-            // string (an unset value → empty).
-            TsStreamType::Mpeg1Audio
-            | TsStreamType::Mpeg2Audio
-            | TsStreamType::Mpeg2AacAudio
-            | TsStreamType::Mpeg4AacAudio => self.ext_data.as_deref().unwrap_or(""),
+            // string; when the packet scan never decoded the stream (unset),
+            // the type-derived constant stands in rather than an empty name
+            // (see DIFFERENCES.md).
+            TsStreamType::Mpeg1Audio => self.ext_data.as_deref().unwrap_or("MP1 Audio"),
+            TsStreamType::Mpeg2Audio => self.ext_data.as_deref().unwrap_or("MP2 Audio"),
+            TsStreamType::Mpeg2AacAudio => self.ext_data.as_deref().unwrap_or("MPEG-2 AAC"),
+            TsStreamType::Mpeg4AacAudio => self.ext_data.as_deref().unwrap_or("MPEG-4 AAC"),
             TsStreamType::LpcmAudio => "LPCM Audio",
             TsStreamType::Ac3Audio => {
                 if self.audio_mode == TsAudioMode::Extended {
@@ -2046,17 +2048,17 @@ mod tests {
         assert_eq!(ma.codec_name(), "DTS-HD Master Audio");
         ma.has_extensions = true;
         assert_eq!(ma.codec_name(), "DTS:X Master Audio");
-        // LPCM is a fixed label; MPEG-1/2 audio and AAC echo their ext_data
-        // (empty when unset).
+        // LPCM is a fixed label; MPEG-1/2 audio and AAC echo their ext_data,
+        // with the type-derived constant standing in when it was never set.
         assert_eq!(audio(TsStreamType::LpcmAudio, 6, 1, 48_000, 0).codec_name(), "LPCM Audio");
-        for ty in [
-            TsStreamType::Mpeg1Audio,
-            TsStreamType::Mpeg2Audio,
-            TsStreamType::Mpeg2AacAudio,
-            TsStreamType::Mpeg4AacAudio,
+        for (ty, fallback) in [
+            (TsStreamType::Mpeg1Audio, "MP1 Audio"),
+            (TsStreamType::Mpeg2Audio, "MP2 Audio"),
+            (TsStreamType::Mpeg2AacAudio, "MPEG-2 AAC"),
+            (TsStreamType::Mpeg4AacAudio, "MPEG-4 AAC"),
         ] {
             let mut s = audio(ty, 2, 0, 48_000, 0);
-            assert_eq!(s.codec_name(), "", "{ty:?} with no ExtendedData");
+            assert_eq!(s.codec_name(), fallback, "{ty:?} with no ExtendedData");
             s.ext_data = Some("MPEG-4 AAC LC".to_owned());
             assert_eq!(s.codec_name(), "MPEG-4 AAC LC", "{ty:?} echoes ExtendedData");
         }

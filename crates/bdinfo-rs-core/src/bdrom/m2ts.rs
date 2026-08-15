@@ -1365,7 +1365,16 @@ impl TsStreamFile {
                                             (state.parse & 0xFE).wrapping_shr(1),
                                         ));
                                         state.pts = i128::from(state.pts_temp);
-                                        if state.pts != state.pts_last {
+                                        // Only a forward PTS measures an interval and
+                                        // advances `pts_last` — a backwards step (a
+                                        // discontinuity, damage) must neither produce
+                                        // a negative interval (`pts_transfer > 0`
+                                        // discards the access unit's bitrate sample)
+                                        // nor drag the interval base back so the next
+                                        // forward unit's rate is understated. Mirrors
+                                        // the PTS+DTS arm's running max below; see
+                                        // DIFFERENCES.md.
+                                        if state.pts > state.pts_last {
                                             if state.pts_last > 0 {
                                                 state.pts_transfer =
                                                     state.pts.wrapping_sub(state.pts_last);
@@ -2564,6 +2573,30 @@ mod tests {
         let st = file.stream_states.get(&0x1100).unwrap();
         assert_eq!(st.peak_transfer_rate, 400);
         assert!(st.transfer_count >= 2);
+    }
+
+    #[test]
+    fn backwards_pts_keeps_the_interval_base_and_the_bitrate_sample() {
+        // Audio PES at PTS 1s, 2s, a backwards 1.5s, then 3s twice. A backwards
+        // or repeated PTS must neither measure an interval nor move `pts_last`:
+        // the backwards access unit keeps the prior 1s interval (its 100-byte
+        // payload ⇒ peak 800 bits/s, the sample a negative interval would
+        // discard), and the next forward unit measures 3s − 2s = 1s from the
+        // running max — not 3s − 1.5s from the regressed value. The final
+        // repeated PTS pins that an equal PTS leaves the interval untouched
+        // (a `>=` would zero it).
+        let mut bytes = packet(0, true, &pat_payload(0x0100));
+        bytes.extend(packet(0x0100, true, &pmt_payload(&[(0x81, 0x1100)])));
+        bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 90_000, &[0; 50])));
+        bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 180_000, &[0; 50])));
+        bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 135_000, &[0; 100]))); // backwards
+        bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 270_000, &[0; 50])));
+        bytes.extend(packet(0x1100, true, &pes_pts(0xC0, 270_000, &[0; 50]))); // repeated
+        let file = scan("00000.m2ts", &bytes, &mut [empty_playlist()], true);
+        let st = file.stream_states.get(&0x1100).unwrap();
+        assert_eq!(st.peak_transfer_rate, 800);
+        assert_eq!(st.pts_last, 270_000);
+        assert_eq!(st.pts_transfer, 90_000);
     }
 
     #[test]
