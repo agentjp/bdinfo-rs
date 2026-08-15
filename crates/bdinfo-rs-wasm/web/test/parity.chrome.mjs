@@ -873,7 +873,7 @@ async function main() {
   demoOk &= demoEq(
     "the strip counts the failures",
     demo.damagedListing.errorsCount,
-    "Recorded 1 error(s) — the readable rest is shown.",
+    "Recorded 1 error — the readable rest is shown.",
   );
   demoOk &= demoEq("the strip names the failure", demo.damagedListing.errorLines, [
     "playlist 00009.mpls: unknown file type: NOPE0100",

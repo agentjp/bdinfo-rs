@@ -615,7 +615,7 @@ fn scan_errors_use_the_classic_epilogue_and_exit_3() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Scan completed with errors (see report)."), "stdout: {stdout}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("warning: scan completed with 1 error(s):"), "stderr: {stderr}");
+    assert!(stderr.contains("warning: scan completed with 1 error:"), "stderr: {stderr}");
     // The report itself carries the WARNING block.
     assert!(report.contains("WARNING: File errors"));
 }

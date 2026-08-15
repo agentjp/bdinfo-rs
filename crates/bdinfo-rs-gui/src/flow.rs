@@ -334,6 +334,14 @@ impl Listing {
     }
 }
 
+/// The count with its noun's number agreed — `"1 error"`, `"0 errors"`,
+/// `"3 stream files"`. The noun is the singular; the plural is `s`-appended,
+/// which every noun the GUI counts inflects regularly.
+#[must_use]
+pub fn counted(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
 /// The scan-complete confirmation text for a scan that recorded `errors`
 /// failures.
 ///
@@ -344,7 +352,10 @@ pub fn scan_notice(errors: usize) -> String {
     if errors == 0 {
         "Scan completed successfully.".to_owned()
     } else {
-        format!("Scan completed with {errors} error(s).\nThe report below was still written.")
+        format!(
+            "Scan completed with {}.\nThe report below was still written.",
+            counted(errors, "error")
+        )
     }
 }
 
@@ -1380,9 +1391,20 @@ mod tests {
     fn the_scan_notice_names_the_error_count() {
         assert_eq!(super::scan_notice(0), "Scan completed successfully.");
         assert_eq!(
-            super::scan_notice(2),
-            "Scan completed with 2 error(s).\nThe report below was still written."
+            super::scan_notice(1),
+            "Scan completed with 1 error.\nThe report below was still written."
         );
+        assert_eq!(
+            super::scan_notice(2),
+            "Scan completed with 2 errors.\nThe report below was still written."
+        );
+    }
+
+    #[test]
+    fn counted_agrees_the_noun_with_the_count() {
+        assert_eq!(super::counted(0, "error"), "0 errors");
+        assert_eq!(super::counted(1, "error"), "1 error");
+        assert_eq!(super::counted(2, "stream file"), "2 stream files");
     }
 
     #[test]
