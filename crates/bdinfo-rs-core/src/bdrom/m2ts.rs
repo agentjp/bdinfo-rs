@@ -578,10 +578,12 @@ pub struct TsStreamFile {
     pub size: u64,
     /// Presentation length in seconds.
     pub length: f64,
-    /// The interleaved 3D source (`*.ssif`), when this clip has one. When
-    /// present, the per-file scan in [`super::disc`] opens it and streams it
-    /// through [`scan`](Self::scan) instead of the plain `*.m2ts` (see
-    /// [`super::interleaved`]).
+    /// The interleaved 3D source (`*.ssif`) this clip was read through, when it
+    /// has one. When present, the per-file scan in [`super::disc`] opened it and
+    /// streamed it through [`scan`](Self::scan) instead of the plain `*.m2ts`
+    /// (see [`super::interleaved`]). It records the source actually read, not
+    /// the one on the disc: a clip whose `*.ssif` would not open is scanned
+    /// from its `*.m2ts` and leaves this `None`.
     pub interleaved_file: Option<TsInterleavedFile>,
     /// The elementary streams keyed by PID, registered from the PMT.
     pub streams: BTreeMap<u16, TsStream>,

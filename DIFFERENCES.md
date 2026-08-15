@@ -34,6 +34,7 @@ actually see on a normal disc.
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 | [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
+| [An unreadable `.ssif` falls back to the base view](#an-unreadable-ssif-falls-back-to-the-base-view) | Only on damaged media — the clip is measured in 2D instead of lost | 3D discs whose `STREAM/SSIF` file will not open |
 
 ---
 
@@ -252,9 +253,53 @@ stream file, which is why the `.iso` path keeps it. Every surface that takes an 
 drains those recordings — the command line, the desktop app and the browser package alike
 — so an unreadable image is never reported as a clean scan.
 
+The split reaches the report text: the `WARNING:` block names a different thing for each
+input, because a different thing failed.
+
+```diff
+  WARNING: File errors were encountered during scan:
+
+- 00011.M2TS	<the read failure>
++ 00011.M2TS @ byte 5242880	<the read failure>
+```
+
+The `-` line is folder input, the `+` line the same disc as an `.iso`. Folder input names
+the stream file that a failed read aborted. `.iso` input names the open file handle and
+the byte offset it first found unreadable; the reader then serves that handle zeros and
+reads on, so further bad sectors under the same handle add no further lines. Both shapes
+are per attempt, not per disc: a damaged span that both measurement passes read as far as
+prints a line for each of them.
+
+Neither shape is BDInfo's — it reads folders only, and prompts per failing file instead of
+collecting the failures into the report.
+
 <sub>Source: `crates/bdinfo-rs-core/src/vfs/udf/source.rs` (`UdfSource::open_resilient`,
 `take_errors`), `crates/bdinfo-rs-core/src/scan.rs` (`open_iso`),
 `crates/bdinfo-rs-wasm/src/lib.rs` (`scan_iso`, `run_iso_report`).</sub>
+
+### An unreadable `.ssif` falls back to the base view
+
+A 3D clip stores its base and dependent views interleaved in
+`BDMV/STREAM/SSIF/<clip>.ssif`, and both tools demux that file in preference to the plain
+`BDMV/STREAM/<clip>.m2ts` — it is the superset, and it is the only place the dependent
+(MVC) view exists. It is not, however, the only readable source of the base view.
+
+When the `.ssif` cannot be opened, BDInfo abandons the clip: no streams, no bitrates, no
+chapter rows. bdinfo-rs opens the `.m2ts` instead and measures the base view from it, so a
+3D disc with an unreadable interleaved file still reports everything a 2D scan of it would
+— minus the dependent-view row, which genuinely could not be read. The failure is not
+swallowed: it is recorded against the `.ssif` and printed in the report `WARNING:` block,
+and the clip is named by the `.m2ts` it was actually read from wherever the report names
+its source file. The on-disk sizes still count the `.ssif` — the file is on the disc
+either way, and an unreadable one is no smaller. A strict (fail-fast) scan still aborts;
+degrading is the resilient scan's job.
+
+This applies to the failed *open* only. An `.ssif` that opens and then fails partway is an
+ordinary damaged stream file, handled as
+[above](#read-errors-folder-input-vs-iso-input): what was demuxed before the failure is
+kept, and the base view is not re-read from the `.m2ts`.
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/disc.rs` (`scan_one_stream_file`).</sub>
 
 ---
 
