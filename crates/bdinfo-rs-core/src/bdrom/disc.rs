@@ -260,6 +260,18 @@ pub struct ClipSummary {
     pub relative_time_in: f64,
     /// Clip duration in seconds.
     pub length: f64,
+    /// Whether the measurement pass demuxed this clip's stream file.
+    ///
+    /// The one thing that separates "measured as empty" from "never looked
+    /// at", both of which leave every measured field below at zero: a
+    /// [`ScanMode::Metadata`] or [`ScanMode::Codecs`] open, a file a
+    /// `scan_files` selection left out, a file that failed to open, and a file
+    /// whose partial demux was dropped ([`ScanOptions::keep_partial`] off) all
+    /// come back `false`, while a 0-byte or header-destroyed file that opens,
+    /// reads to a clean end of file and registers no stream at all comes back
+    /// `true` with nothing measured — which is what lets
+    /// [`BdRom::short_stream_files`] name it.
+    pub measured: bool,
     /// Payload bytes the demux attributed to this clip.
     pub payload_bytes: u64,
     /// Transport packets the demux attributed to this clip.
@@ -311,7 +323,7 @@ impl ClipSummary {
 
 /// Test constructors for [`PlaylistSummary`] and [`ClipSummary`].
 ///
-/// Both are wide plain-data structs — 11 and 12 public fields — while a test
+/// Both are wide plain-data structs — 11 and 13 public fields — while a test
 /// usually cares about two or three. Each function takes those few and zeroes
 /// the rest, so a test spells only its own intent and a field added to either
 /// struct changes one body here instead of every construction site.
@@ -334,6 +346,7 @@ pub mod fixtures {
             angle_index: 0,
             relative_time_in: 0.0,
             length,
+            measured: false,
             payload_bytes: 0,
             packet_count: 0,
             packet_seconds: 0.0,
@@ -1216,15 +1229,19 @@ impl BdRom {
     /// each entry carries).
     ///
     /// Derived from the per-clip summaries on every call, over whatever this
-    /// [`BdRom`] holds: empty after an open that measured nothing
+    /// [`BdRom`] holds, and read through [`ClipSummary::measured`]: empty after
+    /// an open that measured nothing
     /// ([`ScanMode::Metadata`]/[`ScanMode::Codecs`]), and silent about the
-    /// files a `scan_files` selection left out.
+    /// files a `scan_files` selection left out. A 0-byte or header-destroyed
+    /// file that registers no stream at all IS named — it was measured, and
+    /// what it measured is nothing.
     ///
     /// A stream file whose read FAILED partway is named here too when its
     /// partial state was kept ([`ScanOptions::keep_partial`]) — its measured
     /// span is genuinely short. That file is also a [`ScanError`] of the
     /// resilient scan, and this type carries no error list, so a surface
-    /// showing both pairs them by file name.
+    /// showing both pairs them by file name. With the partial state dropped the
+    /// file is silent here and the [`ScanError`] is its only record.
     #[must_use]
     pub fn short_stream_files(&self) -> Vec<ShortStreamFile> {
         shortfall::short_stream_files(&self.playlists)
@@ -1992,6 +2009,11 @@ fn build_clip_summaries(
             angle_index: clip.angle_index,
             relative_time_in: clip.relative_time_in,
             length: clip.length,
+            // Presence in the full-pass map IS "the measurement pass demuxed
+            // this file": a file that never ran, failed to open, or had its
+            // partial state dropped is not in it, and one that opened and read
+            // to a clean end of file is — however little it carried.
+            measured: file.is_some(),
             payload_bytes: clip.payload_bytes,
             packet_count: clip.packet_count,
             packet_seconds: clip.packet_seconds,
@@ -4694,6 +4716,45 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_file_that_demuxes_to_nothing_at_all_is_reported_short() {
+        // Total destruction leaves every number a never-scanned file leaves:
+        // no per-stream tally, no demuxed second, no error (both files open and
+        // read to a clean end of file). `ClipSummary::measured` is the only
+        // thing that tells the two apart, so this is the case that would go
+        // silent if the check read the tally list instead.
+        let clip = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        // A 0-byte stub, as a rip that died before writing a byte leaves, and a
+        // non-empty file whose header is gone — no PAT, no PMT, so no stream
+        // ever registers.
+        for stub in [Vec::new(), vec![0xFF; 4096]] {
+            let bytes = stub.len();
+            let disc = TempDisc::build(
+                &[],
+                &[
+                    ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])), // 100 s
+                    ("BDMV/CLIPINF/00000.clpi", clip.clone()),
+                    ("BDMV/STREAM/00000.m2ts", stub),
+                ],
+            );
+            let scanned = disc.open_scanned().expect("measured scan");
+            let summary = scanned
+                .playlists
+                .first()
+                .and_then(|pl| pl.clips.first())
+                .expect("the destroyed file's clip row");
+            assert!(summary.measured, "{bytes} bytes: the file was demuxed");
+            assert!(summary.streams.is_empty(), "{bytes} bytes: nothing registered");
+            let reported = scanned.short_stream_files();
+            assert_eq!(reported.len(), 1, "{bytes} bytes: {reported:?}");
+            assert_eq!(
+                reported.first().expect("the short file").notice(),
+                "00000.M2TS is shorter than declared: \
+                 measured 0.0 s of 100.0 s (100.0 s missing)"
+            );
+        }
+    }
+
+    #[test]
     fn clip_summaries_skip_a_registration_order_entry_without_a_stream() {
         // The two registration fields are public: a caller can desync them, so
         // an order entry whose stream is gone is skipped, not trusted.
@@ -6137,6 +6198,7 @@ mod tests {
         assert_eq!(pl.chapters.len(), 2);
         assert_eq!(pl.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
         let clip = pl.clips.first().unwrap();
+        assert!(!clip.measured, "a dropped file is not in the full-pass map");
         assert!(clip.streams.is_empty());
         assert_eq!(clip.file_seconds.to_bits(), 0.0_f64.to_bits());
         // …while the in-place playlist tallies the demux flushed before dying
@@ -6172,9 +6234,9 @@ mod tests {
             short.first().unwrap().file()
         );
 
-        // Retention off drops the dead file's demux state, so it carries no
-        // measured tallies at all — indistinguishable from a file the scan
-        // never opened, and named by the recorded failure alone.
+        // Retention off drops the dead file from the full-pass map, so its clip
+        // comes back unmeasured — the same marker a file the scan never opened
+        // carries — and the recorded failure alone names it.
         let off = BdRom::open_resilient(
             &tripping_disc(m2ts, Some(DATA_SIZE)),
             ScanMode::Full,
@@ -6184,6 +6246,13 @@ mod tests {
         )
         .expect("resilient scan continues");
         assert_eq!(off.errors.len(), 1);
+        let dropped = off
+            .bdrom
+            .playlists
+            .first()
+            .and_then(|pl| pl.clips.first())
+            .expect("the dropped file's clip row");
+        assert!(!dropped.measured);
         assert!(off.bdrom.short_stream_files().is_empty());
     }
 

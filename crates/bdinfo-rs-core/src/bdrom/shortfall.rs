@@ -118,8 +118,8 @@ impl ShortStreamFile {
 ///
 /// Silent by construction for everything that was never measured — a
 /// metadata-only or codec-only open, and every file a `scan_files` selection
-/// left out (see [`is_measured`]) — so the result is evidence of a short file,
-/// not of an unscanned one.
+/// left out (see [`ClipSummary::measured`]) — so the result is evidence of a
+/// short file, not of an unscanned one.
 pub(crate) fn short_stream_files(playlists: &[PlaylistSummary]) -> Vec<ShortStreamFile> {
     let mut worst: BTreeMap<String, ShortStreamFile> = BTreeMap::new();
     for playlist in playlists {
@@ -147,11 +147,16 @@ pub(crate) fn short_stream_files(playlists: &[PlaylistSummary]) -> Vec<ShortStre
 /// file or a part of it: a play item that ends before the damage measures its
 /// full window and stays quiet, while one that reaches past it comes up short.
 ///
+/// [`ClipSummary::measured`] is what says the file was demuxed at all — not
+/// the presence of per-stream tallies, which a 0-byte or header-destroyed file
+/// leaves as empty as an unscanned one does, so that total destruction would
+/// go unreported where partial truncation notices.
+///
 /// Comparisons on the difference, not on a ratio, so a `length` of zero — or
 /// any non-finite value a caller-assembled summary could hold — falls out as
 /// "not short" instead of dividing.
 fn clip_shortfall(clip: &ClipSummary) -> Option<ShortStreamFile> {
-    if !is_measured(clip) {
+    if !clip.measured {
         return None;
     }
     let missing = clip.length - clip.packet_seconds;
@@ -162,21 +167,6 @@ fn clip_shortfall(clip: &ClipSummary) -> Option<ShortStreamFile> {
     })
 }
 
-/// Whether `clip`'s stream file was measured at all.
-///
-/// A clip carries whole-file per-stream tallies exactly when the full
-/// measurement pass demuxed its file, so an empty tally list means "not
-/// measured" rather than "measured as empty" — which is what keeps an open that
-/// measures nothing, and every file left out of a selective scan, out of the
-/// result.
-///
-/// The blind spot it buys: a file too short for a single stream to register
-/// leaves the same empty list as a file the scan never opened, so it goes
-/// unreported.
-const fn is_measured(clip: &ClipSummary) -> bool {
-    !clip.streams.is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::disc::{ClipStreamTally, ClipSummary, PlaylistSummary, fixtures};
@@ -185,11 +175,10 @@ mod tests {
     use crate::stream::TsStreamType;
 
     /// A measured clip of `name`: `declared` seconds of play item, `measured`
-    /// seconds demuxed, and the one per-stream tally that marks the file as
-    /// scanned.
+    /// seconds demuxed, and the one per-stream tally a file the demux got
+    /// anywhere into carries.
     fn measured_clip(name: &str, declared: f64, measured: f64) -> ClipSummary {
         ClipSummary {
-            packet_seconds: measured,
             streams: vec![ClipStreamTally {
                 pid: Pid::new(0x1011),
                 stream_type: TsStreamType::AvcVideo,
@@ -197,8 +186,15 @@ mod tests {
                 payload_bytes: 1024,
                 packet_count: 8,
             }],
-            ..fixtures::clip(name, declared)
+            ..empty_clip(name, declared, measured)
         }
+    }
+
+    /// A measured clip that registered no stream at all — the shape a 0-byte
+    /// or header-destroyed stream file leaves: opened, read to a clean end of
+    /// file, nothing demuxed.
+    fn empty_clip(name: &str, declared: f64, measured: f64) -> ClipSummary {
+        ClipSummary { measured: true, packet_seconds: measured, ..fixtures::clip(name, declared) }
     }
 
     /// One playlist named `00000.MPLS` presenting `clips`.
@@ -246,13 +242,27 @@ mod tests {
     }
 
     #[test]
-    fn a_clip_without_measured_tallies_is_never_reported() {
+    fn an_unmeasured_clip_is_never_reported() {
         // The shape every clip has after an open that measured nothing, and
         // every file a selective scan skipped: a declared length, no demuxed
-        // seconds, and no per-stream tallies.
+        // seconds, and the flag down.
         let unmeasured = fixtures::clip("00000.M2TS", 1640.0);
-        assert!(unmeasured.streams.is_empty());
+        assert!(!unmeasured.measured);
         assert!(reported(&disc_of(vec![unmeasured])).is_empty());
+    }
+
+    #[test]
+    fn a_file_that_demuxed_to_nothing_is_reported_as_the_whole_span_missing() {
+        // The flag, not the tally list, is what separates this from the case
+        // above: a 0-byte or header-destroyed file opens, ends at once and
+        // registers no stream, so every number it leaves matches a file the
+        // scan never touched. Only the marker tells them apart.
+        let destroyed = empty_clip("00000.M2TS", 1640.0, 0.0);
+        assert!(destroyed.streams.is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![destroyed])),
+            vec![("00000.M2TS".to_owned(), 1640.0, 0.0)]
+        );
     }
 
     #[test]
