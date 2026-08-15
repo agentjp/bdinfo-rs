@@ -536,15 +536,24 @@ begin {
         }
     )
 
+    # -StructuralOnly answers "does ANY structural rule claim this path" and
+    # stops at the first one, leaving Areas incomplete. It exists for the
+    # exhaustiveness pass, which reads nothing else and runs one rule sweep per
+    # tracked path — the whole index, tens of thousands of entries. Measured
+    # 2026-08-15 on the full self-test: 15.2 s without it, 4.0 s with, same
+    # verdict. Never use it where Areas is read.
     function Get-PathAreas {
-        param([string] $File)
+        param([string] $File, [switch] $StructuralOnly)
 
         $areas = [System.Collections.Generic.SortedSet[string]]::new()
         $structural = $false
 
         foreach ($rule in $script:Rules) {
             if (-not (& $rule.Match $File)) { continue }
-            if ($rule.Structural) { $structural = $true }
+            if ($rule.Structural) {
+                $structural = $true
+                if ($StructuralOnly) { break }
+            }
             foreach ($a in $rule.Areas) { [void] $areas.Add($a) }
         }
 
@@ -631,7 +640,7 @@ end {
         $tracked = @(git ls-files)
         if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
 
-        $unclassified = @($tracked | Where-Object { -not (Get-PathAreas $_).Structural })
+        $unclassified = @($tracked | Where-Object { -not (Get-PathAreas $_ -StructuralOnly).Structural })
         if ($unclassified) {
             $failures.Add("  no rule claims these tracked paths:`n" +
                 (($unclassified | ForEach-Object { "      $_" }) -join "`n"))

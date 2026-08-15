@@ -22,8 +22,10 @@ name: CI
 # classifier asks what KIND of input a file is before it asks which directory
 # holds it — see .github/scripts/classify-diff.ps1, which owns the rules, the
 # mechanism behind each one, and a self-test that refuses any tracked path no
-# rule claims. Because that self-test makes an unclassified file a failure
-# rather than a silent skip, gating rests on the rules themselves; sweep.yml
+# rule claims. That self-test is its own job here, running beside the gate
+# jobs: it makes an unclassified file a failure rather than a silent skip, and
+# reaching ci-ok is what gives it teeth. So gating rests on the rules
+# themselves; sweep.yml
 # re-runs this orchestrator UNGATED on master daily so that environment drift
 # (runner images, toolchain point releases, link rot) is caught as well.
 #
@@ -140,22 +142,12 @@ jobs:
       test-os-pr: ${{ steps.classify.outputs.test-os-pr }}
     steps:
       # Depth 1, .github only: the diff comes from the API, so the checkout
-      # exists for the classifier and its self-test — whose `git ls-files`
-      # still sees every tracked path, because a sparse checkout filters the
-      # working tree, not the index. The fixture discs never materialize
+      # exists to run the classifier. The fixture discs never materialize
       # here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: .github
-
-      # The classifier gates every job below, so prove it still holds its own
-      # rules before trusting it — the same order conventional.yml uses for
-      # check-banned-words.ps1. Also fails when a tracked path matches no rule,
-      # which is what keeps a newly added file from silently gating nothing.
-      - name: Self-test the classifier
-        shell: pwsh
-        run: ./.github/scripts/classify-diff.ps1 -SelfTest
 
       # Tree identity, not commit identity (see the header): a pull_request
       # run's head_sha is the merged branch's tip — still API-reachable after
@@ -402,6 +394,36 @@ jobs:
           mutants-args: --in-place
           cache-workspaces: crates/bdinfo-rs-wasm
 
+  # Prove the classifier still holds its own rules: every golden case, and no
+  # tracked path that matches no rule (which is what stops a newly added file
+  # from silently gating nothing).
+  #
+  # It runs BESIDE the gate jobs rather than inside `plan` because it does not
+  # have to run before the classification to protect it — it only has to fail
+  # the RUN, and ci-ok below turns this job's failure into a red verdict that
+  # blocks the merge whatever the areas said. Inside `plan` it was pure
+  # latency: `plan` gates every other job, so its ~90 s (2026-08-15, before
+  # the exhaustiveness pass early-exited) was paid by every pull request
+  # before any gate job could start. Here it hides entirely behind gate jobs
+  # that run for minutes.
+  classifier:
+    name: classifier self-test
+    needs: plan
+    if: needs.plan.outputs.should_run != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      # Sparse like `plan`'s: `git ls-files` reads the index, which a sparse
+      # checkout does not filter, so the exhaustiveness pass still sees every
+      # tracked path without materializing the fixture discs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - name: Self-test the classifier
+        shell: pwsh
+        run: ./.github/scripts/classify-diff.ps1 -SelfTest
+
   # The root-workspace gate: build + test, the quality gate, coverage, the
   # install + scan and FROM-scratch scans, the .deb/.rpm smoke, the two
   # dependency audits, the release-workflow drift guard and the corpus replay.
@@ -517,7 +539,7 @@ jobs:
   # tree-identity step deliberately emits.
   ci-ok:
     name: ci-ok
-    needs: [plan, core, repo, gui, wasm]
+    needs: [plan, classifier, core, repo, gui, wasm]
     if: ${{ !cancelled() && needs.plan.outputs.should_run != 'false' }}
     runs-on: ubuntu-latest
     steps:
