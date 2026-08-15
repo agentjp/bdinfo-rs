@@ -1719,6 +1719,10 @@ fn run_measurement_scan(
     // `Progress` holds both observers under one lifetime, so the installed one
     // is reborrowed down to `callback`'s rather than pulling it back up to the
     // bundle's (which `discarded`, a local, cannot reach).
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "the `map_or`/`map` rewrite infers the closure's return at the bundle's lifetime, so the reborrow does not shorten and `discarded`, a local, cannot meet it"
+    )]
     let measured: Option<&mut dyn FnMut(MeasuredSnapshot)> = match measured {
         Some(measured) => Some(&mut *measured),
         None => None,
