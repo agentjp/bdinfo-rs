@@ -12,6 +12,11 @@
 // does today, not what it ought to do — a row that looks wrong is a pinned
 // observation, and changing it is a deliberate decision, not a test fix.
 //
+// The run at the end is the cross-surface one: the same disc damaged at the
+// same byte, compared against a golden the library renders from the native
+// build too. The rows above characterize the browser alone and would not
+// notice a core-side change that moved damaged-disc output on both sides.
+//
 // The disc is three playlists over three clips, one of them shared:
 //
 //   00000.MPLS  1640 s  00011.M2TS                marks at 0, 600, 1200, 1500
@@ -39,6 +44,16 @@ installShims();
 const here = dirname(fileURLToPath(import.meta.url));
 const discRoot = resolve(here, "../../../bdinfo-rs/tests/fixtures/MultiPlaylist");
 const wasmPath = resolve(here, "../pkg/bdinfo_rs_wasm_bg.wasm");
+// The damaged-disc golden, committed beside the healthy ones and pinned from
+// BOTH sides: the library test
+// `the_damaged_disc_report_matches_the_golden_the_browser_pins_too` renders it
+// from the native build inside the root gate, this harness renders it from the
+// built wasm inside the wasm gate. The file is the coupling point — neither
+// side can move damaged-disc output without reddening the other's gate too.
+const goldenPath = resolve(
+  here,
+  "../../../bdinfo-rs/tests/fixtures/golden/damaged-multiplaylist.txt",
+);
 
 /** The clip byte lengths, so a fault offset can be placed inside or past one. */
 const CLIP_BYTES = { "00011.m2ts": 6_297_600, "00022.m2ts": 96_000, "00033.m2ts": 76_800 };
@@ -227,6 +242,24 @@ function warningFiles(report) {
 }
 
 /**
+ * The report with every `WARNING:` line's reason replaced by `<reason>` — the
+ * library's `normalize_warning_reasons` in JavaScript.
+ *
+ * The block renders `{file}\t{reason}`, and the reason is each surface's own
+ * error text (`io error: …` natively, the thrown JavaScript value here), so it
+ * is the one field the two sides cannot share. Tabs appear nowhere else in the
+ * report, which is what makes the per-line rule safe over the whole text.
+ */
+const normalizeWarningReasons = (report) =>
+  report
+    .split("\r\n")
+    .map((line) => {
+      const tab = line.indexOf("\t");
+      return tab === -1 ? line : `${line.slice(0, tab)}\t<reason>`;
+    })
+    .join("\r\n");
+
+/**
  * Whether a logged read is one whole chunk of the cadence: it starts on a chunk
  * boundary and ends one chunk later, or at the end of its file.
  */
@@ -410,6 +443,31 @@ async function main() {
     }
   }
 
+  // The cross-surface pin. The same disc, damaged at the same byte of the same
+  // stream file, scanned whole and compared against the committed golden the
+  // library test renders from the native build.
+  //
+  // The fault sits exactly on a chunk boundary of BOTH builds — 5 MiB is one
+  // browser chunk and twenty native 256 KiB ones — so each keeps the bytes
+  // below it and loses every byte above, and the two reports are comparable
+  // byte for byte. A fault anywhere else splits them: this side would void its
+  // whole 5 MiB chunk while the native scan kept another 256 KiB of it.
+  //
+  // The scan is the whole-disc path (an empty selection), which renders in the
+  // disc's own filtered presentation order rather than a caller's order — the
+  // only shape a library render can produce, so the only one both sides share.
+  setFaults({ files: { "00011.m2ts": WASM_CHUNK } });
+  const pinned = normalizeWarningReasons(scan_files(paths, files, []).report);
+  const golden = await readFile(goldenPath, "utf8");
+  if (pinned !== golden) {
+    const at = [...golden].findIndex((char, i) => pinned[i] !== char);
+    const context = (text) => JSON.stringify(text.slice(Math.max(0, at - 40), at + 40));
+    failures.push(
+      `the damaged-disc golden moved (${pinned.length} chars against ${golden.length}), ` +
+        `first difference at ${at}:\n     golden ${context(golden)}\n     got    ${context(pinned)}`,
+    );
+  }
+
   if (failures.length > 0) {
     console.error(`FAIL — ${failures.length} read-failure characterization(s) moved:`);
     for (const failure of failures) {
@@ -420,7 +478,8 @@ async function main() {
 
   console.log(
     `PASS — ${reports.size} read-failure runs (${Object.keys(MODES).length} fault modes ` +
-      `× ${Object.keys(SELECTIONS).length} selections) match their pinned shapes.`,
+      `× ${Object.keys(SELECTIONS).length} selections) match their pinned shapes, ` +
+      `and the damaged-disc scan matches the shared golden (${golden.length} chars).`,
   );
 }
 
