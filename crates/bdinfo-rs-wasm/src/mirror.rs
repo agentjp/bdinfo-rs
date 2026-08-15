@@ -366,6 +366,13 @@ pub struct Clip {
     pub relative_time_in_seconds: f64,
     /// How long the clip runs, in seconds.
     pub length_seconds: f64,
+    /// Whether the measurement pass demuxed this clip's stream file. False for
+    /// a file the scan never opened, one a selection left out and one whose
+    /// failed read was discarded; true for a 0-byte or header-destroyed file
+    /// that opened and yielded nothing, which is what tells "measured as
+    /// empty" from "never looked at" when every field below is zero. The disc's
+    /// own `measured` says whether the scan ran a measurement pass at all.
+    pub measured: bool,
     /// Payload bytes the packet scan attributed to this clip.
     pub payload_bytes: u64,
     /// Transport packets the packet scan attributed to this clip. The
@@ -836,6 +843,7 @@ impl From<&ClipSummary> for Clip {
             angle_index: clip.angle_index,
             relative_time_in_seconds: clip.relative_time_in,
             length_seconds: clip.length,
+            measured: clip.measured,
             payload_bytes: clip.payload_bytes,
             packet_count: clip.packet_count,
             packet_seconds: clip.packet_seconds,
@@ -1121,6 +1129,7 @@ impl From<Clip> for ClipSummary {
             angle_index: clip.angle_index,
             relative_time_in: clip.relative_time_in_seconds,
             length: clip.length_seconds,
+            measured: clip.measured,
             payload_bytes: clip.payload_bytes,
             packet_count: clip.packet_count,
             packet_seconds: clip.packet_seconds,
@@ -1344,6 +1353,7 @@ mod tests {
             angle_index: 14,
             relative_time_in_seconds: 15.5,
             length_seconds: 16.25,
+            measured: true,
             payload_bytes: 17,
             packet_count: 18,
             packet_seconds: 19.5,
@@ -1362,6 +1372,7 @@ mod tests {
             "angleIndex": 14,
             "relativeTimeInSeconds": 15.5,
             "lengthSeconds": 16.25,
+            "measured": true,
             "payloadBytes": 17,
             "packetCount": 18,
             "packetSeconds": 19.5,
@@ -1606,9 +1617,9 @@ mod tests {
 
     #[test]
     fn a_short_stream_file_crosses_as_cores_notice_sentence() {
-        // A clip demuxed to 500 of its declared 1640 seconds, carrying the
-        // per-stream tally that marks its file as measured.
+        // A clip demuxed to 500 of its declared 1640 seconds.
         let clip = ClipSummary {
+            measured: true,
             packet_seconds: 500.0,
             streams: vec![a_core_clip_stream()],
             ..fixtures::clip("00011.M2TS", 1640.0)
@@ -1774,6 +1785,7 @@ mod tests {
             interleaved_file_size: 13,
             angle_index: 14,
             relative_time_in: 15.5,
+            measured: true,
             payload_bytes: 17,
             packet_count: 18,
             packet_seconds: 19.5,

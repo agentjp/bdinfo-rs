@@ -2313,11 +2313,11 @@ mod tests {
         assert!(flow.short_stream_notices().is_empty(), "unmeasured clips raise no notice");
 
         // The measured result comes back with the first clip demuxed to 500 of
-        // its declared 1640 seconds, carrying the per-stream tally that marks
-        // the file as measured.
+        // its declared 1640 seconds.
         let mut measured = structural().bdrom.playlists;
         let clip = measured.first_mut().and_then(|p| p.clips.first_mut()).expect("the first clip");
         clip.length = 1640.0;
+        clip.measured = true;
         clip.packet_seconds = 500.0;
         clip.streams = vec![ClipStreamTally {
             pid: Pid::new(0x1011),

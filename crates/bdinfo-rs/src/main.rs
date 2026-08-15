@@ -2327,10 +2327,10 @@ Options:
     }
 
     /// A scanned disc whose one stream file was demuxed to 500 of its declared
-    /// 1640 seconds — past both shortfall thresholds — with the per-stream
-    /// tally that marks the file as measured.
+    /// 1640 seconds — past both shortfall thresholds.
     fn short_disc() -> BdRom {
         let clip = bdinfo_rs_core::bdrom::disc::ClipSummary {
+            measured: true,
             packet_seconds: 500.0,
             streams: vec![ClipStreamTally {
                 pid: Pid::new(0x1011),
