@@ -4,12 +4,19 @@
 //! The release binary hides the console on Windows (`windows_subsystem`), so
 //! stderr does not exist — without a file, a failed boot, a panic, or a
 //! settings write that didn't stick would all be invisible. This module
-//! writes one plain-text log (`gui.log`, next to `gui.conf`), truncated at
-//! each launch (per-launch truncation bounds its size — no rotation), fed
-//! through the `log` facade so the dependencies that already speak it land
-//! in the same file: `iced_wgpu` logs the selected adapter (the renderer
-//! identity every graphics bug report needs first) and `rfd` logs the Linux
-//! portal errors it otherwise swallows.
+//! writes one plain-text log (`gui.log`, next to `gui.conf`), fed through the
+//! `log` facade so the dependencies that already speak it land in the same
+//! file: `iced_wgpu` logs the selected adapter (the renderer identity every
+//! graphics bug report needs first) and `rfd` logs the Linux portal errors it
+//! otherwise swallows.
+//!
+//! Each launch starts a fresh file and keeps exactly one previous generation
+//! beside it as `gui.log.1` ([`init`]) — two generations bound the size, and
+//! the second one exists because the first thing a user does when something
+//! goes wrong is run the app again, which would otherwise destroy the record
+//! of the launch that showed it. Every line is stamped with seconds since
+//! launch; the one wall-clock line [`init`] writes is what places them all in
+//! absolute time.
 //!
 //! Everything here is best-effort by contract: logging never panics, never
 //! meaningfully blocks (one short line write under a mutex), and a failure
@@ -27,12 +34,36 @@ use std::time::Instant;
 /// The log file's name — a sibling of `gui.conf`.
 const FILE_NAME: &str = "gui.log";
 
-/// Where the log lives: `gui.log` beside the config file. `None` when no
-/// config path resolved — the app then runs without a log, exactly as it
-/// runs without persistence.
+/// The log's name when it lands in the shared temp directory instead, where
+/// `gui.log` would be an unattributable stray.
+const FALLBACK_NAME: &str = "bdinfo-rs-gui.log";
+
+/// The suffix the previous launch's log is renamed to.
+const PREVIOUS_SUFFIX: &str = ".1";
+
+/// Where the log lives: `gui.log` beside the config file, or
+/// `bdinfo-rs-gui.log` in the OS temp directory when no config location
+/// resolved.
+///
+/// The app runs without persistence in that case, but not without a log: a
+/// desktop that resolves no config directory is exactly the environment whose
+/// failures need a witness most, and a temp file is one every OS gives.
 #[must_use]
-pub fn log_path_from(config: Option<&Path>) -> Option<PathBuf> {
-    Some(config?.parent()?.join(FILE_NAME))
+pub fn log_path_from(config: Option<&Path>) -> PathBuf {
+    config
+        .and_then(Path::parent)
+        .map_or_else(|| std::env::temp_dir().join(FALLBACK_NAME), |dir| dir.join(FILE_NAME))
+}
+
+/// Where the previous launch's log is kept: the same path with
+/// [`PREVIOUS_SUFFIX`] appended (`gui.log` → `gui.log.1`).
+///
+/// Appended to the whole file name rather than swapped into the extension, so
+/// the pair sorts together and neither name can collide with a config file.
+fn previous_log_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(PREVIOUS_SUFFIX);
+    PathBuf::from(name)
 }
 
 /// The process-wide sink behind the `log` facade. All state is interior,
@@ -94,33 +125,83 @@ fn line_allowed(level: log::Level, target: &str) -> bool {
     }
 }
 
-/// Opens (truncating) the log file at `path` and installs the global logger.
+/// Rotates the previous log out of the way, opens a fresh file at `path`,
+/// installs the global logger, and writes the launch's wall-clock anchor.
 ///
-/// Called once, first thing in `main`. Best-effort at every step: a `None`
-/// path, an uncreatable directory, or a failed open all leave a sink that
-/// swallows writes — the app never notices the difference.
-pub fn init(path: Option<&Path>) {
+/// Called once, first thing in `main`. Best-effort at every step: an
+/// uncreatable directory, a rename that finds nothing to rename, or a failed
+/// open all leave a sink that swallows writes — the app never notices the
+/// difference.
+pub fn init(path: &Path) {
     let _ = SINK.start.set(Instant::now());
-    if let Some(path) = path {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(file) = File::create(path) {
-            *SINK.file() = Some(file);
-        }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    // The previous launch's file becomes `gui.log.1` before this one truncates
+    // it away; the rename fails harmlessly on the first launch, when there is
+    // nothing there yet.
+    let _ = std::fs::rename(path, previous_log_path(path));
+    if let Ok(file) = File::create(path) {
+        *SINK.file() = Some(file);
     }
     // Err means a logger is already installed (a test re-initializing) — the
     // installed one keeps working; the level cap applies either way.
     let _ = log::set_logger(&SINK);
     log::set_max_level(log::LevelFilter::Info);
+    log::info!("launched {} UTC", utc_stamp(epoch_secs()));
 }
 
-/// Installs a panic hook that writes the payload and location to the log
-/// before the default hook runs.
+/// Seconds since the Unix epoch, now. A clock set before the epoch reads as
+/// the epoch itself rather than failing the launch line.
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
+}
+
+/// `secs` (seconds since the Unix epoch) as a UTC `YYYY-MM-DD HH:MM:SS` stamp
+/// — the launch line every relative timestamp in the file is measured from.
+///
+/// UTC rather than local time: safe `std` reads no timezone offset, and an
+/// unambiguous instant is what a log arriving from another timezone needs
+/// anyway.
+///
+/// The date is Howard Hinnant's `civil_from_days`
+/// (`howardhinnant.github.io/date_algorithms.html`), whose 400-year era
+/// begins on 1 March so that leap days fall at the end of a year and need no
+/// special case. `wrapping_*` is exact here, never a tolerated overflow:
+/// every intermediate is bounded by the input, and even `u64::MAX` seconds —
+/// about 2.1e14 days — leaves the largest product below (`era * 146_097`)
+/// four orders of magnitude short of `u64::MAX`.
+fn utc_stamp(secs: u64) -> String {
+    let days = secs / 86_400;
+    let time = secs % 86_400;
+    let (hour, minute, second) = (time / 3_600, time % 3_600 / 60, time % 60);
+    // 719_468 is the day count from the era's 0000-03-01 origin to the epoch.
+    let z = days.wrapping_add(719_468);
+    let era = z / 146_097;
+    let doe = z.wrapping_sub(era.wrapping_mul(146_097));
+    let yoe =
+        doe.wrapping_sub(doe / 1_460).wrapping_add(doe / 36_524).wrapping_sub(doe / 146_096) / 365;
+    let doy = doe.wrapping_sub(yoe.wrapping_mul(365).wrapping_add(yoe / 4).wrapping_sub(yoe / 100));
+    let mp = doy.wrapping_mul(5).wrapping_add(2) / 153;
+    let day = doy.wrapping_sub(mp.wrapping_mul(153).wrapping_add(2) / 5).wrapping_add(1);
+    // The era's months run March (0) to February (11), so 10 and 11 are the
+    // January and February that belong to the NEXT calendar year.
+    let month = if mp < 10 { mp.wrapping_add(3) } else { mp.wrapping_sub(9) };
+    let year = era.wrapping_mul(400).wrapping_add(yoe).wrapping_add(u64::from(month <= 2));
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
+}
+
+/// Installs a panic hook that writes the payload, location and a backtrace to
+/// the log before the default hook runs.
 ///
 /// Release builds keep it too — a hidden Windows console leaves the log as
 /// the only witness. The scan worker's `PanicAlarm` still reports the death
 /// to the UI; this records **why**.
+///
+/// The backtrace is forced rather than left to `RUST_BACKTRACE`, which nobody
+/// running a desktop app has set. The shipped binary is built with
+/// `strip = true`, so its frames may resolve to addresses and module offsets
+/// only — still the difference between a locatable crash and a bare message.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -131,7 +212,8 @@ pub fn install_panic_hook() {
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
             .unwrap_or("(non-string panic payload)");
-        log::error!(target: "panic", "panicked at {location}: {message}");
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!(target: "panic", "panicked at {location}: {message}\n{backtrace}");
         previous(info);
     }));
 }
@@ -166,19 +248,45 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
-    use super::{LogErr, Sink, format_line, line_allowed, log_path_from};
+    use super::{
+        LogErr, Sink, format_line, line_allowed, log_path_from, previous_log_path, utc_stamp,
+    };
 
     #[test]
-    fn the_log_lives_next_to_the_config() {
+    fn the_log_lives_next_to_the_config_or_in_the_temp_dir() {
         // Built by joins, not path literals: a Windows-separator literal is one
         // opaque component on Unix, where `parent()` would strip nothing.
         let dir = PathBuf::from("config-home").join("bdinfo-rs");
         let config = dir.join("gui.conf");
-        assert_eq!(log_path_from(Some(&config)), Some(dir.join("gui.log")));
-        // No config location → no log location (run without either).
-        assert_eq!(log_path_from(None), None);
-        // A parentless config path can't have a sibling.
-        assert_eq!(log_path_from(Some(Path::new("/"))), None);
+        assert_eq!(log_path_from(Some(&config)), dir.join("gui.log"));
+        // No config location, and a parentless config path that can have no
+        // sibling, both fall back to a named file in the temp directory.
+        let fallback = std::env::temp_dir().join("bdinfo-rs-gui.log");
+        assert_eq!(log_path_from(None), fallback);
+        assert_eq!(log_path_from(Some(Path::new("/"))), fallback);
+    }
+
+    #[test]
+    fn the_previous_generation_keeps_the_whole_name() {
+        // `.1` after the extension, not instead of it: `gui.log.1` sorts beside
+        // `gui.log` and can never be mistaken for another kind of file.
+        assert_eq!(previous_log_path(Path::new("dir/gui.log")), PathBuf::from("dir/gui.log.1"));
+    }
+
+    #[test]
+    fn the_wall_clock_stamp_renders_utc_civil_time() {
+        // The epoch itself, and the last second of that day.
+        assert_eq!(utc_stamp(0), "1970-01-01 00:00:00");
+        assert_eq!(utc_stamp(86_399), "1970-01-01 23:59:59");
+        // 1970-03-01: the day the era's month numbering starts from, so this
+        // is the arm that renders a month without the year correction.
+        assert_eq!(utc_stamp(5_097_600), "1970-03-01 00:00:00");
+        // A leap day: February belongs to the previous era-year, so its date
+        // renders only if the year correction applies to month 2 as well as 1.
+        assert_eq!(utc_stamp(1_709_164_800), "2024-02-29 00:00:00");
+        // Two arbitrary instants with every field non-zero.
+        assert_eq!(utc_stamp(1_000_000_000), "2001-09-09 01:46:40");
+        assert_eq!(utc_stamp(1_700_000_000), "2023-11-14 22:13:20");
     }
 
     #[test]
@@ -255,14 +363,27 @@ mod tests {
     /// the panic hook): everything global runs INSIDE this single function,
     /// sequentially, so no other test races it.
     #[test]
-    fn the_global_logger_truncates_hooks_panics_and_tags_tolerated_errors() {
+    fn the_global_logger_rotates_hooks_panics_and_tags_tolerated_errors() {
         let path = scratch("global/gui.log");
+        let previous = super::previous_log_path(&path);
         let _ = std::fs::create_dir_all(path.parent().expect("a parent"));
+        let _ = std::fs::remove_file(&previous);
         std::fs::write(&path, "stale content from a previous launch\n").expect("scratch write");
 
-        super::init(Some(&path));
+        super::init(&path);
         let after_init = std::fs::read_to_string(&path).expect("scratch read");
-        assert_eq!(after_init, "", "init truncates the previous launch's log");
+        assert_eq!(
+            std::fs::read_to_string(&previous).expect("the previous generation reads"),
+            "stale content from a previous launch\n",
+            "the launch before this one is kept, not destroyed"
+        );
+
+        // The launch line anchors every relative timestamp in the file. Its
+        // date is read from the clock, so it can only be this century.
+        let anchor = after_init.lines().next().expect("init writes the launch line");
+        assert!(anchor.contains("launched 20"), "the anchor carries a real date: {anchor}");
+        assert!(anchor.ends_with(" UTC"), "the anchor names its timezone: {anchor}");
+        assert_eq!(after_init.lines().count(), 1, "and nothing else survived the launch");
 
         // The facade now reaches the file, at the Info cap.
         log::info!("MARKER_HEADER");
@@ -283,9 +404,9 @@ mod tests {
         assert!(text.contains("MARKER_BOOM"));
         assert!(!text.contains("MARKER_FINE"));
 
-        // The panic hook writes payload + location before the previous hook
-        // runs. A no-op previous hook keeps the test output clean; each
-        // payload shape (&str, String, non-string) lands.
+        // The panic hook writes payload + location + backtrace before the
+        // previous hook runs. A no-op previous hook keeps the test output
+        // clean; each payload shape (&str, String, non-string) lands.
         std::panic::set_hook(Box::new(|_| {}));
         super::install_panic_hook();
         assert!(std::panic::catch_unwind(|| std::panic::panic_any("MARKER_STR")).is_err());
@@ -300,11 +421,13 @@ mod tests {
         assert!(text.contains("MARKER_STR"));
         assert!(text.contains("MARKER_STRING"));
         assert!(text.contains("(non-string panic payload)"));
+        // The forced backtrace follows the message: frames are rendered
+        // `   0: symbol`, one per line, by `Backtrace`'s own Display.
+        assert!(text.contains("\n   0: "), "the panic record carries a backtrace");
 
-        // Re-initialization is tolerated: a pathless init keeps the open
-        // file, an unopenable path keeps it too, and the facade still lands.
-        super::init(None);
-        super::init(Some(Path::new("/")));
+        // Re-initialization is tolerated: an unopenable path leaves the open
+        // file in place, and the facade still lands.
+        super::init(Path::new("/"));
         log::info!("MARKER_STILL_ALIVE");
         let text = std::fs::read_to_string(&path).expect("scratch read");
         assert!(text.contains("MARKER_STILL_ALIVE"));
