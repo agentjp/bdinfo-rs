@@ -1,0 +1,214 @@
+name: fuzz-compact
+
+# COMPACT THE COMMITTED SEED CORPUS: re-derive fuzz/corpus/<target> as the
+# smallest set of units that still reaches everything the tracked set reaches,
+# and upload it for a human to commit. Dispatch only — this is maintenance, not
+# a gate, and it rewrites nothing here (the runner's checkout is scratch; the
+# corpus grows and shrinks only through a reviewed pull request, for the reasons
+# fuzz.yml's header gives).
+#
+# WHY IT IS NEEDED. libFuzzer's merge decides what to keep by FEATURES, and
+# promotion decides what to offer by content hash, so a promoted unit can be an
+# alternate spelling of coverage the corpus already had. Measured 2026-08-15,
+# that took the committed set from 6,674 to 63,311 files (183 MB) in one round
+# of promotions while coverage barely moved. fuzz.yml now promotes a coverage
+# delta, which stops the growth; this workflow is what removes what already
+# landed.
+#
+# HUMAN-NAMED SEEDS SURVIVE BY CONSTRUCTION. A seed with a readable name
+# (`codec/hevc_sps_ref_pic_set_runaway`, `clpi/magic_only`) is a hand-written
+# boundary case or a crash reproducer, and it keeps its regression value even
+# when it adds no coverage over the rest. So the merge STARTS from those and the
+# sha1-named units are merged in afterwards, which makes their survival a
+# property of the destination set rather than a judgement call.
+#
+# BOTH POINTER WIDTHS, AND THE UNION OF THE TWO. A unit can add a feature at
+# i686 and none at x86_64 — 32-bit overflow boundaries are the whole reason the
+# fuzz tier runs two widths (fuzz.yml's header carries that argument in full) —
+# so each width compacts independently and the keep-set to commit is the union.
+# Every unit is named by the sha1 of its bytes or by a human, so unzipping both
+# artifacts into one directory IS that union.
+#
+# To commit the result of a run in which every leg is green:
+#
+#   gh run download <run-id> --pattern 'fuzz-compact-*' --dir compacted
+#   for t in $(awk '!/^[[:space:]]*#/ && NF { print $1 }' fuzz/targets.txt); do
+#     d=$(mktemp -d)
+#     cp compacted/fuzz-compact-"$t"-x86_64/* compacted/fuzz-compact-"$t"-i686/* "$d/" || exit 1
+#     rm -rf "fuzz/corpus/$t" && mv "$d" "fuzz/corpus/$t"
+#   done
+#   git add -A fuzz/corpus
+#
+# The acceptance for that pull request is the `corpus replay (regression gate,
+# <arch>)` checks in core.yml: they replay every committed unit at both widths,
+# which is exactly the claim a compaction makes about what it kept.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-compact-${{ github.ref }}
+  # A cancelled leg uploads nothing and the run's keep-set is then incomplete
+  # for that target — but each leg is independent, so a second dispatch simply
+  # redoes the work. Queue rather than cancel, as fuzz.yml does.
+  cancel-in-progress: false
+
+env:
+  # The same per-unit guards fuzz.yml and core.yml's replay gate use: -timeout
+  # bounds a single unit's wall time, -rss_limit_mb its memory. A committed unit
+  # that trips either during the merge is dropped from the keep-set rather than
+  # failing the leg, and the replay gate on the promotion pull request is what
+  # would report it.
+  GUARDS: -timeout=25 -rss_limit_mb=2048
+
+jobs:
+  # fuzz/targets.txt is the one place the target list lives — read the same way
+  # by fuzz.yml, core.yml's replay gate and scripts/fuzz-docker.sh.
+  targets:
+    name: read the target list
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read fuzz/targets.txt
+        id: read
+        run: |
+          list=$(awk '!/^[[:space:]]*#/ && NF { printf "%s\"%s\"", (n++ ? "," : ""), $1 }' fuzz/targets.txt)
+          [ -n "$list" ] || { echo "no targets in fuzz/targets.txt"; exit 1; }
+          echo "list=[$list]" >> "$GITHUB_OUTPUT"
+          echo "matrix: [$list]"
+
+  compact:
+    name: compact ${{ matrix.target }} (${{ matrix.arch }})
+    needs: [targets]
+    runs-on: ubuntu-latest
+    # One merge executes every committed unit once. The slowest target in the
+    # tier runs 584 exec/s (measured 2026-08-03), which puts even the largest
+    # directory in minutes; the ceiling is here for a unit that hangs against
+    # -timeout rather than for the expected cost.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+        arch: [x86_64, i686]
+        # Neither key exists in the two dimensions above, so each entry
+        # decorates every combination of its own arch rather than adding legs.
+        include:
+          - arch: x86_64
+            # The gnu host, NOT the workspace default: .cargo/config.toml sets
+            # build.target = x86_64-unknown-linux-musl, and libFuzzer's
+            # sanitizers cannot link against a static musl libc.
+            triple: x86_64-unknown-linux-gnu
+            sanitizer: address
+          - arch: i686
+            triple: i686-unknown-linux-gnu
+            # rustc declares i686-unknown-linux-gnu as
+            # `"supported-sanitizers":["address"]` while the distributed
+            # rust-std for it ships no librustc-*_rt.asan.a, so -Zsanitizer=
+            # address compiles and fails at LINK (measured 2026-08-04).
+            # fuzz.yml and core.yml's replay leg record the same.
+            sanitizer: none
+    env:
+      # Every value the run steps need, routed through env rather than an
+      # expression inside the script (template injection).
+      TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
+      FUZZ_TARGET: ${{ matrix.triple }}
+      SANITIZER: ${{ matrix.sanitizer }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: pins
+        uses: ./.github/actions/pins
+
+      # Nightly + target, the 32-bit C++ toolchain, the build cache, cargo-fuzz
+      # and the fuzz lockfile check — the shared body core.yml's replay gate and
+      # fuzz.yml's deep pass run too.
+      - uses: ./.github/actions/fuzz-toolchain
+        with:
+          target: ${{ matrix.triple }}
+          cxx-multilib: ${{ matrix.arch == 'i686' }}
+          # Restore-only: core.yml's replay job owns the save of the cargo-fuzz
+          # entry, and restoring an EXECUTABLE is the one place cache poisoning
+          # would matter.
+          cargo-fuzz-cache: restore
+          # The archive fuzz.yml's legs of the same arch build and save: within
+          # an arch every leg compiles the same dependency graph and differs
+          # only in which target binary it links, so a lineage of its own would
+          # buy nothing and cost the 10 GB Actions-cache budget.
+          cache-shared-key: fuzz-deep-${{ matrix.arch }}
+
+      - name: Build ${{ matrix.target }} (${{ matrix.arch }})
+        env:
+          NIGHTLY: ${{ steps.pins.outputs.NIGHTLY }}
+        run: cargo +"$NIGHTLY" fuzz build "$TARGET" --target "$FUZZ_TARGET" --sanitizer "$SANITIZER"
+
+      # Proof that the leg compacted at the width it claims rather than silently
+      # falling back to the host: a keep-set derived from the wrong binary reads
+      # as coverage nobody has, and here it would DELETE the units that carry
+      # the coverage it missed.
+      - name: Prove the built binary's pointer width
+        id: build
+        run: |
+          bin=$(find "fuzz/target/$FUZZ_TARGET/release" -maxdepth 1 -type f -perm -u+x -name "$TARGET")
+          [ -n "$bin" ] || { echo "no $TARGET binary under fuzz/target/$FUZZ_TARGET"; exit 1; }
+          file "$bin"
+          file "$bin" | grep -q 'ELF 32-bit' && width=32 || width=64
+          case "$FUZZ_TARGET" in
+            i686-*)   [ "$width" = 32 ] || { echo "expected a 32-bit binary"; exit 1; } ;;
+            x86_64-*) [ "$width" = 64 ] || { echo "expected a 64-bit binary"; exit 1; } ;;
+          esac
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+          echo "$TARGET built a $width-bit binary"
+
+      # GUARDS ONLY, never a flag from fuzz/targets.txt. -max_len DROPS an
+      # over-long unit rather than truncating it, so merging under the cap would
+      # silently delete from the committed corpus exactly the long units the
+      # per-target cap exists to keep the FUZZER from generating; and a
+      # dictionary steers mutation, of which a merge does none.
+      - name: Compact the committed corpus
+        id: compact
+        env:
+          BIN: ${{ steps.build.outputs.bin }}
+        run: |
+          keep="fuzz/keep/$TARGET"
+          mkdir -p "$keep"
+          # The destination starts as the human-named seeds, so the merge can
+          # only add to them and never has to choose between one of them and a
+          # generated unit that happens to cover the same features.
+          git ls-files -z -- "fuzz/corpus/$TARGET" | grep -zvE '/[0-9a-f]{40}$' |
+            xargs -0 -r cp -t "$keep/"
+          named=$(find "$keep" -type f | wc -l)
+          before=$(git ls-files -- "fuzz/corpus/$TARGET" | wc -l)
+          # The sha1-named units come in as the merge SOURCE. The named ones are
+          # in it too and cost one execution each, which is cheaper than
+          # excluding them and far cheaper than getting the exclusion wrong.
+          "$BIN" -merge=1 $GUARDS "$keep" "fuzz/corpus/$TARGET"
+          after=$(find "$keep" -type f | wc -l)
+          echo "after=$after" >> "$GITHUB_OUTPUT"
+          echo "$TARGET/$ARCH: $before committed unit(s) ($named human-named) compact to $after"
+          {
+            echo "### $TARGET ($ARCH)"
+            echo
+            echo "$before committed unit(s), $named of them human-named, compact to $after ($(du -sh "$keep" | cut -f1))."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Per target AND per arch, because the set to commit is the UNION of the
+      # two widths and only the human downloading them can take it.
+      - name: Upload the keep-set
+        if: ${{ !cancelled() && steps.compact.outputs.after != '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-compact-${{ matrix.target }}-${{ matrix.arch }}
+          path: fuzz/keep/${{ matrix.target }}/
+          if-no-files-found: error
