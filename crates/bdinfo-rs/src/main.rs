@@ -2343,11 +2343,11 @@ Options:
         // cannot fork per surface.
         let shorts = short_disc().short_stream_files();
         let short = shorts.first().expect("the truncated file is reported");
-        assert_eq!(super::short_stream_line(short), format!("warning: {}", short.notice()));
+        let notice = short.notice();
+        assert_eq!(super::short_stream_line(short), format!("warning: {notice}"));
         assert!(
-            short.notice().starts_with("00011.M2TS is shorter"),
-            "the notice names the truncated file: {}",
-            short.notice()
+            notice.starts_with("00011.M2TS is shorter"),
+            "the notice names the truncated file: {notice}"
         );
     }
 
