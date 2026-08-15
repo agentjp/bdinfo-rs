@@ -348,24 +348,6 @@ pub fn scan_notice(errors: usize) -> String {
     }
 }
 
-/// The notice for one stream file the demux measured shorter than the disc
-/// declares — raised beside the report, because the locked report format has no
-/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
-///
-/// The wording is shared with the other surfaces' copies of this format
-/// (the `bdinfo-rs` CLI's `short_stream_notice`, `bdinfo-rs-wasm`'s
-/// `mirror::short_stream_notice`); each copy is pinned by an identical test, so
-/// a change here reworks all three together or fails a sibling gate.
-fn short_stream_notice(short: &ShortStreamFile) -> String {
-    format!(
-        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
-        short.file(),
-        short.measured_seconds(),
-        short.declared_seconds(),
-        short.missing_seconds()
-    )
-}
-
 /// What a measured scan needs, read from the [`Flow`] before spawning the worker.
 ///
 /// The input to re-open, the selected playlist names (the report order), and the
@@ -929,11 +911,12 @@ impl Flow {
     ///
     /// Derived from the retained disc on every call rather than stored, so a
     /// later scan that replaces the measured playlists can never leave a stale
-    /// notice behind.
+    /// notice behind. The sentences come from [`ShortStreamFile::notice`], the
+    /// one home of that wording.
     #[must_use]
     pub fn short_stream_notices(&self) -> Vec<String> {
         self.any_listing().map_or_else(Vec::new, |listing| {
-            listing.bdrom.short_stream_files().iter().map(short_stream_notice).collect()
+            listing.bdrom.short_stream_files().iter().map(ShortStreamFile::notice).collect()
         })
     }
 
@@ -1198,7 +1181,7 @@ mod tests {
     use bdinfo_rs_core::primitives::Pid;
     use bdinfo_rs_core::stream::TsStreamType;
 
-    use super::{Flow, Stage};
+    use super::{Flow, ShortStreamFile, Stage};
     use crate::live::{LivePlaylist, LiveStream};
     use crate::model::{Sort, SortColumn, ViewSettings};
     use crate::scan::{Input, Structural};
@@ -2278,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn a_measured_short_stream_file_surfaces_the_notice_with_the_shared_wording() {
+    fn a_measured_short_stream_file_surfaces_cores_notice_sentence() {
         use bdinfo_rs_core::bdrom::disc::ClipStreamTally;
 
         // No disc, and an unmeasured (structural) disc: silent.
@@ -2301,12 +2284,22 @@ mod tests {
             packet_count: 8,
         }];
         let flow = flow.finished(1, "R".to_owned(), Arc::new(Vec::new()), measured);
-        // The exact sentence, pinned: the CLI and wasm crates carry the same
-        // format and pin the same bytes, which is what keeps the three
-        // surfaces' wording identical.
-        assert_eq!(
-            flow.short_stream_notices(),
-            ["A.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s missing)"]
+        // Delegation, not a second pin: the shell shows exactly what
+        // `ShortStreamFile::notice` says — the bytes themselves are pinned in
+        // core, once, so this sentence cannot fork per surface.
+        let notices = flow.short_stream_notices();
+        let from_core: Vec<String> = flow
+            .any_listing()
+            .expect("the measured listing")
+            .bdrom
+            .short_stream_files()
+            .iter()
+            .map(ShortStreamFile::notice)
+            .collect();
+        assert_eq!(notices, from_core);
+        assert!(
+            notices.first().is_some_and(|notice| notice.starts_with("A.M2TS is shorter")),
+            "the notice names the truncated file: {notices:?}"
         );
     }
 

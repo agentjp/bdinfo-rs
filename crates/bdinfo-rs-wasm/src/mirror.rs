@@ -775,29 +775,15 @@ impl Disc {
     }
 }
 
-/// The notice for one stream file the demux measured shorter than the disc
-/// declares — raised beside the report, because the locked report format has no
-/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
-///
-/// The wording is shared with the other surfaces' copies of this format
-/// (the `bdinfo-rs` CLI's `short_stream_notice`, `bdinfo-rs-gui`'s
-/// `flow::short_stream_notice`); each copy is pinned by an identical test, so
-/// a change here reworks all three together or fails a sibling gate.
-fn short_stream_notice(short: &ShortStreamFile) -> String {
-    format!(
-        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
-        short.file(),
-        short.measured_seconds(),
-        short.declared_seconds(),
-        short.missing_seconds()
-    )
-}
-
 /// [`Disc::short_stream_notices`] for a scanned disc: the notice sentences, or
 /// `None` when no stream file is short — the field's "nothing to say" spelling,
 /// so a healthy disc's wire form carries no empty list.
+///
+/// The sentences come from [`ShortStreamFile::notice`], the one home of that
+/// wording; the mirror only decides whether there are any.
 fn short_stream_notices(bdrom: &BdRom) -> Option<Vec<String>> {
-    let notices: Vec<String> = bdrom.short_stream_files().iter().map(short_stream_notice).collect();
+    let notices: Vec<String> =
+        bdrom.short_stream_files().iter().map(ShortStreamFile::notice).collect();
     (!notices.is_empty()).then_some(notices)
 }
 
@@ -1264,8 +1250,8 @@ mod tests {
 
     use super::{
         Chapter, Clip, ClipStream, Disc, HiddenRule, MeasuredSnapshot, Playlist, ScanError,
-        ScanErrorReason, ScanOptions, ScanStage, Stream, borrowed_codec_alt_name, core_measured,
-        order,
+        ScanErrorReason, ScanOptions, ScanStage, ShortStreamFile, Stream, borrowed_codec_alt_name,
+        core_measured, order,
     };
 
     // One fixture value and one hand-written wire form per mirror type, composed
@@ -1619,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_stream_file_crosses_as_the_shared_notice_wording() {
+    fn a_short_stream_file_crosses_as_cores_notice_sentence() {
         // A clip demuxed to 500 of its declared 1640 seconds, carrying the
         // per-stream tally that marks its file as measured.
         let clip = ClipSummary {
@@ -1632,28 +1618,21 @@ mod tests {
             ..a_core_bdrom()
         };
         let disc = Disc::from_scan(&bdrom, &[], true, &PlaylistFilter::default(), None);
-        // The exact sentence, pinned: the CLI and GUI crates carry the same
-        // format and pin the same bytes, which is what keeps the three
-        // surfaces' wording identical.
-        assert_eq!(
-            disc.short_stream_notices.as_deref(),
-            Some(
-                &["00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s \
-                   missing)"
-                    .to_owned()][..]
-            )
+        // Delegation, not a second pin: the mirror carries exactly what
+        // `ShortStreamFile::notice` says — the bytes themselves are pinned in
+        // core, once, so this sentence cannot fork per surface.
+        let from_core: Vec<String> =
+            bdrom.short_stream_files().iter().map(ShortStreamFile::notice).collect();
+        assert_eq!(disc.short_stream_notices.as_deref(), Some(&from_core[..]));
+        assert!(
+            from_core.first().is_some_and(|notice| notice.starts_with("00011.M2TS is shorter")),
+            "the notice names the truncated file: {from_core:?}"
         );
 
         // The wire carries the sentences as a plain array, and they survive
         // the round trip.
         let wire = serde_json::to_value(&disc).expect("serialize the mirror");
-        assert_eq!(
-            wire.get("shortStreamNotices"),
-            Some(&json!([
-                "00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s \
-                 missing)"
-            ]))
-        );
+        assert_eq!(wire.get("shortStreamNotices"), Some(&json!(from_core)));
         let back: Disc = serde_json::from_value(wire).expect("deserialize the mirror");
         assert_eq!(back, disc);
 

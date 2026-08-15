@@ -33,7 +33,11 @@
 //! The scan is always **resilient**: a damaged file or sector is recorded,
 //! the readable rest is still reported (the failures land in the report's
 //! WARNING block and are summarized on stderr), and the live scan progress
-//! draws on stderr; the flow narration (table, picker, analysis preamble,
+//! draws on stderr. On an ANSI terminal that line repaints about once a second
+//! even while the scan reports nothing, so the elapsed and remaining readouts
+//! keep moving through a read that has not returned; after five seconds of
+//! silence its lead-in reads `Still reading` instead of `Scanning`. The flow
+//! narration (table, picker, analysis preamble,
 //! classic epilogue, saved-report message) prints on stdout. A stream file
 //! measured shorter than the disc declares (a truncated file reads to a clean
 //! end of file, so it records no error) gets a stderr notice after the report
@@ -78,6 +82,7 @@ use std::io::{BufRead, IsTerminal as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
@@ -225,22 +230,14 @@ fn report_errors(errors: &[ScanError]) {
     }
 }
 
-/// The notice for one stream file the demux measured shorter than the disc
-/// declares — raised beside the report, because the locked report format has no
-/// line for it ([`bdinfo_rs_core::bdrom::shortfall`]).
+/// The stderr line for one stream file the demux measured shorter than the disc
+/// declares: the CLI's `warning: ` prefix over [`ShortStreamFile::notice`],
+/// which is where that sentence is worded for every surface.
 ///
-/// The wording is shared with the other surfaces' copies of this format
-/// (`bdinfo-rs-gui`'s `flow::short_stream_notice`, `bdinfo-rs-wasm`'s
-/// `mirror::short_stream_notice`); each copy is pinned by an identical test, so
-/// a change here reworks all three together or fails a sibling gate.
-fn short_stream_notice(short: &ShortStreamFile) -> String {
-    format!(
-        "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
-        short.file(),
-        short.measured_seconds(),
-        short.declared_seconds(),
-        short.missing_seconds()
-    )
+/// Raised beside the report, because the locked report format has no line for
+/// it ([`bdinfo_rs_core::bdrom::shortfall`]).
+fn short_stream_line(short: &ShortStreamFile) -> String {
+    format!("warning: {}", short.notice())
 }
 
 /// Prints the short-stream notices on stderr, one line per affected file —
@@ -251,7 +248,7 @@ fn short_stream_notice(short: &ShortStreamFile) -> String {
 /// clean end of file).
 fn report_short_streams(bdrom: &BdRom) {
     for short in bdrom.short_stream_files() {
-        eprintln!("warning: {}", short_stream_notice(&short));
+        eprintln!("{}", short_stream_line(&short));
     }
 }
 
@@ -381,7 +378,8 @@ fn scan_and_report(
     selection: &[String],
     options: RenderOptions,
 ) -> u8 {
-    let mut line = ProgressDisplay::new();
+    let display = Arc::new(Mutex::new(ProgressDisplay::new()));
+    let styled = locked(&display).styled;
     // The scan's Ctrl+C affordance, styled path only: raw mode makes the press
     // arrive as a key event instead of killing the process, the per-tick poll
     // turns the first press into the cooperative cancel and a second into the
@@ -389,20 +387,24 @@ fn scan_and_report(
     // the OS-default Ctrl+C — there is no hidden cursor to leak there.
     let cancel = AtomicBool::new(false);
     let mut watch = CancelWatch::new();
-    let raw = RawModeScope::enter(line.styled);
-    let scanned = scan(
-        &mut |p: ScanProgress<'_>| {
-            observe_cancellable(&mut line, &mut watch, &cancel, raw.active, &p);
-        },
-        &cancel,
-    );
+    let raw = RawModeScope::enter(styled);
+    let scanned = with_stall_ticker(&display, || {
+        scan(
+            &mut |p: ScanProgress<'_>| {
+                observe_cancellable(&mut locked(&display), &mut watch, &cancel, raw.active, &p);
+            },
+            &cancel,
+        )
+    });
     // Out of raw mode before anything prints a plain `\n` (Unix raw mode
     // disables output post-processing, so a bare newline would not return
     // the carriage).
     drop(raw);
+    // The display is locked per call, not for the rest of the run: the report
+    // is rendered and written with nothing holding the terminal line.
     match scanned {
         Ok((bdrom, errors)) => {
-            line.finish(errors.is_empty());
+            locked(&display).finish(errors.is_empty());
             println!("Please wait while we generate the report...");
             let order = selection_order(&bdrom.playlists, selection);
             let rendered = text::render_with(&bdrom, &order, &errors, options);
@@ -414,12 +416,12 @@ fn scan_and_report(
             finish_early(&errors)
         }
         Err(BdError::ScanCancelled) => {
-            line.clear();
+            locked(&display).clear();
             eprintln!("Scan cancelled.");
             EXIT_CANCELLED
         }
         Err(err) => {
-            line.clear();
+            locked(&display).clear();
             eprintln!("error: {err}");
             1
         }
@@ -818,6 +820,44 @@ fn save_report(dest: &Path, bdrom: &BdRom, rendered: &str) -> Result<(), u8> {
     })
 }
 
+/// The display, locked.
+///
+/// A panic while painting would poison the mutex; a progress line is worth
+/// neither losing the scan to nor a second panic, so the recovered display is
+/// used as it stands.
+fn locked(display: &Mutex<ProgressDisplay>) -> MutexGuard<'_, ProgressDisplay> {
+    display.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Runs `body` with a second thread repainting `display` about once a second
+/// ([`ProgressDisplay::tick`]), and stops that thread before returning `body`'s
+/// value.
+///
+/// The scan drives the display from its own thread, one event per read — so a
+/// read syscall that does not return freezes the line exactly when the reader
+/// most wants to see it moving (damaged optical media can hold a read inside
+/// drive-firmware retries for minutes). The ticker holds the wall clock
+/// instead: it owns no scan state and only repaints what the last event left.
+fn with_stall_ticker<T>(display: &Arc<Mutex<ProgressDisplay>>, body: impl FnOnce() -> T) -> T {
+    let stop = Arc::new(AtomicBool::new(false));
+    let ticker = {
+        let display = Arc::clone(display);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(TICK_POLL);
+                locked(&display).tick();
+            }
+        })
+    };
+    let scanned = body();
+    stop.store(true, Ordering::Relaxed);
+    // A panicked ticker leaves the display as the scan left it; the epilogue
+    // still prints.
+    let _ = ticker.join().is_ok();
+    scanned
+}
+
 /// The widest the styled display's progress bar grows, in cells.
 const BAR_MAX_CELLS: usize = 24;
 
@@ -825,11 +865,69 @@ const BAR_MAX_CELLS: usize = 24;
 /// the plain line.
 const BAR_MIN_CELLS: usize = 8;
 
+/// The redraw throttle: the fastest the display repaints on progress events.
+const DRAW_EVERY: Duration = Duration::from_millis(100);
+
+/// How often the styled display repaints itself while no progress event
+/// arrives, so the elapsed and remaining readouts keep moving through a read
+/// that has not returned. One second is the rate classic `BDInfo` refreshes its
+/// own progress at.
+const TICK_EVERY: Duration = Duration::from_secs(1);
+
+/// How often the ticker thread wakes to ask whether a repaint is due — short
+/// enough that a finished scan is not held up waiting for it to sleep out.
+const TICK_POLL: Duration = Duration::from_millis(100);
+
+/// How long the scan may go without a progress event before the display calls
+/// the current read stalled. Progress arrives many times a second (a heartbeat
+/// before and a count after every read), so a multi-second silence means one
+/// read syscall has not returned — damaged optical media held in drive-firmware
+/// retries, which can block for minutes with no error.
+const STALL_AFTER: Duration = Duration::from_secs(5);
+
+/// The progress line's lead-in while reads are arriving.
+const LEAD_SCANNING: &str = "Scanning";
+
+/// The lead-in once the reads have gone quiet ([`STALL_AFTER`]) — the same
+/// "still reading" wording the desktop shell shows for a stuck read.
+const LEAD_STALLED: &str = "Still reading";
+
+/// The lead-in for a quiet or a moving scan.
+const fn lead_in(stalled: bool) -> &'static str {
+    if stalled { LEAD_STALLED } else { LEAD_SCANNING }
+}
+
+/// Whether reads have gone quiet long enough to call the current one stalled:
+/// [`STALL_AFTER`] since the last progress event, inclusive.
+fn stalled(since_progress: Duration) -> bool {
+    since_progress >= STALL_AFTER
+}
+
+/// Where the display's painted bytes go: stderr in a real run
+/// ([`write_stderr`]), a recorder under test.
+type Ink = Box<dyn FnMut(&str) + Send>;
+
+/// The last progress event, retained so a wall-clock tick can repaint the line
+/// without one.
+#[derive(Clone)]
+struct LastProgress {
+    /// The stream file that event named.
+    file: String,
+    /// The bytes read as of that event.
+    done: u64,
+    /// The bytes the pass will read, as of that event.
+    total: u64,
+}
+
 /// The live scan progress display on stderr, redrawn in place at most every
 /// 100 ms (and always at completion), then erased and replaced by the classic
 /// epilogue. A terminal that renders ANSI sequences gets a styled line with a
 /// progress bar; a piped or redirected stderr gets the plain `\r`-rewritten
 /// line — same information either way. stdout never sees any of it.
+///
+/// The styled line is additionally repainted on a wall clock
+/// ([`tick`](Self::tick), driven by [`with_stall_ticker`]), because progress
+/// events stop entirely while a read syscall is stuck.
 struct ProgressDisplay {
     /// Whether stderr is a terminal that renders ANSI sequences.
     styled: bool,
@@ -840,6 +938,20 @@ struct ProgressDisplay {
     /// The widest plain line drawn so far, so a shorter redraw still
     /// overwrites. Unused in styled mode — the erase sequence wipes the line.
     width: usize,
+    /// The last progress event, or `None` before the first one and after the
+    /// display is erased — a tick has nothing to repaint in either case.
+    last: Option<LastProgress>,
+    /// When that event arrived, for the stall verdict ([`stalled`]).
+    evented: Option<Instant>,
+    /// Whether a [`notice`](Self::notice) owns the line: a tick must not
+    /// overdraw the `Cancelling...` message with the bar it replaced.
+    holding: bool,
+    /// The terminal width the styled line is composed for, asked per paint so a
+    /// resized window is followed. [`terminal_columns`] in a real run; a test
+    /// pins a width instead of depending on the console it runs under.
+    columns: fn() -> usize,
+    /// Where the painted bytes go.
+    ink: Ink,
 }
 
 impl ProgressDisplay {
@@ -850,24 +962,89 @@ impl ProgressDisplay {
     /// A display with the styled/plain choice forced (the testable seam;
     /// [`new`](Self::new) detects it from stderr).
     fn with_style(styled: bool) -> Self {
-        Self { styled, start: Instant::now(), drawn: None, width: 0 }
+        Self::with_ink(styled, Box::new(write_stderr))
+    }
+
+    /// A display painting into `ink` instead of stderr — the seam a test reads
+    /// the painted lines back through.
+    fn with_ink(styled: bool, ink: Ink) -> Self {
+        Self {
+            styled,
+            start: Instant::now(),
+            drawn: None,
+            width: 0,
+            last: None,
+            evented: None,
+            holding: false,
+            columns: terminal_columns,
+            ink,
+        }
     }
 
     /// Observes one scan-progress event, redrawing the display when due.
     fn observe(&mut self, progress: &ScanProgress<'_>) {
+        self.evented = Some(Instant::now());
+        // The file name is re-owned only when it changes: this runs once per
+        // read, hundreds of thousands of times on a feature disc, and the
+        // counts are all that move within a file.
+        match &mut self.last {
+            Some(last) if last.file == progress.file => {
+                last.done = progress.done;
+                last.total = progress.total;
+            }
+            _ => {
+                self.last = Some(LastProgress {
+                    file: progress.file.to_owned(),
+                    done: progress.done,
+                    total: progress.total,
+                });
+            }
+        }
         let due = progress.done == progress.total
-            || self.drawn.is_none_or(|at| at.elapsed() >= Duration::from_millis(100));
-        if !due {
+            || self.drawn.is_none_or(|at| at.elapsed() >= DRAW_EVERY);
+        if due {
+            self.paint(progress, false);
+        }
+    }
+
+    /// Repaints the styled line from the last progress event when a whole
+    /// [`TICK_EVERY`] has passed without one, so the elapsed clock climbs and
+    /// the remaining estimate grows through a read that has not returned; past
+    /// [`STALL_AFTER`] of silence the lead-in says the file is still being
+    /// read rather than implying normal progress.
+    ///
+    /// Silent before the first event (there is no file to name yet — the
+    /// pre-scan wait line stands), while a notice holds the line, and in plain
+    /// mode, which rewrites one `\r` line into a pipe or a log where a repeated
+    /// line is noise rather than an animation.
+    fn tick(&mut self) {
+        if !self.styled || self.holding {
             return;
         }
+        if self.drawn.is_none_or(|at| at.elapsed() < TICK_EVERY) {
+            return;
+        }
+        let Some(last) = self.last.clone() else {
+            return;
+        };
+        let quiet = self.evented.map_or(Duration::ZERO, |at| at.elapsed());
+        let progress = ScanProgress { file: &last.file, done: last.done, total: last.total };
+        self.paint(&progress, stalled(quiet));
+    }
+
+    /// Paints the progress line for `progress` at the current elapsed time, in
+    /// whichever mode the display is in. `stalled` swaps the styled line's
+    /// lead-in; the plain line never carries it.
+    fn paint(&mut self, progress: &ScanProgress<'_>, stalled: bool) {
         self.drawn = Some(Instant::now());
         if self.styled {
-            let columns = terminal_columns();
-            write_stderr(&redraw_sequence(progress, self.start.elapsed(), columns));
+            let columns = (self.columns)();
+            let sequence = redraw_sequence(progress, self.start.elapsed(), columns, stalled);
+            (self.ink)(&sequence);
         } else {
-            let line = compose_progress(progress, self.start.elapsed());
+            let line = compose_progress(progress, self.start.elapsed(), LEAD_SCANNING);
             self.width = self.width.max(line.chars().count());
-            eprint!("\r{line:<width$}", width = self.width);
+            (self.ink)(&format!("\r{line:<width$}", width = self.width));
         }
     }
 
@@ -877,6 +1054,7 @@ impl ProgressDisplay {
     /// [`clear`](Self::clear) restores it.
     fn notice(&mut self, text: &str) {
         self.drawn = Some(Instant::now());
+        self.holding = true;
         if self.styled {
             let mut sequence = String::new();
             let _ = cursor::MoveToColumn(0).write_ansi(&mut sequence).is_ok();
@@ -884,22 +1062,26 @@ impl ProgressDisplay {
                 .write_ansi(&mut sequence)
                 .is_ok();
             sequence.push_str(text);
-            write_stderr(&sequence);
+            (self.ink)(&sequence);
         } else {
             self.width = self.width.max(text.chars().count());
-            eprint!("\r{text:<width$}", width = self.width);
+            (self.ink)(&format!("\r{text:<width$}", width = self.width));
         }
     }
 
-    /// Erases the progress display, if any was drawn.
+    /// Erases the progress display, if any was drawn. The retained event goes
+    /// with it, so a tick racing the scan's end cannot repaint the line the
+    /// epilogue is about to print over.
     fn clear(&mut self) {
+        self.last = None;
+        self.holding = false;
         if self.drawn.take().is_none() {
             return;
         }
         if self.styled {
-            write_stderr(&erase_sequence());
+            (self.ink)(&erase_sequence());
         } else {
-            eprint!("\r{:width$}\r", "", width = self.width);
+            (self.ink)(&format!("\r{:width$}\r", "", width = self.width));
         }
     }
 
@@ -976,13 +1158,19 @@ fn write_stderr(sequence: &str) {
 }
 
 /// The in-place redraw sequence: hide the cursor, return to column 0, clear
-/// the rest of the line, then the styled progress line.
-fn redraw_sequence(progress: &ScanProgress<'_>, elapsed: Duration, columns: usize) -> String {
+/// the rest of the line, then the styled progress line — with the stalled
+/// lead-in when `stalled`.
+fn redraw_sequence(
+    progress: &ScanProgress<'_>,
+    elapsed: Duration,
+    columns: usize,
+    stalled: bool,
+) -> String {
     let mut sequence = String::new();
     let _ = cursor::Hide.write_ansi(&mut sequence).is_ok();
     let _ = cursor::MoveToColumn(0).write_ansi(&mut sequence).is_ok();
     let _ = terminal::Clear(terminal::ClearType::UntilNewLine).write_ansi(&mut sequence).is_ok();
-    sequence.push_str(&compose_styled_progress(progress, elapsed, columns));
+    sequence.push_str(&compose_styled_progress(progress, elapsed, columns, stalled));
     sequence
 }
 
@@ -1000,30 +1188,33 @@ fn erase_sequence() -> String {
 /// line's percent/file/elapsed/remaining tail. The bar takes whatever room
 /// the terminal leaves the tail, up to [`BAR_MAX_CELLS`]; under
 /// [`BAR_MIN_CELLS`] of room the line falls back to the plain spelling,
-/// truncated to the width.
+/// truncated to the width. `stalled` picks the lead-in ([`lead_in`]), which
+/// the fallback spelling carries too.
 fn compose_styled_progress(
     progress: &ScanProgress<'_>,
     elapsed: Duration,
     columns: usize,
+    stalled: bool,
 ) -> String {
     let (percent, elapsed_seconds, remaining_seconds) =
         progress_stats(progress.done, progress.total, elapsed);
+    let lead = lead_in(stalled);
     let tail = format!(
         "{percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
         hms(elapsed_seconds),
         hms(remaining_seconds)
     );
-    // The room the bar gets: the width less one spare cell, the `Scanning
-    // [] ` frame, and the tail — all measured in display cells.
-    let frame = "Scanning [] ".chars().count();
+    // The room the bar gets: the width less one spare cell, the lead-in and its
+    // ` [] ` bar frame, and the tail — all measured in display cells.
+    let frame = lead.chars().count().saturating_add(" [] ".chars().count());
     let cells = columns
         .saturating_sub(1)
         .saturating_sub(frame)
         .saturating_sub(tail.chars().count())
         .min(BAR_MAX_CELLS);
     if cells < BAR_MIN_CELLS {
-        let plain = compose_progress(progress, elapsed);
+        let plain = compose_progress(progress, elapsed, lead);
         return plain.chars().take(columns.saturating_sub(1)).collect();
     }
     let filled = usize::try_from(percent)
@@ -1033,19 +1224,19 @@ fn compose_styled_progress(
         .unwrap_or(0)
         .min(cells);
     format!(
-        "Scanning [{}{}] {tail}",
+        "{lead} [{}{}] {tail}",
         "█".repeat(filled).cyan(),
         "░".repeat(cells.saturating_sub(filled)).dark_grey()
     )
 }
 
-/// Composes the plain progress line: percent, current file, elapsed, and the
-/// remaining-time estimate.
-fn compose_progress(progress: &ScanProgress<'_>, elapsed: Duration) -> String {
+/// Composes the plain progress line: the `lead`-in, percent, current file,
+/// elapsed, and the remaining-time estimate.
+fn compose_progress(progress: &ScanProgress<'_>, elapsed: Duration, lead: &str) -> String {
     let (percent, elapsed_seconds, remaining_seconds) =
         progress_stats(progress.done, progress.total, elapsed);
     format!(
-        "Scanning {percent:>3}% - {} | Elapsed: {} | Remaining: {}",
+        "{lead} {percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
         hms(elapsed_seconds),
         hms(remaining_seconds)
@@ -1057,6 +1248,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use bdinfo_rs_core::bdrom::disc::{
@@ -1786,6 +1978,7 @@ Options:
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 50, total: 200 },
             Duration::from_secs(10),
+            super::LEAD_SCANNING,
         );
         assert_eq!(line, "Scanning  25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30");
         // Half a second in, the estimate already shows (millisecond math):
@@ -1793,19 +1986,33 @@ Options:
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 50, total: 200 },
             Duration::from_millis(500),
+            super::LEAD_SCANNING,
         );
         assert_eq!(line, "Scanning  25% - 00000.M2TS | Elapsed: 00:00:00 | Remaining: 00:00:01");
         // Nothing read yet → no estimate; an empty scan reads 100%.
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 0, total: 200 },
             Duration::from_secs(1),
+            super::LEAD_SCANNING,
         );
         assert_eq!(line, "Scanning   0% - 00000.M2TS | Elapsed: 00:00:01 | Remaining: 00:00:00");
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 0, total: 0 },
             Duration::ZERO,
+            super::LEAD_SCANNING,
         );
         assert!(line.starts_with("Scanning 100% - 00000.M2TS"));
+        // The stalled lead-in replaces it, and nothing else about the line
+        // moves.
+        let line = compose_progress(
+            &ScanProgress { file: "00000.M2TS", done: 50, total: 200 },
+            Duration::from_secs(10),
+            super::LEAD_STALLED,
+        );
+        assert_eq!(
+            line,
+            "Still reading  25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"
+        );
     }
 
     /// A playlist summary carrying only what the selection flow reads: name,
@@ -2130,15 +2337,17 @@ Options:
     }
 
     #[test]
-    fn the_short_stream_notice_spells_the_shared_wording() {
-        // The exact sentence, pinned: the GUI and wasm crates carry the same
-        // format and pin the same bytes, which is what keeps the three
-        // surfaces' wording identical.
+    fn the_short_stream_line_prefixes_cores_notice_sentence() {
+        // Delegation, not a second pin: the CLI adds `warning: ` and nothing
+        // else — the sentence itself is worded and pinned in core, once, so it
+        // cannot fork per surface.
         let shorts = short_disc().short_stream_files();
         let short = shorts.first().expect("the truncated file is reported");
-        assert_eq!(
-            super::short_stream_notice(short),
-            "00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s missing)"
+        assert_eq!(super::short_stream_line(short), format!("warning: {}", short.notice()));
+        assert!(
+            short.notice().starts_with("00011.M2TS is shorter"),
+            "the notice names the truncated file: {}",
+            short.notice()
         );
     }
 
@@ -2316,40 +2525,181 @@ Options:
         // A wide terminal gets the full 24-cell bar: 25% → 6 filled cells,
         // the rest empty; the tail repeats the plain line's information.
         let progress = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
-        let line = compose_styled_progress(&progress, Duration::from_secs(10), 120);
+        let line = compose_styled_progress(&progress, Duration::from_secs(10), 120, false);
         assert_eq!(line.matches('█').count(), 6);
         assert_eq!(line.matches('░').count(), 18);
         assert!(line.contains("\u{1b}["), "the bar is styled: {line}");
+        assert!(line.starts_with("Scanning ["));
         assert!(line.contains(" 25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"));
         // A complete scan fills the whole bar.
         let done = ScanProgress { file: "00000.M2TS", done: 200, total: 200 };
-        let line = compose_styled_progress(&done, Duration::from_secs(10), 120);
+        let line = compose_styled_progress(&done, Duration::from_secs(10), 120, false);
         assert_eq!(line.matches('█').count(), BAR_MAX_CELLS);
         // A standard 80-column terminal shrinks the bar to the room the tail
         // leaves (8 cells here) rather than dropping it.
-        let line = compose_styled_progress(&progress, Duration::from_secs(10), 80);
+        let line = compose_styled_progress(&progress, Duration::from_secs(10), 80, false);
         assert_eq!(line.matches('█').count(), 2);
         assert_eq!(line.matches('░').count(), 6);
     }
 
     #[test]
+    fn a_stalled_line_swaps_the_lead_in_and_keeps_the_bar() {
+        // The stalled spelling is the same line under a different lead-in: the
+        // bar and the tail are untouched, and the five extra lead cells come
+        // out of the bar's room, never out of the tail.
+        let progress = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
+        let line = compose_styled_progress(&progress, Duration::from_secs(10), 120, true);
+        assert!(line.starts_with("Still reading ["), "{line}");
+        assert!(line.contains(" 25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"));
+        assert_eq!(line.matches('█').count(), 6);
+        assert_eq!(line.matches('░').count(), 18);
+        // The lead-in decision itself.
+        assert_eq!(super::lead_in(false), "Scanning");
+        assert_eq!(super::lead_in(true), "Still reading");
+        // Its trigger: five seconds of silence, inclusive.
+        assert!(!super::stalled(Duration::from_millis(4_999)));
+        assert!(super::stalled(Duration::from_secs(5)));
+        assert!(super::stalled(Duration::from_secs(90)));
+    }
+
+    #[test]
     fn a_narrow_terminal_falls_back_to_the_truncated_plain_line() {
         let progress = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
-        let line = compose_styled_progress(&progress, Duration::from_secs(10), 20);
+        let line = compose_styled_progress(&progress, Duration::from_secs(10), 20, false);
         assert_eq!(line, "Scanning  25% - 000");
         assert!(!line.contains('\u{1b}'), "the narrow fallback is unstyled");
+        // The fallback carries the stall wording too — a narrow terminal loses
+        // the bar, not the news that the read is stuck.
+        let line = compose_styled_progress(&progress, Duration::from_secs(10), 20, true);
+        assert_eq!(line, "Still reading  25% ");
         // A zero-width terminal draws nothing rather than panicking.
-        assert_eq!(compose_styled_progress(&progress, Duration::ZERO, 0), "");
+        assert_eq!(compose_styled_progress(&progress, Duration::ZERO, 0, false), "");
     }
 
     #[test]
     fn redraw_and_erase_sequences_manage_the_cursor_and_line() {
         let progress = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
-        let sequence = redraw_sequence(&progress, Duration::from_secs(10), 120);
+        let sequence = redraw_sequence(&progress, Duration::from_secs(10), 120, false);
         // Hide the cursor, return to column 0, clear to the line end, draw.
         assert!(sequence.starts_with("\u{1b}[?25l\u{1b}[1G\u{1b}[K"), "{sequence:?}");
         assert!(sequence.contains("Scanning ["));
         let erase = erase_sequence();
         assert_eq!(erase, "\u{1b}[1G\u{1b}[K\u{1b}[?25h");
+    }
+
+    /// A styled display painting into a recorder instead of stderr, with the
+    /// painted strings the test reads back.
+    fn recording_display() -> (ProgressDisplay, Arc<Mutex<Vec<String>>>) {
+        let painted = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&painted);
+        let ink = Box::new(move |text: &str| {
+            sink.lock().expect("the recorder").push(text.to_owned());
+        });
+        let mut display = ProgressDisplay::with_ink(true, ink);
+        // A fixed width, so the assertions read the same under a console of
+        // any size and under none at all.
+        display.columns = || 120;
+        (display, painted)
+    }
+
+    /// The recorded paints, oldest first.
+    fn paints(painted: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        painted.lock().expect("the recorder").clone()
+    }
+
+    /// Backdates `display`'s clocks by `seconds`: the scan start, the last
+    /// paint and the last progress event, which is exactly the state a read
+    /// that has not returned for that long leaves behind.
+    fn quiet_for(display: &mut ProgressDisplay, seconds: u64) {
+        let past = Instant::now().checked_sub(Duration::from_secs(seconds));
+        display.start = past.unwrap_or_else(Instant::now);
+        display.drawn = past;
+        display.evented = past;
+    }
+
+    #[test]
+    fn a_tick_repaints_the_stalled_line_with_a_climbing_clock() {
+        let (mut line, painted) = recording_display();
+        line.observe(&ScanProgress { file: "00011.M2TS", done: 50, total: 200 });
+        assert_eq!(paints(&painted).len(), 1, "the first event draws");
+        // Inside the tick interval nothing is repainted…
+        line.tick();
+        assert_eq!(paints(&painted).len(), 1, "a tick inside the interval is throttled");
+        // …a second of silence repaints the retained event, still under the
+        // plain lead-in (one second is not a stall)…
+        quiet_for(&mut line, 1);
+        line.tick();
+        let after_one = paints(&painted);
+        assert_eq!(after_one.len(), 2);
+        let second = after_one.get(1).expect("the tick's paint");
+        assert!(second.contains("Scanning ["), "{second}");
+        assert!(second.contains("00011.M2TS | Elapsed: 00:00:01"), "{second}");
+        // …and past the stall threshold the lead-in changes while the elapsed
+        // readout keeps climbing off the same retained counts.
+        quiet_for(&mut line, 40);
+        line.tick();
+        let after_forty = paints(&painted);
+        assert_eq!(after_forty.len(), 3);
+        let third = after_forty.get(2).expect("the stalled paint");
+        assert!(third.contains("Still reading ["), "{third}");
+        assert!(third.contains("00011.M2TS | Elapsed: 00:00:40"), "{third}");
+        assert!(third.contains(" 25% - "), "the percent cannot move without an event: {third}");
+    }
+
+    #[test]
+    fn a_tick_paints_nothing_without_a_line_of_its_own() {
+        // Before the first progress event there is no file to name, so a tick
+        // leaves the pre-scan wait text alone.
+        let (mut line, painted) = recording_display();
+        quiet_for(&mut line, 40);
+        line.drawn = None;
+        line.tick();
+        assert!(paints(&painted).is_empty(), "nothing is retained to repaint");
+        // A notice owns the line while a cancellation is in flight; the bar
+        // must not come back over it.
+        line.observe(&ScanProgress { file: "00011.M2TS", done: 50, total: 200 });
+        line.notice("Cancelling...");
+        quiet_for(&mut line, 40);
+        line.tick();
+        assert_eq!(paints(&painted).len(), 2, "the notice stays; the bar does not return");
+        // Erasing the display drops the retained event with it, so a tick
+        // racing the scan's end cannot repaint over the epilogue.
+        line.clear();
+        quiet_for(&mut line, 40);
+        line.tick();
+        assert_eq!(paints(&painted).len(), 3, "only the erase, no repaint after it");
+        // The plain path never ticks: a pipe or a log gets one line per event.
+        let mut plain = ProgressDisplay::with_style(false);
+        plain.observe(&ScanProgress { file: "00011.M2TS", done: 50, total: 200 });
+        quiet_for(&mut plain, 40);
+        plain.tick();
+        assert_eq!(
+            plain.drawn.map(|at| at.elapsed().as_secs()),
+            Some(40),
+            "the plain line was not repainted"
+        );
+    }
+
+    #[test]
+    fn the_ticker_keeps_the_line_moving_while_a_read_hangs() {
+        // The end-to-end shape, with a reader that blocks instead of
+        // reporting: the ticker thread is the only thing that can paint, and
+        // the line it paints names the stuck file with a climbing clock.
+        let (mut line, painted) = recording_display();
+        line.observe(&ScanProgress { file: "00011.M2TS", done: 50, total: 200 });
+        quiet_for(&mut line, 40);
+        let display = Arc::new(Mutex::new(line));
+        let stuck = super::with_stall_ticker(&display, || {
+            // The scan thread inside a read that does not return: it reports
+            // nothing at all for the whole wait.
+            std::thread::sleep(Duration::from_millis(1_500));
+            "the read finally failed"
+        });
+        assert_eq!(stuck, "the read finally failed");
+        let ticked = paints(&painted);
+        assert!(ticked.len() >= 2, "the ticker repainted at least once: {ticked:?}");
+        let last = ticked.last().expect("a painted line");
+        assert!(last.contains("Still reading ["), "{last}");
+        assert!(last.contains("00011.M2TS | Elapsed: 00:00:4"), "the clock climbed: {last}");
     }
 }
