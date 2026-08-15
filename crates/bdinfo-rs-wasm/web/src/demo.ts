@@ -26,10 +26,11 @@ import {
   type Playlist,
   renderReport,
   reportFileName,
+  type ScanError,
   type Stream,
   scan,
 } from "./analyze.js";
-import { sizeCell as formatSize } from "./format.js";
+import { errorLine, sizeCell as formatSize, reportLabel } from "./format.js";
 
 /**
  * One selection-table row — the CLI columns this page draws, distilled from a
@@ -132,6 +133,9 @@ const errorBox = el("error");
 const errorText = el("error-text");
 const shortStreams = el("short-streams");
 const shortStreamsList = el("short-streams-list");
+const scanErrors = el("scan-errors");
+const scanErrorsCount = el("scan-errors-count");
+const scanErrorsList = el("scan-errors-list");
 const mainEl = el("main");
 const listingBox = el("listing");
 const settingsBtn = el<HTMLButtonElement>("settings-btn");
@@ -458,7 +462,29 @@ function adoptDisc(next: Disc, threshold: number): void {
     }),
   );
   shortStreams.hidden = notices.length === 0;
+  renderScanErrors(next.errors);
   renderRows();
+}
+
+/**
+ * Fills the failure strip from the held disc: one line per file the scan could
+ * not read or parse, in the wording the report's `WARNING:` block and the
+ * command line use.
+ *
+ * A structural listing records these as a measured scan does, and it renders no
+ * report — so this strip, not the report, is what tells a browser user their
+ * disc is damaged. A disc that recorded none hides it.
+ */
+function renderScanErrors(errors: ScanError[]): void {
+  scanErrorsCount.textContent = `Recorded ${errors.length} error(s) — the readable rest is shown.`;
+  scanErrorsList.replaceChildren(
+    ...errors.map((error) => {
+      const item = document.createElement("li");
+      item.textContent = errorLine(error);
+      return item;
+    }),
+  );
+  scanErrors.hidden = errors.length === 0;
 }
 
 /**
@@ -1023,9 +1049,12 @@ async function copyReport(): Promise<void> {
 async function downloadReport(): Promise<void> {
   // The module's sanitizer names the file: the disc controls its own label
   // bytes, and this is the one place the demo turns that label into a path.
+  // The label comes off the scanned disc, so an `.iso` saves under the volume
+  // label recorded in its filesystem — the name every other surface writes —
+  // rather than under whatever the image file is called here.
   let name: string;
   try {
-    name = await reportFileName(discName);
+    name = await reportFileName(reportLabel(disc?.volumeLabel, discName));
   } catch (error) {
     showError(errMessage(error));
     return;

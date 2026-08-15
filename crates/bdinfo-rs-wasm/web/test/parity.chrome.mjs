@@ -299,6 +299,8 @@ async function main() {
         ),
       );
       files.push(toFile("WASMDISC/BDMV/PLAYLIST/00002.mpls", withLength(decode(source.b64), 10)));
+      // Kept for the damaged re-pick at the end of the run.
+      window.__demoFiles = files;
       const transfer = new DataTransfer();
       for (const file of files) {
         transfer.items.add(file);
@@ -335,6 +337,9 @@ async function main() {
           codecs: grid("#codecs-body tr"),
           hintHidden: document.getElementById("hidden-hint").hidden,
           hintText: document.getElementById("hidden-hint").textContent,
+          errorsHidden: document.getElementById("scan-errors").hidden,
+          errorsCount: document.getElementById("scan-errors-count").textContent,
+          errorLines: texts("#scan-errors-list li"),
           reportHidden: document.getElementById("report-card").hidden,
           progressHidden: document.getElementById("progress-card").hidden,
           discardHidden: document.getElementById("discard-note").hidden,
@@ -459,6 +464,30 @@ async function main() {
       () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
     );
 
+    // A damaged disc through the page: the same folder plus a file in PLAYLIST
+    // that is not a playlist, which the structural listing records and reads
+    // past. A listing renders no report, so the failure strip is the only place
+    // this shows — the state a browser user reaches before scanning anything.
+    await demoPage.evaluate(() => {
+      const junk = new File([new TextEncoder().encode("NOPE0100garbage")], "00009.mpls");
+      Object.defineProperty(junk, "webkitRelativePath", {
+        value: "WASMDISC/BDMV/PLAYLIST/00009.mpls",
+      });
+      const transfer = new DataTransfer();
+      for (const file of [...window.__demoFiles, junk]) {
+        transfer.items.add(file);
+      }
+      const picker = document.getElementById("picker");
+      picker.files = transfer.files;
+      picker.dispatchEvent(new Event("change"));
+    });
+    await demoPage.waitForFunction(
+      () => !document.getElementById("scan-errors").hidden,
+      undefined,
+      { timeout: 30000 },
+    );
+    const damagedListing = await readDemo();
+
     // The settings survive a reload through `localStorage`; the dialog's
     // controls are initialized from what was stored.
     await demoPage.reload();
@@ -498,6 +527,7 @@ async function main() {
       retentionOff,
       zeroThreshold,
       pageScrolls,
+      damagedListing,
       persisted,
     };
   } finally {
@@ -835,6 +865,19 @@ async function main() {
   demoOk &= demoEq("a zero threshold shows no short hint", demo.zeroThreshold.hintHidden, true);
 
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
+
+  // The failure strip: absent for healthy media, and on a damaged listing it
+  // names the file and says what was wrong with it, in the report's wording.
+  demoOk &= demoEq("healthy media shows no failure strip", demo.initial.errorsHidden, true);
+  demoOk &= demoEq("a damaged listing shows the strip", demo.damagedListing.errorsHidden, false);
+  demoOk &= demoEq(
+    "the strip counts the failures",
+    demo.damagedListing.errorsCount,
+    "Recorded 1 error(s) — the readable rest is shown.",
+  );
+  demoOk &= demoEq("the strip names the failure", demo.damagedListing.errorLines, [
+    "playlist 00009.mpls: unknown file type: NOPE0100",
+  ]);
   // Retention was switched off above, so the reload proves the stored `false`
   // is read back rather than defaulted to on like an absent setting; the
   // stored 0 threshold likewise comes back as the committed 0, not the default.

@@ -227,7 +227,7 @@ async function main() {
   // The demo's size cells against the shared vector table, columns 4 and 5 (the
   // desktop app asserts columns 2 and 3 of the same rows). A row count is
   // asserted too: a badly parsed table would check nothing and still pass.
-  const { sizeCell } = await import("../dist/format.js");
+  const { reportLabel, sizeCell } = await import("../dist/format.js");
   const vectors = (await readFile(sizeVectorsPath, "utf8"))
     .split(/\r?\n/)
     .filter((line) => line.length > 0 && !line.startsWith("#"))
@@ -359,6 +359,21 @@ async function main() {
   if (!isoInspectOk) {
     console.error(`FAIL — inspect_iso disc unexpected: ${JSON.stringify(isoInspected)}`);
   }
+  // The name a saved report takes for this image. The demo picks the label the
+  // way `reportLabel` does — off the scanned disc — so an `.iso` downloads under
+  // the volume label in its filesystem (`Blu-Ray`), the same file name the
+  // command line writes, and not under the image's own file name. Without a
+  // disc, or with a label-less one, the picked name is the fallback.
+  const isoDownloadName = report_file_name(
+    reportLabel(isoInspected.volumeLabel, "BigBuckBunny.iso"),
+  );
+  const downloadNameOk =
+    isoDownloadName === "BDINFO.Blu-Ray.txt" &&
+    reportLabel(undefined, "BigBuckBunny.iso") === "BigBuckBunny.iso" &&
+    reportLabel("", "BigBuckBunny.iso") === "BigBuckBunny.iso";
+  if (!downloadNameOk) {
+    console.error(`FAIL — the .iso report download name was ${isoDownloadName}.`);
+  }
   // The both-outputs scan over the image, round-tripped the same way.
   const isoFullOk =
     isoOk &&
@@ -408,10 +423,11 @@ async function main() {
     isoOk &&
     isoSelOk &&
     isoInspectOk &&
-    isoFullOk
+    isoFullOk &&
+    downloadNameOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + selection + round trip + retention + short-stream notices + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + download name + selection + round trip + retention + short-stream notices + .iso OK.`,
     );
     process.exit(0);
   }
