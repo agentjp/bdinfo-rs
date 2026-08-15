@@ -930,8 +930,27 @@ jobs:
           # nothing".
           $dash = { param($v) if ($null -eq $v) { '-' } else { $v } }
           $rows = @($stats | Sort-Object target, arch | ForEach-Object {
-            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $(& $dash $_.seed_cov) | $($_.cov) | $(& $dash $_.cov_gained) | $($_.ft) | $($_.execs_per_sec) |"
+            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.promote) | $(& $dash $_.seed_cov) | $($_.cov) | $(& $dash $_.cov_gained) | $($_.ft) | $($_.execs_per_sec) |"
           })
+          # THE ONE NUMBER A HUMAN ACTS ON: how many files a promotion pull
+          # request would add. Every promotable unit is named by the sha1 of its
+          # bytes, so a unit both widths found is one name in two legs' lists and
+          # the union of those lists is the diff size exactly — where a sum of
+          # per-leg counts would double it, and a sum of per-leg EDGE counts
+          # (the arches being different binaries with different edge ids) is not
+          # a count of anything.
+          $promotable = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($s in $stats) {
+            foreach ($n in @($s.promote_sha1)) { if ($n) { [void]$promotable.Add($n) } }
+          }
+          $unitsToPromote = $promotable.Count
+          $targetsToPromote = @($stats | Where-Object { $_.promote -gt 0 } |
+            ForEach-Object { $_.target } | Sort-Object -Unique)
+          # A leg whose delta merge could not run promotes its whole accumulated
+          # set, so its artifact holds units that add no coverage; the issue says
+          # so rather than letting the headline imply a filtering that did not
+          # happen.
+          $unfiltered = @($stats | Where-Object { -not $_.merged -and $_.promote -gt 0 })
           # [int] on purpose: Measure-Object sums an empty set to $null, and
           # $null is not 0, so an artifact-less run would otherwise file a
           # growth issue with a blank count.
@@ -945,11 +964,6 @@ jobs:
           $unmeasured = @($stats | Where-Object { $null -eq $_.cov_gained })
           $gainers = @($stats | Where-Object { $_.cov_gained -gt 0 })
           $totalGained = [int](($gainers | Measure-Object -Property cov_gained -Sum).Sum)
-          # Counted per leg, so a unit found at both widths counts twice here —
-          # the arches share one corpus and cmin names a unit by the sha1 of its
-          # bytes, so the duplicate collapses the moment both artifacts are
-          # unzipped into one directory. The number is a review-queue signal, not
-          # a distinct-unit count.
           # Every leg of a run gets the same FUZZ_SECONDS and WORKERS, so any
           # leg's copy is the whole run's budget. Read from the first because an
           # empty $stats has no leg to read at all.
@@ -958,15 +972,15 @@ jobs:
           @(
             '## Discovery pass'
             ''
-            "Budget ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup). Those units reach $totalGained edge(s) the committed seeds alone do not."
+            "Budget ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (both summed over the arches, which double-counts a unit found at each). Of those, $unitsToPromote distinct unit(s) across $($targetsToPromote.Count) target(s) reach coverage the committed seeds do not; the legs' fuzzed corpora reach $totalGained edge(s) the seeds alone do not."
             ''
-            '| target | arch | seeds | restored | new | seed cov | cov | gained | ft | exec/s |'
-            '|---|---|---|---|---|---|---|---|---|---|'
+            '| target | arch | seeds | restored | new | promote | seed cov | cov | gained | ft | exec/s |'
+            '|---|---|---|---|---|---|---|---|---|---|---|'
             $rows
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
 
           if ($env:FILE_ISSUES -ne 'true') {
-            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); new units: $totalNew; edges gained: $totalGained."
+            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); units to promote: $unitsToPromote; edges gained: $totalGained."
             exit 0
           }
 
@@ -1082,12 +1096,14 @@ jobs:
             Write-Host "No leg gained an edge over the committed seeds, and $($unmeasured.Count) of $(@($stats).Count) leg(s) could not be measured — neither filing nor closing."
             exit 0
           }
-          # Sorted by what the reader is deciding on: the legs whose units are
-          # worth a promotion pull request sit at the top. The unit count stays
-          # a column because it sizes that pull request.
-          $grownRows = @($gainers | Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
-            "| ``$($_.target)`` | $($_.arch) | $($_.cov_gained) | $($_.seed_cov) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
-          })
+          # One row per leg that has something to promote, sorted by what the
+          # reader is deciding on. A leg whose baseline could not be measured is
+          # listed too: its units are no less promotable for the gain column
+          # being unknown.
+          $grownRows = @($stats | Where-Object { $_.promote -gt 0 } |
+            Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
+              "| ``$($_.target)`` | $($_.arch) | $($_.promote) | $(& $dash $_.cov_gained) | $(& $dash $_.seed_cov) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
+            })
           # This workflow's push trigger is `tags: ['v*']`, so a push here is
           # always a release tag.
           $trigger = switch ($env:GITHUB_EVENT_NAME) {
@@ -1133,15 +1149,32 @@ jobs:
             $promotePatterns = "--pattern 'fuzz-corpus-<target>-*'"
             $promoteLead = "No target's best leg gained $promoteCut edges or more. To promote one anyway, name it:"
           }
-          $title = "Fuzz corpus: $totalGained edge(s) beyond the committed seeds"
+          # The headline is the SIZE OF THE PULL REQUEST this issue is asking
+          # for, which is the only number a reader can act on directly and is
+          # zero exactly when there is nothing to do. The edge total keeps its
+          # place in the body: it is what says whether the pull request is worth
+          # opening, but as a sum over two binaries with unrelated edge ids it
+          # is not a count of anything and must not lead.
+          $title = if ($unitsToPromote -gt 0) {
+            "Fuzz corpus: $unitsToPromote unit(s) ready to promote across $($targetsToPromote.Count) target(s)"
+          }
+          else {
+            "Fuzz corpus: $totalGained edge(s) beyond the committed seeds, none held by a promotable unit"
+          }
           $body = @(
-            "The discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They $whereTheyLive; nothing is committed automatically."
+            "A promotion pull request would add $unitsToPromote unit(s) across $($targetsToPromote.Count) target(s) — the units that reach coverage the committed seed corpus does not. The pass's fuzzed corpora reach $totalGained edge(s) beyond those seeds. The accumulated units $whereTheyLive; nothing is committed automatically."
             ''
             "Refreshed by $trigger, fuzzing ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). A release tag fuzzes 600s where a scheduled pass fuzzes 300, so two refreshes are only comparable with each other when their budgets match."
             ''
-            'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached. The total is summed over both pointer widths, which are different binaries: their edge counts are not the same edges and do not dedupe. The unit counts are summed the same way, but a unit found at both widths is the same bytes under the same sha1 filename, so those DO collapse when both artifacts are unzipped into one directory.'
+            'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached — that is the gain column, summed over both pointer widths, which are different binaries whose edge counts are not the same edges and do not dedupe. The unit counts come from a separate step: libFuzzer merges the accumulated corpus into a copy of the committed seeds and keeps only what adds a feature they lack. Each such unit is named by the sha1 of its bytes, so the headline counts the DISTINCT units across both widths and is exactly the number of files the pull request adds.'
+            $(if ($unfiltered.Count -gt 0) {
+              @(
+                ''
+                "The delta merge did not run on $((@($unfiltered | ForEach-Object { "``$($_.target)`` ($($_.arch))" } | Sort-Object -Unique) -join ', ')) — those artifacts hold every accumulated unit, including ones that add no coverage, and their rows overstate the pull request accordingly."
+              )
+            })
             ''
-            '| target | arch | edges gained | seed cov | units | artifact |'
+            '| target | arch | units to promote | edges gained | seed cov | artifact |'
             '|---|---|---|---|---|---|'
             $grownRows
             $(if ($unmeasured.Count -gt 0) {
