@@ -116,13 +116,14 @@ fn run_window(open: Option<PathBuf>) -> ExitCode {
     // `boot`. The path travels into the app so every later save writes the
     // same file (and a test-built `App` — path `None` — never writes at all).
     let config = config_path();
-    // Diagnostics come up before anything can fail: the per-launch log next
-    // to the config file, the panic hook (release too — a hidden Windows
-    // console leaves the log as the only witness), and a launch header. The
+    // Diagnostics come up before anything can fail: the per-launch log beside
+    // the config file (or in the temp directory when no config location
+    // resolved), the panic hook (release too — a hidden Windows console
+    // leaves the log as the only witness), and a launch header. The
     // renderer identity lands by itself: iced_wgpu logs its adapter selection
     // through the same facade once the compositor initializes.
     let log_path = diagnostics::log_path_from(config.as_deref());
-    diagnostics::init(log_path.as_deref());
+    diagnostics::init(&log_path);
     diagnostics::install_panic_hook();
     log::info!(
         "bdinfo-rs-gui {} ({}, {})",
@@ -178,7 +179,7 @@ fn run_window(open: Option<PathBuf>) -> ExitCode {
             // own stderr report, so the error is printed here — before the
             // dialog, which blocks on a human.
             let _ = writeln!(std::io::stderr(), "Error: {error}").is_ok();
-            surface_boot_failure(&error, log_path.as_deref());
+            surface_boot_failure(&error, &log_path);
             ExitCode::FAILURE
         }
     }
@@ -200,17 +201,16 @@ fn run_window(open: Option<PathBuf>) -> ExitCode {
 /// strictly worse than the non-zero exit and stderr line it decorates, and
 /// exactly what a packaging validation sandbox with a desktop but no human
 /// would hit.
-fn surface_boot_failure(error: &iced::Error, log_path: Option<&std::path::Path>) {
+fn surface_boot_failure(error: &iced::Error, log_path: &std::path::Path) {
     log::error!("boot failed: {error}");
     if !attended_session() {
         log::info!("unattended session: boot-failure dialog suppressed");
         return;
     }
-    let mut description = format!("The window could not be started.\n\n{error}");
-    if let Some(path) = log_path {
-        use std::fmt::Write as _;
-        let _ = write!(description, "\n\nDiagnostic log: {}", path.display());
-    }
+    let description = format!(
+        "The window could not be started.\n\n{error}\n\nDiagnostic log: {}",
+        log_path.display()
+    );
     let show = move || {
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
@@ -1696,8 +1696,23 @@ impl App {
         // The listing outcome, next to begin_listing's start line. A stale
         // worker's outcome is logged too, then dropped: after a cancel it is
         // the record that the blocked thread finally returned.
+        //
+        // The per-failure lines are the listing's half of what `on_finished`
+        // records for the measured scan. A structural open records a stream
+        // file it could not read, and that read is the one a damaged disc can
+        // hold for a minute at a time — without these lines the listing looks,
+        // in the log, like it simply took a while.
         match &result {
-            Ok(_) => log::info!("listed {}", input.display()),
+            Ok(structural) => {
+                log::info!(
+                    "listed {}: {} error(s) recorded",
+                    input.display(),
+                    structural.warnings.len()
+                );
+                for warning in &structural.warnings {
+                    log::info!("listing error: {warning}");
+                }
+            }
             Err(error) => log::info!("listing failed: {error}"),
         }
         if generation != self.generation {
@@ -1764,7 +1779,18 @@ impl App {
         self.pulse = progress::pulse_advance(self.pulse);
         let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
         let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
+        let stalled = self.flow.scan_stalled();
         self.flow.tick(elapsed, since_progress);
+        // The two transitions are logged, never the state (the tick runs at
+        // 1 Hz). A log that records neither cannot tell a read stuck in drive
+        // firmware from a process that stopped: both simply go quiet.
+        if let Some(line) = progress::stall_line(
+            stalled,
+            self.flow.scan_stalled(),
+            self.flow.progress_view().map(ProgressModel::file),
+        ) {
+            log::info!("{line}");
+        }
     }
 
     /// Cancels the in-flight scan for real — the measured scan back to the
@@ -1800,7 +1826,14 @@ impl App {
         let was_scanning = self.flow.stage() == Stage::Scanning;
         self.flow = std::mem::take(&mut self.flow).finished(generation, report, errors, playlists);
         if was_scanning && self.flow.stage() == Stage::Reported {
-            log::info!("scan finished: {} error(s) recorded", self.flow.report_errors().len());
+            // The duration is what a field report's "it took forever" becomes
+            // a number: the elapsed readout is gone from the screen by the
+            // time anyone writes the report up.
+            log::info!(
+                "scan finished in {:.1}s: {} error(s) recorded",
+                self.scan_start.map_or(Duration::ZERO, |start| start.elapsed()).as_secs_f64(),
+                self.flow.report_errors().len()
+            );
             for error in self.flow.report_errors() {
                 log::info!("scan error: {error}");
             }
@@ -1866,6 +1899,11 @@ impl App {
         match Input::classify(path) {
             Ok(input) => self.begin_listing(input),
             Err(message) => {
+                // The one open road that ends before `begin_listing` — and so
+                // before the "listing …" line — leaving a log in which a drop
+                // or a command-line path the user swears they gave simply
+                // never appears.
+                log::info!("open failed: {message}");
                 self.status = None;
                 self.showing_report = false;
                 self.notice = None;
@@ -1972,14 +2010,21 @@ impl App {
         self.scan_start = Some(Instant::now());
         self.last_progress = self.scan_start;
         // The scan's opening log line: with the per-file lines and the
-        // terminal line below, gui.log can now place a field report's hang
-        // inside the scan (and name the file) rather than only before it.
+        // terminal line below, gui.log can place a field report's hang inside
+        // the scan (and name the file) rather than only before it. The disc
+        // identity rides this line rather than the listing's, because a scan
+        // is what a report is usually about, and the counts say how much of
+        // the disc it covers: an unchecked table scans every listed playlist.
         log::info!(
-            "scan started: {} playlist(s), {} stream file(s), input {}",
+            "scan started: {} of {} playlist(s), {} stream file(s), input {}",
             selection.len(),
+            self.flow.row_count(),
             scan_files.len(),
             input.display()
         );
+        if let Some(identity) = self.flow.disc_identity() {
+            log::info!("disc: {identity}");
+        }
         self.status = None;
         self.showing_report = false;
         self.notice = None;
@@ -4137,6 +4182,39 @@ mod interaction {
         });
         assert!(!app.flow.scan_stalled());
         assert!(sees(&app, "Reading A.M2TS…"));
+    }
+
+    #[test]
+    fn a_listing_that_recorded_a_failure_banners_it_and_logs_it() {
+        // A stream file the listing could not read is recorded by the
+        // structural open, and this is where it becomes visible: a banner over
+        // the usable table, and a line per failure in the diagnostics log —
+        // the two surfaces a report from the field is written from.
+        //
+        // The global logger is process-wide, and each test here runs in its
+        // own process, so installing it inside one test races nothing.
+        let log = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/listing-log/gui.log");
+        bdinfo_rs_gui::diagnostics::init(&log);
+
+        let failure = "stream 00011.M2TS: io error: incorrect function";
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        let mut structural = structural();
+        structural.warnings = vec![failure.to_owned()];
+        let _ = app.update(Message::Listed {
+            generation: app.generation,
+            input: bdinfo_rs_gui::scan::Input::Folder("disc".into()),
+            result: Ok(structural),
+        });
+
+        assert_eq!(app.flow.stage(), Stage::Listed, "the disc still lists");
+        assert!(sees(&app, failure), "the banner carries the recorded failure");
+        let text = std::fs::read_to_string(&log).expect("the diagnostics log reads");
+        assert!(
+            text.contains("listed disc: 1 error(s) recorded"),
+            "the listing outcome counts them: {text}"
+        );
+        assert!(text.contains(&format!("listing error: {failure}")), "and names each: {text}");
     }
 
     #[test]

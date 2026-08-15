@@ -56,6 +56,26 @@ pub(crate) fn stalled(since_progress: Duration) -> bool {
     since_progress >= STALL_AFTER
 }
 
+/// The log line a change in the stall flag deserves — `None` while it holds
+/// steady, in either position.
+///
+/// The flag is recomputed on every display tick, so only the two transitions
+/// are worth recording: without them a log shows a scan going quiet and a log
+/// shows a process that died mid-read as the same thing — nothing, then
+/// nothing. `file` is the stream file the last progress event named, absent
+/// when a read stalls before the first event of a pass.
+#[must_use]
+pub fn stall_line(previous: bool, current: bool, file: Option<&str>) -> Option<String> {
+    match (previous, current) {
+        (false, true) => Some(file.map_or_else(
+            || "read stalled before the first progress event".to_owned(),
+            |file| format!("read stalled on {file}"),
+        )),
+        (true, false) => Some("read resumed".to_owned()),
+        _ => None,
+    }
+}
+
 /// Whether a scan-progress event should become a UI message.
 ///
 /// The scan fires its callback before and after every read — hundreds of
@@ -252,6 +272,27 @@ mod tests {
         assert!(!super::stalled(Duration::from_millis(4_999)));
         assert!(super::stalled(Duration::from_secs(5)));
         assert!(super::stalled(Duration::from_secs(6)));
+    }
+
+    #[test]
+    fn only_a_change_of_stall_state_is_worth_a_line() {
+        // Raised and cleared each say so once; a flag that holds — down through
+        // an ordinary scan, up through a minutes-long stuck read — says nothing,
+        // so a 1 Hz tick cannot fill the log with its own repetitions.
+        assert_eq!(
+            super::stall_line(false, true, Some("00011.M2TS")).as_deref(),
+            Some("read stalled on 00011.M2TS")
+        );
+        assert_eq!(
+            super::stall_line(false, true, None).as_deref(),
+            Some("read stalled before the first progress event")
+        );
+        assert_eq!(
+            super::stall_line(true, false, Some("00011.M2TS")).as_deref(),
+            Some("read resumed")
+        );
+        assert_eq!(super::stall_line(false, false, Some("00011.M2TS")), None);
+        assert_eq!(super::stall_line(true, true, Some("00011.M2TS")), None);
     }
 
     #[test]

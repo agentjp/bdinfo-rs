@@ -101,7 +101,9 @@ pub struct Structural {
     /// fixed order — the info box's `Detected Features` line.
     pub features: Vec<String>,
     /// Any failures recorded while reading the structure (a corrupt playlist,
-    /// an unreadable directory) — shown as a non-blocking warning banner.
+    /// an unreadable directory, a stream head that never returned) — shown as
+    /// a non-blocking warning banner. Merged across both structural opens
+    /// ([`listing_scan`]), so a failure the AACS probe hit is here too.
     pub warnings: Vec<String>,
 }
 
@@ -222,17 +224,43 @@ pub fn scan_structural(
 /// open's verdict ([`ScanOptions::aacs_encrypted`]), so one listing probes
 /// the disc once.
 ///
+/// The disc is the second open's, and the recorded failures are **both**
+/// opens' ([`merge_errors`]): the metadata open is where the AACS probe reads
+/// each stream file's head, so on damaged media it is the open that records
+/// the failed head read — keeping only the codec pass's list would drop it,
+/// and the listing would show a playlist whose codec detail is silently
+/// absent.
+///
 /// # Errors
 /// Whatever `open` reports, from either call.
 fn listing_scan(mut open: impl FnMut(ScanMode, ScanOptions) -> Opened) -> Opened {
-    let cheap = open(ScanMode::Metadata, ScanOptions::default())?;
-    if cheap.0.is_aacs_encrypted {
-        Ok(cheap)
-    } else {
-        let mut options = ScanOptions::default();
-        options.aacs_encrypted = Some(cheap.0.is_aacs_encrypted);
-        open(ScanMode::Codecs, options)
+    let (bdrom, errors) = open(ScanMode::Metadata, ScanOptions::default())?;
+    if bdrom.is_aacs_encrypted {
+        return Ok((bdrom, errors));
     }
+    let mut options = ScanOptions::default();
+    options.aacs_encrypted = Some(bdrom.is_aacs_encrypted);
+    let (bdrom, deep_errors) = open(ScanMode::Codecs, options)?;
+    Ok((bdrom, merge_errors(errors, deep_errors)))
+}
+
+/// Both structural opens' recorded failures as one list — the first open's in
+/// order, then whatever the second added — with a repeated rendering dropped.
+///
+/// The two opens read the same disc, so a fault the first hit is usually
+/// recorded again by the second, and each recorded failure becomes one banner:
+/// without the fold the user would see the same disc fault twice. The rendered
+/// string is the whole identity, because that is exactly what the banner and
+/// the log line show.
+fn merge_errors(first: Vec<ScanError>, second: Vec<ScanError>) -> Vec<ScanError> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut merged: Vec<ScanError> = Vec::new();
+    for error in first.into_iter().chain(second) {
+        if seen.insert(error.to_string()) {
+            merged.push(error);
+        }
+    }
+    merged
 }
 
 /// Runs the **measured** scan over `input`, narrowed to the selected clips.
@@ -623,6 +651,53 @@ mod tests {
             "both opens, in that order; only the first probes"
         );
         assert_eq!(bdrom.volume_label, "DEEP", "the codec pass is what the listing keeps");
+    }
+
+    /// A recorded stream-read failure naming `file` — the shape a head read
+    /// that never returned leaves behind.
+    fn read_error(file: &str) -> super::ScanError {
+        super::ScanError {
+            file: file.to_owned(),
+            stage: bdinfo_rs_core::error::ScanStage::StreamFile,
+            reason: super::BdError::UnexpectedEof,
+        }
+    }
+
+    #[test]
+    fn the_listing_seam_keeps_the_failures_of_both_opens() {
+        // The metadata open is where the AACS probe reads the stream heads, so
+        // a failed head read is recorded THERE — keeping only the codec pass's
+        // list leaves the listing with no record of it at all. A fault both
+        // opens hit is one entry, not two, so it becomes one banner.
+        let (result, modes) = opened_modes(|mode| {
+            let bdrom = cheap_open(false).0;
+            let errors = match mode {
+                ScanMode::Metadata => vec![read_error("00011.M2TS"), read_error("00012.M2TS")],
+                _ => vec![read_error("00011.M2TS"), read_error("00013.M2TS")],
+            };
+            Ok((bdrom, errors))
+        });
+        let (_, errors) = result.expect("the codec pass answers");
+        assert_eq!(
+            super::error_lines(&errors),
+            [
+                "stream 00011.M2TS: unexpected end of input",
+                "stream 00012.M2TS: unexpected end of input",
+                "stream 00013.M2TS: unexpected end of input"
+            ],
+            "the metadata open's failures first, then what the codec pass added"
+        );
+        assert_eq!(modes.len(), 2, "both opens ran");
+    }
+
+    #[test]
+    fn an_encrypted_listing_keeps_its_one_opens_failures() {
+        // The road that stops at the metadata open carries that open's list
+        // through untouched — there is no second list to merge it with.
+        let (result, _) =
+            opened_modes(|_| Ok((cheap_open(true).0, vec![read_error("00011.M2TS")])));
+        let (_, errors) = result.expect("the metadata open stands in");
+        assert_eq!(super::error_lines(&errors), ["stream 00011.M2TS: unexpected end of input"]);
     }
 
     #[test]

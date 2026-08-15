@@ -836,6 +836,28 @@ impl Flow {
         self.any_listing().map_or(&[], |listing| listing.features.as_slice())
     }
 
+    /// The loaded disc named for a diagnostic log: volume label, byte size,
+    /// detected features, and the two content-protection flags the feature
+    /// list leaves out (`BdRom::extra_features` carries neither). `None`
+    /// before any disc is listed.
+    ///
+    /// Which disc a log came from is otherwise unrecoverable from it — the
+    /// path a log records is the user's, and says nothing about the media.
+    #[must_use]
+    pub fn disc_identity(&self) -> Option<String> {
+        let listing = self.any_listing()?;
+        let mut flags: Vec<&str> = listing.features.iter().map(String::as_str).collect();
+        if listing.bdrom.is_aacs_encrypted {
+            flags.push("AACS");
+        }
+        if listing.bdrom.is_bd_plus {
+            flags.push("BD+");
+        }
+        let flags =
+            if flags.is_empty() { String::new() } else { format!(", {}", flags.join(", ")) };
+        Some(format!("{} ({} bytes{flags})", listing.bdrom.volume_label, listing.bdrom.size))
+    }
+
     /// The active (highlighted) row index, when a disc is loaded.
     #[must_use]
     pub fn active_index(&self) -> Option<usize> {
@@ -1427,6 +1449,27 @@ mod tests {
         assert_eq!(Flow::idle().disc_size(), None);
         assert!(Flow::idle().disc_features().is_empty());
         assert_eq!(Flow::idle().input_display(), None);
+    }
+
+    #[test]
+    fn the_disc_identity_names_the_media_for_a_log() {
+        // Label, size and features, on one line.
+        assert_eq!(listed().disc_identity().as_deref(), Some("DISC (78000000000 bytes, Ultra HD)"));
+        // A disc with no detected feature carries no trailing list.
+        assert_eq!(listed3().disc_identity().as_deref(), Some("DISC (78000000000 bytes)"));
+        // The two protection flags are appended after the features, because
+        // the core's feature list carries neither.
+        let mut structural = structural();
+        structural.bdrom.is_aacs_encrypted = true;
+        structural.bdrom.is_bd_plus = true;
+        let flow =
+            Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
+        assert_eq!(
+            flow.disc_identity().as_deref(),
+            Some("DISC (78000000000 bytes, Ultra HD, AACS, BD+)")
+        );
+        // No disc, no identity.
+        assert_eq!(Flow::idle().disc_identity(), None);
     }
 
     #[test]
