@@ -5737,6 +5737,131 @@ Total Bitrate:  0.00 Mbps
         assert_eq!(second.max_frame_size.to_bits(), 0.0_f64.to_bits());
     }
 
+    // ── the cross-surface damaged-disc golden ───────────────────────────────
+
+    /// The first unreadable byte of `00011.M2TS` in the damaged-disc pin.
+    ///
+    /// 5 MiB is the browser build's read-chunk size
+    /// ([`m2ts::DATA_SIZE`](crate::bdrom::m2ts::DATA_SIZE) under
+    /// `target_arch = "wasm32"`) and exactly 20 native chunks of its 256 KiB, so
+    /// it is a chunk boundary on BOTH builds: each keeps the bytes below it and
+    /// loses every byte above, whatever its chunk size. Any other offset splits
+    /// the two — the browser voids its whole 5 MiB chunk while the native scan
+    /// keeps another 256 KiB chunk of it — and the two sides would then render
+    /// different numbers from the same damage for a reason that is not a defect.
+    /// The offset also sits inside `00011.M2TS`'s second chunk (the clip is
+    /// 6,297,600 bytes), which is what makes the failure a truncation rather
+    /// than a voided file: the codec pass finishes well below it and only the
+    /// measured pass dies, so the file is named ONCE in the `WARNING:` block.
+    const DAMAGED_FAULT_AT: usize = 5_242_880;
+
+    /// The committed damaged-disc golden — the report both surfaces pin.
+    ///
+    /// Beside the healthy goldens, one crate over, so the browser harness
+    /// (`crates/bdinfo-rs-wasm/web/test/faults.node.mjs`) reads the very same
+    /// committed file this test does. The golden directory's `*.txt -text`
+    /// entry in `.gitattributes` keeps its CRLF bytes through a checkout.
+    fn damaged_disc_golden() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../bdinfo-rs/tests/fixtures/golden/damaged-multiplaylist.txt");
+        std::fs::read_to_string(path).expect("read the damaged-disc golden")
+    }
+
+    /// The report with every `WARNING:` line's reason replaced by `<reason>`.
+    ///
+    /// The block renders `{file}⇥{reason}`, and the reason is each surface's
+    /// own error text — [`BdError`]'s `io error: {0}` for a native read, the
+    /// value the browser's `FileReaderSync` threw for a web one — so it is the
+    /// one field two surfaces cannot be expected to share for the same fault.
+    /// The file list beside it is what they must agree on. Tabs appear nowhere
+    /// else in the report, which is what makes the per-line rule safe over the
+    /// whole text.
+    fn normalize_warning_reasons(report: &str) -> String {
+        report
+            .split("\r\n")
+            .map(|line| {
+                line.split_once('\t')
+                    .map_or_else(|| line.to_owned(), |(file, _)| format!("{file}\t<reason>"))
+            })
+            .collect::<Vec<String>>()
+            .join("\r\n")
+    }
+
+    /// The committed fixture disc `name` as a mock tree whose stream files can
+    /// fail: `faults` names a file (case-insensitively) and the byte count its
+    /// reader serves before erroring, as [`MockFile::fail_read_at`].
+    ///
+    /// The bytes are the real fixture's, read from disk; only the reader is
+    /// synthetic, so no damaged copy of a disc is committed.
+    fn fixture_tree(name: &str, faults: &[(&str, usize)]) -> MockDir {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../bdinfo-rs/tests/fixtures")
+            .join(name);
+        load_fixture_dir(&root, name, faults)
+    }
+
+    /// One directory of a [`fixture_tree`], recursing into its subdirectories.
+    ///
+    /// Entries are sorted by name: `read_dir` order is filesystem-defined, and
+    /// listing order reaches the report (the disc's playlist and clip order).
+    fn load_fixture_dir(path: &std::path::Path, name: &str, faults: &[(&str, usize)]) -> MockDir {
+        let trip = Trip::new(usize::MAX);
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+            .expect("list the fixture directory")
+            .map(|entry| entry.expect("read the directory entry").path())
+            .collect();
+        entries.sort();
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry_name = entry
+                .file_name()
+                .expect("a fixture entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            if entry.is_dir() {
+                dirs.push(load_fixture_dir(&entry, &entry_name, faults));
+            } else {
+                files.push(MockFile {
+                    extension: extension_of_name(&entry_name),
+                    bytes: std::fs::read(&entry).expect("read the fixture file"),
+                    trip: trip.clone(),
+                    fail_read_at: faults
+                        .iter()
+                        .find(|(file, _)| file.eq_ignore_ascii_case(&entry_name))
+                        .map(|&(_, serve)| serve),
+                    name: entry_name,
+                });
+            }
+        }
+        MockDir { name: name.to_owned(), dirs, files, trip }
+    }
+
+    #[test]
+    fn the_damaged_disc_report_matches_the_golden_the_browser_pins_too() {
+        // The core half of the cross-surface pin. The browser half scans the
+        // SAME committed disc, damaged at the SAME byte of the same stream
+        // file, and compares the SAME committed golden — so a change that moves
+        // damaged-disc output on either side reddens that side's own gate,
+        // whichever gate the diff selected. (The browser harness runs only in
+        // the wasm gate, which a core-only diff never selects.)
+        //
+        // Characterization, not judgement: the golden is what current master
+        // renders, including anything a later ruling may decide is wrong.
+        let disc = fixture_tree("MultiPlaylist", &[("00011.m2ts", DAMAGED_FAULT_AT)]);
+        let report =
+            BdRom::open_resilient(&disc, ScanMode::Full).expect("resilient scan continues");
+        let rendered = crate::report::text::render(&report.bdrom, &report.errors);
+
+        // The damage is one truncation, so exactly one failure is recorded —
+        // the shape the golden's single WARNING line carries.
+        assert_eq!(report.errors.len(), 1);
+        let recorded = report.errors.first().expect("the recorded failure");
+        assert_eq!((recorded.stage, recorded.file.as_str()), (ScanStage::StreamFile, "00011.m2ts"));
+
+        assert_eq!(normalize_warning_reasons(&rendered), damaged_disc_golden());
+    }
+
     // ── scan progress + selection ───────────────────────────────────────────
 
     #[test]

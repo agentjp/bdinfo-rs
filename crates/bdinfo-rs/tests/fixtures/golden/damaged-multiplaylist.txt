@@ -1,0 +1,252 @@
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1
+
+Notes:          
+
+BDINFO HOME:
+  Cinema Squid (old)
+    http://www.cinemasquid.com/blu-ray/tools/bdinfo
+  UniqProject GitHub (new)
+    https://github.com/UniqProject/BDInfo
+
+INCLUDES FORUMS REPORT FOR:
+  AVS Forum Blu-ray Audio and Video Specifications Thread
+    http://www.avsforum.com/avs-vb/showthread.php?t=1155731
+
+WARNING: File errors were encountered during scan:
+
+00011.m2ts	<reason>
+
+********************
+PLAYLIST: 00002.MPLS
+********************
+
+<--- BEGIN FORUMS PASTE --->
+[code]
+                                                                                                                      Total        Video                                                                           
+Title                                                           Codec   Length    Movie Size        Disc Size         Bitrate      Bitrate      Main Audio Track                          Secondary Audio Track    
+-----                                                           ------  -------   --------------    ----------------  -----------  -----------  ------------------                        ---------------------    
+00002.MPLS                                                      AVC     00:27:40  5,318,976         6,472,420         0.03 Mbps    0.02 Mbps    DD AC3 5.1 640 kbps                                                
+[/code]
+
+[code]
+DISC INFO:
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1b
+
+PLAYLIST REPORT:
+
+Name:           00002.MPLS
+Length:         00:27:40.000 (h:m:s.ms)
+Size:           5,318,976 bytes
+Total Bitrate:  0.03 Mbps
+
+VIDEO:
+
+Codec                   Bitrate             Description     
+---------------         -------------       -----------     
+MPEG-4 AVC Video        19 kbps             1080p / 24 fps / 16:9 / High Profile 4.1
+
+AUDIO:
+
+Codec                           Language        Bitrate         Description     
+---------------                 -------------   -------------   -----------     
+Dolby Digital Audio             English           640 kbps      5.1 / 48 kHz /   640 kbps / DN -31dB
+
+FILES:
+
+Name            Time In         Length          Size            Total Bitrate   
+--------------- -------------   -------------   -------------   -------------   
+00033.M2TS      0:00:00.000     0:00:20.000     76,800              31 kbps     
+00011.M2TS      0:00:20.000     0:27:20.000     5,242,176           31 kbps     
+
+CHAPTERS:
+
+Number          Time In         Length          Avg Video Rate  Max 1-Sec Rate  Max 1-Sec Time  Max 5-Sec Rate  Max 5-Sec Time  Max 10Sec Rate  Max 10Sec Time  Avg Frame Size  Max Frame Size  Max Frame Time  
+------          -------------   -------------   --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  
+1               0:00:00.000     0:00:10.000         19 kbps         24 kbps     00:00:00.000        20 kbps     00:00:00.000         0 kbps     00:00:00.000        239 bytes       901 bytes   00:00:00.100    
+2               0:00:10.000     0:00:10.000         20 kbps         24 kbps     00:00:10.000        20 kbps     00:00:10.000         0 kbps     00:00:00.000        246 bytes       901 bytes   00:00:10.100    
+3               0:00:20.000     0:10:00.000         19 kbps         24 kbps     00:00:21.000        20 kbps     00:00:21.000        20 kbps     00:00:21.000        238 bytes       901 bytes   00:00:21.100    
+4               0:10:20.000     0:10:00.000         19 kbps         24 kbps     00:10:20.000        20 kbps     00:10:20.000        20 kbps     00:10:20.000        239 bytes       901 bytes   00:10:20.100    
+5               0:20:20.000     0:05:00.000         10 kbps         24 kbps     00:20:20.000        20 kbps     00:20:20.000        20 kbps     00:20:20.000        239 bytes       901 bytes   00:20:20.100    
+6               0:25:20.000     0:02:20.000          0 kbps          0 kbps     00:00:00.000         0 kbps     00:00:00.000         0 kbps     00:00:00.000          0 bytes         0 bytes   00:00:00.000    
+
+STREAM DIAGNOSTICS:
+
+File            PID             Type            Codec           Language                Seconds                     Bitrate                  Bytes        Packets       
+----------      -------------   -----           ----------      -------------           --------------          ---------------         --------------  -----------     
+00033.M2TS      4113 (0x1011)   0x1B            AVC                                     19.800                       19 kbps                    47,555          280     
+00033.M2TS      4352 (0x1100)   0x81            AC3             eng (English)           19.800                        5 kbps                    13,600           80     
+00011.M2TS      4113 (0x1011)   0x1B            AVC                                     1364.900                     19 kbps                 3,256,890       19,111     
+00011.M2TS      4352 (0x1100)   0x81            AC3             eng (English)           1364.900                      5 kbps                   928,200        5,460     
+
+[/code]
+<---- END FORUMS PASTE ---->
+
+QUICK SUMMARY:
+
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+Playlist:       00002.MPLS
+Size:           5,318,976 bytes
+Length:         00:27:40.000
+Total Bitrate:  0.03 Mbps
+Video:          MPEG-4 AVC Video / 19 kbps / 1080p / 24 fps / 16:9 / High Profile 4.1
+Audio:          English / Dolby Digital Audio / 5.1 / 48 kHz /   640 kbps / DN -31dB
+
+
+********************
+PLAYLIST: 00000.MPLS
+********************
+
+<--- BEGIN FORUMS PASTE --->
+[code]
+                                                                                                                      Total        Video                                                                           
+Title                                                           Codec   Length    Movie Size        Disc Size         Bitrate      Bitrate      Main Audio Track                          Secondary Audio Track    
+-----                                                           ------  -------   --------------    ----------------  -----------  -----------  ------------------                        ---------------------    
+00000.MPLS                                                      AVC     00:27:20  5,242,176         6,472,420         0.03 Mbps    0.02 Mbps    DD AC3 5.1 640 kbps                                                
+[/code]
+
+[code]
+DISC INFO:
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1b
+
+PLAYLIST REPORT:
+
+Name:           00000.MPLS
+Length:         00:27:20.000 (h:m:s.ms)
+Size:           5,242,176 bytes
+Total Bitrate:  0.03 Mbps
+
+VIDEO:
+
+Codec                   Bitrate             Description     
+---------------         -------------       -----------     
+MPEG-4 AVC Video        19 kbps             1080p / 24 fps / 16:9 / High Profile 4.1
+
+AUDIO:
+
+Codec                           Language        Bitrate         Description     
+---------------                 -------------   -------------   -----------     
+Dolby Digital Audio             English           640 kbps      5.1 / 48 kHz /   640 kbps / DN -31dB
+
+FILES:
+
+Name            Time In         Length          Size            Total Bitrate   
+--------------- -------------   -------------   -------------   -------------   
+00011.M2TS      0:00:00.000     0:27:20.000     5,242,176           31 kbps     
+
+CHAPTERS:
+
+Number          Time In         Length          Avg Video Rate  Max 1-Sec Rate  Max 1-Sec Time  Max 5-Sec Rate  Max 5-Sec Time  Max 10Sec Rate  Max 10Sec Time  Avg Frame Size  Max Frame Size  Max Frame Time  
+------          -------------   -------------   --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  
+1               0:00:00.000     0:10:00.000         19 kbps         24 kbps     00:00:00.000        20 kbps     00:00:00.000        20 kbps     00:00:00.000        239 bytes       901 bytes   00:00:00.100    
+2               0:10:00.000     0:10:00.000         19 kbps         24 kbps     00:10:00.000        20 kbps     00:10:00.000        20 kbps     00:10:00.000        239 bytes       901 bytes   00:10:00.100    
+3               0:20:00.000     0:05:00.000         10 kbps         24 kbps     00:20:00.000        20 kbps     00:20:00.000        20 kbps     00:20:00.000        239 bytes       901 bytes   00:20:00.100    
+4               0:25:00.000     0:02:20.000          0 kbps          0 kbps     00:00:00.000         0 kbps     00:00:00.000         0 kbps     00:00:00.000          0 bytes         0 bytes   00:00:00.000    
+
+STREAM DIAGNOSTICS:
+
+File            PID             Type            Codec           Language                Seconds                     Bitrate                  Bytes        Packets       
+----------      -------------   -----           ----------      -------------           --------------          ---------------         --------------  -----------     
+00011.M2TS      4113 (0x1011)   0x1B            AVC                                     1364.900                     19 kbps                 3,256,890       19,111     
+00011.M2TS      4352 (0x1100)   0x81            AC3             eng (English)           1364.900                      5 kbps                   928,200        5,460     
+
+[/code]
+<---- END FORUMS PASTE ---->
+
+QUICK SUMMARY:
+
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+Playlist:       00000.MPLS
+Size:           5,242,176 bytes
+Length:         00:27:20.000
+Total Bitrate:  0.03 Mbps
+Video:          MPEG-4 AVC Video / 19 kbps / 1080p / 24 fps / 16:9 / High Profile 4.1
+Audio:          English / Dolby Digital Audio / 5.1 / 48 kHz /   640 kbps / DN -31dB
+
+
+********************
+PLAYLIST: 00001.MPLS
+********************
+
+<--- BEGIN FORUMS PASTE --->
+[code]
+                                                                                                                      Total        Video                                                                           
+Title                                                           Codec   Length    Movie Size        Disc Size         Bitrate      Bitrate      Main Audio Track                          Secondary Audio Track    
+-----                                                           ------  -------   --------------    ----------------  -----------  -----------  ------------------                        ---------------------    
+00001.MPLS                                                      AVC     00:00:25  96,000            6,472,420         0.03 Mbps    0.02 Mbps    DD AC3 5.1 640 kbps                                                
+[/code]
+
+[code]
+DISC INFO:
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+BDInfo:         0.8.0.1b
+
+PLAYLIST REPORT:
+
+Name:           00001.MPLS
+Length:         00:00:25.000 (h:m:s.ms)
+Size:           96,000 bytes
+Total Bitrate:  0.03 Mbps
+
+VIDEO:
+
+Codec                   Bitrate             Description     
+---------------         -------------       -----------     
+MPEG-4 AVC Video        19 kbps             1080p / 24 fps / 16:9 / High Profile 4.1
+
+AUDIO:
+
+Codec                           Language        Bitrate         Description     
+---------------                 -------------   -------------   -----------     
+Dolby Digital Audio             English           640 kbps      5.1 / 48 kHz /   640 kbps / DN -31dB
+
+FILES:
+
+Name            Time In         Length          Size            Total Bitrate   
+--------------- -------------   -------------   -------------   -------------   
+00022.M2TS      0:00:00.000     0:00:25.000     96,000              31 kbps     
+
+CHAPTERS:
+
+Number          Time In         Length          Avg Video Rate  Max 1-Sec Rate  Max 1-Sec Time  Max 5-Sec Rate  Max 5-Sec Time  Max 10Sec Rate  Max 10Sec Time  Avg Frame Size  Max Frame Size  Max Frame Time  
+------          -------------   -------------   --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  --------------  
+1               0:00:00.000     0:00:08.000         19 kbps         24 kbps     00:00:00.000        20 kbps     00:00:00.000         0 kbps     00:00:00.000        239 bytes       901 bytes   00:00:00.100    
+2               0:00:08.000     0:00:08.000         19 kbps         24 kbps     00:00:08.000        20 kbps     00:00:08.000         0 kbps     00:00:00.000        239 bytes       901 bytes   00:00:08.100    
+3               0:00:16.000     0:00:09.000         19 kbps         24 kbps     00:00:16.000        20 kbps     00:00:16.000         0 kbps     00:00:00.000        239 bytes       901 bytes   00:00:16.100    
+
+STREAM DIAGNOSTICS:
+
+File            PID             Type            Codec           Language                Seconds                     Bitrate                  Bytes        Packets       
+----------      -------------   -----           ----------      -------------           --------------          ---------------         --------------  -----------     
+00022.M2TS      4113 (0x1011)   0x1B            AVC                                     24.800                       19 kbps                    59,485          350     
+00022.M2TS      4352 (0x1100)   0x81            AC3             eng (English)           24.800                        5 kbps                    17,000          100     
+
+[/code]
+<---- END FORUMS PASTE ---->
+
+QUICK SUMMARY:
+
+Disc Label:     MultiPlaylist
+Disc Size:      6,472,420 bytes
+Protection:     AACS
+Playlist:       00001.MPLS
+Size:           96,000 bytes
+Length:         00:00:25.000
+Total Bitrate:  0.03 Mbps
+Video:          MPEG-4 AVC Video / 19 kbps / 1080p / 24 fps / 16:9 / High Profile 4.1
+Audio:          English / Dolby Digital Audio / 5.1 / 48 kHz /   640 kbps / DN -31dB
+
