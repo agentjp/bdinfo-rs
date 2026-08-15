@@ -669,7 +669,7 @@ impl Flow {
     /// values, and the scan's completion ([`Flow::finished`]) replaces every
     /// cell with the measured summaries.
     ///
-    /// The cells live on the [`Listing`], not on the scan, so a cancel keeps
+    /// The cells live on the listing rather than on the scan, so a cancel keeps
     /// what the partial scan gathered on the grids.
     pub fn measured(&mut self, generation: u64, playlists: Vec<(String, LivePlaylist)>) {
         if let Inner::Scanning { generation: active, listing, .. } = &mut self.inner
@@ -701,9 +701,9 @@ impl Flow {
     /// `since_progress` (since the last progress event) drives the stall flag
     /// (its fixed threshold lives in [`crate::progress`], beside the model's
     /// other display constants). The re-stamp re-derives the remaining estimate
-    /// from the same clock ([`ProgressModel::set_elapsed`]), so it climbs
-    /// through a stall instead of holding a value the stuck read has already
-    /// invalidated.
+    /// from the same clock and the last event's byte counts
+    /// ([`ProgressModel`]), so it climbs through a stall instead of holding a
+    /// value the stuck read has already invalidated.
     ///
     /// Both in-flight stages take it, on identical terms: the measured scan
     /// ([`Stage::Scanning`]) and the structural listing ([`Stage::Listing`]),
