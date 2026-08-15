@@ -1,1 +1,0 @@
-{"ed":false,"errors":[{"file":"B","stage":"playlist","reason":{"kind":"unknownFileType","magic":"00"}},{"file":"a","stage":"clipinfo","reason":{"kind":"unexpectedEof"}},{"file":"b","stage":"discovery","reason":{"kind":"structureNotFound"}},{"file":"c","stage":"playlist","reason":			}]}
