@@ -87,7 +87,7 @@ use std::time::{Duration, Instant};
 
 use bdinfo_rs_core::bdrom::chapters::seconds_to_ticks;
 use bdinfo_rs_core::bdrom::disc::{
-    BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanOptions, ScanProgress,
+    BdRom, HIDDEN_STREAMS_NOTE, PlaylistSummary, ScanMode, ScanObservers, ScanOptions, ScanProgress,
 };
 use bdinfo_rs_core::bdrom::order::{
     HiddenRule, PlaylistFilter, hidden_by, named_selection, selection_order,
@@ -201,8 +201,8 @@ fn scan_options(cli: &Cli) -> ScanOptions {
 
 /// Dispatches `path` to the `.iso` or folder scan. `options` carries the
 /// behavior switches ([`scan_options`]), `scan_files` narrows the packet scan,
-/// `progress` observes it, and `cancel` aborts it (the library's `open_with`
-/// extras).
+/// `progress` observes it, and `cancel` aborts it (the pair the library takes
+/// as a `ScanObservers` bundle).
 fn scan_disc(
     path: &str,
     run_packet_scan: bool,
@@ -213,10 +213,11 @@ fn scan_disc(
 ) -> Result<ScanOutcome, BdError> {
     let location = Path::new(path);
     let mode = scan_mode(run_packet_scan);
+    let observers = ScanObservers::new(progress, cancel);
     let report = if is_iso(location) {
-        scan::open_iso(location, mode, options, scan_files, progress, cancel)
+        scan::open_iso(location, mode, options, scan_files, observers)
     } else {
-        scan::open_folder(location, mode, options, scan_files, progress, cancel)
+        scan::open_folder(location, mode, options, scan_files, observers)
     }?;
     Ok((report.bdrom, report.errors))
 }
@@ -2405,7 +2406,7 @@ Options:
         // The injectable seam plays the core's part: the observer runs like a
         // real scan tick (a test process has no console, so no press is ever
         // seen and the flag stays clear), then the scan aborts the way a
-        // signalled cancel flag makes `open_resilient_with` abort.
+        // signalled cancel flag makes `BdRom::open_resilient` abort.
         let dest = TempDest::new();
         let code = super::scan_and_report(
             &mut |progress, cancel| {

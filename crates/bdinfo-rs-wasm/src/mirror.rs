@@ -1873,8 +1873,18 @@ mod tests {
     /// The fixture disc scanned through the in-memory tree, mirrored under the
     /// standard 20 s classification.
     fn a_fixture_disc(mode: ScanMode) -> Disc {
+        // The core's `ScanOptions`, not this module's mirrored one.
+        use bdinfo_rs_core::bdrom::disc::{ScanObservers, ScanOptions as CoreScanOptions};
+
         let tree = crate::framed_tree(&crate::tests::fixture_blob());
-        let report = BdRom::open_resilient(&tree, mode).expect("the fixture disc opens");
+        let report = BdRom::open_resilient(
+            &tree,
+            mode,
+            CoreScanOptions::default(),
+            None,
+            ScanObservers::none(),
+        )
+        .expect("the fixture disc opens");
         Disc::from_scan(
             &report.bdrom,
             &report.errors,
@@ -1902,7 +1912,7 @@ mod tests {
             taken.push(MeasuredSnapshot::from(&snapshot));
         };
         let cancel = AtomicBool::new(false);
-        let report = BdRom::open_resilient_observed(
+        let report = BdRom::open_resilient(
             &tree,
             ScanMode::Full,
             ScanOptions::default(),

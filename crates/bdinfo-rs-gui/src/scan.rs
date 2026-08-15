@@ -139,12 +139,8 @@ fn open(
     observers: ScanObservers<'_>,
 ) -> Result<(BdRom, Vec<ScanError>), BdError> {
     let report = match input {
-        Input::Folder(path) => {
-            core_scan::open_folder_observed(path, mode, options, scan_files, observers)
-        }
-        Input::Iso(path) => {
-            core_scan::open_iso_observed(path, mode, options, scan_files, observers)
-        }
+        Input::Folder(path) => core_scan::open_folder(path, mode, options, scan_files, observers),
+        Input::Iso(path) => core_scan::open_iso(path, mode, options, scan_files, observers),
     }?;
     Ok((report.bdrom, report.errors))
 }
@@ -385,7 +381,14 @@ mod tests {
 
     use bdinfo_rs_core::vfs::fs::FsDir;
 
-    use super::{BdRom, Input, ScanMode, ScanOptions, Structural};
+    use super::{BdRom, Input, ScanMode, ScanObservers, ScanOptions, Structural};
+
+    /// A whole-disc metadata/codec open with no observers — the structural
+    /// scan a test performs for itself, without the seam under test.
+    fn open(root: &Path, mode: ScanMode) -> BdRom {
+        BdRom::open(&FsDir::new(root), mode, ScanOptions::default(), None, ScanObservers::none())
+            .expect("the disc opens")
+    }
 
     /// [`super::scan_structural`] with the silent sink and a never-set cancel
     /// flag — every test that only cares about the scan's result goes through
@@ -594,19 +597,16 @@ mod tests {
         // if the untouched fixture it is built from does NOT read as encrypted
         // — the key file alone must never be the verdict.
         let root = encrypted_fixture("aacs-probe");
-        let encrypted =
-            BdRom::open(&FsDir::new(&root), ScanMode::Metadata).expect("the crafted disc opens");
+        let encrypted = open(&root, ScanMode::Metadata);
         assert!(encrypted.is_aacs_encrypted, "the crafted stream shows the fingerprint");
 
-        let plain = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
-            .expect("the fixture disc opens");
+        let plain = open(&fixture("BigBuckBunny"), ScanMode::Metadata);
         assert!(!plain.is_aacs_encrypted, "an ordinary disc is not encrypted");
     }
 
     /// The metadata open the listing seam decides from, flagged or not.
     fn cheap_open(is_aacs_encrypted: bool) -> (BdRom, Vec<super::ScanError>) {
-        let bdrom = BdRom::open(&FsDir::new(fixture("BigBuckBunny")), ScanMode::Metadata)
-            .expect("the fixture disc opens");
+        let bdrom = open(&fixture("BigBuckBunny"), ScanMode::Metadata);
         (BdRom { is_aacs_encrypted, ..bdrom }, Vec::new())
     }
 
@@ -730,15 +730,13 @@ mod tests {
         assert!(listed.bdrom.is_aacs_encrypted);
         assert!(!listed.bdrom.playlists.is_empty(), "the structure still lists");
 
-        let metadata =
-            BdRom::open(&FsDir::new(&root), ScanMode::Metadata).expect("the metadata pass opens");
+        let metadata = open(&root, ScanMode::Metadata);
         assert_eq!(listed.bdrom.playlists, metadata.playlists, "the listing ran the codec pass");
 
         // The proof that the assertion above discriminates: over this very
         // disc the codec pass produces different streams, so a listing that ran
         // it could not have matched the metadata pass.
-        let codecs =
-            BdRom::open(&FsDir::new(&root), ScanMode::Codecs).expect("the codec pass opens");
+        let codecs = open(&root, ScanMode::Codecs);
         assert_ne!(
             codecs.playlists, metadata.playlists,
             "the fixture cannot tell the two passes apart, so the assertion above proves nothing"
@@ -753,8 +751,7 @@ mod tests {
         let root = fixture("BigBuckBunny");
         let listed = scan_structural(&Input::Folder(root.clone())).expect("the fixture lists");
         assert!(!listed.bdrom.is_aacs_encrypted);
-        let codecs =
-            BdRom::open(&FsDir::new(&root), ScanMode::Codecs).expect("the codec pass opens");
+        let codecs = open(&root, ScanMode::Codecs);
         assert_eq!(listed.bdrom.playlists, codecs.playlists, "the listing skipped the codec pass");
     }
 

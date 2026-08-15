@@ -63,8 +63,8 @@ pub enum BdError {
         limit: u64,
     },
     /// The packet scan was cancelled through the caller's cooperative cancel
-    /// flag (the `cancel` parameter of `BdRom::open_with` /
-    /// `BdRom::open_resilient_with`) — the caller's abort, not a disc failure.
+    /// flag (the one an open's `ScanObservers` carries) — the caller's abort,
+    /// not a disc failure.
     /// The whole open aborts with this error in strict **and** resilient modes
     /// alike: a cancelled scan yields no partial result and is never recorded
     /// as a per-file [`ScanError`].

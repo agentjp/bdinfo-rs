@@ -4,8 +4,8 @@
 //! browser. Several entry points feed the very same render path:
 //!
 //! - [`scan_report`] — the in-memory export: BDMV bytes are framed into a synthetic disc tree (six
-//!   `u32`-BE sections), opened with [`BdRom::open_resilient_with`] (packet scan **on**), and
-//!   rendered to the classic report. Used by the native ⇄ in-browser byte-parity test.
+//!   `u32`-BE sections), opened with [`BdRom::open_resilient`] (packet scan **on**), and rendered
+//!   to the classic report. Used by the native ⇄ in-browser byte-parity test.
 //! - [`scan_files`] — the streaming export: a `webkitdirectory`-selected BDMV folder arrives as a
 //!   flat list of `(relativePath, File)` pairs. The files stay on disk; their bytes are read
 //!   **synchronously** at byte offsets through [`web_sys::FileReaderSync`] (no JSPI, no Asyncify),
@@ -725,7 +725,8 @@ fn inspect_disc(
     mode: ScanMode,
     filter: &PlaylistFilter,
 ) -> Result<Disc, BdError> {
-    let report = BdRom::open_resilient(root, mode)?;
+    let report =
+        BdRom::open_resilient(root, mode, CoreScanOptions::default(), None, ScanObservers::none())?;
     // No report was rendered, so the mirror carries no report order and a later
     // render of it falls back to the whole-disc presentation order.
     Ok(Disc::from_scan(&report.bdrom, &report.errors, false, filter, None))
@@ -787,7 +788,13 @@ fn scan_selection(
     options: CoreScanOptions,
     observers: ScanObservers<'_>,
 ) -> Result<Scan, SelectionError> {
-    let structural = BdRom::open_resilient(root, ScanMode::Metadata)?;
+    let structural = BdRom::open_resilient(
+        root,
+        ScanMode::Metadata,
+        CoreScanOptions::default(),
+        None,
+        ScanObservers::none(),
+    )?;
     let names = named_selection(&structural.bdrom.playlists, selection);
     if names.is_empty() {
         return Err(SelectionError::NoMatch);
@@ -800,8 +807,7 @@ fn scan_selection(
     // healthy scan of a disc holding no data. Only a structure the second open
     // cannot walk gets this far: a per-file read failure is recorded by the
     // resilient sink and never returned.
-    let measured =
-        BdRom::open_resilient_observed(root, ScanMode::Full, options, Some(&files), observers)?;
+    let measured = BdRom::open_resilient(root, ScanMode::Full, options, Some(&files), observers)?;
     let order = selection_order(&measured.bdrom.playlists, &names);
     Ok(Scan { report: measured, order })
 }
@@ -871,21 +877,21 @@ impl Scan {
 /// order.
 ///
 /// This is the byte-for-byte core shared by every export and the native parity
-/// test: [`BdRom::open_resilient_observed`] with the packet scan **on** and the
-/// scan's behaviour switches set by `options`, ordered by the standard filtered
-/// set ([`PlaylistFilter::default`], which drops playlists shorter than 20 s and
+/// test: [`BdRom::open_resilient`] with the packet scan **on** and the scan's
+/// behaviour switches set by `options`, ordered by the standard filtered set
+/// ([`PlaylistFilter::default`], which drops playlists shorter than 20 s and
 /// looping ones). `observers` watches the demux.
 ///
 /// # Errors
-/// Returns the [`BdError`] from [`BdRom::open_resilient_observed`] when the
-/// structure is too damaged to open at all (no `BDMV`/`CLIPINF`/`PLAYLIST`) —
-/// the caller decides whether that is an empty disc or an error to report.
+/// Returns the [`BdError`] from [`BdRom::open_resilient`] when the structure is
+/// too damaged to open at all (no `BDMV`/`CLIPINF`/`PLAYLIST`) — the caller
+/// decides whether that is an empty disc or an error to report.
 fn scan_whole(
     root: &dyn BdDir,
     options: CoreScanOptions,
     observers: ScanObservers<'_>,
 ) -> Result<Scan, BdError> {
-    let report = BdRom::open_resilient_observed(root, ScanMode::Full, options, None, observers)?;
+    let report = BdRom::open_resilient(root, ScanMode::Full, options, None, observers)?;
     let order = report.bdrom.presentation_order(&PlaylistFilter::default());
     Ok(Scan { report, order })
 }
@@ -2316,7 +2322,14 @@ mod tests {
             // `scan_selection` starts with, so the next listing after them is
             // the measured open's first.
             let counted = FlakyRoot::new(framed_tree(&blob), usize::MAX);
-            BdRom::open_resilient(&counted, ScanMode::Metadata).expect("the fixture disc opens");
+            BdRom::open_resilient(
+                &counted,
+                ScanMode::Metadata,
+                CoreScanOptions::default(),
+                None,
+                ScanObservers::none(),
+            )
+            .expect("the fixture disc opens");
             let structural_listings = counted.listings();
             assert!(structural_listings > 0, "a structural open lists the root at least once");
             // The delegating accessors, which the scan reads for the disc label

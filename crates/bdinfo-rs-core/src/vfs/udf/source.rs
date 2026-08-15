@@ -2169,15 +2169,24 @@ mod tests {
 
     #[test]
     fn a_bd_iso_reports_aacs_encryption_through_the_udf_backend() {
-        use crate::bdrom::disc::{BdRom, ScanMode};
+        use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions};
+        let scan = |root: &dyn BdDir| {
+            BdRom::open(
+                root,
+                ScanMode::Metadata,
+                ScanOptions::default(),
+                None,
+                ScanObservers::none(),
+            )
+        };
         // Encrypted stream heads → the flag is set on the `.iso` backend, with
         // the marker file and the stream both found through the UDF tree.
         let encrypted = UdfSource::open(MemIso::boxed(bd_iso(false))).expect("open encrypted iso");
-        let bd = BdRom::open(&encrypted.root(), ScanMode::Metadata).expect("scan encrypted iso");
+        let bd = scan(&encrypted.root()).expect("scan encrypted iso");
         assert!(bd.is_aacs_encrypted);
         // The same image with clear streams is a decrypted rip: not encrypted.
         let ripped = UdfSource::open(MemIso::boxed(bd_iso(true))).expect("open ripped iso");
-        let bd = BdRom::open(&ripped.root(), ScanMode::Metadata).expect("scan ripped iso");
+        let bd = scan(&ripped.root()).expect("scan ripped iso");
         assert!(!bd.is_aacs_encrypted);
     }
 
