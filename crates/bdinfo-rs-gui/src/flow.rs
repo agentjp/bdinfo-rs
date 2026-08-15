@@ -1004,12 +1004,17 @@ impl Flow {
         let listing = self.editable_listing().filter(|listing| listing.scannable())?;
         let selection = listing.scan_names();
         let scan_files = selection_stream_files(&listing.bdrom.playlists, &selection);
+        // The listing open already probed the stream heads for this verdict;
+        // carrying it spares the measured open a re-probe
+        // ([`ScanOptions::aacs_encrypted`]).
+        let mut scan_options = listing.view.scan_options();
+        scan_options.aacs_encrypted = Some(listing.bdrom.is_aacs_encrypted);
         Some(ScanRequest {
             input: listing.input.clone(),
             selection,
             scan_files,
             options: listing.view.render_options(),
-            scan_options: listing.view.scan_options(),
+            scan_options,
         })
     }
 

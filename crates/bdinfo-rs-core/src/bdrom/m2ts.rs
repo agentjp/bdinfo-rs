@@ -164,6 +164,33 @@ fn apply_vbr_bitrate(stream: &mut TsStream, packet_seconds: f64) {
     }
 }
 
+/// Recomputes every variable-bitrate presented stream's rate (main and angle
+/// maps alike) from each playlist's accumulated main-angle demux seconds —
+/// the settling step of every bitrate window, and of each parsed chunk of a
+/// detail back-filling scan ([`TsStreamFile::backfill_detail`]), whose
+/// `is_vbr` switches can arrive after the last window that would otherwise
+/// have computed the rate.
+fn apply_playlist_vbr_bitrates(playlists: &mut [&mut TsPlaylistFile]) {
+    for playlist in playlists.iter_mut() {
+        let mut packet_seconds = 0.0;
+        for clip in &playlist.stream_clips {
+            if clip.angle_index == 0 {
+                packet_seconds += clip.packet_seconds;
+            }
+        }
+        if packet_seconds > 0.0 {
+            for stream in playlist.streams.values_mut() {
+                apply_vbr_bitrate(stream, packet_seconds);
+            }
+            for angle in &mut playlist.angle_streams {
+                for stream in angle.values_mut() {
+                    apply_vbr_bitrate(stream, packet_seconds);
+                }
+            }
+        }
+    }
+}
+
 /// Fills `buf` from `reader`, returning the number of bytes read (0 at EOF),
 /// looping to tolerate short reads.
 ///
@@ -566,6 +593,14 @@ pub struct TsStreamFile {
     stream_states: BTreeMap<u16, TsStreamState>,
     /// Per-video-PID bitrate samples.
     pub stream_diagnostics: BTreeMap<u16, Vec<TsStreamDiagnostics>>,
+    /// Whether each parsed chunk merges this clip's scanned codec detail into
+    /// the playlists' presented streams
+    /// ([`backfill_playlist_detail`](super::disc::backfill_playlist_detail)).
+    /// Off by default; the disc-level scan sets it on a measurement pass whose
+    /// presented streams were resolved without a quick codec pass
+    /// ([`ScanOptions::skip_quick_pass`](super::disc::ScanOptions::skip_quick_pass))
+    /// and therefore carry no scanned detail of their own.
+    pub(crate) backfill_detail: bool,
 }
 
 impl TsStreamFile {
@@ -581,6 +616,7 @@ impl TsStreamFile {
             stream_order: Vec::new(),
             stream_states: BTreeMap::new(),
             stream_diagnostics: BTreeMap::new(),
+            backfill_detail: false,
         }
     }
 
@@ -1459,6 +1495,20 @@ impl TsStreamFile {
             }
             self.size = self.size.wrapping_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
         }
+        // After the chunk's windows, so a codec initialised by this chunk is
+        // merged before the next chunk's windows read the playlists' detail
+        // (`is_vbr`, the TrueHD core) — and before this chunk's measured
+        // snapshot is built, so a display's live rates carry it too. The
+        // recompute right after settles the rates a just-arrived `is_vbr`
+        // unlocks: without it, a stream whose last window preceded this merge
+        // (a reader failing in the next chunk, with no end-of-file flush to
+        // recompute) would keep a zero rate the two-pass scan resolves.
+        if self.backfill_detail {
+            for playlist in relevant.iter_mut() {
+                super::disc::backfill_playlist_detail(playlist, &self.streams);
+            }
+            apply_playlist_vbr_bitrates(relevant);
+        }
         false
     }
 
@@ -1740,24 +1790,7 @@ impl TsStreamFile {
             self.update_stream_bitrate(pid, pts_pid, pts, pts_diff, playlists);
         }
 
-        for playlist in playlists.iter_mut() {
-            let mut packet_seconds = 0.0;
-            for clip in &playlist.stream_clips {
-                if clip.angle_index == 0 {
-                    packet_seconds += clip.packet_seconds;
-                }
-            }
-            if packet_seconds > 0.0 {
-                for stream in playlist.streams.values_mut() {
-                    apply_vbr_bitrate(stream, packet_seconds);
-                }
-                for angle in &mut playlist.angle_streams {
-                    for stream in angle.values_mut() {
-                        apply_vbr_bitrate(stream, packet_seconds);
-                    }
-                }
-            }
-        }
+        apply_playlist_vbr_bitrates(playlists);
     }
 
     /// Adds one PID's window to the clips, the playlist streams, and this clip's
