@@ -723,7 +723,11 @@ jobs:
           # a promotion pull request would add EXACTLY, rather than summing
           # per-leg counts that double every unit both widths found.
           $promoteDir = "fuzz/promote/$($env:TARGET)"
-          $promoteNames = @(if (Test-Path $promoteDir) { (Get-ChildItem -File $promoteDir).Name })
+          # ENUMERATED, never `@((Get-ChildItem -File $dir).Name)`: over an EMPTY
+          # directory that expression is an array of one $null, which reports one
+          # unit to promote where there are none — and an empty delta is the
+          # normal state of a saturated target, not an edge case.
+          $promoteNames = @(if (Test-Path $promoteDir) { Get-ChildItem -File $promoteDir | ForEach-Object Name })
           $stats = [ordered]@{
             target = $env:TARGET
             arch = $env:ARCH
@@ -949,7 +953,9 @@ jobs:
           # A leg whose delta merge could not run promotes its whole accumulated
           # set, so its artifact holds units that add no coverage; the issue says
           # so rather than letting the headline imply a filtering that did not
-          # happen.
+          # happen. The count guard is load-bearing: a leg whose accumulated set
+          # is empty skips the merge for want of anything to filter and reports
+          # the same flag, with nothing to promote and nothing to warn about.
           $unfiltered = @($stats | Where-Object { -not $_.merged -and $_.promote -gt 0 })
           # [int] on purpose: Measure-Object sums an empty set to $null, and
           # $null is not 0, so an artifact-less run would otherwise file a
