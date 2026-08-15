@@ -102,8 +102,8 @@ pub struct Structural {
     pub features: Vec<String>,
     /// Any failures recorded while reading the structure (a corrupt playlist,
     /// an unreadable directory, a stream head that never returned) — shown as
-    /// a non-blocking warning banner. Merged across both structural opens
-    /// ([`listing_scan`]), so a failure the AACS probe hit is here too.
+    /// a non-blocking warning banner. Merged across both opens
+    /// [`scan_structural`] makes, so a failure the AACS probe hit is here too.
     pub warnings: Vec<String>,
 }
 
