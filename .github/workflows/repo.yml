@@ -67,7 +67,10 @@ jobs:
   # against .yamllint.yml — duplicate keys, trailing whitespace, bad
   # indentation, missing final newline, etc. — and covers the non-workflow
   # YAML (dependabot, issue templates, scorecard) that action-validator's
-  # schemas can't read. Mirrors the local gate.
+  # schemas can't read. A third check then reads the workflows as a GRAPH
+  # rather than one file at a time, which is the only way to see a called
+  # workflow asking for more permission than its caller holds. Mirrors the
+  # local gate. The job name predates that third check.
   yaml:
     name: lint YAML (action-validator + ryl)
     if: inputs.yaml == 'true'
@@ -124,6 +127,15 @@ jobs:
 
       - name: Style/syntax-lint all YAML (ryl, strict)
         run: ryl -f github -o - -s .
+
+      # Neither tool above follows a `uses: ./…` edge, and the failure this
+      # catches produces no jobs and no check runs to read — see the script.
+      # Self-test first, the order conventional.yml uses for its own checker.
+      - name: Check reusable-workflow permission compatibility
+        shell: pwsh
+        run: |
+          ./.github/scripts/check-workflow-permissions.ps1 -SelfTest
+          ./.github/scripts/check-workflow-permissions.ps1
 
   # TOML formatting + lint gate (taplo): every tracked TOML — the Cargo manifests,
   # the gate configs (clippy/deny/nextest/mutants/typos), dist-workspace.toml — must

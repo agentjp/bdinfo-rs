@@ -470,6 +470,13 @@ begin {
             Match      = { param($f) Test-Match $f @('.github/scripts/check-banned-words.ps1', '.github/scripts/classify-diff.ps1') }
         },
         @{
+            Name       = 'reusable-workflow permission checker'
+            Areas      = @('yaml', 'workflows')
+            Structural = $true
+            Why        = 'The lint YAML job runs it beside action-validator, over the same .github/workflows tree.'
+            Match      = { param($f) $f -eq '.github/scripts/check-workflow-permissions.ps1' }
+        },
+        @{
             Name       = 'packaging templates'
             Areas      = @()
             Structural = $true

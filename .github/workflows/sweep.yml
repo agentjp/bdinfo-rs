@@ -179,6 +179,9 @@ jobs:
   # ONE rolling issue for sweep failures (the ruff daily-fuzz pattern):
   # refreshed while the sweep stays red, closed again once a sweep passes.
   #
+  # This job can only report on a run that reached it. sweep-watchdog.yml
+  # watches from outside for the failures that never get here at all.
+  #
   # FILING stays scheduled-only — a workflow_dispatch run has a human reading
   # its log, who does not need an issue filed at them. CLOSING also accepts
   # workflow_dispatch, because re-dispatching is how a fixed sweep gets

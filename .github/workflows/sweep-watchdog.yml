@@ -1,0 +1,111 @@
+name: sweep watchdog
+
+# The sweep's rolling-issue job lives INSIDE the sweep run, which makes it
+# blind to the two ways a sweep can fail without producing one:
+#
+#   - a rejected run. A workflow-level error — most reachably, a called
+#     workflow's job requesting a permission its calling job does not hold —
+#     ends the run with conclusion `startup_failure`, zero jobs and zero check
+#     runs. No job runs, so nothing files an issue. Observed on 2026-08-15,
+#     unnoticed for a day.
+#   - a cron that stops firing. A scheduled workflow on a repository with no
+#     recent activity is disabled by GitHub after 60 days, and the schedule is
+#     a request rather than a guarantee in any case; "no run at all" looks
+#     exactly like "nothing to report".
+#
+# So this workflow watches the sweep from outside it, on its own schedule, and
+# files the SAME rolling issue the sweep's own report job uses. It only ever
+# opens one: when an issue with the label is already open, the sweep's report
+# job is doing its job and this one stays quiet. It never closes — a green
+# sweep does that, which keeps one closing rule instead of two that can
+# disagree.
+#
+# Deliberately standalone, never a called workflow: a watchdog that a caller
+# can misconfigure is subject to the failure it is meant to catch.
+
+on:
+  schedule:
+    # Late enough that a sweep starting in its own (2-4 h late, see sweep.yml)
+    # window has finished: the longest leg is the sharded core mutants pass at
+    # a few hours. This cron runs late too, landing around 22:00-00:00 UTC.
+    - cron: "0 20 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sweep-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: watch the sweep from outside it
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: File the rolling issue when the sweep failed silently
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so gh has no git remote to infer the
+          # repository from — name it explicitly.
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # An open issue means the sweep's own report job already filed, so
+          # the sweep ran far enough to report and needs nothing from here.
+          $existing = gh issue list --state open --label ci-sweep --json number --jq '.[0].number'
+          if ($existing) {
+            Write-Host "Issue #$existing is already open; the sweep is reporting for itself."
+            exit 0
+          }
+
+          # Scheduled runs only: a dispatched sweep has an operator reading its
+          # log, and the sweep's own report job holds the same rule.
+          $runs = gh run list --workflow sweep.yml --event schedule --limit 5 `
+            --json databaseId,conclusion,status,createdAt,url | ConvertFrom-Json
+          if (-not $runs) {
+            Write-Host 'No scheduled sweep runs found at all; nothing to compare against.'
+            exit 0
+          }
+
+          $latest = $runs[0]
+          if ($latest.status -ne 'completed') {
+            Write-Host "The latest scheduled sweep ($($latest.databaseId)) is still $($latest.status)."
+            exit 0
+          }
+
+          # Two failure shapes, one issue. `startup_failure` is the rejected
+          # run; a stale newest run means the cron stopped firing. 48 h rather
+          # than 24 h so a single skipped or badly delayed grant is not an
+          # alert on its own.
+          $ageHours = ([datetimeoffset]::UtcNow - [datetimeoffset]::Parse($latest.createdAt)).TotalHours
+          $problem = ''
+          if ($ageHours -gt 48) {
+            $problem = "the newest scheduled sweep run started $([math]::Round($ageHours)) h ago, so the daily schedule has stopped firing"
+          }
+          elseif ($latest.conclusion -ne 'success') {
+            $problem = "the latest scheduled sweep run concluded ``$($latest.conclusion)`` and filed nothing itself"
+          }
+
+          if (-not $problem) {
+            Write-Host "The latest scheduled sweep ($($latest.databaseId)) succeeded $([math]::Round($ageHours)) h ago."
+            exit 0
+          }
+
+          gh label create ci-sweep --color ededed --description 'Daily full-sweep failures' --force | Out-Null
+          $body = @(
+            "The daily sweep did not report on itself: $problem."
+            ''
+            "Latest scheduled sweep run: $($latest.url)"
+            "Watchdog run: $env:RUN_URL"
+            ''
+            'A run that GitHub rejects before creating any job has no job to file this, which is why it comes from a separate workflow. This is the same rolling issue the sweep files: the next green sweep closes it.'
+          ) -join "`n"
+          gh issue create --title "Daily sweep did not report: $($latest.conclusion)" --body $body --label ci-sweep | Out-Null
+          Write-Host "Filed the rolling issue: $problem"
