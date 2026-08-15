@@ -56,11 +56,11 @@ name: fuzz
 # measurement) — the jitter that turns "rides the eviction boundary" into
 # "crossed it".
 #
-# CORPUS GROWTH IS HUMAN-GATED: a leg that ends with more units than it
-# restored uploads them as an artifact and the report job names the count in one
-# rolling issue. Nothing is committed by CI — signed-commit branch protection
-# and a 735 MB .git are both reasons the regression set grows only through a
-# reviewed pull request.
+# CORPUS GROWTH IS HUMAN-GATED: a leg that accumulated units reaching coverage
+# the committed seeds do not uploads exactly those units as an artifact, and the
+# report job names the count in one rolling issue. Nothing is committed by CI —
+# signed-commit branch protection and a 735 MB .git are both reasons the
+# regression set grows only through a reviewed pull request.
 #
 # The tag pass runs ALONGSIDE the publish workflows the same tag triggers
 # (v-release/publish-crates/publish-npm) and does NOT block them — a crash
@@ -340,11 +340,13 @@ jobs:
 
       # THE CACHE'S BACKSTOP, because a cache entry is storage nobody promised:
       # both lineages above can be evicted between passes (the header's cadence
-      # note carries the measurement), and every unit in them was also uploaded
-      # as a `fuzz-corpus-<target>-<arch>` artifact, which lives 90 days in a
-      # store the cache budget does not touch. Runs only when both restores came
-      # back empty, and before the seeding step below, so its `restored` count
-      # includes whatever this recovers.
+      # note carries the measurement). What they hold survives elsewhere as the
+      # `fuzz-corpus-<target>-<arch>` artifact, which lives 90 days in a store
+      # the cache budget does not touch — the coverage delta rather than every
+      # unit the cache kept, so this recovers a smaller corpus reaching the same
+      # features (the step that computes it, below, says why). Runs only when
+      # both restores came back empty, and before the seeding step below, so its
+      # `restored` count includes whatever this recovers.
       #
       # Queried per artifact NAME, not "the newest run's artifacts": a leg that
       # found nothing new uploads nothing, so the newest run need not carry an
@@ -429,11 +431,19 @@ jobs:
       # back from minimisation under a different name than the one git tracks.
       # Hashing the tracked seeds up front — before anything touches the
       # directory — makes the accounting immune to that.
+      #
+      # fuzz/seeds/<target> is a pristine copy of the tracked seeds, taken in
+      # the same breath and for the same reason: the promotion delta below
+      # merges against the WHOLE committed set, and from the `cp -n` onwards
+      # fuzz/corpus/<target> is the union — after cmin it is not even a superset
+      # of the seeds any more, since minimisation drops a seed whose coverage
+      # another unit also reaches.
       - name: Seed the run with the accumulated corpus
         id: seed
         run: |
-          mkdir -p "fuzz/accumulated/$TARGET" "fuzz/corpus/$TARGET"
+          mkdir -p "fuzz/accumulated/$TARGET" "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET"
           git ls-files -z -- "fuzz/corpus/$TARGET" | xargs -0 -r sha1sum | cut -c1-40 | sort -u > seed-hashes.txt
+          git ls-files -z -- "fuzz/corpus/$TARGET" | xargs -0 -r cp -t "fuzz/seeds/$TARGET/"
           restored=$(find "fuzz/accumulated/$TARGET" -type f | wc -l)
           seeds=$(wc -l < seed-hashes.txt)
           # -n so a name collision can never overwrite a tracked seed; colliding
@@ -530,6 +540,11 @@ jobs:
       # survives in the artifact and the issue. slow-unit-* files are excluded —
       # libFuzzer writes those for a unit that merely approached -timeout, which
       # is not a failure.
+      #
+      # The pristine seed copy is quarantined alongside the corpus, because the
+      # delta merge below EXECUTES every unit in it: a crashing seed left there
+      # would abort that merge and cost the leg its promotion artifact on top of
+      # the crash it already found.
       - name: Quarantine the crashing unit
         id: crash
         if: ${{ steps.run.outputs.rc != '0' }}
@@ -538,7 +553,7 @@ jobs:
         run: |
           repro=$(find fuzz/artifacts -type f ! -name 'slow-unit-*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
           find fuzz/artifacts -type f ! -name 'slow-unit-*' -print0 2>/dev/null | xargs -0 -r sha1sum | cut -c1-40 | sort -u > crash-hashes.txt
-          find "fuzz/corpus/$TARGET" -type f -print0 | xargs -0 -r sha1sum |
+          find "fuzz/corpus/$TARGET" "fuzz/seeds/$TARGET" -type f -print0 | xargs -0 -r sha1sum |
             awk 'NR == FNR { bad[$1] = 1; next } ($1 in bad) { print substr($0, 43) }' crash-hashes.txt - |
             while IFS= read -r f; do rm -f -- "$f"; echo "quarantined $f"; done
           if [ -z "$repro" ]; then
@@ -559,12 +574,11 @@ jobs:
 
       # Minimisation policy for the ACCUMULATED corpus (D8 left the committed
       # one alone and handed this one here): minimise the union of the seeds and
-      # everything restored, then keep only what is not already tracked. The
-      # cache therefore holds units that add a feature the committed seeds do
-      # not, which is what bounds its growth; and once a human commits them, the
-      # same units become tracked, drop out of the "new" set, and the growth
-      # issue closes itself. The committed corpus is never rewritten — the
-      # runner's checkout is scratch and nothing is pushed from here.
+      # everything restored, then keep only what is not already tracked. That set
+      # is the fuzzer's working memory and it is what the cache below saves —
+      # NOT what gets promoted, which the delta step after this one computes.
+      # The committed corpus is never rewritten — the runner's checkout is
+      # scratch and nothing is pushed from here.
       #
       # cmin takes the GUARDS and nothing else. Never a per-target flag from
       # targets.txt: -max_len DROPS an over-long unit rather than truncating it,
@@ -591,6 +605,69 @@ jobs:
           echo "new=$new" >> "$GITHUB_OUTPUT"
           echo "$TARGET/$ARCH: $grown new units before cmin, $new after"
 
+      # WHAT A PROMOTION PULL REQUEST WOULD ADD — a COVERAGE delta, not the byte
+      # difference the step above computes. Those two are not the same set and
+      # the gap is enormous: cmin re-minimises the seeds and the accumulated
+      # units together and names every survivor by the sha1 of its bytes, so a
+      # generated unit that reaches exactly what a committed seed reaches can
+      # displace that seed and then count as "not in the seed set". Measured
+      # 2026-08-15 over one scheduled pass, that is ~40,600 units across 16 legs
+      # carrying 3,312 edges between them — roughly twelve files per edge, and
+      # the committed corpus grew from 6,674 to 63,311 files (183 MB) in a
+      # single round of promotions.
+      #
+      # libFuzzer's own merge answers the question a sha1 comparison cannot:
+      # `-merge=1 DST SRC` copies a unit out of SRC only when it reaches a
+      # feature DST does not already reach. Seeding DST with the pristine
+      # committed seeds therefore makes what lands there exactly the units whose
+      # coverage the repository does not already own. Run through the fuzz
+      # binary directly because `cargo fuzz cmin` merges a corpus into ITSELF
+      # and offers no way to name a different destination.
+      #
+      # GUARDS ONLY, never a flag from targets.txt, for the same reason the cmin
+      # above takes none: -max_len DROPS an over-long unit instead of truncating
+      # it, which would silently withhold from promotion the long units that
+      # only the other arch's leg can still restore.
+      #
+      # Fails SOFT to the whole accumulated set: a merge that cannot run must
+      # cost a smaller pull request, never the discovery it represents. The
+      # `merged` flag travels into stats.json so the issue can name the legs
+      # whose artifact was not filtered.
+      - name: Collect the units worth promoting
+        id: delta
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "fuzz/promote/$TARGET"
+          bin=$(find "fuzz/target/$FUZZ_TARGET/release" -maxdepth 1 -type f -perm -u+x -name "$TARGET")
+          merged=false
+          if [ -n "$bin" ] && [ -n "$(find "fuzz/accumulated/$TARGET" -type f -print -quit)" ]; then
+            find "fuzz/seeds/$TARGET" -type f -printf '%f\n' | sort > delta-before.txt
+            set +e
+            "$bin" -merge=1 $GUARDS "fuzz/seeds/$TARGET" "fuzz/accumulated/$TARGET" > merge.log 2>&1
+            rc=$?
+            set -e
+            grep -E 'MERGE-OUTER|MERGE-INNER' merge.log | tail -3 || true
+            if [ "$rc" -eq 0 ]; then
+              merged=true
+            else
+              echo "the delta merge exited $rc — promoting the accumulated set un-filtered"
+              tail -20 merge.log
+            fi
+          fi
+          if [ "$merged" = true ]; then
+            # Merge only ever ADDS to its destination, so the names that appear
+            # between the two listings are the delta and nothing else.
+            find "fuzz/seeds/$TARGET" -type f -printf '%f\n' | sort > delta-after.txt
+            comm -13 delta-before.txt delta-after.txt |
+              while IFS= read -r n; do cp -- "fuzz/seeds/$TARGET/$n" "fuzz/promote/$TARGET/"; done
+          else
+            find "fuzz/accumulated/$TARGET" -type f -exec cp -t "fuzz/promote/$TARGET/" {} +
+          fi
+          promote=$(find "fuzz/promote/$TARGET" -type f | wc -l)
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+          echo "promote=$promote" >> "$GITHUB_OUTPUT"
+          echo "$TARGET/$ARCH: $promote of $(find "fuzz/accumulated/$TARGET" -type f | wc -l) accumulated unit(s) reach coverage the committed seeds do not (merged=$merged)"
+
       - name: Record this leg's numbers
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -601,6 +678,7 @@ jobs:
           SEED_FT: ${{ steps.baseline.outputs.seed_ft }}
           GROWN: ${{ steps.collect.outputs.grown }}
           NEW: ${{ steps.collect.outputs.new }}
+          MERGED: ${{ steps.delta.outputs.merged }}
           RC: ${{ steps.run.outputs.rc }}
           REPRO: ${{ steps.crash.outputs.repro }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -639,6 +717,13 @@ jobs:
           $seedCov = if ($env:SEED_COV) { [int]$env:SEED_COV } else { $null }
           $seedFt = if ($env:SEED_FT) { [int]$env:SEED_FT } else { $null }
           $covGained = if ($null -ne $seedCov) { $cov - $seedCov } else { $null }
+          # The names in the promotion directory ARE the sha1 of each unit's
+          # bytes — libFuzzer's merge names every unit it writes that way — so
+          # shipping the list is what lets the report job below count the units
+          # a promotion pull request would add EXACTLY, rather than summing
+          # per-leg counts that double every unit both widths found.
+          $promoteDir = "fuzz/promote/$($env:TARGET)"
+          $promoteNames = @(if (Test-Path $promoteDir) { (Get-ChildItem -File $promoteDir).Name })
           $stats = [ordered]@{
             target = $env:TARGET
             arch = $env:ARCH
@@ -648,6 +733,9 @@ jobs:
             restored = [int]$env:RESTORED
             grown = [int]$env:GROWN
             new = [int]$env:NEW
+            promote = $promoteNames.Count
+            promote_sha1 = $promoteNames
+            merged = ($env:MERGED -eq 'true')
             seed_cov = $seedCov
             seed_ft = $seedFt
             cov = $cov
@@ -657,11 +745,11 @@ jobs:
             units_executed = [int64](($units | ForEach-Object { [int64]$_.Groups[1].Value } | Measure-Object -Sum).Sum)
             rc = [int]$env:RC
           }
-          $stats | ConvertTo-Json | Set-Content result/stats.json
+          $stats | ConvertTo-Json -Depth 5 | Set-Content result/stats.json
           @(
             "### $($env:TARGET) ($($env:ARCH))"
             ''
-            "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation - $($env:WORKERS) process(es), cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
+            "$($env:SEEDS) distinct committed seeds, $($env:RESTORED) restored, $($env:NEW) new after minimisation, $($promoteNames.Count) worth promoting - $($env:WORKERS) process(es), cov $cov, ft $ft, $execs exec/s, exit $($env:RC)"
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
           if (-not $env:REPRO) { exit 0 }
 
@@ -738,14 +826,24 @@ jobs:
       # The units a human can promote into the committed regression set: unzip
       # into fuzz/corpus/<target>/ and open a pull request. Both arches upload,
       # and a unit found at both widths appears in both — as the SAME file, since
-      # cmin names a unit by the sha1 of its bytes, so unzipping both into one
-      # directory collapses the duplicate.
+      # every unit here is named by the sha1 of its bytes, so unzipping both into
+      # one directory collapses the duplicate.
+      #
+      # This is the COVERAGE DELTA, not the whole accumulated set (the step that
+      # computes it carries the measurement). Two consequences worth naming.
+      # The artifact is now much smaller than the cache entry beside it, and
+      # that is the point. And the artifact fallback at the top of this job,
+      # which rebuilds the accumulated corpus from these zips when both cache
+      # lineages are gone, therefore recovers the delta rather than everything
+      # earlier passes kept: a strictly smaller set that reaches the SAME
+      # features, since every unit it drops was dropped for reaching nothing the
+      # rest does not.
       - name: Upload the new corpus units
-        if: ${{ !cancelled() && steps.collect.outputs.new != '0' }}
+        if: ${{ !cancelled() && steps.delta.outputs.promote != '0' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}
-          path: fuzz/accumulated/${{ matrix.target }}/
+          path: fuzz/promote/${{ matrix.target }}/
           if-no-files-found: ignore
 
       # Saved even when the leg failed, and deliberately: a crash must not cost
@@ -832,8 +930,27 @@ jobs:
           # nothing".
           $dash = { param($v) if ($null -eq $v) { '-' } else { $v } }
           $rows = @($stats | Sort-Object target, arch | ForEach-Object {
-            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $(& $dash $_.seed_cov) | $($_.cov) | $(& $dash $_.cov_gained) | $($_.ft) | $($_.execs_per_sec) |"
+            "| $($_.target) | $($_.arch) | $($_.seeds) | $($_.restored) | $($_.new) | $($_.promote) | $(& $dash $_.seed_cov) | $($_.cov) | $(& $dash $_.cov_gained) | $($_.ft) | $($_.execs_per_sec) |"
           })
+          # THE ONE NUMBER A HUMAN ACTS ON: how many files a promotion pull
+          # request would add. Every promotable unit is named by the sha1 of its
+          # bytes, so a unit both widths found is one name in two legs' lists and
+          # the union of those lists is the diff size exactly — where a sum of
+          # per-leg counts would double it, and a sum of per-leg EDGE counts
+          # (the arches being different binaries with different edge ids) is not
+          # a count of anything.
+          $promotable = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($s in $stats) {
+            foreach ($n in @($s.promote_sha1)) { if ($n) { [void]$promotable.Add($n) } }
+          }
+          $unitsToPromote = $promotable.Count
+          $targetsToPromote = @($stats | Where-Object { $_.promote -gt 0 } |
+            ForEach-Object { $_.target } | Sort-Object -Unique)
+          # A leg whose delta merge could not run promotes its whole accumulated
+          # set, so its artifact holds units that add no coverage; the issue says
+          # so rather than letting the headline imply a filtering that did not
+          # happen.
+          $unfiltered = @($stats | Where-Object { -not $_.merged -and $_.promote -gt 0 })
           # [int] on purpose: Measure-Object sums an empty set to $null, and
           # $null is not 0, so an artifact-less run would otherwise file a
           # growth issue with a blank count.
@@ -847,11 +964,6 @@ jobs:
           $unmeasured = @($stats | Where-Object { $null -eq $_.cov_gained })
           $gainers = @($stats | Where-Object { $_.cov_gained -gt 0 })
           $totalGained = [int](($gainers | Measure-Object -Property cov_gained -Sum).Sum)
-          # Counted per leg, so a unit found at both widths counts twice here —
-          # the arches share one corpus and cmin names a unit by the sha1 of its
-          # bytes, so the duplicate collapses the moment both artifacts are
-          # unzipped into one directory. The number is a review-queue signal, not
-          # a distinct-unit count.
           # Every leg of a run gets the same FUZZ_SECONDS and WORKERS, so any
           # leg's copy is the whole run's budget. Read from the first because an
           # empty $stats has no leg to read at all.
@@ -860,15 +972,15 @@ jobs:
           @(
             '## Discovery pass'
             ''
-            "Budget ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (summed over both arches, before cross-arch dedup). Those units reach $totalGained edge(s) the committed seeds alone do not."
+            "Budget ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). Accumulated corpus: $totalRestored units in, $totalNew out after minimisation against the committed seeds (both summed over the arches, which double-counts a unit found at each). Of those, $unitsToPromote distinct unit(s) across $($targetsToPromote.Count) target(s) reach coverage the committed seeds do not; the legs' fuzzed corpora reach $totalGained edge(s) the seeds alone do not."
             ''
-            '| target | arch | seeds | restored | new | seed cov | cov | gained | ft | exec/s |'
-            '|---|---|---|---|---|---|---|---|---|---|'
+            '| target | arch | seeds | restored | new | promote | seed cov | cov | gained | ft | exec/s |'
+            '|---|---|---|---|---|---|---|---|---|---|---|'
             $rows
           ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
 
           if ($env:FILE_ISSUES -ne 'true') {
-            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); new units: $totalNew; edges gained: $totalGained."
+            Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); units to promote: $unitsToPromote; edges gained: $totalGained."
             exit 0
           }
 
@@ -984,12 +1096,14 @@ jobs:
             Write-Host "No leg gained an edge over the committed seeds, and $($unmeasured.Count) of $(@($stats).Count) leg(s) could not be measured — neither filing nor closing."
             exit 0
           }
-          # Sorted by what the reader is deciding on: the legs whose units are
-          # worth a promotion pull request sit at the top. The unit count stays
-          # a column because it sizes that pull request.
-          $grownRows = @($gainers | Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
-            "| ``$($_.target)`` | $($_.arch) | $($_.cov_gained) | $($_.seed_cov) | $($_.new) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
-          })
+          # One row per leg that has something to promote, sorted by what the
+          # reader is deciding on. A leg whose baseline could not be measured is
+          # listed too: its units are no less promotable for the gain column
+          # being unknown.
+          $grownRows = @($stats | Where-Object { $_.promote -gt 0 } |
+            Sort-Object { [int]$_.cov_gained } -Descending | ForEach-Object {
+              "| ``$($_.target)`` | $($_.arch) | $($_.promote) | $(& $dash $_.cov_gained) | $(& $dash $_.seed_cov) | ``fuzz-corpus-$($_.target)-$($_.arch)`` |"
+            })
           # This workflow's push trigger is `tags: ['v*']`, so a push here is
           # always a release tag.
           $trigger = switch ($env:GITHUB_EVENT_NAME) {
@@ -1035,15 +1149,32 @@ jobs:
             $promotePatterns = "--pattern 'fuzz-corpus-<target>-*'"
             $promoteLead = "No target's best leg gained $promoteCut edges or more. To promote one anyway, name it:"
           }
-          $title = "Fuzz corpus: $totalGained edge(s) beyond the committed seeds"
+          # The headline is the SIZE OF THE PULL REQUEST this issue is asking
+          # for, which is the only number a reader can act on directly and is
+          # zero exactly when there is nothing to do. The edge total keeps its
+          # place in the body: it is what says whether the pull request is worth
+          # opening, but as a sum over two binaries with unrelated edge ids it
+          # is not a count of anything and must not lead.
+          $title = if ($unitsToPromote -gt 0) {
+            "Fuzz corpus: $unitsToPromote unit(s) ready to promote across $($targetsToPromote.Count) target(s)"
+          }
+          else {
+            "Fuzz corpus: $totalGained edge(s) beyond the committed seeds, none held by a promotable unit"
+          }
           $body = @(
-            "The discovery pass has accumulated units that reach $totalGained edge(s) the committed seed corpus does not. They $whereTheyLive; nothing is committed automatically."
+            "A promotion pull request would add $unitsToPromote unit(s) across $($targetsToPromote.Count) target(s) — the units that reach coverage the committed seed corpus does not. The pass's fuzzed corpora reach $totalGained edge(s) beyond those seeds. The accumulated units $whereTheyLive; nothing is committed automatically."
             ''
             "Refreshed by $trigger, fuzzing ${seconds}s per target per arch across $workers concurrent libFuzzer process(es). A release tag fuzzes 600s where a scheduled pass fuzzes 300, so two refreshes are only comparable with each other when their budgets match."
             ''
-            'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached. The total is summed over both pointer widths, which are different binaries: their edge counts are not the same edges and do not dedupe. The unit counts are summed the same way, but a unit found at both widths is the same bytes under the same sha1 filename, so those DO collapse when both artifacts are unzipped into one directory.'
+            'Each leg measures its own baseline by replaying the committed seeds alone at `-runs=0` before the accumulated units are mixed in, then subtracts that from the coverage the fuzzed corpus reached — that is the gain column, summed over both pointer widths, which are different binaries whose edge counts are not the same edges and do not dedupe. The unit counts come from a separate step: libFuzzer merges the accumulated corpus into a copy of the committed seeds and keeps only what adds a feature they lack. Each such unit is named by the sha1 of its bytes, so the headline counts the DISTINCT units across both widths and is exactly the number of files the pull request adds.'
+            $(if ($unfiltered.Count -gt 0) {
+              @(
+                ''
+                "The delta merge did not run on $((@($unfiltered | ForEach-Object { "``$($_.target)`` ($($_.arch))" } | Sort-Object -Unique) -join ', ')) — those artifacts hold every accumulated unit, including ones that add no coverage, and their rows overstate the pull request accordingly."
+              )
+            })
             ''
-            '| target | arch | edges gained | seed cov | units | artifact |'
+            '| target | arch | units to promote | edges gained | seed cov | artifact |'
             '|---|---|---|---|---|---|'
             $grownRows
             $(if ($unmeasured.Count -gt 0) {
