@@ -388,14 +388,14 @@ fn scan_and_report(
     let cancel = AtomicBool::new(false);
     let mut watch = CancelWatch::new();
     let raw = RawModeScope::enter(styled);
-    let scanned = with_stall_ticker(&display, || {
-        scan(
-            &mut |p: ScanProgress<'_>| {
-                observe_cancellable(&mut locked(&display), &mut watch, &cancel, raw.active, &p);
-            },
-            &cancel,
-        )
-    });
+    let ticker = StallTicker::start(&display);
+    let scanned = scan(
+        &mut |p: ScanProgress<'_>| {
+            observe_cancellable(&mut locked(&display), &mut watch, &cancel, raw.active, &p);
+        },
+        &cancel,
+    );
+    ticker.stop();
     // Out of raw mode before anything prints a plain `\n` (Unix raw mode
     // disables output post-processing, so a bare newline would not return
     // the carriage).
@@ -829,42 +829,59 @@ fn locked(display: &Mutex<ProgressDisplay>) -> MutexGuard<'_, ProgressDisplay> {
     display.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Runs `body` with a second thread repainting `display` about once a second
-/// ([`ProgressDisplay::tick`]), and stops that thread before returning `body`'s
-/// value.
+/// A second thread repainting the display about once a second
+/// ([`ProgressDisplay::tick`]) for as long as a scan is running.
 ///
 /// The scan drives the display from its own thread, one event per read — so a
 /// read syscall that does not return freezes the line exactly when the reader
 /// most wants to see it moving (damaged optical media can hold a read inside
 /// drive-firmware retries for minutes). The ticker holds the wall clock
 /// instead: it owns no scan state and only repaints what the last event left.
-fn with_stall_ticker<T>(display: &Arc<Mutex<ProgressDisplay>>, body: impl FnOnce() -> T) -> T {
-    if !locked(display).styled {
-        // A plain line never ticks (see [`ProgressDisplay::tick`]), so a piped
-        // or redirected run spawns nothing.
-        return body();
+struct StallTicker {
+    /// Set by [`stop`](Self::stop) to end the thread.
+    stop: Arc<AtomicBool>,
+    /// The thread, or `None` for a plain display: a plain line never ticks
+    /// (see [`ProgressDisplay::tick`]), so a piped or redirected run spawns
+    /// nothing at all.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StallTicker {
+    /// Starts ticking `display`.
+    fn start(display: &Arc<Mutex<ProgressDisplay>>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        if !locked(display).styled {
+            return Self { stop, thread: None };
+        }
+        let thread = {
+            let display = Arc::clone(display);
+            let stop = Arc::clone(&stop);
+            // The wait is parked rather than slept, so the unpark in `stop`
+            // ends the thread at once instead of after the rest of a poll
+            // interval — the CLI runs a scan per invocation, and that wait
+            // would be paid on every one of them.
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::park_timeout(TICK_POLL);
+                    locked(&display).tick();
+                }
+            })
+        };
+        Self { stop, thread: Some(thread) }
     }
-    let stop = Arc::new(AtomicBool::new(false));
-    let ticker = {
-        let display = Arc::clone(display);
-        let stop = Arc::clone(&stop);
-        // The wait is parked rather than slept, so the unpark below ends the
-        // thread at once instead of after the rest of a poll interval — a scan
-        // per run is a scan's worth of avoidable wait.
-        std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::park_timeout(TICK_POLL);
-                locked(&display).tick();
-            }
-        })
-    };
-    let scanned = body();
-    stop.store(true, Ordering::Relaxed);
-    ticker.thread().unpark();
-    // A panicked ticker leaves the display as the scan left it; the epilogue
-    // still prints.
-    let _ = ticker.join().is_ok();
-    scanned
+
+    /// Ends the ticking and waits for the thread to finish, so nothing repaints
+    /// the line the epilogue is about to print over.
+    fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let Some(thread) = self.thread else {
+            return;
+        };
+        thread.thread().unpark();
+        // A panicked ticker leaves the display as the scan left it; the
+        // epilogue still prints.
+        let _ = thread.join().is_ok();
+    }
 }
 
 /// The widest the styled display's progress bar grows, in cells.
@@ -2698,16 +2715,14 @@ Options:
         line.observe(&ScanProgress { file: "00011.M2TS", done: 50, total: 200 });
         quiet_for(&mut line, 40);
         let display = Arc::new(Mutex::new(line));
-        let stuck = super::with_stall_ticker(&display, || {
-            // The scan thread inside a read that does not return: it reports
-            // nothing at all for the whole wait.
-            std::thread::sleep(Duration::from_millis(1_500));
-            "the read finally failed"
-        });
-        assert_eq!(stuck, "the read finally failed");
-        let ticked = paints(&painted);
-        assert!(ticked.len() >= 2, "the ticker repainted at least once: {ticked:?}");
-        let last = ticked.last().expect("a painted line");
+        let ticker = super::StallTicker::start(&display);
+        // The scan thread inside a read that does not return: it reports
+        // nothing at all for the whole wait.
+        std::thread::sleep(Duration::from_millis(1_500));
+        ticker.stop();
+        let repaints = paints(&painted);
+        assert!(repaints.len() >= 2, "the ticker repainted at least once: {repaints:?}");
+        let last = repaints.last().expect("a painted line");
         assert!(last.contains("Still reading ["), "{last}");
         assert!(last.contains("00011.M2TS | Elapsed: 00:00:4"), "the clock climbed: {last}");
     }
