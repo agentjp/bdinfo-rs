@@ -2394,7 +2394,9 @@ fn stream_summary(stream: &TsStream) -> StreamSummary {
 /// pass), keyed by upper-cased name. Each file is scanned once, with the
 /// playlists handed in so the demux can attribute packets to their clips. A
 /// file with an interleaved 3D counterpart (`SSIF/<stem>.SSIF` under
-/// `ssif_dir`) is demuxed through it, so the dependent-view streams register.
+/// `ssif_dir`) is demuxed through it, so the dependent-view streams register —
+/// unless that file will not open, which in resilient mode falls back to the
+/// plain `*.m2ts` (see [`scan_one_stream_file`]).
 /// `is_full_scan` selects the pass: the quick pass stops once every stream's
 /// codec detail is initialised; the full pass demuxes every packet to EOF —
 /// the measurement pass. Used only at the `streams` level; the
@@ -2487,6 +2489,7 @@ fn scan_stream_files(
             is_full_scan,
             backfill_detail,
             progress,
+            sink,
         );
         // Cancellation aborts the whole open, in strict and resilient modes
         // alike — the sink collects disc damage, not the caller's abort, so
@@ -2548,6 +2551,11 @@ enum StreamScan {
 /// `Err` is reserved for the two no-demux-state cases — the source would not
 /// open, or the caller cancelled ([`BdError::ScanCancelled`], whose partial
 /// state is deliberately never offered: cancellation is an abort, not damage).
+///
+/// An interleaved source that will not open is recovered from rather than
+/// failed on, in resilient mode: the clip is scanned from its plain `*.m2ts`
+/// instead and the `*.ssif` failure recorded through `sink` — see
+/// `DIFFERENCES.md`.
 fn scan_one_stream_file(
     file: &dyn BdFile,
     interleaved: Option<Box<dyn BdFile>>,
@@ -2555,17 +2563,43 @@ fn scan_one_stream_file(
     is_full_scan: bool,
     backfill_detail: bool,
     progress: &mut Progress<'_>,
+    sink: &mut Sink<'_>,
 ) -> Result<StreamScan, BdError> {
     let mut stream_file = TsStreamFile::new(file.name());
     stream_file.backfill_detail = backfill_detail;
+    // The `*.ssif` handle's name as the disc spells it, read before the handle
+    // is wrapped (which upper-cases it), so the failure below is recorded in
+    // the same casing as every other name this scan records.
+    let interleaved_name = interleaved.as_ref().map_or_else(String::new, |s| s.name().to_owned());
     stream_file.interleaved_file = interleaved.map(TsInterleavedFile::new);
     // The interleaved 3D `*.ssif` is the demux source in preference to the plain
     // `*.m2ts` whenever the clip has one: its base/dependent extents are just more
     // source packets, and without reading it the dependent-view (MVC) streams
     // never register. The selected reader is wrapped so each read advances the
     // progress.
-    let inner = match &stream_file.interleaved_file {
-        Some(interleaved) => interleaved.open_read().map_err(BdError::Io)?,
+    let inner = match stream_file.interleaved_file.take() {
+        Some(interleaved) => match interleaved.open_read() {
+            Ok(reader) => {
+                stream_file.interleaved_file = Some(interleaved);
+                reader
+            }
+            // The `*.ssif` is the superset source, not the only one: the base
+            // view is also in the plain `*.m2ts`, so a clip whose interleaved
+            // file will not open is measured in 2D rather than lost — only the
+            // dependent view is unreachable. `interleaved_file` stays taken,
+            // so the clip reports the source it was read from. Strict mode has
+            // no such policy: `absorb` propagates the failure there, exactly as
+            // an unopenable `*.m2ts` does.
+            Err(reason) => {
+                sink.absorb(
+                    ScanStage::StreamFile,
+                    &interleaved_name,
+                    (),
+                    Err(BdError::Io(reason)),
+                )?;
+                file.open_read()?
+            }
+        },
         None => file.open_read()?,
     };
     // The shared reference and the measured observer are moved out before the
@@ -4822,6 +4856,136 @@ mod tests {
         )
     }
 
+    /// The same one-clip 3D disc as a mock tree, so either source can be made
+    /// unopenable: the base view alone in `00000.m2ts` (opening under `m2ts`),
+    /// base plus dependent view in `00000.ssif` (opening under `ssif`). Every
+    /// other file is intact.
+    fn interleaved_mock_disc(ssif: &Trip, m2ts: &Trip) -> MockDir {
+        let trip = Trip::new(usize::MAX);
+        let file = |name: &str, bytes: Vec<u8>, trip: &Trip| MockFile {
+            name: name.to_owned(),
+            extension: extension_of_name(name),
+            bytes,
+            trip: trip.clone(),
+            fail_read_at: None,
+            reads: None,
+        };
+        let dir = |name: &str, dirs: Vec<MockDir>, files: Vec<MockFile>| MockDir {
+            name: name.to_owned(),
+            dirs,
+            files,
+            trip: trip.clone(),
+        };
+        dir(
+            "disc",
+            vec![dir(
+                "BDMV",
+                vec![
+                    dir(
+                        "CLIPINF",
+                        vec![],
+                        vec![file(
+                            "00000.clpi",
+                            clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]),
+                            &trip,
+                        )],
+                    ),
+                    dir(
+                        "PLAYLIST",
+                        vec![],
+                        vec![file("00000.mpls", mpls("00000", 0, 4_500_000, &[]), &trip)],
+                    ),
+                    dir(
+                        "STREAM",
+                        vec![dir(
+                            "SSIF",
+                            vec![],
+                            vec![file("00000.ssif", interleaved_ssif(true), ssif)],
+                        )],
+                        vec![file("00000.m2ts", interleaved_ssif(false), m2ts)],
+                    ),
+                ],
+                vec![],
+            )],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn an_unopenable_interleaved_source_falls_back_to_the_base_view() {
+        // Control: with the `.ssif` openable this really is a 3D scan, so the
+        // 2D result below is the failed open's doing, not the fixture's.
+        let intact = Trip::new(usize::MAX);
+        let healthy =
+            BdRom::open_resilient(&interleaved_mock_disc(&intact, &intact), ScanMode::Full)
+                .expect("healthy 3D scan");
+        assert!(healthy.errors.is_empty());
+        let control = healthy.bdrom.playlists.first().unwrap();
+        assert!(control.streams.iter().any(|s| s.pid == Pid::new(0x1012)), "the dependent view");
+        assert_eq!(control.clips.first().unwrap().display_name, "00000.SSIF");
+
+        let report =
+            BdRom::open_resilient(&interleaved_mock_disc(&Trip::always(), &intact), ScanMode::Full)
+                .expect("the resilient scan degrades to the base view");
+        // Both measurement passes open the source, so both record the failure
+        // — the per-attempt shape every unopenable file already has.
+        // The file that failed is the file named — the `.ssif`, not the
+        // `.m2ts` the clip is keyed by.
+        let recorded: Vec<(ScanStage, &str)> =
+            report.errors.iter().map(|e| (e.stage, e.file.as_str())).collect();
+        assert_eq!(recorded, vec![(ScanStage::StreamFile, "00000.ssif"); 2]);
+
+        // The clip is measured from its `*.m2ts` — base view present with its
+        // rate, dependent view absent, and named by the source it was read
+        // from.
+        let pl = report.bdrom.playlists.first().unwrap();
+        let base = pl.streams.iter().find(|s| s.pid == Pid::new(0x1011)).expect("the base view");
+        assert!(base.bitrate > 0, "the base view carries its measured rate");
+        assert!(pl.streams.iter().all(|s| s.pid != Pid::new(0x1012)), "no dependent-view row");
+        let clip = pl.clips.first().unwrap();
+        assert_eq!(clip.display_name, "00000.M2TS");
+        assert!(clip.streams.iter().any(|t| t.pid == Pid::new(0x1011)));
+        assert!(clip.file_seconds > 0.0, "the base view was demuxed");
+    }
+
+    #[test]
+    fn a_strict_scan_still_fails_on_an_unopenable_interleaved_source() {
+        // The fallback is the resilient scan's keep-what-you-can policy; strict
+        // mode is the fail-fast path and has no policy to apply.
+        let failed = BdRom::open(
+            &interleaved_mock_disc(&Trip::always(), &Trip::new(usize::MAX)),
+            ScanMode::Full,
+        )
+        .expect_err("strict mode propagates the failed interleaved open");
+        assert_eq!(failed.to_string(), "io error: injected io failure");
+    }
+
+    #[test]
+    fn a_clip_with_neither_source_openable_keeps_the_scan_going() {
+        // The fallback is an attempt, not a guarantee: with the `*.m2ts`
+        // unopenable too there is nothing left to read, so the clip is dropped
+        // and both failures are recorded — one per source, per pass.
+        let dead = Trip::always();
+        let report = BdRom::open_resilient(&interleaved_mock_disc(&dead, &dead), ScanMode::Full)
+            .expect("the resilient scan continues past a clip it cannot read");
+        let recorded: Vec<(ScanStage, &str)> =
+            report.errors.iter().map(|e| (e.stage, e.file.as_str())).collect();
+        assert_eq!(
+            recorded,
+            vec![
+                (ScanStage::StreamFile, "00000.ssif"),
+                (ScanStage::StreamFile, "00000.m2ts"),
+                (ScanStage::StreamFile, "00000.ssif"),
+                (ScanStage::StreamFile, "00000.m2ts"),
+            ]
+        );
+        // The playlist still reports, on clip-info detail alone.
+        let pl = report.bdrom.playlists.first().unwrap();
+        let base = pl.streams.iter().find(|s| s.pid == Pid::new(0x1011)).expect("the base view");
+        assert_eq!(base.bitrate, 0, "nothing was measured");
+        assert!(pl.clips.first().unwrap().streams.is_empty());
+    }
+
     #[test]
     fn a_full_scan_without_the_quick_pass_presents_the_two_pass_result() {
         // The hardest resolution case: the dependent view exists only in the
@@ -5407,15 +5571,24 @@ mod tests {
     struct Trip {
         count: Arc<AtomicUsize>,
         fail_at: usize,
+        /// Whether *every* operation fails, `fail_at` notwithstanding — an
+        /// object that never opens, which a scan opening it once per
+        /// measurement pass needs (a one-shot trip would let the second pass
+        /// through).
+        always: bool,
     }
 
     impl Trip {
         fn new(fail_at: usize) -> Self {
-            Self { count: Arc::new(AtomicUsize::new(0)), fail_at }
+            Self { count: Arc::new(AtomicUsize::new(0)), fail_at, always: false }
+        }
+
+        fn always() -> Self {
+            Self { count: Arc::new(AtomicUsize::new(0)), fail_at: usize::MAX, always: true }
         }
 
         fn tick(&self) -> io::Result<()> {
-            if self.count.fetch_add(1, Ordering::Relaxed) == self.fail_at {
+            if self.count.fetch_add(1, Ordering::Relaxed) == self.fail_at || self.always {
                 Err(io::Error::other("injected io failure"))
             } else {
                 Ok(())
