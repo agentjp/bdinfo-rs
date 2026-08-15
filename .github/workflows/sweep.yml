@@ -74,6 +74,24 @@ jobs:
   orchestrator:
     name: orchestrator
     if: github.event_name != 'push'
+    # The token a called workflow's jobs run under is the CALLING job's, and a
+    # called job may only request permissions the caller already holds — ask
+    # for more and GitHub rejects the entire run before it creates a single
+    # job (conclusion `startup_failure`, zero jobs, zero check runs, so the
+    # `report` job below never runs and files nothing). This block must
+    # therefore stay a superset of every permission any job inside ci.yml and
+    # the workflows it calls declares; today that is ci.yml's `plan` job
+    # alone. Job-level, not workflow-level: the mutants legs below keep the
+    # narrow default.
+    #
+    # A workflow_call invocation uses neither elevated scope — `plan` reads
+    # workflow runs only on `push` and pull-request files only on
+    # `pull_request` — but permissions are static, evaluated before any event
+    # condition, so the grant is required all the same.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci.yml
 
   # Full mutation over the ROOT workspace (bdinfo-rs-core + the CLI), 0
