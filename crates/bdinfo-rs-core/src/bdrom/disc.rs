@@ -4982,25 +4982,47 @@ mod tests {
     fn a_supplied_aacs_verdict_replaces_the_stream_head_probe() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let disc = logged_disc(video_m2ts(&[1]), &log, true);
-        let open = |options: ScanOptions| {
+        let progressed = AtomicBool::new(false);
+        let open = |mode: ScanMode, options: ScanOptions| {
             log.lock().unwrap().clear();
-            BdRom::open_with(&disc, ScanMode::Metadata, options, None, &mut |_| {}, &never_cancel())
+            let mut observe = |_: ScanProgress<'_>| progressed.store(true, Ordering::Relaxed);
+            BdRom::open_with(&disc, mode, options, None, &mut observe, &never_cancel())
                 .expect("the mock disc opens")
         };
         // Probing (the default): the key file is present, so the probe reads
         // the stream head — a `Metadata` open's only stream read — and the
         // fingerprint-free bytes resolve to unencrypted.
-        let probed = open(ScanOptions::default());
+        let probed = open(ScanMode::Metadata, ScanOptions::default());
         assert!(!probed.is_aacs_encrypted);
         assert!(!log.lock().unwrap().is_empty(), "the probe reads the stream head");
         // A supplied verdict is recorded verbatim with no read at all —
         // `true` could not have come from probing this unencrypted disc.
         let told =
             |verdict| ScanOptions { aacs_encrypted: Some(verdict), ..ScanOptions::default() };
-        assert!(open(told(true)).is_aacs_encrypted);
+        assert!(open(ScanMode::Metadata, told(true)).is_aacs_encrypted);
         assert!(log.lock().unwrap().is_empty(), "no probe read with a supplied verdict");
-        assert!(!open(told(false)).is_aacs_encrypted);
+        assert!(!open(ScanMode::Metadata, told(false)).is_aacs_encrypted);
         assert!(log.lock().unwrap().is_empty(), "no probe read either way");
+        assert!(!progressed.load(Ordering::Relaxed), "a Metadata open reports no progress");
+        // A `Codecs` open with a reused verdict — the shape of a listing's
+        // second open — keeps its packet scan: the quick pass reads (and
+        // reports progress); only the probe stays silent.
+        let coded = open(ScanMode::Codecs, told(false));
+        assert!(!coded.is_aacs_encrypted);
+        assert!(!log.lock().unwrap().is_empty(), "the quick pass still reads packets");
+        assert!(progressed.load(Ordering::Relaxed), "the quick pass reports progress");
+    }
+
+    #[test]
+    fn a_logged_reader_seeks_through_to_its_source() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut reader =
+            LoggedReads { inner: Box::new(Cursor::new(vec![1, 2, 3, 4])), log: Arc::clone(&log) };
+        assert_eq!(reader.seek(SeekFrom::Start(2)).unwrap(), 2);
+        let mut buf = [0_u8; 2];
+        assert_eq!(reader.read(&mut buf).unwrap(), 2);
+        assert_eq!(buf, [3, 4]);
+        assert_eq!(*log.lock().unwrap(), [2], "the seek is silent; the read is logged");
     }
 
     #[test]
