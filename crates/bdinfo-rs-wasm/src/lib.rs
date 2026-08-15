@@ -774,7 +774,9 @@ impl std::fmt::Display for SelectionError {
 /// pass.
 ///
 /// # Errors
-/// [`SelectionError::Open`] if the structure is too damaged to scan, or
+/// [`SelectionError::Open`] if the structure is too damaged to scan — from
+/// either open, so a tree that stops resolving between them is reported instead
+/// of rendering as an unmeasured disc — or
 /// [`SelectionError::NoMatch`] if `selection` names no playlist on the disc
 /// (mirroring the CLI's `--mpls`, which exits with "No matching playlists found
 /// on BD" rather than rendering a header-only report).
@@ -791,14 +793,15 @@ fn scan_selection(
         return Err(SelectionError::NoMatch);
     }
     let files = selection_stream_files(&structural.bdrom.playlists, &names);
-    // The measured scan re-opens the same tree, narrowed to the selected clips.
-    // It locates the same `BDMV`/`CLIPINF`/`PLAYLIST` the structural open just
-    // found, so it cannot hit the only hard error (`StructureNotFound`); on that
-    // unreachable failure it degrades to the structural disc (zero measured
-    // tallies) rather than erroring.
+    // The measured scan re-opens the same tree, narrowed to the selected clips,
+    // and its failure is reported rather than swallowed. Serving the structural
+    // disc instead would render a complete report whose every measured tally is
+    // zero, carrying no error and no `WARNING:` block — indistinguishable from a
+    // healthy scan of a disc holding no data. Only a structure the second open
+    // cannot walk gets this far: a per-file read failure is recorded by the
+    // resilient sink and never returned.
     let measured =
-        BdRom::open_resilient_observed(root, ScanMode::Full, options, Some(&files), observers)
-            .unwrap_or(structural);
+        BdRom::open_resilient_observed(root, ScanMode::Full, options, Some(&files), observers)?;
     let order = selection_order(&measured.bdrom.playlists, &names);
     Ok(Scan { report: measured, order })
 }
@@ -2016,8 +2019,12 @@ mod tests {
     /// CLI-parity selection helpers: the classification threshold and the
     /// by-name measured scan, native-tested.
     mod selection {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         use bdinfo_rs_core::bdrom::disc::{PlaylistSummary, fixtures};
         use bdinfo_rs_core::bdrom::order::PlaylistFilter;
+        use bdinfo_rs_core::vfs::mem::MemDir;
+        use bdinfo_rs_core::vfs::{BdDir, BdFile, SearchOption};
 
         use crate::classification_filter;
 
@@ -2225,6 +2232,122 @@ mod tests {
             )
             .expect_err("an all-unknown selection must error");
             assert_eq!(no_match.to_string(), "No matching playlists found on BD");
+        }
+
+        /// The committed fixture's disc tree, listing its directories through a
+        /// counter — and refusing to list them from the `fail_from`-th call on.
+        ///
+        /// The counter runs across the whole life of one value, so a scan that
+        /// opens the same tree twice can be made to fail on the SECOND open
+        /// alone: point `fail_from` past the listings the first open makes.
+        /// Only the root counts; the sub-directories it hands out are the
+        /// fixture's own and always answer.
+        struct FlakyRoot {
+            inner: MemDir,
+            listings: AtomicUsize,
+            fail_from: usize,
+        }
+
+        impl FlakyRoot {
+            fn new(inner: MemDir, fail_from: usize) -> Self {
+                Self { inner, listings: AtomicUsize::new(0), fail_from }
+            }
+
+            /// How many times the root has been listed so far.
+            fn listings(&self) -> usize {
+                self.listings.load(Ordering::Relaxed)
+            }
+        }
+
+        impl BdDir for FlakyRoot {
+            fn name(&self) -> &str {
+                self.inner.name()
+            }
+
+            fn full_name(&self) -> &str {
+                self.inner.full_name()
+            }
+
+            fn parent(&self) -> Option<Box<dyn BdDir>> {
+                self.inner.parent()
+            }
+
+            fn get_files_pattern_option(
+                &self,
+                pattern: &str,
+                option: SearchOption,
+            ) -> std::io::Result<Vec<Box<dyn BdFile>>> {
+                self.inner.get_files_pattern_option(pattern, option)
+            }
+
+            fn get_directories(&self) -> std::io::Result<Vec<Box<dyn BdDir>>> {
+                let seen = self.listings.fetch_add(1, Ordering::Relaxed);
+                if seen >= self.fail_from {
+                    return Err(std::io::Error::other("the disc stopped listing"));
+                }
+                self.inner.get_directories()
+            }
+        }
+
+        #[test]
+        fn a_by_name_scan_reports_a_failure_of_its_measured_open() {
+            use bdinfo_rs_core::bdrom::disc::ScanProgress;
+            use bdinfo_rs_core::report::text::RenderOptions;
+
+            use super::fixture_blob;
+            use crate::{
+                BdRom, CoreScanOptions, ScanMode, ScanObservers, framed_tree, never_cancelled,
+                scan_selection,
+            };
+
+            let blob = fixture_blob();
+            let mut sink: for<'a> fn(ScanProgress<'a>) = |_| {};
+            let selection = ["00000.MPLS".to_owned()];
+            let mut scan = |root: &FlakyRoot| {
+                scan_selection(
+                    root,
+                    &selection,
+                    CoreScanOptions::default(),
+                    ScanObservers::new(&mut sink, &never_cancelled()),
+                )
+            };
+
+            // How many root listings ONE structural open makes — the same open
+            // `scan_selection` starts with, so the next listing after them is
+            // the measured open's first.
+            let counted = FlakyRoot::new(framed_tree(&blob), usize::MAX);
+            BdRom::open_resilient(&counted, ScanMode::Metadata).expect("the fixture disc opens");
+            let structural_listings = counted.listings();
+            assert!(structural_listings > 0, "a structural open lists the root at least once");
+            // The delegating accessors, which the scan reads for the disc label
+            // and the walk-up to the disc root.
+            assert_eq!(counted.name(), "WASMDISC");
+            assert_eq!(counted.full_name(), "WASMDISC");
+            assert!(counted.parent().is_none(), "the fixture root is the top of its tree");
+
+            // Healthy, the same tree renders the selected playlist measured.
+            let healthy = scan(&FlakyRoot::new(framed_tree(&blob), usize::MAX))
+                .expect("an unfaulted by-name scan")
+                .render(RenderOptions::default());
+            assert!(
+                healthy.contains("PLAYLIST: 00000.MPLS"),
+                "the control scan renders:\n{healthy}"
+            );
+
+            // Faulted from the measured open's first listing on, the failure is
+            // reported — where degrading to the structural disc would have
+            // rendered that same block with every measured value zero and no
+            // WARNING line to say so.
+            let flaky = FlakyRoot::new(framed_tree(&blob), structural_listings);
+            let err = scan(&flaky).expect_err("the measured open's failure must be reported");
+            assert_eq!(
+                err.to_string(),
+                "no readable Blu-ray structure (io error: the disc stopped listing)"
+            );
+            assert!(
+                flaky.listings() > structural_listings,
+                "the structural open must have completed before the fault"
+            );
         }
     }
 

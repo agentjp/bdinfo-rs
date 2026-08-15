@@ -37,6 +37,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { errorLine } from "../dist/format.js";
 import { installShims, readLog, ShimFile, setFaults } from "./shims.mjs";
 
 installShims();
@@ -400,6 +401,42 @@ async function main() {
   }
   if (thrown.some((line) => line.includes("JavaScript exception"))) {
     failures.push(`a WARNING line fell back to the placeholder: ${JSON.stringify(thrown)}`);
+  }
+
+  // What a browser user is shown for that same damaged scan: the demo page
+  // renders `disc.errors` through its own formatter (src/format.ts), one line
+  // per recorded failure. Each line must be the report's own `WARNING:` line
+  // with the stage in front — the page and the report saying the same thing
+  // about the same failure, which is what makes the strip trustworthy on a
+  // listing that renders no report at all.
+  const damagedLines = subsetDisc.errors.map(errorLine);
+  const warningLines = reports
+    .get("twoClips/defectiveOnly")
+    .split("\r\n")
+    .filter((line) => line.includes("\tio error:"));
+  if (damagedLines.length !== 2) {
+    failures.push(`the damaged subset scan recorded ${damagedLines.length} error(s), not 2`);
+  }
+  const rendered = damagedLines.every(
+    (line, index) =>
+      line === `${subsetDisc.errors[index].stage} ${warningLines[index]?.replace("\t", ": ")}`,
+  );
+  if (!rendered) {
+    failures.push(
+      `the page's error lines are not the report's: ${JSON.stringify(damagedLines)} against ` +
+        `${JSON.stringify(warningLines)}`,
+    );
+  }
+  if (
+    !damagedLines.every(
+      (line) =>
+        // The stream stage, and the clip named as it is ON DISC (lower case
+        // here) — where the report's own tables print it upper-cased.
+        line.startsWith("stream 00011.m2ts: io error:") &&
+        line.includes("unreadable from byte 40000"),
+    )
+  ) {
+    failures.push(`the page's error lines lost the failure: ${JSON.stringify(damagedLines)}`);
   }
 
   // Damage deep inside a multi-chunk clip is named ONCE per file, not twice.

@@ -1,13 +1,15 @@
-// The demo's byte-size cell formatter, in a module of its own so a test can
-// reach it: `demo.ts` reads the page's DOM at import time and cannot be loaded
-// outside a browser. Nothing in the published package imports this — the demo
-// is the site, not the API.
+// The demo's pure formatters, in a module of its own so a test can reach them:
+// `demo.ts` reads the page's DOM at import time and cannot be loaded outside a
+// browser. Nothing in the published package imports this — the demo is the
+// site, not the API.
 //
 // The desktop app formats the same cell in Rust (`model::byte_cell`), which no
 // amount of arranging can share with TypeScript. What holds the two together is
 // the vector table `crates/bdinfo-rs-gui/tests/size-vectors.tsv`: both sides
 // assert every row of it, so a change here that is not mirrored there fails a
 // test on both.
+
+import type { ScanError, ScanErrorReason } from "./analyze.js";
 
 /**
  * A size cell under the size-format setting: `83.62 GB` / `335.37 MB`
@@ -29,4 +31,56 @@ export function sizeCell(bytes: number | null, humanReadable: boolean): string {
     unit += 1;
   }
   return `${value.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+}
+
+/**
+ * One recorded scan failure as one line — `{stage} {file}: {reason}`, the
+ * sentence the `bdinfo-rs` command line prints on stderr and the desktop app
+ * banners.
+ *
+ * The wording is the library's `ScanError`/`BdError` display, which crosses to
+ * the browser as structured data rather than as text, so the mapping below is
+ * the second copy of it. `faults.node.mjs` renders the errors of a real damaged
+ * scan through this function, so a reason whose wording moves in the library
+ * fails that harness rather than drifting quietly.
+ */
+export function errorLine(error: ScanError): string {
+  return `${error.stage} ${error.file}: ${errorReason(error.reason)}`;
+}
+
+/** The reason half of {@link errorLine}. */
+export function errorReason(reason: ScanErrorReason): string {
+  switch (reason.kind) {
+    case "unknownFileType":
+      return `unknown file type: ${reason.magic}`;
+    case "unexpectedEof":
+      return "unexpected end of input";
+    case "structureNotFound":
+      return "unable to locate BD structure";
+    case "missingClipFile":
+      return `referenced missing clip file: ${reason.file}`;
+    case "io":
+      return `io error: ${reason.message}`;
+    case "metadataTooLarge":
+      return `metadata file too large: ${reason.file} exceeds ${reason.limitBytes} bytes`;
+    // The open kinds — a cancelled scan today, anything the library adds
+    // tomorrow — carry their own message and nothing to prefix it with.
+    case "other":
+      return reason.message;
+  }
+}
+
+/**
+ * The disc label a saved report is named after: the disc's own volume label,
+ * falling back to `picked` — the name of the folder or file the user chose —
+ * when no disc is held or its label is empty.
+ *
+ * The two differ on an `.iso`, whose volume label is the one recorded in the
+ * UDF filesystem while the file name is only what the image happens to be
+ * called on this machine. Every other surface names the report after the
+ * volume label, so the browser does too; the page still SHOWS the picked name,
+ * which is what the user recognizes.
+ */
+export function reportLabel(volumeLabel: string | undefined, picked: string): string {
+  return volumeLabel !== undefined && volumeLabel !== "" ? volumeLabel : picked;
 }
