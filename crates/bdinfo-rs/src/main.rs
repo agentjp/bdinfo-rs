@@ -839,19 +839,28 @@ fn locked(display: &Mutex<ProgressDisplay>) -> MutexGuard<'_, ProgressDisplay> {
 /// drive-firmware retries for minutes). The ticker holds the wall clock
 /// instead: it owns no scan state and only repaints what the last event left.
 fn with_stall_ticker<T>(display: &Arc<Mutex<ProgressDisplay>>, body: impl FnOnce() -> T) -> T {
+    if !locked(display).styled {
+        // A plain line never ticks (see [`ProgressDisplay::tick`]), so a piped
+        // or redirected run spawns nothing.
+        return body();
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let ticker = {
         let display = Arc::clone(display);
         let stop = Arc::clone(&stop);
+        // The wait is parked rather than slept, so the unpark below ends the
+        // thread at once instead of after the rest of a poll interval — a scan
+        // per run is a scan's worth of avoidable wait.
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(TICK_POLL);
+                std::thread::park_timeout(TICK_POLL);
                 locked(&display).tick();
             }
         })
     };
     let scanned = body();
     stop.store(true, Ordering::Relaxed);
+    ticker.thread().unpark();
     // A panicked ticker leaves the display as the scan left it; the epilogue
     // still prints.
     let _ = ticker.join().is_ok();
