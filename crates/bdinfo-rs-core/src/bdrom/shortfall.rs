@@ -84,6 +84,26 @@ impl ShortStreamFile {
     pub const fn missing_seconds(&self) -> f64 {
         self.declared_seconds - self.measured_seconds
     }
+
+    /// The one-line notice a surface raises for this file, beside the report:
+    /// `00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s
+    /// (1140.0 s missing)`.
+    ///
+    /// The single home of that sentence — the CLI prints it on stderr, the
+    /// desktop shell banners it and the browser mirror crosses it as a wire
+    /// string, all through this method, so the three surfaces cannot word it
+    /// differently. Seconds to one decimal, like every other span the surfaces
+    /// show a human.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        format!(
+            "{} is shorter than declared: measured {:.1} s of {:.1} s ({:.1} s missing)",
+            self.file(),
+            self.measured_seconds(),
+            self.declared_seconds(),
+            self.missing_seconds()
+        )
+    }
 }
 
 /// Every stream file in `playlists` whose demuxed span fell materially short of
@@ -275,6 +295,21 @@ mod tests {
         let names: Vec<String> =
             reported(&disc_of(clips)).into_iter().map(|(file, _, _)| file).collect();
         assert_eq!(names, vec!["00011.M2TS".to_owned(), "00033.M2TS".to_owned()]);
+    }
+
+    #[test]
+    fn the_notice_spells_the_sentence_every_surface_raises() {
+        // The authoritative byte pin of the shared wording: the CLI, the
+        // desktop shell and the browser mirror all render this string through
+        // `ShortStreamFile::notice`, and each asserts only that it delegates
+        // here — this test is where the bytes are decided.
+        let short: Vec<ShortStreamFile> =
+            short_stream_files(&disc_of(vec![measured_clip("00011.M2TS", 1640.0, 500.0)]));
+        let first = short.first().expect("the short file is reported");
+        assert_eq!(
+            first.notice(),
+            "00011.M2TS is shorter than declared: measured 500.0 s of 1640.0 s (1140.0 s missing)"
+        );
     }
 
     #[test]
