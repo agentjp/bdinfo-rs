@@ -108,6 +108,10 @@ jobs:
     # The default token carries contents: read only; the tree-identity skip
     # lists workflow runs (actions) and the classifier reads the PR's files
     # (pull-requests).
+    #
+    # COUPLED to sweep.yml's `orchestrator` job, which calls this workflow: a
+    # called job may only request permissions its caller holds, so widening
+    # this set without widening that one fails the whole sweep run at startup.
     permissions:
       actions: read
       contents: read
