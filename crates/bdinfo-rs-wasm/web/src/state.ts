@@ -18,8 +18,10 @@ export type Source =
   | { kind: "folder"; files: BdmvFile[]; label: string }
   | { kind: "iso"; file: File; label: string };
 
-/** The dialog's settings, mirroring the desktop app's eight browser-relevant ones. */
+/** The dialog's settings, mirroring the desktop app's browser-relevant ones. */
 export interface Settings {
+  /** The page palette: follow the OS (`"auto"`), or force one side. */
+  theme: "auto" | "light" | "dark";
   showShortPlaylists: boolean;
   showLoopingPlaylists: boolean;
   /** What "short" means, in whole seconds — the one setting that re-runs `inspect`. */
@@ -40,7 +42,12 @@ export interface Settings {
   keepPartialScans: boolean;
 }
 
-/** Where the settings persist between visits. */
+/**
+ * Where the settings persist between visits. index.html's inline theme-boot
+ * script reads the same key as a literal — an inline script can import
+ * nothing — so renaming it means changing both (and regenerating the boot
+ * script's CSP hash).
+ */
 const SETTINGS_KEY = "bdinfo-rs.settings";
 
 /** The default short-playlist threshold, matching the CLI flag's default. */
@@ -74,7 +81,9 @@ function loadSettings(): Settings {
     stored = {};
   }
   const seconds = stored.shortPlaylistSeconds;
+  const theme = stored.theme;
   return {
+    theme: theme === "light" || theme === "dark" ? theme : "auto",
     showShortPlaylists: stored.showShortPlaylists === true,
     showLoopingPlaylists: stored.showLoopingPlaylists === true,
     shortPlaylistSeconds:

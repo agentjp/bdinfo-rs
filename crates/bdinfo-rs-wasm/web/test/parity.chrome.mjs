@@ -38,6 +38,11 @@ const goldenPath = resolve(here, "../../tests/golden_report.txt");
 // that the page `fetch`es into a `File` — no multi-MB base64 round-trip.
 const isoPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/BigBuckBunny.iso");
 const isoGoldenPath = resolve(here, "../../../bdinfo-rs/tests/fixtures/golden/iso.txt");
+// The deployed CSP, served on the demo page below so its inline theme-boot
+// script runs (or is blocked) exactly as deployed: a stale script hash in
+// _headers is a silent wrong-theme-on-cold-start in production, but a hard
+// failure of the boot assertions here.
+const headersPath = resolve(here, "../_headers");
 
 // The fixture's six files at the synthetic disc paths the in-memory golden was
 // built from: root `WASMDISC` → disc label `WASMDISC`. `bdmt_eng.xml` is empty,
@@ -59,7 +64,7 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
 };
 
-function startServer() {
+function startServer(csp) {
   const server = createServer(async (req, res) => {
     try {
       const urlPath = decodeURIComponent((req.url ?? "/").split("?")[0]);
@@ -75,7 +80,13 @@ function startServer() {
         return;
       }
       const body = await readFile(safe);
-      res.writeHead(200, { "content-type": MIME[extname(safe)] ?? "application/octet-stream" });
+      const headers = { "content-type": MIME[extname(safe)] ?? "application/octet-stream" };
+      // Only the demo page: the harness page's inline module script is a test
+      // fixture the deployed policy never covers.
+      if (urlPath === "/index.html") {
+        headers["content-security-policy"] = csp;
+      }
+      res.writeHead(200, headers);
       res.end(body);
     } catch {
       res.writeHead(404).end();
@@ -97,7 +108,8 @@ async function main() {
     entries.push({ path: item.path, b64: bytes.toString("base64") });
   }
 
-  const server = await startServer();
+  const csp = (await readFile(headersPath, "utf8")).match(/^\s*Content-Security-Policy: (.+)$/m)[1];
+  const server = await startServer(csp);
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
 
@@ -502,6 +514,67 @@ async function main() {
       keepPartial: document.getElementById("opt-keep-partial").checked,
     }));
 
+    // The theme. Headless Chrome runs OS-light by default, so the OS side is
+    // pinned explicitly: Auto (nothing stored yet) follows an emulated OS flip
+    // live, a manual chip beats the OS and rewrites both theme-color metas,
+    // and the settings dialog closes and reopens with the stored chip pressed.
+    const pageBg = () => demoPage.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    const pressedChips = () =>
+      demoPage.evaluate(() =>
+        [...document.querySelectorAll("#theme-chips .btn")].map((chip) =>
+          chip.getAttribute("aria-pressed"),
+        ),
+      );
+    await demoPage.emulateMedia({ colorScheme: "dark" });
+    const autoDark = await pageBg();
+    await demoPage.emulateMedia({ colorScheme: "light" });
+    const autoLight = await pageBg();
+    await demoPage.click("#settings-btn");
+    await demoPage.click('#theme-chips button[data-theme-choice="dark"]');
+    const overrideDark = {
+      bg: await pageBg(),
+      pressed: await pressedChips(),
+      metas: await demoPage.evaluate(() =>
+        [...document.querySelectorAll('meta[name="theme-color"]')].map((meta) => meta.content),
+      ),
+    };
+    await demoPage.click('#theme-chips button[data-theme-choice="light"]');
+    const overrideLight = await pageBg();
+    await demoPage.click("#settings-close");
+
+    // The boot: reload with a stored Light choice under a dark OS. The init
+    // script records what data-theme was the moment the page's <style> element
+    // appeared — mutation callbacks flush before the module scripts run, so
+    // only the parser-run inline boot script can have set it by then. Light
+    // ground despite the dark OS = the stored override, applied with no dark
+    // flash; the CSP served above is what would block a stale-hashed script.
+    await demoPage.addInitScript(() => {
+      window.__themeAtStyle = "pending";
+      const observer = new MutationObserver(() => {
+        if (document.head?.querySelector("style") && window.__themeAtStyle === "pending") {
+          window.__themeAtStyle = document.documentElement.dataset.theme ?? "absent";
+          observer.disconnect();
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true });
+    });
+    await demoPage.reload();
+    const booted = await demoPage.evaluate(() => ({
+      atStyle: window.__themeAtStyle,
+      attr: document.documentElement.dataset.theme ?? null,
+      bg: getComputedStyle(document.body).backgroundColor,
+      reportBg: getComputedStyle(document.getElementById("report")).backgroundColor,
+    }));
+    await demoPage.click("#settings-btn");
+    const reopened = {
+      open: await demoPage.evaluate(() => document.getElementById("settings-dialog").open),
+      pressed: await pressedChips(),
+    };
+    await demoPage.click("#settings-close");
+    const closedAgain = await demoPage.evaluate(
+      () => document.getElementById("settings-dialog").open,
+    );
+
     demo = {
       initial,
       positionSorted,
@@ -529,6 +602,7 @@ async function main() {
       pageScrolls,
       damagedListing,
       persisted,
+      theme: { autoDark, autoLight, overrideDark, overrideLight, booted, reopened, closedAgain },
     };
   } finally {
     await browser.close();
@@ -891,6 +965,44 @@ async function main() {
     summary: true,
     keepPartial: false,
   });
+  // The theme: Auto follows the emulated OS both ways; a manual chip beats a
+  // light OS, tints its own chip, and writes its ground into both theme-color
+  // metas; a reload under a dark OS with a stored Light choice still boots
+  // light — the attribute is already set when the page's <style> appears, so
+  // there is no dark flash — while the report well keeps its dark ground; and
+  // the settings dialog reopens with the stored chip pressed, then closes.
+  demoOk &= demoEq("auto follows a dark OS", demo.theme.autoDark, "rgb(11, 13, 16)");
+  demoOk &= demoEq("auto follows an OS flip to light", demo.theme.autoLight, "rgb(244, 246, 249)");
+  demoOk &= demoEq(
+    "the dark chip beats the light OS",
+    demo.theme.overrideDark.bg,
+    "rgb(11, 13, 16)",
+  );
+  demoOk &= demoEq("the pressed chip is the choice", demo.theme.overrideDark.pressed, [
+    "false",
+    "false",
+    "true",
+  ]);
+  demoOk &= demoEq("a manual choice rewrites both metas", demo.theme.overrideDark.metas, [
+    "#0b0d10",
+    "#0b0d10",
+  ]);
+  demoOk &= demoEq(
+    "the light chip repaints the ground",
+    demo.theme.overrideLight,
+    "rgb(244, 246, 249)",
+  );
+  demoOk &= demoEq("the stored choice is applied before the style exists", demo.theme.booted, {
+    atStyle: "light",
+    attr: "light",
+    bg: "rgb(244, 246, 249)",
+    reportBg: "rgb(8, 9, 11)",
+  });
+  demoOk &= demoEq("the dialog reopens with the stored chip pressed", demo.theme.reopened, {
+    open: true,
+    pressed: ["false", "true", "false"],
+  });
+  demoOk &= demoEq("the dialog closes again", demo.theme.closedAgain, false);
   demoOk = Boolean(demoOk);
 
   process.exit(listOk && inspectOk && scanOk && surfaceOk && isoStructuredOk && demoOk ? 0 : 1);

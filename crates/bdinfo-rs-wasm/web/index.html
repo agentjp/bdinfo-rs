@@ -8,6 +8,11 @@
       name="description"
       content="Analyze a Blu-ray disc (BDMV) entirely in your browser. No upload — the bdinfo-rs measured scan, compiled to WebAssembly."
     />
+    <!-- Each content mirrors --bg in its palette. The media form only tracks
+         the OS, so a manual Light/Dark choice rewrites both contents from the
+         settings module. -->
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d10" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f9" />
     <!-- The bdinfo-rs aperture mark (crates/bdinfo-rs-gui/assets/icon.svg is
          the vector source of truth): PNG for browsers without SVG favicon
          support (Safari), the inline SVG for everything newer, and the
@@ -19,6 +24,22 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='54.4' fill='none' stroke='%23F2A65A' stroke-width='16.64'/%3E%3Ccircle cx='64' cy='64' r='20.48' fill='%23F2A65A'/%3E%3C/svg%3E"
     />
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+    <!-- Applies a stored manual theme choice before first paint; Auto leaves
+         the attribute off and the prefers-color-scheme blocks below decide.
+         Inline so it runs during parse: the CSP in _headers allowlists exactly
+         these bytes by SHA-256 hash, so any edit between the script tags must
+         regenerate the hash (the command is beside it in _headers) — a stale
+         hash blocks the script SILENTLY and a stored choice paints wrong on
+         cold start. The storage key mirrors SETTINGS_KEY in src/state.ts,
+         which an inline script cannot import. -->
+    <script>
+      try {
+        const theme = JSON.parse(localStorage.getItem("bdinfo-rs.settings")).theme;
+        if (theme === "light" || theme === "dark") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch {}
+    </script>
     <style>
       :root {
         --bg: #0b0d10;
@@ -36,9 +57,97 @@
         --danger: #ff6b6b;
         --warn: #f7b955;
         --ok: #46d18a;
+        --accent-ink: #06121b;
+        --link-hover: #7ad2ff;
+        --error-text: #ffd7d7;
+        --error-bg: rgba(255, 107, 107, 0.08);
+        --error-border: rgba(255, 107, 107, 0.35);
+        --warning-text: #ffe6bd;
+        --warning-bg: rgba(247, 185, 85, 0.08);
+        --warning-border: rgba(247, 185, 85, 0.35);
+        --shadow: rgba(0, 0, 0, 0.55);
+        --backdrop: rgba(4, 6, 9, 0.62);
+        --logo-glow: rgba(76, 194, 255, 0.35);
+        --report-bg: #08090b;
+        --report-text: #cdd3da;
         --radius: 12px;
         --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
         --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
+        color-scheme: dark;
+      }
+
+      /* The dark palette above is the fixed reference; the light palette below
+         is derived from it — the same hues with the lightness flipped, and
+         WCAG AA contrast for text, muted and accent against the light grounds.
+         It appears twice because the two states cannot share one selector:
+         the media-guarded block themes Auto (no data-theme attribute — the OS
+         decides), the attribute block an explicit Light choice on any OS; an
+         explicit Dark choice needs no block of its own, since data-theme="dark"
+         defeats the media guard and leaves the :root reference in force. Keep
+         the two copies identical. --report-bg/--report-text are deliberately
+         absent from both: the report well keeps its dark ground in either
+         theme, a terminal artifact on its own ground. Per-block color-scheme
+         is what flips the native widgets (scrollbars, checkbox and spinner
+         chrome, the dialog) with the palette. */
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme="dark"]) {
+          --bg: #f4f6f9;
+          --bg-glow: #e7edf5;
+          --surface: #ffffff;
+          --surface-2: #eef1f6;
+          --border: #d9dee7;
+          --border-strong: #c0c9d4;
+          --text: #1b222b;
+          --muted: #57626f;
+          --faint: #8a93a0;
+          --accent: #0270a8;
+          --accent-strong: #015d8c;
+          --accent-dim: rgba(2, 112, 168, 0.12);
+          --danger: #c92a2a;
+          --warn: #a4720f;
+          --ok: #178a4e;
+          --accent-ink: #ffffff;
+          --link-hover: #015d8c;
+          --error-text: #942222;
+          --error-bg: rgba(201, 42, 42, 0.06);
+          --error-border: rgba(201, 42, 42, 0.35);
+          --warning-text: #7c5a10;
+          --warning-bg: rgba(164, 114, 15, 0.08);
+          --warning-border: rgba(164, 114, 15, 0.35);
+          --shadow: rgba(9, 14, 20, 0.18);
+          --backdrop: rgba(9, 14, 20, 0.35);
+          --logo-glow: rgba(2, 112, 168, 0.25);
+          color-scheme: light;
+        }
+      }
+      :root[data-theme="light"] {
+        --bg: #f4f6f9;
+        --bg-glow: #e7edf5;
+        --surface: #ffffff;
+        --surface-2: #eef1f6;
+        --border: #d9dee7;
+        --border-strong: #c0c9d4;
+        --text: #1b222b;
+        --muted: #57626f;
+        --faint: #8a93a0;
+        --accent: #0270a8;
+        --accent-strong: #015d8c;
+        --accent-dim: rgba(2, 112, 168, 0.12);
+        --danger: #c92a2a;
+        --warn: #a4720f;
+        --ok: #178a4e;
+        --accent-ink: #ffffff;
+        --link-hover: #015d8c;
+        --error-text: #942222;
+        --error-bg: rgba(201, 42, 42, 0.06);
+        --error-border: rgba(201, 42, 42, 0.35);
+        --warning-text: #7c5a10;
+        --warning-bg: rgba(164, 114, 15, 0.08);
+        --warning-border: rgba(164, 114, 15, 0.35);
+        --shadow: rgba(9, 14, 20, 0.18);
+        --backdrop: rgba(9, 14, 20, 0.35);
+        --logo-glow: rgba(2, 112, 168, 0.25);
+        color-scheme: light;
       }
 
       * {
@@ -67,7 +176,7 @@
         text-decoration: none;
       }
       a:hover {
-        color: #7ad2ff;
+        color: var(--link-hover);
       }
 
       .wrap {
@@ -94,7 +203,7 @@
       }
       .brand .logo {
         color: var(--accent);
-        filter: drop-shadow(0 0 10px rgba(76, 194, 255, 0.35));
+        filter: drop-shadow(0 0 10px var(--logo-glow));
       }
       .brand h1 {
         margin: 0;
@@ -161,13 +270,13 @@
       .btn.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: #06121b;
+        color: var(--accent-ink);
         font-weight: 650;
       }
       .btn.primary:hover:not(:disabled) {
         background: var(--accent-strong);
         border-color: var(--accent-strong);
-        color: #06121b;
+        color: var(--accent-ink);
       }
       .btn.small {
         padding: 0.35rem 0.6rem;
@@ -492,10 +601,10 @@
         background: var(--surface);
         border: 1px solid var(--border-strong);
         border-radius: var(--radius);
-        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+        box-shadow: 0 18px 50px var(--shadow);
       }
       .settings::backdrop {
-        background: rgba(4, 6, 9, 0.62);
+        background: var(--backdrop);
       }
       .settings h2 {
         margin: 0 0 0.9rem;
@@ -539,6 +648,32 @@
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 0.25rem 0.4rem;
+      }
+      /* The Auto/Light/Dark theme chips: one segmented control built from the
+         button idiom — outer corners only, segments fused by a 1px overlap.
+         The pressed chip is accent-tinted and sits above its neighbors so its
+         accent border wins the overlap. */
+      .chips {
+        margin-left: auto;
+        display: inline-flex;
+      }
+      .chips .btn {
+        border-radius: 0;
+      }
+      .chips .btn:first-child {
+        border-radius: 9px 0 0 9px;
+      }
+      .chips .btn:last-child {
+        border-radius: 0 9px 9px 0;
+      }
+      .chips .btn + .btn {
+        margin-left: -1px;
+      }
+      .chips .btn[aria-pressed="true"] {
+        position: relative;
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-dim);
       }
       /* the hairline separating the display settings from the report ones */
       .settings hr {
@@ -617,11 +752,14 @@
         font-family: var(--mono);
         font-size: 0.8rem;
         line-height: 1.5;
-        color: #cdd3da;
+        color: var(--report-text);
         white-space: pre;
         overflow: auto;
         max-height: 60vh;
-        background: #08090b;
+        background: var(--report-bg);
+        /* The well keeps its dark ground in the light theme, so its own
+           scrollbars must stay dark while the page around them goes light. */
+        color-scheme: dark;
       }
       .copied {
         color: var(--ok) !important;
@@ -636,9 +774,9 @@
         padding: 0.8rem 1rem;
         margin-bottom: 1.1rem;
         font-size: 0.88rem;
-        color: #ffd7d7;
-        background: rgba(255, 107, 107, 0.08);
-        border: 1px solid rgba(255, 107, 107, 0.35);
+        color: var(--error-text);
+        background: var(--error-bg);
+        border: 1px solid var(--error-border);
         border-radius: 10px;
       }
       .error svg {
@@ -652,9 +790,9 @@
         padding: 0.8rem 1rem;
         margin-bottom: 0.9rem;
         font-size: 0.88rem;
-        color: #ffe6bd;
-        background: rgba(247, 185, 85, 0.08);
-        border: 1px solid rgba(247, 185, 85, 0.35);
+        color: var(--warning-text);
+        background: var(--warning-bg);
+        border: 1px solid var(--warning-border);
         border-radius: 10px;
       }
       .warning svg {
@@ -942,6 +1080,17 @@
       <!-- settings: a native modal dialog (Esc closes, the backdrop dims) -->
       <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
         <h2 id="settings-title">Settings</h2>
+        <!-- Instant-apply: each chip is its own live preview, so there is no
+             draft state and nothing to cancel. -->
+        <div class="setting-row">
+          <span>Theme</span>
+          <span class="chips" id="theme-chips" role="group" aria-label="Theme">
+            <button class="btn small" type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+            <button class="btn small" type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+            <button class="btn small" type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+          </span>
+        </div>
+        <hr />
         <div class="setting-row">
           <label class="setting">
             <input type="checkbox" id="opt-short" />
