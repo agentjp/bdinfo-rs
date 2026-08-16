@@ -31,10 +31,10 @@ use crate::vfs::volume;
 ///
 /// The label is the [`volume`] repair's: a folder scan names the disc after
 /// its root directory, which a bare Windows drive root (`J:\`) does not have.
-/// When the scan recorded an io failure at any stage the repair skips its
-/// raw-device read — the device just demonstrated read errors, and another
-/// raw read could stall — so the label degrades to the bare drive letter
-/// there.
+/// The repair's raw-device read runs **before** the scan, on the letter the
+/// input path spells, so a disc whose scan goes on to fail reads still carries
+/// its real name; what that read found is applied only if the finished scan's
+/// own label turned out to be a bare drive root.
 ///
 /// `mode`, `options`, `scan_files` and `observers` are
 /// [`BdRom::open_resilient`]'s, passed through unchanged.
@@ -49,11 +49,18 @@ pub fn open_folder(
     scan_files: Option<&BTreeSet<String>>,
     observers: ScanObservers<'_>,
 ) -> Result<ScanReport, BdError> {
+    // Ahead of the scan, and only for an input path that can walk up to a
+    // nameless drive root: the read grinds the very device the scan is about to
+    // read, and one raw read on damaged media can sit for minutes in the
+    // drive's retries — so it belongs where no read has failed yet. Re-walking
+    // the tree afterwards to recover the same letter is not an option: `FsDir`
+    // shares its error sink across derived handles, so a second walk would
+    // record a damaged listing's failures into the report twice.
+    let probed = volume::drive_root_probe(path).and_then(volume::real_volume_label);
     let root = FsDir::new(path);
     let mut report = BdRom::open_resilient(&root, mode, options, scan_files, observers)?;
     report.errors.extend(root.take_errors());
-    report.bdrom.volume_label =
-        volume::resolve_folder_label_after_scan(&report.bdrom.volume_label, &report.errors);
+    report.bdrom.volume_label = volume::apply_drive_root_probe(&report.bdrom.volume_label, probed);
     Ok(report)
 }
 
