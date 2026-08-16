@@ -1707,7 +1707,7 @@ impl App {
                 log::info!(
                     "listed {}: {} recorded",
                     input.display(),
-                    flow::counted(structural.warnings.len(), "error")
+                    report::counted(structural.warnings.len(), "error")
                 );
                 for warning in &structural.warnings {
                     log::info!("listing error: {warning}");
@@ -1832,7 +1832,7 @@ impl App {
             log::info!(
                 "scan finished in {:.1}s: {} recorded",
                 self.scan_start.map_or(Duration::ZERO, |start| start.elapsed()).as_secs_f64(),
-                flow::counted(self.flow.report_errors().len(), "error")
+                report::counted(self.flow.report_errors().len(), "error")
             );
             for error in self.flow.report_errors() {
                 log::info!("scan error: {error}");
@@ -2018,8 +2018,8 @@ impl App {
         log::info!(
             "scan started: {} of {}, {}, input {}",
             selection.len(),
-            flow::counted(self.flow.row_count(), "playlist"),
-            flow::counted(scan_files.len(), "stream file"),
+            report::counted(self.flow.row_count(), "playlist"),
+            report::counted(scan_files.len(), "stream file"),
             input.display()
         );
         if let Some(identity) = self.flow.disc_identity() {
@@ -2712,7 +2712,7 @@ impl App {
                 p.warning,
                 &format!(
                     "Completed with {} — the report below was still written.",
-                    flow::counted(errors.len(), "error")
+                    report::counted(errors.len(), "error")
                 ),
             ));
         }

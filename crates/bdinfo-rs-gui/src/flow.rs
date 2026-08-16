@@ -24,6 +24,7 @@ use bdinfo_rs_core::bdrom::disc::{BdRom, PlaylistSummary, ScanOptions};
 use bdinfo_rs_core::bdrom::order::{PlaylistFilter, selection_order, selection_stream_files};
 use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error::ScanError;
+use bdinfo_rs_core::report::counted;
 use bdinfo_rs_core::report::text::{self, RenderOptions};
 
 use crate::live::LivePlaylist;
@@ -332,14 +333,6 @@ impl Listing {
         let order = selection_order(&self.bdrom.playlists, scanned);
         text::render_with(&self.bdrom, &order, errors, self.view.render_options())
     }
-}
-
-/// The count with its noun's number agreed — `"1 error"`, `"0 errors"`,
-/// `"3 stream files"`. The noun is the singular; the plural is `s`-appended,
-/// which every noun the GUI counts inflects regularly.
-#[must_use]
-pub fn counted(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
 }
 
 /// The scan-complete confirmation text for a scan that recorded `errors`
@@ -1398,13 +1391,6 @@ mod tests {
             super::scan_notice(2),
             "Scan completed with 2 errors.\nThe report below was still written."
         );
-    }
-
-    #[test]
-    fn counted_agrees_the_noun_with_the_count() {
-        assert_eq!(super::counted(0, "error"), "0 errors");
-        assert_eq!(super::counted(1, "error"), "1 error");
-        assert_eq!(super::counted(2, "stream file"), "2 stream files");
     }
 
     #[test]

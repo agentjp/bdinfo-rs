@@ -5,9 +5,19 @@
 //! the classic human-readable disc report in [`text`].
 //!
 //! The file a caller saves it as is part of the same contract, so the name is
-//! composed here too: [`file_name`].
+//! composed here too: [`file_name`]. [`counted`] words the count-parametric
+//! messages the front ends print around the report; the report text itself
+//! never uses it.
 
 pub mod text;
+
+/// The count with its noun's number agreed — `"1 error"`, `"0 errors"`,
+/// `"3 stream files"`. The noun is the singular; the plural is `s`-appended,
+/// which every noun the front ends count inflects regularly.
+#[must_use]
+pub fn counted(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
 
 /// Characters illegal in a Windows filename component, plus the separators that
 /// would re-root the report path. Replaced so [`file_name`] is always one
@@ -36,7 +46,14 @@ pub fn file_name(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::file_name;
+    use super::{counted, file_name};
+
+    #[test]
+    fn counted_agrees_the_noun_with_the_count() {
+        assert_eq!(counted(0, "error"), "0 errors");
+        assert_eq!(counted(1, "error"), "1 error");
+        assert_eq!(counted(2, "stream file"), "2 stream files");
+    }
 
     #[test]
     fn a_clean_label_passes_through() {

@@ -225,17 +225,10 @@ fn scan_disc(
 /// Prints the "scan completed with errors" stderr summary — one line per recorded
 /// failure (the always-report discipline; stdout stays clean).
 fn report_errors(errors: &[ScanError]) {
-    eprintln!("warning: scan completed with {}:", counted(errors.len(), "error"));
+    eprintln!("warning: scan completed with {}:", report::counted(errors.len(), "error"));
     for err in errors {
         eprintln!("warning:   {err}");
     }
-}
-
-/// The count with its noun's number agreed — `"1 error"`, `"0 errors"`. The
-/// noun is the singular; the plural is `s`-appended, which every noun the CLI
-/// counts inflects regularly.
-fn counted(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
 }
 
 /// The stderr line for one stream file the demux measured shorter than the disc
@@ -1293,17 +1286,10 @@ mod tests {
 
     use super::{
         BAR_MAX_CELLS, Cli, ProgressDisplay, analyze_preamble, banner, compose_progress,
-        compose_styled_progress, counted, erase_sequence, finish_early, help_page, hidden_hint,
+        compose_styled_progress, erase_sequence, finish_early, help_page, hidden_hint,
         pick_playlists, redraw_sequence, report_parse_failure, row_names, run, scan_options,
         selection_table,
     };
-
-    #[test]
-    fn counted_agrees_the_noun_with_the_count() {
-        assert_eq!(counted(0, "error"), "0 errors");
-        assert_eq!(counted(1, "error"), "1 error");
-        assert_eq!(counted(2, "error"), "2 errors");
-    }
 
     /// A throwaway minimal BD folder (`BDMV/PLAYLIST` + `BDMV/CLIPINF`, both empty)
     /// under the system temp dir, removed on drop. Enough for `BDROM` to scan it
