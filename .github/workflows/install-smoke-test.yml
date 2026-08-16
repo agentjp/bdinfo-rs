@@ -16,10 +16,12 @@ name: install-smoke-test
 # Out of scope by design: Scoop, WinGet, and cargo install/binstall ship the bare
 # executable only (no man/completions), so there is nothing to verify there. The
 # .deb/.rpm/Cloudsmith man+completions contract is verified per-release in packages.yml.
-# The GUI's other channels (crates.io, winget, AUR, Cloudsmith) are likewise
+# The GUI's other package channels (winget, AUR, Cloudsmith) are likewise
 # checksum- and attestation-verified per release by gui-publish.yml's
-# verify/prepare phases; for both binaries Homebrew is the one rolling channel
-# worth re-probing between releases.
+# verify/prepare phases, and its crate is published from source by
+# gui-publish-crates.yml, which carries no release asset to verify; for both
+# binaries Homebrew is the one rolling channel worth re-probing between
+# releases.
 
 on:  # zizmor: ignore[dangerous-triggers] only installs the published formula/cask; never checks out untrusted PR code
   workflow_run:
