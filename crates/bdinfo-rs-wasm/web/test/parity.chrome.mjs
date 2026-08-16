@@ -108,9 +108,7 @@ async function main() {
     entries.push({ path: item.path, b64: bytes.toString("base64") });
   }
 
-  const csp = (await readFile(headersPath, "utf8")).match(
-    /^\s*Content-Security-Policy: (.+)$/m,
-  )[1];
+  const csp = (await readFile(headersPath, "utf8")).match(/^\s*Content-Security-Policy: (.+)$/m)[1];
   const server = await startServer(csp);
   const { port } = server.address();
   const base = `http://127.0.0.1:${port}`;
@@ -975,7 +973,11 @@ async function main() {
   // the settings dialog reopens with the stored chip pressed, then closes.
   demoOk &= demoEq("auto follows a dark OS", demo.theme.autoDark, "rgb(11, 13, 16)");
   demoOk &= demoEq("auto follows an OS flip to light", demo.theme.autoLight, "rgb(244, 246, 249)");
-  demoOk &= demoEq("the dark chip beats the light OS", demo.theme.overrideDark.bg, "rgb(11, 13, 16)");
+  demoOk &= demoEq(
+    "the dark chip beats the light OS",
+    demo.theme.overrideDark.bg,
+    "rgb(11, 13, 16)",
+  );
   demoOk &= demoEq("the pressed chip is the choice", demo.theme.overrideDark.pressed, [
     "false",
     "false",
