@@ -21,7 +21,15 @@
 # scripts), data: images, and blob: for the in-page report download
 # (URL.createObjectURL). No COOP/COEP (single-threaded FileReaderSync, no
 # SharedArrayBuffer) — see the note above.
+#
+# The 'sha256-…' entry allowlists index.html's inline theme-boot script — the
+# page's one attribute-less <script> tag. It hashes the EXACT bytes between the
+# script tags, so regenerate after ANY edit to them (run in this directory):
+#   node -e "const s=require('fs').readFileSync('index.html','utf8').match(/<script>([^]*?)<\/script>/)[1];console.log('sha256-'+require('crypto').createHash('sha256').update(s).digest('base64'))"
+# A stale hash fails SILENTLY — the page loads, the blocked script never sets
+# data-theme, and a stored Light/Dark choice paints wrong on cold start.
+# test/parity.chrome.mjs serves this CSP on index.html and asserts the boot.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-bIG7TV9pFGN301DjW68tzbgy2dQfI+ZZrLEEXZdjvsM='; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer

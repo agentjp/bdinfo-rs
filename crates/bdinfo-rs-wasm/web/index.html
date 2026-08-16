@@ -24,6 +24,22 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Ccircle cx='64' cy='64' r='54.4' fill='none' stroke='%23F2A65A' stroke-width='16.64'/%3E%3Ccircle cx='64' cy='64' r='20.48' fill='%23F2A65A'/%3E%3C/svg%3E"
     />
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+    <!-- Applies a stored manual theme choice before first paint; Auto leaves
+         the attribute off and the prefers-color-scheme blocks below decide.
+         Inline so it runs during parse: the CSP in _headers allowlists exactly
+         these bytes by SHA-256 hash, so any edit between the script tags must
+         regenerate the hash (the command is beside it in _headers) — a stale
+         hash blocks the script SILENTLY and a stored choice paints wrong on
+         cold start. The storage key mirrors SETTINGS_KEY in src/state.ts,
+         which an inline script cannot import. -->
+    <script>
+      try {
+        const theme = JSON.parse(localStorage.getItem("bdinfo-rs.settings")).theme;
+        if (theme === "light" || theme === "dark") {
+          document.documentElement.dataset.theme = theme;
+        }
+      } catch {}
+    </script>
     <style>
       :root {
         --bg: #0b0d10;
@@ -633,6 +649,32 @@
         border-radius: 6px;
         padding: 0.25rem 0.4rem;
       }
+      /* The Auto/Light/Dark theme chips: one segmented control built from the
+         button idiom — outer corners only, segments fused by a 1px overlap.
+         The pressed chip is accent-tinted and sits above its neighbors so its
+         accent border wins the overlap. */
+      .chips {
+        margin-left: auto;
+        display: inline-flex;
+      }
+      .chips .btn {
+        border-radius: 0;
+      }
+      .chips .btn:first-child {
+        border-radius: 9px 0 0 9px;
+      }
+      .chips .btn:last-child {
+        border-radius: 0 9px 9px 0;
+      }
+      .chips .btn + .btn {
+        margin-left: -1px;
+      }
+      .chips .btn[aria-pressed="true"] {
+        position: relative;
+        color: var(--accent);
+        border-color: var(--accent);
+        background: var(--accent-dim);
+      }
       /* the hairline separating the display settings from the report ones */
       .settings hr {
         border: none;
@@ -1035,6 +1077,17 @@
       <!-- settings: a native modal dialog (Esc closes, the backdrop dims) -->
       <dialog class="settings" id="settings-dialog" aria-labelledby="settings-title">
         <h2 id="settings-title">Settings</h2>
+        <!-- Instant-apply: each chip is its own live preview, so there is no
+             draft state and nothing to cancel. -->
+        <div class="setting-row">
+          <span>Theme</span>
+          <span class="chips" id="theme-chips" role="group" aria-label="Theme">
+            <button class="btn small" type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+            <button class="btn small" type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+            <button class="btn small" type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+          </span>
+        </div>
+        <hr />
         <div class="setting-row">
           <label class="setting">
             <input type="checkbox" id="opt-short" />
