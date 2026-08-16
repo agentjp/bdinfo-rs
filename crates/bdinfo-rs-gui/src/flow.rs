@@ -345,10 +345,7 @@ pub fn scan_notice(errors: usize) -> String {
     if errors == 0 {
         "Scan completed successfully.".to_owned()
     } else {
-        format!(
-            "Scan completed with {}.\nThe report below was still written.",
-            counted(errors, "error")
-        )
+        format!("Scan completed with {}.\nThe report was still written.", counted(errors, "error"))
     }
 }
 
@@ -1385,11 +1382,11 @@ mod tests {
         assert_eq!(super::scan_notice(0), "Scan completed successfully.");
         assert_eq!(
             super::scan_notice(1),
-            "Scan completed with 1 error.\nThe report below was still written."
+            "Scan completed with 1 error.\nThe report was still written."
         );
         assert_eq!(
             super::scan_notice(2),
-            "Scan completed with 2 errors.\nThe report below was still written."
+            "Scan completed with 2 errors.\nThe report was still written."
         );
     }
 
