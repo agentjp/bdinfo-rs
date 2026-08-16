@@ -2794,9 +2794,11 @@ impl App {
                 // A stalled scan (no progress event past the threshold —
                 // [`Flow::scan_stalled`]) says the drive is struggling with
                 // the named file; classic BDInfo's bar just freezes silently.
+                // "Still" continues the verb before it, so a line that changes
+                // mid-scan reads as the same activity carrying on.
                 Stage::Scanning if self.flow.scan_stalled() => progress.map_or_else(
                     || "Starting scan…".to_owned(),
-                    |pr| format!("Still reading {}…", pr.file()),
+                    |pr| format!("Still scanning {}…", pr.file()),
                 ),
                 Stage::Scanning => progress.map_or_else(
                     || "Starting scan…".to_owned(),
@@ -4382,7 +4384,11 @@ mod interaction {
             Some("00:01:30".to_owned())
         );
         assert!(app.flow.scan_stalled());
-        assert!(sees(&app, "Still reading A.M2TS…"), "the stall hint names the stuck file");
+        // "Still" continues the measured pass's own verb: `Scanning` above,
+        // `Still scanning` here. (The listing pass reads, and says `Reading` /
+        // `Still reading` for the same reason.)
+        assert!(sees(&app, "Still scanning A.M2TS…"), "the stall hint names the stuck file");
+        assert!(!sees(&app, "Scanning A.M2TS…"), "the plain wording is replaced, not doubled");
     }
 
     #[test]

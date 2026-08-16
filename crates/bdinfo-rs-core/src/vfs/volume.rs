@@ -17,16 +17,25 @@
 //! UDF volume label — read off the raw volume device (`\\.\J:`) through the
 //! same [`UdfSource`](crate::vfs::udf::source::UdfSource) core the `.iso` path
 //! uses, the identical string Windows Explorer and classic `BDInfo` show —
-//! falling back to the drive letter when that read is unavailable. A folder
-//! backend's caller applies it to the scanned label; an `.iso` scan already
-//! reads the genuine UDF label and needs no repair. A scan that recorded io
-//! failures resolves through `resolve_folder_label_after_scan` instead, which
-//! skips the raw-device read outright.
+//! falling back to the drive letter when that read is unavailable. An `.iso`
+//! scan already reads the genuine UDF label and needs no repair.
+//!
+//! A folder scan's caller takes that repair in two halves so the device read
+//! lands **before** the scan: [`drive_root_probe`] picks the drive letter to
+//! read out of the input path, the caller performs the read, and
+//! [`apply_drive_root_probe`] applies the answer to the label the finished scan
+//! derived. Only the scanned label can confirm the disc root really was
+//! nameless, and it does not exist until the walk has run — but reading the
+//! device *after* the scan costs a damaged disc its name, because the drive
+//! that just failed a read is the one this repair must not grind a second time.
+//! Reading first resolves both: the read is over before any failure exists, and
+//! the answer is still only applied to a label that turned out nameless.
 
 #[cfg(any(windows, test))]
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::Path;
 
-use crate::error::{BdError, ScanError};
+use crate::discovery::BdmvDir;
 #[cfg(any(windows, test))]
 use crate::vfs::ReadSeek;
 #[cfg(windows)]
@@ -57,7 +66,51 @@ fn drive_root_letter(label: &str) -> Option<char> {
 /// a `J:\` scan.
 #[must_use]
 pub fn resolve_folder_label(scanned: &str) -> String {
-    resolve_folder_label_after_scan(scanned, &[])
+    resolve_with(scanned, real_volume_label)
+}
+
+/// The drive letter a scan of `path` may need the volume label of, or `None`
+/// when it cannot need one.
+///
+/// A folder scan names the disc after the root it walked up to, so that name is
+/// a bare drive root only when every directory between `path` and the drive
+/// root is one the walk climbs out of. This decides that **lexically**, from
+/// the input path alone: strip a `<letter>:` prefix, then require every
+/// remaining component to be either empty (a separator) or a `BDMV`-tree
+/// directory name ([`BdmvDir::from_name`]). `J:\`, `J:\BDMV` and
+/// `j:/bdmv/stream` all qualify — the three input spellings a folder scan
+/// accepts — while `J:\Rips\Disc\BDMV` does not, because the walk stops at
+/// `Disc`. No IO and no filesystem lookup, so an ordinary named folder costs
+/// nothing and the verdict is identical on every platform (`std` only parses a
+/// path `Prefix` on Windows).
+///
+/// A `Some` is a *may*, never a *will*: [`apply_drive_root_probe`] still
+/// requires the finished scan's own label to be a bare drive root before it
+/// uses anything read for this letter.
+pub(crate) fn drive_root_probe(path: &Path) -> Option<char> {
+    let text = path.to_string_lossy();
+    let mut chars = text.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next() != Some(':') {
+        return None;
+    }
+    chars
+        .as_str()
+        .split(['/', '\\'])
+        .all(|part| part.is_empty() || BdmvDir::from_name(part).is_some())
+        .then(|| letter.to_ascii_uppercase())
+}
+
+/// [`resolve_folder_label`] with the raw-device read already taken: `probed` is
+/// the label [`drive_root_probe`]'s letter yielded before the scan started, and
+/// `None` when no probe was owed or the read produced nothing.
+///
+/// A bare drive-root `scanned` resolves to `probed`, or to the drive letter; a
+/// real name resolves to itself, which is what keeps a scan of a named folder
+/// un-renameable by a probe taken on speculation.
+#[must_use]
+pub(crate) fn apply_drive_root_probe(scanned: &str, probed: Option<String>) -> String {
+    resolve_with(scanned, move |_| probed)
 }
 
 /// The label resolution both entry points end in, with the raw-device read
@@ -67,36 +120,6 @@ fn resolve_with(scanned: &str, read: impl FnOnce(char) -> Option<String>) -> Str
         || scanned.to_owned(),
         |letter| read(letter).unwrap_or_else(|| letter.to_string()),
     )
-}
-
-/// [`resolve_folder_label`] for a scan that may have recorded failures: when
-/// `errors` carries an io failure ([`BdError::Io`]) from any stage, the
-/// raw-device read is skipped and a bare drive-root label degrades straight
-/// to the drive letter. The label read grinds the same device that just
-/// failed, sector by sector, and on damaged media one raw read can stall for
-/// minutes inside the drive's retries — a cosmetic label is not worth that
-/// after the device has demonstrated read errors. Every other [`BdError`]
-/// describes the disc's *bytes* — malformed or missing metadata — which is no
-/// evidence against the device, so those leave the read in play. A real name
-/// resolves to itself either way.
-#[must_use]
-pub(crate) fn resolve_folder_label_after_scan(scanned: &str, errors: &[ScanError]) -> String {
-    resolve_after_scan_with(scanned, errors, real_volume_label)
-}
-
-/// The pure core of [`resolve_folder_label_after_scan`], with the raw-device
-/// read injected as `read` so the failure gate is exercised without a real
-/// device.
-fn resolve_after_scan_with(
-    scanned: &str,
-    errors: &[ScanError],
-    read: impl FnOnce(char) -> Option<String>,
-) -> String {
-    if errors.iter().any(|e| matches!(e.reason, BdError::Io(_))) {
-        resolve_with(scanned, |_| None)
-    } else {
-        resolve_with(scanned, read)
-    }
 }
 
 /// How many times to attempt the raw-device read — an optical drive can fail the
@@ -113,14 +136,17 @@ const RAW_READ_RETRY_DELAY: std::time::Duration = std::time::Duration::from_mill
 /// `letter` (Windows `\\.\J:`), or `None` when it cannot — the device is absent,
 /// unreadable, holds no UDF volume, or reports an empty label.
 ///
+/// The one IO in this module, so a folder scan's caller runs it at the moment
+/// it chooses — before the scan, for [`drive_root_probe`]'s letter.
+///
 /// Environment-bound: opening a real volume device cannot run in a deterministic
 /// test, so this is excluded from coverage and mutation. The machinery it drives
-/// — [`AlignedReader`], [`UdfSource::read_label`], and the decision in
-/// [`resolve_with`] — is unit-tested directly, and the live read is validated
-/// end-to-end against a physical disc.
+/// — [`AlignedReader`], [`UdfSource::read_label`], and the decisions in
+/// [`drive_root_probe`] and [`apply_drive_root_probe`] — is unit-tested
+/// directly, and the live read is validated end-to-end against a physical disc.
 #[cfg(windows)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn real_volume_label(letter: char) -> Option<String> {
+pub(crate) fn real_volume_label(letter: char) -> Option<String> {
     let iso = RawVolumeIso { device: format!(r"\\.\{letter}:") };
     for attempt in 0..RAW_READ_ATTEMPTS {
         // Pause before each retry (never the first) so a spun-down drive gets a
@@ -143,7 +169,7 @@ fn real_volume_label(letter: char) -> Option<String> {
 /// platform constant, excluded from coverage like its Windows sibling.
 #[cfg(not(windows))]
 #[cfg_attr(coverage_nightly, coverage(off))]
-const fn real_volume_label(_letter: char) -> Option<String> {
+pub(crate) const fn real_volume_label(_letter: char) -> Option<String> {
     None
 }
 
@@ -297,13 +323,12 @@ fn add_signed(base: u64, delta: i64) -> io::Result<u64> {
 )]
 mod tests {
     use std::io::{Cursor, Read as _, Seek as _, SeekFrom};
+    use std::path::Path;
 
     use super::{
-        AlignedReader, BdError, SECTOR, ScanError, add_signed, drive_root_letter,
-        resolve_after_scan_with, resolve_folder_label, resolve_folder_label_after_scan,
-        resolve_with,
+        AlignedReader, SECTOR, add_signed, apply_drive_root_probe, drive_root_letter,
+        drive_root_probe, resolve_folder_label, resolve_with,
     };
-    use crate::error::ScanStage;
 
     #[test]
     fn drive_root_letter_matches_every_bare_drive_root_spelling() {
@@ -344,70 +369,52 @@ mod tests {
         assert_eq!(resolve_folder_label("BigBuckBunny"), "BigBuckBunny");
     }
 
-    /// A recorded device failure at `stage` — the reason that closes the gate.
-    fn io_error_at(stage: ScanStage) -> ScanError {
-        ScanError {
-            file: "00000.m2ts".to_owned(),
-            stage,
-            reason: BdError::Io(std::io::Error::other("read failed")),
-        }
-    }
-
-    /// A recorded failure at `stage` blaming the disc's bytes rather than the
-    /// device, which leaves the gate open.
-    fn parse_error_at(stage: ScanStage) -> ScanError {
-        ScanError { file: "00000.clpi".to_owned(), stage, reason: BdError::UnexpectedEof }
+    #[test]
+    fn a_probe_is_owed_by_every_drive_root_input_spelling() {
+        // The three spellings the CLI accepts for a disc sitting at a drive
+        // root — the root itself, its BDMV directory, and a directory inside
+        // that — each walk up to the nameless root, so each owes a probe.
+        // Separators, letter case and a trailing separator are all immaterial.
+        assert_eq!(drive_root_probe(Path::new(r"J:\")), Some('J'));
+        assert_eq!(drive_root_probe(Path::new("k:/")), Some('K'));
+        assert_eq!(drive_root_probe(Path::new("k:")), Some('K'));
+        assert_eq!(drive_root_probe(Path::new(r"J:\BDMV")), Some('J'));
+        assert_eq!(drive_root_probe(Path::new("j:/bdmv/stream/")), Some('J'));
+        assert_eq!(drive_root_probe(Path::new(r"J:\BDMV\PLAYLIST")), Some('J'));
     }
 
     #[test]
-    fn a_recorded_io_failure_at_any_stage_skips_the_device_read() {
-        // One injected reader for every shape: consulted only when the gate is
-        // open, so its label wins exactly there.
-        let read = |letter: char| Some(format!("VOL{letter}"));
-        // An io failure degrades a drive root straight to the letter, whatever
-        // stage recorded it — a stream read is what a damaged disc trips first,
-        // but a metadata-only scan never reaches that stage at all. These are
-        // the four a folder scan can record; `ScanStage::SectorRead` comes
-        // from the UDF `.iso` reader, and an `.iso` carries a genuine volume
-        // label that never reaches this repair.
-        for stage in
-            [ScanStage::Discovery, ScanStage::ClipInfo, ScanStage::Playlist, ScanStage::StreamFile]
-        {
-            assert_eq!(resolve_after_scan_with(r"J:\", &[io_error_at(stage)], read), "J");
-        }
-        // A parse failure is no evidence against the device, so it leaves the
-        // read in play — as does a clean scan.
-        assert_eq!(
-            resolve_after_scan_with(r"J:\", &[parse_error_at(ScanStage::ClipInfo)], read),
-            "VOLJ"
-        );
-        assert_eq!(resolve_after_scan_with(r"J:\", &[], read), "VOLJ");
-        // One io failure among parse failures still closes the gate.
-        assert_eq!(
-            resolve_after_scan_with(
-                r"J:\",
-                &[parse_error_at(ScanStage::ClipInfo), io_error_at(ScanStage::Playlist)],
-                read
-            ),
-            "J"
-        );
-        // A real name resolves to itself whatever is on record.
-        assert_eq!(
-            resolve_after_scan_with("BigBuckBunny", &[io_error_at(ScanStage::StreamFile)], read),
-            "BigBuckBunny"
-        );
+    fn no_probe_is_owed_where_the_scan_will_find_a_name() {
+        // A named directory anywhere above the BDMV tree is the label the scan
+        // will derive, so probing the drive would be pure wasted IO.
+        assert_eq!(drive_root_probe(Path::new(r"J:\Rips\Disc\BDMV")), None);
+        assert_eq!(drive_root_probe(Path::new(r"J:\BigBuckBunny")), None);
+        // Relative and non-Windows inputs carry no drive letter to probe at all
+        // — a mounted disc names itself through its mount point there.
+        assert_eq!(drive_root_probe(Path::new("BigBuckBunny")), None);
+        assert_eq!(drive_root_probe(Path::new("/media/user/MY_DISC/BDMV")), None);
+        assert_eq!(drive_root_probe(Path::new("")), None);
+        assert_eq!(drive_root_probe(Path::new("1:/")), None); // not a letter
+        assert_eq!(drive_root_probe(Path::new("Jx")), None); // no colon
     }
 
     #[test]
-    fn resolve_folder_label_after_scan_leaves_a_real_name_untouched() {
-        // The wrapper with the real device read behind it, on the shapes that
-        // never touch a device — a real name on both sides of the gate (the
-        // drive-root road is validated end-to-end on real hardware).
-        assert_eq!(resolve_folder_label_after_scan("BigBuckBunny", &[]), "BigBuckBunny");
+    fn a_probed_label_reaches_a_drive_root_scan_whatever_the_scan_recorded() {
+        // The probe is taken before the scan runs, so what the scan went on to
+        // record cannot reach this decision — there is nothing here to consult.
+        // That is the whole repair: a disc whose read failed still gets its
+        // name, where consulting the errors afterwards degraded it to `J`.
+        assert_eq!(apply_drive_root_probe(r"J:\", Some("MY_DISC".to_owned())), "MY_DISC");
+        assert_eq!(apply_drive_root_probe("k:/", Some("MY_DISC".to_owned())), "MY_DISC");
+        // No probe (none owed, or the device read produced nothing) still
+        // degrades to the drive letter, which is all the scan itself has.
+        assert_eq!(apply_drive_root_probe(r"J:\", None), "J");
+        // A real name is never renamed, even by a probe taken on speculation.
         assert_eq!(
-            resolve_folder_label_after_scan("BigBuckBunny", &[io_error_at(ScanStage::StreamFile)]),
+            apply_drive_root_probe("BigBuckBunny", Some("MY_DISC".to_owned())),
             "BigBuckBunny"
         );
+        assert_eq!(apply_drive_root_probe("BigBuckBunny", None), "BigBuckBunny");
     }
 
     /// An inner reader that fails any read whose current position or length is

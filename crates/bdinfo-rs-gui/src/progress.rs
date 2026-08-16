@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
+use bdinfo_rs_core::bdrom::progress::{hms, progress_stats, remaining_hms};
 
 /// The indeterminate-bar animation period (one full 0→1→0 breath).
 pub const PULSE_PERIOD: u16 = 1000;
@@ -175,10 +175,11 @@ impl ProgressModel {
         hms(self.elapsed_seconds)
     }
 
-    /// The remaining-time estimate as `hh:mm:ss`.
+    /// The remaining-time estimate as `hh:mm:ss`, or the core's no-estimate
+    /// placeholder while nothing has been measured to extrapolate from.
     #[must_use]
     pub fn remaining_hms(&self) -> String {
-        hms(self.remaining_seconds)
+        remaining_hms(self.done, self.remaining_seconds)
     }
 
     /// The progress text line: `NN% - file | Elapsed: hh:mm:ss | Remaining:
@@ -191,7 +192,7 @@ impl ProgressModel {
             self.percent,
             self.file,
             hms(self.elapsed_seconds),
-            hms(self.remaining_seconds)
+            self.remaining_hms()
         )
     }
 }
@@ -259,12 +260,15 @@ mod tests {
     #[test]
     fn a_tick_before_any_bytes_estimates_nothing() {
         // `done == 0` gives the cumulative average nothing to extrapolate from,
-        // so the readout stays at zero however long the clock runs — the same
-        // blind window `progress_stats` defines for the first event.
+        // so the readout shows the core's no-estimate placeholder however long
+        // the clock runs — the same blind window `progress_stats` defines for
+        // the first event, spelled as an absence rather than as `00:00:00`,
+        // which on a stalled read would say "about to finish" for minutes.
         let mut model = ProgressModel::compute("00000.M2TS".to_owned(), 0, 200, Duration::ZERO);
         model.set_elapsed(Duration::from_secs(30));
         assert_eq!(model.elapsed_hms(), "00:00:30");
-        assert_eq!(model.remaining_hms(), "00:00:00");
+        assert_eq!(model.remaining_hms(), "--:--:--");
+        assert_eq!(model.line(), "  0% - 00000.M2TS | Elapsed: 00:00:30 | Remaining: --:--:--");
     }
 
     #[test]
