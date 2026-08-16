@@ -36,6 +36,19 @@
         --danger: #ff6b6b;
         --warn: #f7b955;
         --ok: #46d18a;
+        --accent-ink: #06121b;
+        --link-hover: #7ad2ff;
+        --error-text: #ffd7d7;
+        --error-bg: rgba(255, 107, 107, 0.08);
+        --error-border: rgba(255, 107, 107, 0.35);
+        --warning-text: #ffe6bd;
+        --warning-bg: rgba(247, 185, 85, 0.08);
+        --warning-border: rgba(247, 185, 85, 0.35);
+        --shadow: rgba(0, 0, 0, 0.55);
+        --backdrop: rgba(4, 6, 9, 0.62);
+        --logo-glow: rgba(76, 194, 255, 0.35);
+        --report-bg: #08090b;
+        --report-text: #cdd3da;
         --radius: 12px;
         --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
         --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
@@ -67,7 +80,7 @@
         text-decoration: none;
       }
       a:hover {
-        color: #7ad2ff;
+        color: var(--link-hover);
       }
 
       .wrap {
@@ -94,7 +107,7 @@
       }
       .brand .logo {
         color: var(--accent);
-        filter: drop-shadow(0 0 10px rgba(76, 194, 255, 0.35));
+        filter: drop-shadow(0 0 10px var(--logo-glow));
       }
       .brand h1 {
         margin: 0;
@@ -161,13 +174,13 @@
       .btn.primary {
         background: var(--accent);
         border-color: var(--accent);
-        color: #06121b;
+        color: var(--accent-ink);
         font-weight: 650;
       }
       .btn.primary:hover:not(:disabled) {
         background: var(--accent-strong);
         border-color: var(--accent-strong);
-        color: #06121b;
+        color: var(--accent-ink);
       }
       .btn.small {
         padding: 0.35rem 0.6rem;
@@ -492,10 +505,10 @@
         background: var(--surface);
         border: 1px solid var(--border-strong);
         border-radius: var(--radius);
-        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+        box-shadow: 0 18px 50px var(--shadow);
       }
       .settings::backdrop {
-        background: rgba(4, 6, 9, 0.62);
+        background: var(--backdrop);
       }
       .settings h2 {
         margin: 0 0 0.9rem;
@@ -617,11 +630,11 @@
         font-family: var(--mono);
         font-size: 0.8rem;
         line-height: 1.5;
-        color: #cdd3da;
+        color: var(--report-text);
         white-space: pre;
         overflow: auto;
         max-height: 60vh;
-        background: #08090b;
+        background: var(--report-bg);
       }
       .copied {
         color: var(--ok) !important;
@@ -636,9 +649,9 @@
         padding: 0.8rem 1rem;
         margin-bottom: 1.1rem;
         font-size: 0.88rem;
-        color: #ffd7d7;
-        background: rgba(255, 107, 107, 0.08);
-        border: 1px solid rgba(255, 107, 107, 0.35);
+        color: var(--error-text);
+        background: var(--error-bg);
+        border: 1px solid var(--error-border);
         border-radius: 10px;
       }
       .error svg {
@@ -652,9 +665,9 @@
         padding: 0.8rem 1rem;
         margin-bottom: 0.9rem;
         font-size: 0.88rem;
-        color: #ffe6bd;
-        background: rgba(247, 185, 85, 0.08);
-        border: 1px solid rgba(247, 185, 85, 0.35);
+        color: var(--warning-text);
+        background: var(--warning-bg);
+        border: 1px solid var(--warning-border);
         border-radius: 10px;
       }
       .warning svg {
