@@ -683,6 +683,29 @@ async function main() {
     const cancelled = await readDemo();
     const cancelledSelection = await demoPage.evaluate(() => window.__selections.at(-1));
 
+    // The settings can withhold every playlist the disc has: there is then
+    // nothing to report on, and a shown pre-scan report is withdrawn instead of
+    // re-rendered into a report with no playlist in it. The threshold goes back
+    // to 0 afterwards — the reload below reads the stored value.
+    await demoPage.click("#view-report-btn");
+    await demoPage.waitForFunction(
+      () => !document.getElementById("report-card").hidden,
+      undefined,
+      {
+        timeout: 60000,
+      },
+    );
+    const previewAgain = await readDemo();
+    await demoPage.click("#settings-btn");
+    await demoPage.fill("#opt-short-seconds", "60");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await rowCountIs(0);
+    const emptied = await readDemo();
+    await demoPage.fill("#opt-short-seconds", "0");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await rowCountIs(3);
+    await demoPage.click("#settings-close");
+
     // A phone-width viewport must not scroll the page sideways — wide tables
     // scroll inside their own wrapper instead.
     await demoPage.setViewportSize({ width: 390, height: 844 });
@@ -838,6 +861,8 @@ async function main() {
       beforeCancel,
       cancelled,
       cancelledSelection,
+      previewAgain,
+      emptied,
       pageScrolls,
       damagedListing,
       persisted,
@@ -1381,6 +1406,24 @@ async function main() {
     false,
     false,
     false,
+  ]);
+
+  // Withholding every playlist: the report and the button that offers it both
+  // go, and the withdrawal costs no render — the threshold's own inspect is the
+  // only request the step makes.
+  demoOk &= demoEq(
+    "the report is offered again after a scan",
+    demo.previewAgain.viewDisabled,
+    false,
+  );
+  demoOk &= demoEq(
+    "an empty table withdraws the report and its button",
+    [demo.emptied.reportHidden, demo.emptied.viewDisabled, demo.emptied.scanDisabled],
+    [true, true, true],
+  );
+  demoOk &= demoEq("withdrawing it renders nothing", demo.emptied.calls, [
+    ...demo.previewAgain.calls,
+    "inspect",
   ]);
 
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);

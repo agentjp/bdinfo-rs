@@ -395,6 +395,17 @@ async function renderPreview(): Promise<void> {
   }
   const sections = reportSections();
   const selection = scanNames();
+  // The settings can withhold every playlist the disc has. There is then
+  // nothing to report on — the button that offers the report is disabled on the
+  // same terms — so the shown one is withdrawn rather than re-rendered into a
+  // report with no playlist in it.
+  if (selection.length === 0) {
+    state.previewing = false;
+    state.previewOrder = null;
+    state.reportText = "";
+    hide(reportCard);
+    return;
+  }
   // Recorded as the render is REQUESTED, not when it lands: it says which
   // selection the page is rendering, so a change made during the round trip is
   // judged against that one rather than against the older order still on
