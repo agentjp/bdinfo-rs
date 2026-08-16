@@ -220,10 +220,10 @@ pub fn install_panic_hook() {
 
 /// Tolerated-`Result` logging.
 ///
-/// Where the code deliberately swallows an error (a settings write, an
-/// autosave destination, a recall of a vanished path), `log_err` records it
-/// with the swallow's own `file:line` before the value flows on unchanged —
-/// the tolerance stays, the invisibility goes.
+/// Where the code deliberately swallows an error (a settings write, the
+/// config directory it needs, the window icon), `log_err` records it with the
+/// swallow's own `file:line` before the value flows on unchanged — the
+/// tolerance stays, the invisibility goes.
 pub trait LogErr {
     /// Logs the `Err` (if any) at Warn, tagged with the caller's `file:line`
     /// and `what` naming the tolerated operation, and returns `self`.
