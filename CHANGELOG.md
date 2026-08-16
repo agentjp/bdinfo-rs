@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the scan runs. ([#349](https://github.com/agentjp/bdinfo-rs/issues/349))
 * **wasm:** `onMeasured` streams those snapshots to the page, throttled to at most one a second.
   ([#350](https://github.com/agentjp/bdinfo-rs/issues/350))
+* **wasm:** the demo gains a light theme, chosen by an auto, light or dark setting; auto follows the
+  operating system. ([#381](https://github.com/agentjp/bdinfo-rs/issues/381))
+* **wasm:** the demo's scan lifecycle matches the desktop app's — scanning with nothing ticked scans
+  every listed playlist rather than refusing, a cancelled or failed scan keeps the cells it measured
+  until the next scan starts, a running scan freezes what names its scan set while the highlighted
+  row and the live cells stay live, and the progress card carries elapsed and remaining times that
+  climb through a stall instead of freezing. ([#382](https://github.com/agentjp/bdinfo-rs/issues/382))
+* **wasm:** the demo gains a disc-info strip — disc title, detected features, disc size in bytes and
+  in human-readable form, the hidden-tracks note, and the AACS indicator as a badge — plus a
+  `View report` that renders the structural zero-bitrate report over the current selection before any
+  measured scan, a source bar naming the loaded disc, a reveal on the filter hint, and `Ctrl+C`
+  copying the highlighted row's disc-relative path. ([#383](https://github.com/agentjp/bdinfo-rs/issues/383))
+* **wasm:** the demo's progress strip shows an indeterminate state until the scan's first event — a
+  sweeping bar and a spinner where the percentage sits — instead of reporting a measurement it does
+  not have yet. ([#387](https://github.com/agentjp/bdinfo-rs/issues/387))
 * **core:** stream files whose bytes stop before the span the disc declares are detected and named.
   Such a file reads to a clean end of file, so nothing is recorded as a read error and every value
   measured from it is silently smaller than the disc says; the CLI raises one stderr notice per
@@ -87,10 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   last source, nor freezes a running window when it is dropped onto it; the stall lands on the
   worker, behind the scan overlay's Cancel. A path that is missing or is not a disc still reaches
   the same failure screen with the same message. ([#379](https://github.com/agentjp/bdinfo-rs/issues/379))
+* **gui:** the disc-size line counts the interleaved `*.ssif` files, so a 3D disc no longer reads
+  smaller in the info box than in the report the same window renders. The log line carrying that
+  number moves with it. ([#385](https://github.com/agentjp/bdinfo-rs/issues/385))
 * **gui:** the log records a stall clearing as well as a stall starting, the scan overlay no longer
   passes clicks and drags through to the table beneath it, the scan-notice modal stops referring to
-  a report below it, and a refused report save names the destination it tried.
-  ([#377](https://github.com/agentjp/bdinfo-rs/issues/377))
+  a report below it and says the report was generated rather than written, and a refused report save
+  names the destination it tried. ([#377](https://github.com/agentjp/bdinfo-rs/issues/377), [#384](https://github.com/agentjp/bdinfo-rs/issues/384))
 * **gui:** cancelling a scan keeps the values it measured on the grids, the selection stays live
   during a scan so the panes follow the highlighted row, and the remaining-time estimate climbs
   through a stall instead of freezing. ([#365](https://github.com/agentjp/bdinfo-rs/issues/365))
