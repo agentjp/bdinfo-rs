@@ -771,6 +771,16 @@ struct App {
     /// nothing at all) — what the display tick measures the stall hint
     /// against ([`Flow::tick`]), for the listing and the measured scan alike.
     last_progress: Option<Instant>,
+    /// Whether the log's last stall line was a raise — the single owner of the
+    /// logged stall state, and the `previous` side [`App::on_tick`] passes to
+    /// [`progress::stall_line`].
+    ///
+    /// It cannot be sampled off the flow instead: a progress event clears that
+    /// flag the moment it lands ([`Flow::progress`]), which is what the status
+    /// line needs, so by the next tick the fall has already happened and the
+    /// resume would never be logged. Reset when a worker starts, so a stall
+    /// left standing by one worker cannot log a resume for the next.
+    stall_logged: bool,
     /// A one-line status (e.g. `Report saved to: …`), shown in the bottom bar.
     status: Option<String>,
     /// Whether the report view (over the panes) is showing.
@@ -831,6 +841,7 @@ impl Default for App {
             scan_cancel: None,
             scan_start: None,
             last_progress: None,
+            stall_logged: false,
             status: None,
             showing_report: false,
             notice: None,
@@ -1779,18 +1790,23 @@ impl App {
         self.pulse = progress::pulse_advance(self.pulse);
         let elapsed = self.scan_start.map_or(Duration::ZERO, |start| start.elapsed());
         let since_progress = self.last_progress.map_or(Duration::ZERO, |at| at.elapsed());
-        let stalled = self.flow.scan_stalled();
         self.flow.tick(elapsed, since_progress);
         // The two transitions are logged, never the state (the tick runs at
         // 1 Hz). A log that records neither cannot tell a read stuck in drive
-        // firmware from a process that stopped: both simply go quiet.
+        // firmware from a process that stopped: both simply go quiet — and one
+        // that records only the raise cannot tell a drive that recovered and
+        // re-stalled from a single unbroken stall. The `previous` side is the
+        // log's own memory (`stall_logged`), never the flow's flag before this
+        // tick; the reason is on the field.
+        let stalled = self.flow.scan_stalled();
         if let Some(line) = progress::stall_line(
+            self.stall_logged,
             stalled,
-            self.flow.scan_stalled(),
             self.flow.progress_view().map(ProgressModel::file),
         ) {
             log::info!("{line}");
         }
+        self.stall_logged = stalled;
     }
 
     /// Cancels the in-flight scan for real — the measured scan back to the
@@ -1936,6 +1952,7 @@ impl App {
         let generation = self.generation;
         self.scan_start = Some(Instant::now());
         self.last_progress = self.scan_start;
+        self.stall_logged = false;
         // The one log line per open: pins down whether a scan ever started
         // when a report or listing seems to be missing in the field.
         log::info!("listing {}", input.display());
@@ -2009,6 +2026,7 @@ impl App {
         let generation = self.generation;
         self.scan_start = Some(Instant::now());
         self.last_progress = self.scan_start;
+        self.stall_logged = false;
         // The scan's opening log line: with the per-file lines and the
         // terminal line below, gui.log can place a field report's hang inside
         // the scan (and name the file) rather than only before it. The disc
@@ -2137,7 +2155,10 @@ impl App {
                 // The status line is transient; autosave in particular runs
                 // with nobody watching, so the failure goes to the log too.
                 log::warn!("report save failed ({}): {err}", target.display());
-                Some(format!("Save failed: {err}"))
+                // Both carry the destination: autosave picks it without asking,
+                // so "access denied" alone leaves a user who never opens the
+                // log unable to tell which directory refused the write.
+                Some(format!("Save failed ({}): {err}", target.display()))
             }
         };
     }
@@ -3399,11 +3420,19 @@ fn modal<'a>(
 /// Overlays `card` on `base` over a dim scrim, **without** a dismiss — the
 /// "please wait" overlay shown while the initial scan runs (it clears itself when
 /// the scan completes).
+///
+/// The scrim is `opaque`, which is what makes the overlay modal at all: it
+/// captures every mouse press over its bounds and reports a cursor
+/// interaction, so the [`Stack`] neither delivers the press to the layer
+/// beneath nor lets it paint a hover. Without it the pane splitters and the
+/// tables' column dividers really do drag while the card is up. The press is
+/// swallowed rather than dismissing, unlike [`modal`] — the overlay ends when
+/// the scan does, and a stray click must not take it away.
 fn scanning_modal<'a>(
     base: Element<'a, Message>,
     card: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let scrim = container(card).center(Length::Fill).style(ui::scrim());
+    let scrim = iced::widget::opaque(container(card).center(Length::Fill).style(ui::scrim()));
     Stack::new().push(base).push(scrim).into()
 }
 
@@ -3970,7 +3999,7 @@ mod harness {
 #[cfg(test)]
 mod interaction {
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
     use bdinfo_rs_gui::flow::Stage;
@@ -3981,6 +4010,14 @@ mod interaction {
         bounds, click, encrypted_app, filtered_app, listed_app, sees, structural,
     };
     use super::{App, ENCRYPTED_BADGE, Message};
+
+    /// Serializes the tests that read the diagnostics log. The sink behind the
+    /// `log` facade is process-wide and holds ONE file, so under a runner that
+    /// shares a process between tests (`cargo test` does; `cargo nextest` does
+    /// not) a second `diagnostics::init` would redirect the first test's lines
+    /// into the second's file mid-test. Poison is ignored — a panicking test
+    /// leaves nothing here to corrupt.
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn the_scan_flow_reaches_the_report_through_clicks() {
@@ -4185,14 +4222,69 @@ mod interaction {
     }
 
     #[test]
+    fn a_stall_that_clears_logs_both_the_raise_and_the_recovery() {
+        // Driven through the real update path, because that is where the
+        // defect lived: the pure `stall_line` has always produced both lines,
+        // while production reached only the raise. The log is the only
+        // witness of the recovery, so the proof has to read it.
+        let _installed = LOG_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let log = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/stall-log/gui.log");
+        bdinfo_rs_gui::diagnostics::init(&log);
+
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        // A file name no other test emits: a runner that shares one process
+        // lets every test's lines into this file, so the assert below must be
+        // able to attribute the raise it finds.
+        let read = |app: &mut App| {
+            let _ = app.update(Message::ListProgress {
+                generation: app.generation,
+                file: "00042.M2TS".to_owned(),
+                done: 1,
+                total: 2,
+            });
+        };
+        read(&mut app);
+        // A read stuck in drive firmware: the clock runs on with no event.
+        app.last_progress = Instant::now().checked_sub(Duration::from_secs(30));
+        let _ = app.update(Message::Tick);
+        assert!(app.flow.scan_stalled());
+        // The drive returns. The event clears the flag immediately — the
+        // status line must not wait a tick to stop saying the read is stuck —
+        // and the tick after it still records the recovery.
+        read(&mut app);
+        assert!(!app.flow.scan_stalled(), "the event clears the hint at once");
+        let _ = app.update(Message::Tick);
+        let text = std::fs::read_to_string(&log).expect("the diagnostics log reads");
+        assert!(
+            text.contains("read stalled on 00042.M2TS"),
+            "the raise names the stuck file: {text}"
+        );
+        assert!(text.contains("read resumed"), "and the recovery is recorded: {text}");
+    }
+
+    #[test]
+    fn the_scan_overlay_swallows_a_press_aimed_at_the_table_beneath_it() {
+        let mut app = App::default();
+        let _ = app.update(Message::FolderPicked(Some(PathBuf::from("disc"))));
+        assert_eq!(app.flow.stage(), Stage::Listing);
+        assert!(sees(&app, "Please wait while we scan the disc..."));
+        // The playlist header's sort cells carry no busy gate, so a press that
+        // reaches one acts. Under the overlay none may.
+        assert!(click(&mut app, "Length").is_empty(), "the overlay captures the press");
+        // The same press on the same header without an overlay does sort — so
+        // the silence above is the overlay, not an inert control.
+        let mut listed = listed_app();
+        assert!(!click(&mut listed, "Length").is_empty(), "and the header is live without one");
+    }
+
+    #[test]
     fn a_listing_that_recorded_a_failure_banners_it_and_logs_it() {
         // A stream file the listing could not read is recorded by the
         // structural open, and this is where it becomes visible: a banner over
         // the usable table, and a line per failure in the diagnostics log —
         // the two surfaces a report from the field is written from.
-        //
-        // The global logger is process-wide, and each test here runs in its
-        // own process, so installing it inside one test races nothing.
+        let _installed = LOG_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let log = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/listing-log/gui.log");
         bdinfo_rs_gui::diagnostics::init(&log);
 
@@ -4711,6 +4803,28 @@ mod interaction {
             "the status line confirms the save: {:?}",
             app.status
         );
+    }
+
+    #[test]
+    fn a_refused_save_names_its_destination_in_the_status_line() {
+        // Autosave chooses its destination without asking, so the error alone
+        // leaves a user who never opens the log unable to tell which directory
+        // refused the write. A directory standing where the report file would
+        // go refuses it on every platform.
+        let dir = scratch("save-refused");
+        std::fs::create_dir_all(dir.join("BDINFO.DISC.txt")).expect("the blocking dir creates");
+        let mut app = listed_app();
+        click(&mut app, "Scan Bitrates");
+        let _ = app.update(Message::Finished {
+            generation: app.generation,
+            report: "THE MEASURED REPORT\r\n".to_owned(),
+            errors: Arc::new(Vec::new()),
+            playlists: structural().bdrom.playlists,
+        });
+        let _ = app.update(Message::SaveDest(Some(dir)));
+        let status = app.status.clone().expect("a refused save still reports");
+        assert!(status.starts_with("Save failed ("), "the failure leads: {status}");
+        assert!(status.contains("BDINFO.DISC.txt"), "and the line names where it aimed: {status}");
     }
 
     #[test]
