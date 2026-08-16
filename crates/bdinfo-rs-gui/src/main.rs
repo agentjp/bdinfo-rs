@@ -2711,7 +2711,7 @@ impl App {
                 p,
                 p.warning,
                 &format!(
-                    "Completed with {} — the report below was still written.",
+                    "Completed with {} — the report was still generated.",
                     report::counted(errors.len(), "error")
                 ),
             ));
