@@ -8,8 +8,8 @@ abstract: >-
 authors:
   - name: bdinfo-rs contributors
     email: agent@fastmail.jp
-version: 3.0.0
-date-released: "2026-08-08"
+version: 4.0.0
+date-released: "2026-08-16"
 license: LGPL-2.1-or-later
 repository-code: https://github.com/agentjp/bdinfo-rs
 url: https://github.com/agentjp/bdinfo-rs

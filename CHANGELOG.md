@@ -12,6 +12,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v4.0.0](https://github.com/agentjp/bdinfo-rs/compare/v3.0.0...v4.0.0) (2026-08-16)
+
+### ⚠ BREAKING CHANGES
+
+* **core:** each layer has one scan entry point again, and it takes the observers. `BdRom::open`
+  and `BdRom::open_resilient` take `(root, mode, ScanOptions, scan_files, ScanObservers)`, and
+  `scan::open_folder` / `scan::open_iso` take the same; the `_with` and `_observed` twins
+  (`open_with`, `open_observed`, `open_resilient_with`, `open_resilient_observed`,
+  `open_folder_observed`, `open_iso_observed`) are removed. Migration: call the plain name and pass
+  the bundle — `ScanObservers::none()` where a caller has no progress callback, no cancel flag, and
+  no measured observer, `ScanObservers::new(&mut progress, &cancel)` otherwise, plus
+  `.with_measured(&mut observer)` for live snapshots. ([#372](https://github.com/agentjp/bdinfo-rs/issues/372))
+* **core:** `ClipSummary` gains a `measured: bool` field recording whether the measurement pass
+  demuxed that stream file, so a 0-byte or header-destroyed `*.m2ts` is reported as short rather
+  than read as unscanned. Struct-literal construction of a `ClipSummary` therefore has to name it;
+  building through `fixtures::clip(…)` does not. The browser package's `Clip` mirrors it as
+  `measured`, additively on the wire. ([#373](https://github.com/agentjp/bdinfo-rs/issues/373))
+
+### Added
+
+* **core:** a measured-snapshot observer on the scan API — the full pass emits per-stream byte
+  tallies and bitrates at chunk boundaries while it reads, so a front-end can fill measured cells
+  during the scan instead of waiting for the report. ([#347](https://github.com/agentjp/bdinfo-rs/issues/347), [#348](https://github.com/agentjp/bdinfo-rs/issues/348))
+* **gui:** the playlist, stream-file, and codec grids tick their measured sizes and bitrates while
+  the scan runs. ([#349](https://github.com/agentjp/bdinfo-rs/issues/349))
+* **wasm:** `onMeasured` streams those snapshots to the page, throttled to at most one a second.
+  ([#350](https://github.com/agentjp/bdinfo-rs/issues/350))
+* **core:** stream files whose bytes stop before the span the disc declares are detected and named.
+  Such a file reads to a clean end of file, so nothing is recorded as a read error and every value
+  measured from it is silently smaller than the disc says; the CLI raises one stderr notice per
+  short file, the desktop app a banner, and the browser package `disc.shortStreamNotices`. The
+  report bytes are unchanged. ([#345](https://github.com/agentjp/bdinfo-rs/issues/345), [#346](https://github.com/agentjp/bdinfo-rs/issues/346))
+
+### Performance
+
+* **core:** a caller whose earlier `Codecs` open already read the codec detail can skip the quick
+  codec pass (`ScanOptions::skip_quick_pass`), and can hand a prior open's AACS verdict to the next
+  one (`ScanOptions::aacs_encrypted`) instead of re-probing. The desktop app uses both, so its
+  measured scan no longer re-reads every stream file head — on damaged media each such read can
+  stall for minutes. ([#358](https://github.com/agentjp/bdinfo-rs/issues/358))
+* **core:** the demux reads 256 KiB per request in the full pass and 16 KiB in the quick pass, so a
+  stalled read blocks for less and a cancel takes effect sooner. ([#333](https://github.com/agentjp/bdinfo-rs/issues/333))
+
+### Fixes
+
+* **core:** a 3D clip whose `BDMV/STREAM/SSIF/<clip>.ssif` will not open is measured from the plain
+  `*.m2ts` instead of being abandoned — the base view is reported, the dependent (MVC) row is not,
+  and the failure is recorded against the `.ssif` in the `WARNING` block. ([#363](https://github.com/agentjp/bdinfo-rs/issues/363))
+* **core:** three classic-parity corrections — an audio access unit's transfer interval is measured
+  only on a forward PTS (a backwards step no longer drags the interval base back), undecoded
+  MPEG-1/2 and AAC audio rows fall back to the type-derived codec names instead of rendering an
+  empty one, and each clip's share of its playlist is computed against the finished playlist length
+  rather than the part accumulated so far. ([#364](https://github.com/agentjp/bdinfo-rs/issues/364))
+* **core:** the raw-device volume-label read on a Windows drive root is skipped once any io error
+  has been recorded, at any scan stage — one less sector-by-sector grind of a failing drive.
+  ([#341](https://github.com/agentjp/bdinfo-rs/issues/341))
+* **cli:** the progress line repaints about once a second through a stalled read, switching its
+  lead-in to `Still reading` after five seconds, so a hung drive no longer looks like a hung
+  program. ([#366](https://github.com/agentjp/bdinfo-rs/issues/366))
+* **gui:** cancelling a scan keeps the values it measured on the grids, the selection stays live
+  during a scan so the panes follow the highlighted row, and the remaining-time estimate climbs
+  through a stall instead of freezing. ([#365](https://github.com/agentjp/bdinfo-rs/issues/365))
+* **gui:** read errors from the listing pass reach the warning banner and the log — both structural
+  opens' failures are merged and deduplicated — and `gui.log` keeps the previous launch as
+  `gui.log.1`, stamps its launch time, and records stalls, disc identity, and scan durations.
+  ([#367](https://github.com/agentjp/bdinfo-rs/issues/367))
+* **gui:** the listing pass is cancellable and reports its progress, and the stall hint covers it.
+  ([#339](https://github.com/agentjp/bdinfo-rs/issues/339), [#342](https://github.com/agentjp/bdinfo-rs/issues/342))
+* **wasm:** a failed measured open is reported instead of rendering a report of zero tallies, scan
+  errors are shown on the page, and a downloaded report is named from the scanned disc's volume
+  label. ([#336](https://github.com/agentjp/bdinfo-rs/issues/336), [#369](https://github.com/agentjp/bdinfo-rs/issues/369))
+* Plural nouns agree with their counts in the command-line, desktop, and browser messages.
+  ([#374](https://github.com/agentjp/bdinfo-rs/issues/374))
+
 ## [v3.0.0](https://github.com/agentjp/bdinfo-rs/compare/v2.0.0...v3.0.0) (2026-08-08)
 
 ### ⚠ BREAKING CHANGES
