@@ -36,7 +36,8 @@
 //! draws on stderr. On an ANSI terminal that line repaints about once a second
 //! even while the scan reports nothing, so the elapsed and remaining readouts
 //! keep moving through a read that has not returned; after five seconds of
-//! silence its lead-in reads `Still reading` instead of `Scanning`. The flow
+//! silence its lead-in reads `Still scanning` instead of `Scanning`, and the
+//! remaining readout stays `--:--:--` until the first bytes are measured. The flow
 //! narration (table, picker, analysis preamble,
 //! classic epilogue, saved-report message) prints on stdout. A stream file
 //! measured shorter than the disc declares (a truncated file reads to a clean
@@ -93,7 +94,7 @@ use bdinfo_rs_core::bdrom::order::{
     HiddenRule, PlaylistFilter, hidden_by, named_selection, selection_order,
     selection_stream_files, table_rows,
 };
-use bdinfo_rs_core::bdrom::progress::{hms, progress_stats};
+use bdinfo_rs_core::bdrom::progress::{hms, progress_stats, remaining_hms};
 use bdinfo_rs_core::bdrom::shortfall::ShortStreamFile;
 use bdinfo_rs_core::error::{BdError, ScanError};
 use bdinfo_rs_core::report::text::{self, RenderOptions};
@@ -916,8 +917,10 @@ const STALL_AFTER: Duration = Duration::from_secs(5);
 const LEAD_SCANNING: &str = "Scanning";
 
 /// The lead-in once the reads have gone quiet ([`STALL_AFTER`]) — the same
-/// "still reading" wording the desktop shell shows for a stuck read.
-const LEAD_STALLED: &str = "Still reading";
+/// wording the desktop shell shows for a stuck read. "Still" continues
+/// [`LEAD_SCANNING`]'s verb rather than swapping in another one, so a line that
+/// changes mid-scan reads as the same activity carrying on.
+const LEAD_STALLED: &str = "Still scanning";
 
 /// The lead-in for a quiet or a moving scan.
 const fn lead_in(stalled: bool) -> &'static str {
@@ -1225,7 +1228,7 @@ fn compose_styled_progress(
         "{percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
         hms(elapsed_seconds),
-        hms(remaining_seconds)
+        remaining_hms(progress.done, remaining_seconds)
     );
     // The room the bar gets: the width less one spare cell, the lead-in and its
     // ` [] ` bar frame, and the tail — all measured in display cells.
@@ -1261,7 +1264,7 @@ fn compose_progress(progress: &ScanProgress<'_>, elapsed: Duration, lead: &str) 
         "{lead} {percent:>3}% - {} | Elapsed: {} | Remaining: {}",
         progress.file,
         hms(elapsed_seconds),
-        hms(remaining_seconds)
+        remaining_hms(progress.done, remaining_seconds)
     )
 }
 
@@ -2011,13 +2014,14 @@ Options:
             super::LEAD_SCANNING,
         );
         assert_eq!(line, "Scanning  25% - 00000.M2TS | Elapsed: 00:00:00 | Remaining: 00:00:01");
-        // Nothing read yet → no estimate; an empty scan reads 100%.
+        // Nothing read yet → no estimate, spelled as one; an empty scan reads
+        // 100%.
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 0, total: 200 },
             Duration::from_secs(1),
             super::LEAD_SCANNING,
         );
-        assert_eq!(line, "Scanning   0% - 00000.M2TS | Elapsed: 00:00:01 | Remaining: 00:00:00");
+        assert_eq!(line, "Scanning   0% - 00000.M2TS | Elapsed: 00:00:01 | Remaining: --:--:--");
         let line = compose_progress(
             &ScanProgress { file: "00000.M2TS", done: 0, total: 0 },
             Duration::ZERO,
@@ -2033,7 +2037,7 @@ Options:
         );
         assert_eq!(
             line,
-            "Still reading  25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"
+            "Still scanning  25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"
         );
     }
 
@@ -2571,13 +2575,13 @@ Options:
         // out of the bar's room, never out of the tail.
         let progress = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
         let line = compose_styled_progress(&progress, Duration::from_secs(10), 120, true);
-        assert!(line.starts_with("Still reading ["), "{line}");
+        assert!(line.starts_with("Still scanning ["), "{line}");
         assert!(line.contains(" 25% - 00000.M2TS | Elapsed: 00:00:10 | Remaining: 00:00:30"));
         assert_eq!(line.matches('█').count(), 6);
         assert_eq!(line.matches('░').count(), 18);
         // The lead-in decision itself.
         assert_eq!(super::lead_in(false), "Scanning");
-        assert_eq!(super::lead_in(true), "Still reading");
+        assert_eq!(super::lead_in(true), "Still scanning");
         // Its trigger: five seconds of silence, inclusive.
         assert!(!super::stalled(Duration::from_millis(4_999)));
         assert!(super::stalled(Duration::from_secs(5)));
@@ -2598,9 +2602,34 @@ Options:
         // The fallback carries the stall wording too — a narrow terminal loses
         // the bar, not the news that the read is stuck.
         let line = compose_styled_progress(&progress, Duration::from_secs(10), 20, true);
-        assert_eq!(line, "Still reading  25% ");
+        assert_eq!(line, "Still scanning  25%");
         // A zero-width terminal draws nothing rather than panicking.
         assert_eq!(compose_styled_progress(&progress, Duration::ZERO, 0, false), "");
+    }
+
+    #[test]
+    fn the_no_estimate_placeholder_costs_the_line_no_width() {
+        // Before the first byte the remaining field is a placeholder, not a
+        // time — and it has to occupy exactly the room a time would, because
+        // the bar is sized from what the tail leaves and the narrow fallback
+        // truncates to the window. Same width in, same line out.
+        let blind = ScanProgress { file: "00000.M2TS", done: 0, total: 200 };
+        let measured = ScanProgress { file: "00000.M2TS", done: 50, total: 200 };
+        let line = compose_progress(&blind, Duration::from_secs(10), super::LEAD_SCANNING);
+        assert!(line.ends_with("Remaining: --:--:--"), "{line}");
+        assert_eq!(
+            line.chars().count(),
+            compose_progress(&measured, Duration::from_secs(10), super::LEAD_SCANNING)
+                .chars()
+                .count()
+        );
+        // The bar keeps every cell it had.
+        let styled = compose_styled_progress(&blind, Duration::from_secs(10), 120, false);
+        assert!(styled.contains("Remaining: --:--:--"), "{styled}");
+        assert_eq!(styled.matches('░').count(), 24);
+        // And the narrow fallback truncates at the same column.
+        let narrow = compose_styled_progress(&blind, Duration::from_secs(10), 20, false);
+        assert_eq!(narrow, "Scanning   0% - 000");
     }
 
     #[test]
@@ -2668,7 +2697,7 @@ Options:
         let after_forty = paints(&painted);
         assert_eq!(after_forty.len(), 3);
         let third = after_forty.get(2).expect("the stalled paint");
-        assert!(third.contains("Still reading ["), "{third}");
+        assert!(third.contains("Still scanning ["), "{third}");
         assert!(third.contains("00011.M2TS | Elapsed: 00:00:40"), "{third}");
         assert!(third.contains(" 25% - "), "the percent cannot move without an event: {third}");
     }
@@ -2724,7 +2753,7 @@ Options:
         let repaints = paints(&painted);
         assert!(repaints.len() >= 2, "the ticker repainted at least once: {repaints:?}");
         let last = repaints.last().expect("a painted line");
-        assert!(last.contains("Still reading ["), "{last}");
+        assert!(last.contains("Still scanning ["), "{last}");
         assert!(last.contains("00011.M2TS | Elapsed: 00:00:4"), "the clock climbed: {last}");
 
         // Stopping really stops it: with the clocks pushed back into the past

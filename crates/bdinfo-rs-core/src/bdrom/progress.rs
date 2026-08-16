@@ -23,7 +23,9 @@ use std::time::Duration;
 /// The percent is the byte ratio; a scan with nothing to read (`total == 0`)
 /// reads 100%, not a division by zero. The remaining estimate scales the
 /// elapsed time by the bytes still to read, and is `0` before the first byte
-/// arrives (`done == 0` gives it nothing to extrapolate from).
+/// arrives (`done == 0` gives it nothing to extrapolate from) — which is a
+/// placeholder value, not a time, so a surface spells it through
+/// [`remaining_hms`] rather than [`hms`].
 ///
 /// The estimate works in **milliseconds**: whole-second math would read zero
 /// for the entire first second, exactly when the first plausible estimate
@@ -57,11 +59,34 @@ pub fn hms(seconds: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// What the remaining field reads while there is no estimate to show — the
+/// blind window before the first byte is measured.
+///
+/// Punctuation rather than a word, and exactly as wide as an [`hms`] time: both
+/// surfaces lay the progress line out in monospace, and the terminal one
+/// truncates it to a narrow window, so the field has to keep its width. A
+/// placeholder also adds no vocabulary to a line that already spells everything
+/// else as a number.
+pub const NO_ESTIMATE: &str = "--:--:--";
+
+/// The remaining field's spelling: [`hms`] of `remaining_seconds` once bytes
+/// have been measured, and [`NO_ESTIMATE`] before that.
+///
+/// `done` is the same byte count [`progress_stats`] took. At `done == 0` its
+/// estimate has nothing to extrapolate from and reads `0`, which spelled as a
+/// time says `00:00:00` — "about to finish" at the moment nothing has been read
+/// at all. On damaged media that window can stand for minutes beside a stalled
+/// read, so it is spelled as the absence it is.
+#[must_use]
+pub fn remaining_hms(done: u64, remaining_seconds: u64) -> String {
+    if done == 0 { NO_ESTIMATE.to_owned() } else { hms(remaining_seconds) }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{hms, progress_stats};
+    use super::{NO_ESTIMATE, hms, progress_stats, remaining_hms};
 
     #[test]
     fn an_empty_scan_reads_one_hundred_percent() {
@@ -105,6 +130,26 @@ mod tests {
         let (_, _, remaining) =
             progress_stats(1, u64::MAX, Duration::from_secs(u64::from(u32::MAX)));
         assert_eq!(remaining, u64::MAX);
+    }
+
+    #[test]
+    fn the_remaining_field_shows_a_placeholder_until_a_byte_is_measured() {
+        // Before the first byte there is no estimate, however long the clock has
+        // run; from the first byte on the field is an ordinary time again.
+        let (_, _, remaining) = progress_stats(0, 200, Duration::from_secs(190));
+        assert_eq!(remaining_hms(0, remaining), NO_ESTIMATE);
+        let (_, _, remaining) = progress_stats(50, 200, Duration::from_secs(4));
+        assert_eq!(remaining_hms(50, remaining), "00:00:12");
+        // A finished scan reads zero seconds, not the placeholder — bytes were
+        // measured, and none are left.
+        assert_eq!(remaining_hms(200, 0), "00:00:00");
+    }
+
+    #[test]
+    fn the_placeholder_is_as_wide_as_the_time_it_stands_in_for() {
+        // The terminal line is truncated to the window width, so a placeholder
+        // wider or narrower than a time would shift the fields around it.
+        assert_eq!(NO_ESTIMATE.chars().count(), hms(0).chars().count());
     }
 
     #[test]
