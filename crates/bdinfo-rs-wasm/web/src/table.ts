@@ -43,8 +43,20 @@ export const PACKET_BYTES = 192;
 
 export const playlistsCard = el("playlists-card");
 export const playlistBody = el<HTMLTableSectionElement>("playlist-body");
+export const selectAllBtn = el<HTMLButtonElement>("select-all");
+export const clearBtn = el<HTMLButtonElement>("clear-sel");
 const selCount = el("sel-count");
 const hiddenHint = el("hidden-hint");
+
+/**
+ * Whether the scan set is frozen: a running scan measures the playlists it
+ * started with, so what names them cannot move under it. The active row and the
+ * measured cells are not part of the scan set and stay live — they show the
+ * running scan rather than change it.
+ */
+function frozen(): boolean {
+  return state.scanController !== null;
+}
 
 /** A row per playlist, in the table order `position` records. */
 export function playlistRows(playlists: Playlist[]): PlaylistRow[] {
@@ -141,8 +153,15 @@ function isAscending(rows: PlaylistRow[], column: SortColumn): boolean {
  * its direction; a click on any other column starts it ascending — unless the
  * rows already read ascending by that column, in which case it starts
  * descending. That keeps every click a visible re-order.
+ *
+ * Inert while the scan set is {@link frozen}: the report prints the scan set in
+ * table order, so a re-sort under a running scan would re-order a report that
+ * scan is still producing.
  */
 export function clickSort(column: SortColumn): void {
+  if (frozen()) {
+    return;
+  }
   const ascending =
     state.sort?.column === column ? !state.sort.ascending : !isAscending(state.displayed, column);
   state.sort = { column, ascending };
@@ -195,6 +214,7 @@ export function renderRows(): void {
   renderHint();
   ensureActive();
   updateSelection();
+  applyFreeze();
 }
 
 /** How many playlist names a hint line spells out before it counts the rest. */
@@ -292,10 +312,12 @@ function playlistRow(row: PlaylistRow, position: number, group: number): HTMLTab
   // playlist and fills the detail panes, like the desktop table.
   tr.addEventListener("click", (event) => {
     if (event.target === check || event.target === checkCell) {
-      if (event.target === checkCell) {
+      // The cell stands in for the box, so it has to refuse what the disabled
+      // box already refuses while the scan set is frozen.
+      if (event.target === checkCell && !frozen()) {
         check.checked = !check.checked;
+        updateSelection();
       }
-      updateSelection();
       return;
     }
     state.activeName = row.name;
@@ -328,8 +350,30 @@ export function updateSelection(): void {
       count += 1;
     }
   }
-  selCount.textContent = `${count} selected`;
-  scanBtn.disabled = count === 0 || !scanOffered();
+  // Nothing ticked is a whole-disc scan, not a refusal to scan, so the count
+  // says what the button will do rather than reading as an empty selection.
+  selCount.textContent = count === 0 ? "0 selected — scans all" : `${count} selected`;
+  // The only unscannable table is one with no rows in it: the settings can
+  // withhold every playlist the disc has, and there is then nothing to measure.
+  scanBtn.disabled = state.displayed.length === 0 || !scanOffered() || frozen();
+}
+
+/**
+ * Puts the freeze into effect on the controls that name the scan set — the row
+ * checkboxes, the two selection buttons and the sortable headers. Disabled
+ * rather than hidden: the user can still read what the running scan is
+ * measuring.
+ */
+export function applyFreeze(): void {
+  const scanning = frozen();
+  for (const box of rowBoxes()) {
+    box.disabled = scanning;
+  }
+  selectAllBtn.disabled = scanning;
+  clearBtn.disabled = scanning;
+  for (const th of playlistsCard.querySelectorAll<HTMLTableCellElement>("th[data-sort]")) {
+    th.classList.toggle("frozen", scanning);
+  }
 }
 
 export function selectedNames(): string[] {
@@ -343,7 +387,25 @@ export function selectedNames(): string[] {
   return names;
 }
 
+/**
+ * The playlists a measured scan covers: the ticked rows, or — with nothing
+ * ticked — every listed row, in table order. That is the desktop app's and the
+ * command line's whole-disc rule, so the filter settings widen and narrow what
+ * a whole-disc scan measures exactly as they widen and narrow the table.
+ *
+ * Always a list of names, never the empty list the module reads as "the
+ * standard set": that set is classified against the library's own default
+ * threshold and filter, which is not what this page is showing.
+ */
+export function scanNames(): string[] {
+  const selected = selectedNames();
+  return selected.length > 0 ? selected : state.displayed.map((row) => row.name);
+}
+
 export function setAll(checked: boolean): void {
+  if (frozen()) {
+    return;
+  }
   for (const box of rowBoxes()) {
     box.checked = checked;
   }

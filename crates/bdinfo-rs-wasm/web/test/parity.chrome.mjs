@@ -257,15 +257,43 @@ async function main() {
     await demoPage.goto(`${base}/index.html`);
     await demoPage.evaluate((items) => {
       // Record every request the page posts to a scan Worker, so the checks
-      // below can assert which settings cost a wasm call and which cost none.
+      // below can assert which settings cost a wasm call and which cost none,
+      // and which playlists each measured scan was asked for.
       const NativeWorker = window.Worker;
       window.__calls = [];
+      window.__selections = [];
+      // Cancels the running scan from inside the page, one message after its
+      // first measured snapshot has been applied. The fixture disc scans in
+      // well under a second, so a cancel driven from the test process would
+      // race the completion; this cannot.
+      window.__cancelOnMeasured = false;
       window.Worker = class extends NativeWorker {
+        #handler = null;
         postMessage(message, ...rest) {
           if (typeof message === "object" && message !== null && "kind" in message) {
             window.__calls.push(message.kind);
+            if ("selection" in message) {
+              window.__selections.push(message.selection);
+            }
           }
           super.postMessage(message, ...rest);
+        }
+        get onmessage() {
+          return this.#handler;
+        }
+        set onmessage(handler) {
+          this.#handler = handler;
+          super.onmessage = (event) => {
+            handler(event);
+            if (
+              window.__cancelOnMeasured &&
+              event.data?.type === "measured" &&
+              event.data.measured.playlists.some((playlist) => playlist.measuredBytes > 0)
+            ) {
+              window.__cancelOnMeasured = false;
+              document.getElementById("cancel-btn").click();
+            }
+          };
         }
       };
       const decode = (b64) => {
@@ -355,6 +383,16 @@ async function main() {
           reportHidden: document.getElementById("report-card").hidden,
           progressHidden: document.getElementById("progress-card").hidden,
           discardHidden: document.getElementById("discard-note").hidden,
+          selCount: document.getElementById("sel-count").textContent,
+          times: document.getElementById("progress-times").textContent,
+          // The scan-set controls: live between scans, inert while one runs.
+          scanDisabled: document.getElementById("scan-btn").disabled,
+          boxesDisabled: [...document.querySelectorAll("#playlist-body input[type=checkbox]")].map(
+            (box) => box.disabled,
+          ),
+          sortFrozen: [...document.querySelectorAll("th[data-sort]")].map((th) =>
+            th.classList.contains("frozen"),
+          ),
           calls: window.__calls.slice(),
         };
       });
@@ -406,9 +444,55 @@ async function main() {
     // report below comparable to the scan's own, byte for byte.
     await demoPage.click('th[data-sort="position"]');
 
+    // Nothing ticked is a whole-disc scan, not a refusal to scan: the button
+    // stays live and the count says what pressing it will do.
+    await demoPage.click("#clear-sel");
+    const cleared = await readDemo();
+    await demoPage.click("#select-all");
+    const reselected = await readDemo();
+
     // The measured scan through the page (both shown rows are ticked): the
     // report card appears and the panes' measured cells fill in place.
-    await demoPage.click("#scan-btn");
+    //
+    // `runScan` installs the scan and redraws the table synchronously, so
+    // everything read after the click below is genuinely mid-scan state — no
+    // polling, and no race with a fixture that finishes in under a second.
+    const midScan = await demoPage.evaluate(() => {
+      const read = () => ({
+        names: [...document.querySelectorAll("#playlist-body td.name")].map((td) => td.textContent),
+        selCount: document.getElementById("sel-count").textContent,
+        boxesDisabled: [...document.querySelectorAll("#playlist-body input[type=checkbox]")].map(
+          (box) => box.disabled,
+        ),
+        sortFrozen: [...document.querySelectorAll("th[data-sort]")].map((th) =>
+          th.classList.contains("frozen"),
+        ),
+        selectAllDisabled: document.getElementById("select-all").disabled,
+        clearDisabled: document.getElementById("clear-sel").disabled,
+        scanDisabled: document.getElementById("scan-btn").disabled,
+        progressHidden: document.getElementById("progress-card").hidden,
+        times: document.getElementById("progress-times").textContent,
+      });
+      document.getElementById("scan-btn").click();
+      const frozen = read();
+      // Every edit to the scan set is inert while the scan runs — the header
+      // sort, both selection buttons, and the check cell that stands in for a
+      // row's (now disabled) box.
+      document.querySelector('th[data-sort="name"]').click();
+      document.getElementById("select-all").click();
+      document.getElementById("clear-sel").click();
+      document.querySelector("#playlist-body td.col-check").click();
+      const afterEdits = read();
+      // The active row is not part of the scan set and stays live: clicking the
+      // other row re-targets the panes under the running scan.
+      document.querySelector('#playlist-body tr[data-name="00001.MPLS"] td.name').click();
+      const activated = {
+        active: document.querySelector("#playlist-body tr.active")?.dataset.name ?? null,
+        paneLabel: document.getElementById("pane-playlist").textContent,
+      };
+      document.querySelector('#playlist-body tr[data-name="00000.MPLS"] td.name').click();
+      return { frozen, afterEdits, activated };
+    });
     await demoPage.waitForFunction(() => !document.getElementById("report-card").hidden, {
       timeout: 120000,
     });
@@ -468,6 +552,25 @@ async function main() {
     );
     const zeroThreshold = await readDemo();
     await demoPage.click("#settings-close");
+
+    // A cancelled whole-disc scan. Nothing is ticked, so the scan set is every
+    // listed row — which the recorded request proves — and the page cancels
+    // itself the moment the first measured snapshot has been applied. What that
+    // snapshot ticked must still be standing afterwards, beside no report: a
+    // cancel measures something real and renders nothing.
+    await demoPage.click("#clear-sel");
+    const beforeCancel = await readDemo();
+    await demoPage.evaluate(() => {
+      window.__cancelOnMeasured = true;
+      document.getElementById("scan-btn").click();
+    });
+    await demoPage.waitForFunction(
+      () => document.getElementById("progress-card").hidden,
+      undefined,
+      { timeout: 120000 },
+    );
+    const cancelled = await readDemo();
+    const cancelledSelection = await demoPage.evaluate(() => window.__selections.at(-1));
 
     // A phone-width viewport must not scroll the page sideways — wide tables
     // scroll inside their own wrapper instead.
@@ -585,6 +688,9 @@ async function main() {
       grouped,
       noSuffix,
       preScan,
+      cleared,
+      reselected,
+      midScan,
       scanned,
       report,
       sdOff,
@@ -599,6 +705,9 @@ async function main() {
       thresholdApplied,
       retentionOff,
       zeroThreshold,
+      beforeCancel,
+      cancelled,
+      cancelledSelection,
       pageScrolls,
       damagedListing,
       persisted,
@@ -827,6 +936,81 @@ async function main() {
     "10.63 MB",
   ]);
   demoOk &= demoEq("display settings cost no wasm call", demo.preScan.calls, ["inspect"]);
+
+  // The empty selection: the button is live and the count says the scan covers
+  // everything, and ticking the rows again returns the plain count.
+  demoOk &= demoEq(
+    "an empty selection still scans",
+    demo.cleared.selCount,
+    "0 selected — scans all",
+  );
+  demoOk &= demoEq("the button is live at nothing selected", demo.cleared.scanDisabled, false);
+  demoOk &= demoEq("a selection counts itself", demo.reselected.selCount, "2 selected");
+  demoOk &= demoEq("the controls are live between scans", demo.preScan.sortFrozen, [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+  ]);
+  demoOk &= demoEq("the boxes are live between scans", demo.preScan.boxesDisabled, [false, false]);
+
+  // The mid-scan freeze: the scan set cannot move under the running scan, the
+  // readout waits for the first progress event, and the active row stays live.
+  demoOk &= demoEq("a running scan disables the boxes", demo.midScan.frozen.boxesDisabled, [
+    true,
+    true,
+  ]);
+  demoOk &= demoEq("a running scan freezes every sort header", demo.midScan.frozen.sortFrozen, [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+  ]);
+  demoOk &= demoEq(
+    "a running scan disables the selection buttons",
+    [
+      demo.midScan.frozen.selectAllDisabled,
+      demo.midScan.frozen.clearDisabled,
+      demo.midScan.frozen.scanDisabled,
+    ],
+    [true, true, true],
+  );
+  demoOk &= demoEq("the progress card is up", demo.midScan.frozen.progressHidden, false);
+  demoOk &= demoEq("the readout is blank before the first event", demo.midScan.frozen.times, "");
+  demoOk &= demoEq("a frozen sort header does not re-order", demo.midScan.afterEdits.names, [
+    "00001.MPLS [02 Chapters]",
+    "00000.MPLS",
+  ]);
+  demoOk &= demoEq(
+    "frozen selection edits change nothing",
+    demo.midScan.afterEdits.selCount,
+    "2 selected",
+  );
+  demoOk &= demoEq("the active row stays live mid-scan", demo.midScan.activated, {
+    active: "00001.MPLS",
+    paneLabel: "00001.MPLS",
+  });
+  demoOk &= demoEq("the scan releases the controls", demo.scanned.boxesDisabled, [false, false]);
+  demoOk &= demoEq("the scan releases the headers", demo.scanned.sortFrozen, [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+  ]);
+  // Digits normalized: the times themselves depend on how long the scan took,
+  // the shape does not — and it is a real estimate, not the `--:--:--` of a
+  // scan that never measured a byte.
+  demoOk &= demoEq(
+    "the readout keeps the last elapsed and remaining",
+    demo.scanned.times.replace(/\d/g, "0"),
+    "Elapsed 00:00:00 · Remaining 00:00:00",
+  );
   demoOk &= demoEq("scan keeps the active row", demo.scanned.active, "00000.MPLS");
   demoOk &= demoEq("measured size fills after the scan", demo.scanned.files, [
     ["00000.M2TS", "1", "00:00:30", "10.63 MB", "10.55 MB"],
@@ -937,6 +1121,31 @@ async function main() {
     "00002.MPLS",
   ]);
   demoOk &= demoEq("a zero threshold shows no short hint", demo.zeroThreshold.hintHidden, true);
+
+  // The cancelled whole-disc scan: the request named every listed row without a
+  // tick anywhere, the cells it managed to tick are still standing, and no
+  // report was rendered from them. The controls are released again.
+  demoOk &= demoEq("nothing measured before the cancelled scan", demo.beforeCancel.measured, [
+    "—",
+    "—",
+    "—",
+  ]);
+  demoOk &= demoEq("an empty selection asks for every listed row", demo.cancelledSelection, [
+    "00001.MPLS",
+    "00000.MPLS",
+    "00002.MPLS",
+  ]);
+  demoOk &= demoEq(
+    "a cancelled scan keeps what it measured",
+    demo.cancelled.measured.every((text) => text !== "—"),
+    true,
+  );
+  demoOk &= demoEq("a cancelled scan renders no report", demo.cancelled.reportHidden, true);
+  demoOk &= demoEq("a cancelled scan releases the boxes", demo.cancelled.boxesDisabled, [
+    false,
+    false,
+    false,
+  ]);
 
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
 

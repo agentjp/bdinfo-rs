@@ -79,6 +79,44 @@ export function errorReason(reason: ScanErrorReason): string {
   }
 }
 
+/** What the remaining field reads while nothing has been measured to extrapolate from. */
+const NO_ESTIMATE = "--:--:--";
+
+/**
+ * `hh:mm:ss` from whole seconds, hours ACCUMULATING — a scan past a day reads
+ * `25:01:01`. Deliberately unlike the table's `tableLength`, which wraps at 24
+ * because a playlist runtime never legitimately exceeds a day and a wall-clock
+ * estimate can.
+ */
+function hms(seconds: number): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(Math.trunc(seconds / 3600))}:${pad(Math.trunc(seconds / 60) % 60)}:${pad(seconds % 60)}`;
+}
+
+/**
+ * The progress card's `Elapsed hh:mm:ss · Remaining hh:mm:ss`, from the byte
+ * counts the last progress event reported and the wall time since the scan
+ * started.
+ *
+ * The estimate scales the elapsed time by the bytes still to read, so
+ * re-deriving it from RETAINED counts at a later `elapsedMs` makes it climb —
+ * which is what a caller ticking this on a wall clock wants a stalled read to
+ * look like. Before the first byte is measured there is nothing to extrapolate
+ * from, and the field reads {@link NO_ESTIMATE} rather than `00:00:00`, which
+ * would say "about to finish" for however long the stall lasts.
+ *
+ * The arithmetic is the library's `bdrom::progress::progress_stats` +
+ * `remaining_hms` (Rust), hand-written a second time here because a browser
+ * page cannot call it; the vectors in `test/parity.node.mjs` are the ones that
+ * module's own unit tests assert, so a change to either side that is not
+ * mirrored fails a test.
+ */
+export function elapsedRemaining(done: number, total: number, elapsedMs: number): string {
+  const left = Math.max(0, total - done);
+  const remaining = done === 0 ? NO_ESTIMATE : hms(Math.trunc((elapsedMs * left) / (done * 1000)));
+  return `Elapsed ${hms(Math.trunc(elapsedMs / 1000))} · Remaining ${remaining}`;
+}
+
 /**
  * The disc label a saved report is named after: the disc's own volume label,
  * falling back to `picked` — the name of the folder or file the user chose —

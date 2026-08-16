@@ -246,6 +246,35 @@ async function main() {
     );
   }
 
+  // The demo's Elapsed/Remaining readout against the vectors the library's own
+  // `bdrom::progress` unit tests assert — the arithmetic is written once per
+  // language and cannot be shared, so these rows are what keep the two from
+  // drifting. Reading the same byte counts at a LATER wall time must lengthen
+  // the estimate rather than hold it: that is what makes a stalled read visible
+  // instead of frozen.
+  const { elapsedRemaining } = await import("../dist/format.js");
+  const progressVectors = [
+    // 50 of 200 B after 4 s: a quarter read, so three times the elapsed to go.
+    [[50, 200, 4_000], "Elapsed 00:00:04 · Remaining 00:00:12"],
+    // The same event re-read 62 s later: both fields climb, nothing else moves.
+    [[50, 200, 65_999], "Elapsed 00:01:05 · Remaining 00:03:17"],
+    // Nothing measured yet — the estimate has nothing to extrapolate from, and
+    // says so rather than reading "about to finish" through a whole stall.
+    [[0, 200, 30_000], "Elapsed 00:00:30 · Remaining --:--:--"],
+    // A finished pass: bytes were measured and none are left.
+    [[200, 200, 7_000], "Elapsed 00:00:07 · Remaining 00:00:00"],
+    // Hours accumulate past a day instead of wrapping at 24 like a playlist runtime.
+    [[1, 2, 90_061_000], "Elapsed 25:01:01 · Remaining 25:01:01"],
+  ];
+  const progressMismatches = progressVectors.flatMap(([args, want]) => {
+    const got = elapsedRemaining(...args);
+    return got === want ? [] : [`${JSON.stringify(args)}: got "${got}", want "${want}"`];
+  });
+  const progressOk = progressMismatches.length === 0;
+  if (!progressOk) {
+    console.error(`FAIL — progress readout diverged: ${progressMismatches.join("; ")}`);
+  }
+
   // The report save-file name, sanitized by the core rule.
   const fileNameOk =
     report_file_name("WASMDISC") === "BDINFO.WASMDISC.txt" &&
@@ -416,6 +445,7 @@ async function main() {
     rejectionOk &&
     codecsOk &&
     sizeOk &&
+    progressOk &&
     fileNameOk &&
     fullOk &&
     keepPartialOk &&
@@ -427,7 +457,7 @@ async function main() {
     downloadNameOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + file name + download name + selection + round trip + retention + short-stream notices + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + progress readout + file name + download name + selection + round trip + retention + short-stream notices + .iso OK.`,
     );
     process.exit(0);
   }

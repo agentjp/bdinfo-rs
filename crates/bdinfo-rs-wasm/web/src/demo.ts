@@ -32,13 +32,18 @@ import {
 } from "./scan.js";
 import { initSettings } from "./settings.js";
 import { el, errMessage, showError, state } from "./state.js";
-import { clickSort, playlistsCard, type SortColumn, setAll } from "./table.js";
+import {
+  clearBtn,
+  clickSort,
+  playlistsCard,
+  type SortColumn,
+  selectAllBtn,
+  setAll,
+} from "./table.js";
 
 const dropzone = el<HTMLLabelElement>("dropzone");
 const picker = el<HTMLInputElement>("picker");
 const isoPicker = el<HTMLInputElement>("iso-picker");
-const selectAllBtn = el<HTMLButtonElement>("select-all");
-const clearBtn = el<HTMLButtonElement>("clear-sel");
 const cancelBtn = el<HTMLButtonElement>("cancel-btn");
 
 picker.addEventListener("change", () => {

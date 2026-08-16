@@ -12,11 +12,11 @@ import {
   type ScanError,
   scan,
 } from "./analyze.js";
-import { counted, errorLine, reportLabel } from "./format.js";
+import { counted, elapsedRemaining, errorLine, reportLabel } from "./format.js";
 import { applyMeasured } from "./panes.js";
 import { discardNote } from "./settings.js";
 import { el, errMessage, errorBox, hide, type Source, show, showError, state } from "./state.js";
-import { playlistRows, playlistsCard, renderRows, selectedNames } from "./table.js";
+import { playlistRows, playlistsCard, renderRows, scanNames } from "./table.js";
 
 const pickedBox = el("picked");
 const pickedName = el("picked-name");
@@ -26,6 +26,7 @@ export const scanBtn = el<HTMLButtonElement>("scan-btn");
 const progressCard = el("progress-card");
 const bar = el<HTMLProgressElement>("bar");
 const pctLabel = el("pct");
+const progressTimes = el("progress-times");
 const progressText = el("progress-text");
 export const reportCard = el("report-card");
 const reportPre = el("report");
@@ -235,24 +236,54 @@ export async function runScan(): Promise<void> {
   if (state.source === null || !scanOffered()) {
     return;
   }
-  const selection = selectedNames();
+  const selection = scanNames();
+  // An empty scan set means an empty table, not an empty selection — the
+  // button is disabled there, and a scan started any other way is refused on
+  // the same terms.
   if (selection.length === 0) {
     return;
   }
   const src = state.source;
   const controller = new AbortController();
   state.scanController = controller;
+  const gen = ++state.generation;
   hide(errorBox);
   hide(reportCard);
   hide(discardNote);
   show(progressCard);
   setProgress(0, "Preparing…");
-  scanBtn.disabled = true;
+  // This pass starts its tallies from zero, so whatever a cancelled or failed
+  // scan left ticked goes now rather than being overwritten row by row. The
+  // redraw is also what freezes the controls that name the scan set.
+  state.live.clear();
+  renderRows();
+  const started = performance.now();
+  // The last progress event's byte counts, retained so a wall-clock tick can
+  // re-derive the estimate from them. Null until the first event — the blind
+  // window the readout spends blank.
+  let counts: { done: number; total: number } | null = null;
+  const showTimes = () => {
+    progressTimes.textContent =
+      counts === null
+        ? ""
+        : elapsedRemaining(counts.done, counts.total, performance.now() - started);
+  };
+  showTimes();
   const onProgress = ({ file, done, total }: { file: string; done: number; total: number }) => {
     const percent = total > 0 ? Math.floor((done / total) * 100) : 0;
     setProgress(percent, `Scanning ${file}`);
+    counts = { done, total };
+    showTimes();
   };
-  const gen = ++state.generation;
+  // The estimate is re-derived from the retained counts on every tick, so a
+  // read that stalls makes Remaining climb each second instead of holding the
+  // value a now-stale event computed. Stamped like every other completion: a
+  // tick belonging to a scan the page has moved on from writes nothing.
+  const ticker = window.setInterval(() => {
+    if (gen === state.generation) {
+      showTimes();
+    }
+  }, 1000);
   const threshold = state.settings.shortPlaylistSeconds;
   const sections = {
     streamDiagnostics: state.settings.reportStreamDiagnostics,
@@ -292,14 +323,14 @@ export async function runScan(): Promise<void> {
       showError(errMessage(error));
     }
   } finally {
+    window.clearInterval(ticker);
     state.scanController = null;
     hide(progressCard);
-    scanBtn.disabled = selectedNames().length === 0 || !scanOffered();
-    // The overlay dies with the scan that fed it. A finished scan cleared it
-    // already, adopting the measured disc; a cancelled or failed one clears it
-    // here, and the redraw puts back what the held disc knows — partial numbers
-    // beside a report that does not carry them would be the worse half-state.
-    state.live.clear();
+    // A finished scan already dropped the overlay, adopting the measured disc.
+    // A cancelled or failed one KEEPS it: what the scan did measure before it
+    // stopped is real, and the desktop app leaves the same cells standing. The
+    // report is not made from it — a cancel still renders none — so the redraw
+    // only releases the controls and puts the cells back as they stand.
     renderRows();
   }
   // A report switch flipped while the scan ran was deferred (the disc it would
