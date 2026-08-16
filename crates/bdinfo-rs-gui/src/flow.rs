@@ -338,14 +338,17 @@ impl Listing {
 /// The scan-complete confirmation text for a scan that recorded `errors`
 /// failures.
 ///
-/// A clean success, or a note that the resilient scan still wrote the report
+/// A clean success, or a note that the resilient scan still generated the report
 /// — the message the shell shows in its completion modal.
 #[must_use]
 pub fn scan_notice(errors: usize) -> String {
     if errors == 0 {
         "Scan completed successfully.".to_owned()
     } else {
-        format!("Scan completed with {}.\nThe report was still written.", counted(errors, "error"))
+        format!(
+            "Scan completed with {}.\nThe report was still generated.",
+            counted(errors, "error")
+        )
     }
 }
 
@@ -1369,11 +1372,11 @@ mod tests {
         assert_eq!(super::scan_notice(0), "Scan completed successfully.");
         assert_eq!(
             super::scan_notice(1),
-            "Scan completed with 1 error.\nThe report was still written."
+            "Scan completed with 1 error.\nThe report was still generated."
         );
         assert_eq!(
             super::scan_notice(2),
-            "Scan completed with 2 errors.\nThe report was still written."
+            "Scan completed with 2 errors.\nThe report was still generated."
         );
     }
 
