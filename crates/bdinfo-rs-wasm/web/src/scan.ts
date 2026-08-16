@@ -30,6 +30,7 @@ export const scanBtn = el<HTMLButtonElement>("scan-btn");
 export const viewReportBtn = el<HTMLButtonElement>("view-report-btn");
 const progressCard = el("progress-card");
 const bar = el<HTMLProgressElement>("bar");
+const progressSpinner = el("progress-spinner");
 const pctLabel = el("pct");
 const progressTimes = el("progress-times");
 const progressText = el("progress-text");
@@ -292,11 +293,21 @@ export async function runScan(): Promise<void> {
   // re-derive the estimate from them. Null until the first event — the blind
   // window the readout spends blank.
   let counts: { done: number; total: number } | null = null;
+  // The whole blind window hangs off that one value: no estimate, no
+  // percentage, and a sweeping bar instead of a flat one. On a defective disc
+  // the first read can stall for the better part of a minute, and a `0%` beside
+  // a motionless bar claims a measurement that has not been made.
   const showTimes = () => {
+    // Read once into a local: the counts are written from another closure, so
+    // only a snapshot narrows for the estimate below.
+    const measured = counts;
+    progressSpinner.hidden = measured !== null;
+    pctLabel.hidden = measured === null;
+    bar.classList.toggle("indeterminate", measured === null);
     progressTimes.textContent =
-      counts === null
+      measured === null
         ? ""
-        : elapsedRemaining(counts.done, counts.total, performance.now() - started);
+        : elapsedRemaining(measured.done, measured.total, performance.now() - started);
   };
   showTimes();
   const onProgress = ({ file, done, total }: { file: string; done: number; total: number }) => {
