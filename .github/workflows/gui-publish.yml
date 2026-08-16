@@ -333,4 +333,3 @@ jobs:
         run: >-
           .github/scripts/publish-gui-cloudsmith.ps1
           -Version $env:VERSION -Tag $env:TAG -Mode publish -Payload payload
-
