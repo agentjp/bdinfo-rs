@@ -354,16 +354,6 @@ fn boot_with(mut app: App, base: Task<Message>) -> (App, Task<Message>) {
         std::env::var("BDINFO_GUI_SETTINGS").ok().map(|_| Task::done(Message::OpenSettings));
     let mut tasks = vec![base];
     tasks.extend(settings_dialog);
-    // BDINFO_GUI_SMOKE_MS=<ms>: exit cleanly after the delay — the headless
-    // launch smoke's seam ("the app opens, renders, exits 0"; see gui.yml).
-    // The sleep blocks one executor worker, which is fine for a debug hook.
-    if let Some(ms) = std::env::var("BDINFO_GUI_SMOKE_MS").ok().and_then(|v| v.parse::<u64>().ok())
-    {
-        tasks.push(Task::perform(
-            async move { std::thread::sleep(Duration::from_millis(ms)) },
-            |()| Message::SmokeExit,
-        ));
-    }
     // BDINFO_GUI_DRIVE=<dir>: run the scripted walk, markers into <dir> (see
     // [`DRIVE_STEPS`]). The directory is created here so the harness can start
     // watching it before the first marker lands.
@@ -448,6 +438,14 @@ fn debug_window_override(mut persisted: settings::Settings) -> settings::Setting
 #[cfg(debug_assertions)]
 fn drive_dir() -> Option<PathBuf> {
     std::env::var_os("BDINFO_GUI_DRIVE").map(PathBuf::from)
+}
+
+/// Debug only: the delay after which the app ends itself (`BDINFO_GUI_SMOKE_MS`),
+/// `None` when the hook is off. See [`App::subscription`] for why the deadline
+/// rides a subscription.
+#[cfg(debug_assertions)]
+fn smoke_ms() -> Option<u64> {
+    std::env::var("BDINFO_GUI_SMOKE_MS").ok().and_then(|v| v.parse().ok())
 }
 
 /// Debug only: the per-step capture window of the scripted walk, milliseconds
@@ -647,8 +645,9 @@ const fn drive_first_split(node: &pane_grid::Node) -> Option<pane_grid::Split> {
 }
 
 /// Delivers `message` after `ms` — the walk's scheduler. The sleep blocks one
-/// executor worker, the established debug-hook trade-off (`BDINFO_GUI_SMOKE_MS`
-/// sleeps the same way).
+/// executor worker until it returns, which also holds the process open that
+/// long after a close (see [`App::subscription`]); the walk's steps are ~1.5 s
+/// apart, so the delay a close can inherit here is bounded by one step.
 #[cfg(debug_assertions)]
 fn drive_after(ms: u64, message: Message) -> Task<Message> {
     Task::perform(async move { std::thread::sleep(Duration::from_millis(ms)) }, move |()| message)
@@ -1545,6 +1544,19 @@ impl App {
                 || std::env::var_os("BDINFO_GUI_ISO").is_some())
         {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::DebugAutoOpen));
+        }
+        // The smoke deadline (`BDINFO_GUI_SMOKE_MS`) is a SUBSCRIPTION, not a
+        // boot task: the blocking `std::thread::sleep` a task would hold parks
+        // an executor worker for the whole delay, and the process cannot exit
+        // while it is parked — so a window closed before the deadline left the
+        // app running, windowless, until the sleep returned (measured
+        // 2026-08-16 on Windows: the window went away on WM_CLOSE at t+14 s,
+        // the process not until the 60 s deadline). A subscription is torn
+        // down with the event loop, so an early close really ends the process.
+        // `every` repeats; the first tick exits, so the repeat never runs.
+        #[cfg(debug_assertions)]
+        if let Some(ms) = smoke_ms() {
+            subs.push(iced::time::every(Duration::from_millis(ms)).map(|_| Message::SmokeExit));
         }
         // The close button / Alt+F4: closing is manual (so the geometry saves
         // on the way out) — this feed is what makes the window closable at all.
