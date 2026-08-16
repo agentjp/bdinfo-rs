@@ -477,6 +477,13 @@ begin {
             Match      = { param($f) $f -eq '.github/scripts/check-workflow-permissions.ps1' }
         },
         @{
+            Name       = 'trusted-publishing trigger checker'
+            Areas      = @('yaml', 'workflows')
+            Structural = $true
+            Why        = 'The lint YAML job runs it beside the permission checker, over the same .github/workflows tree.'
+            Match      = { param($f) $f -eq '.github/scripts/check-trusted-publishing-triggers.ps1' }
+        },
+        @{
             Name       = 'packaging templates'
             Areas      = @()
             Structural = $true
