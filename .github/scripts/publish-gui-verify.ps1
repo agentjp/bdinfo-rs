@@ -25,7 +25,7 @@ param(
     [Parameter(Mandatory)] [string] $Tag,
     # The dispatch's channel selection: `all` or one channel name.
     [Parameter(Mandatory)]
-    [ValidateSet('all', 'winget', 'homebrew', 'aur', 'cloudsmith', 'crates')]
+    [ValidateSet('all', 'winget', 'homebrew', 'aur', 'cloudsmith')]
     [string] $Channels,
     # Where the release assets are downloaded for verification.
     [Parameter(Mandatory)] [string] $OutDir
@@ -100,7 +100,7 @@ foreach ($name in $expected) {
 
 # Channel matrix. AUR is armed by the AUR_ENABLED repo variable, like the
 # packages.yml aur job.
-$selected = if ($Channels -eq 'all') { @('winget', 'homebrew', 'aur', 'cloudsmith', 'crates') } else { @($Channels) }
+$selected = if ($Channels -eq 'all') { @('winget', 'homebrew', 'aur', 'cloudsmith') } else { @($Channels) }
 if ($env:AUR_ENABLED -ne 'true' -and $selected -contains 'aur') {
     if ($Channels -eq 'aur') {
         Stop-Leg 'AUR publishing is paused (repo variable AUR_ENABLED is not true); set it before an explicit aur dispatch'

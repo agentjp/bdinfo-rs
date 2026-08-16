@@ -263,6 +263,16 @@ The desktop app releases through its own hand-rolled lane (`gui-release.yml`), n
 macOS `.dmg`, Linux AppImage + `.deb` + `.rpm`), and publishes a GitHub Release marked not-latest.
 cargo-dist's `v` tag-namespace keeps the two lanes from ever firing each other.
 
+The publishing that follows is split by how each channel authenticates, mirroring the command-line
+lane. `gui-publish-crates.yml` puts the crate on crates.io from the tag push, because crates.io
+Trusted Publishing refuses to mint a token for a `workflow_run` trigger; `gui-publish.yml` then
+pushes the release's attested bytes to WinGet, the Homebrew cask, the AUR and Cloudsmith on
+`workflow_run`, using stored secrets. Both crates.io lanes bind the `crates-io` GitHub environment,
+which holds no secrets and exists so the minted token's OIDC claim names it — the trusted publisher
+records the workflow filename *and* that environment, so pushing a workflow is not by itself enough
+to publish a crate. `.github/scripts/check-trusted-publishing-triggers.ps1` fails CI if any
+`workflow_run` workflow tries to mint a registry token.
+
 **Versioning: two lanes, one version.** The library, the command line, the browser package and the
 desktop app move in lock-step: every surface carries the same `X.Y.Z`, and a release tags both
 lanes at it (`vX.Y.Z` and `gui-vX.Y.Z`). The lanes are separate because they build and publish
