@@ -1705,9 +1705,9 @@ impl App {
         match &result {
             Ok(structural) => {
                 log::info!(
-                    "listed {}: {} error(s) recorded",
+                    "listed {}: {} recorded",
                     input.display(),
-                    structural.warnings.len()
+                    report::counted(structural.warnings.len(), "error")
                 );
                 for warning in &structural.warnings {
                     log::info!("listing error: {warning}");
@@ -1830,9 +1830,9 @@ impl App {
             // a number: the elapsed readout is gone from the screen by the
             // time anyone writes the report up.
             log::info!(
-                "scan finished in {:.1}s: {} error(s) recorded",
+                "scan finished in {:.1}s: {} recorded",
                 self.scan_start.map_or(Duration::ZERO, |start| start.elapsed()).as_secs_f64(),
-                self.flow.report_errors().len()
+                report::counted(self.flow.report_errors().len(), "error")
             );
             for error in self.flow.report_errors() {
                 log::info!("scan error: {error}");
@@ -2016,10 +2016,10 @@ impl App {
         // is what a report is usually about, and the counts say how much of
         // the disc it covers: an unchecked table scans every listed playlist.
         log::info!(
-            "scan started: {} of {} playlist(s), {} stream file(s), input {}",
+            "scan started: {} of {}, {}, input {}",
             selection.len(),
-            self.flow.row_count(),
-            scan_files.len(),
+            report::counted(self.flow.row_count(), "playlist"),
+            report::counted(scan_files.len(), "stream file"),
             input.display()
         );
         if let Some(identity) = self.flow.disc_identity() {
@@ -2711,8 +2711,8 @@ impl App {
                 p,
                 p.warning,
                 &format!(
-                    "Completed with {} error(s) — the report below was still written.",
-                    errors.len()
+                    "Completed with {} — the report below was still written.",
+                    report::counted(errors.len(), "error")
                 ),
             ));
         }
@@ -4211,7 +4211,7 @@ mod interaction {
         assert!(sees(&app, failure), "the banner carries the recorded failure");
         let text = std::fs::read_to_string(&log).expect("the diagnostics log reads");
         assert!(
-            text.contains("listed disc: 1 error(s) recorded"),
+            text.contains("listed disc: 1 error recorded"),
             "the listing outcome counts them: {text}"
         );
         assert!(text.contains(&format!("listing error: {failure}")), "and names each: {text}");

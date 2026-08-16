@@ -12,6 +12,15 @@
 import type { ScanError, ScanErrorReason } from "./analyze.js";
 
 /**
+ * The count with its noun's number agreed — `"1 error"`, `"0 errors"`,
+ * `"3 files"`. The noun is the singular; the plural is `s`-appended, which
+ * every noun the demo counts inflects regularly.
+ */
+export function counted(n: number, noun: string): string {
+  return n === 1 ? `1 ${noun}` : `${n} ${noun}s`;
+}
+
+/**
  * A size cell under the size-format setting: `83.62 GB` / `335.37 MB`
  * (1024-based, like BDInfo) when `humanReadable`, the thousands-grouped exact
  * byte count (`11,145,216`) when not, and `—` for a size nothing knows yet.

@@ -225,7 +225,7 @@ fn scan_disc(
 /// Prints the "scan completed with errors" stderr summary — one line per recorded
 /// failure (the always-report discipline; stdout stays clean).
 fn report_errors(errors: &[ScanError]) {
-    eprintln!("warning: scan completed with {} error(s):", errors.len());
+    eprintln!("warning: scan completed with {}:", report::counted(errors.len(), "error"));
     for err in errors {
         eprintln!("warning:   {err}");
     }

@@ -30,7 +30,7 @@ import {
   type Stream,
   scan,
 } from "./analyze.js";
-import { errorLine, sizeCell as formatSize, reportLabel } from "./format.js";
+import { counted, errorLine, sizeCell as formatSize, reportLabel } from "./format.js";
 
 /**
  * One selection-table row — the CLI columns this page draws, distilled from a
@@ -389,7 +389,7 @@ async function loadSource(src: Source): Promise<void> {
   discName = src.label;
   pickedName.textContent = discName;
   pickedCount.textContent =
-    src.kind === "folder" ? `${src.files.length} files` : "disc image (.iso)";
+    src.kind === "folder" ? counted(src.files.length, "file") : "disc image (.iso)";
   mainEl.classList.remove("landing");
   show(pickedBox);
   hide(errorBox);
@@ -476,7 +476,7 @@ function adoptDisc(next: Disc, threshold: number): void {
  * disc is damaged. A disc that recorded none hides it.
  */
 function renderScanErrors(errors: ScanError[]): void {
-  scanErrorsCount.textContent = `Recorded ${errors.length} error(s) — the readable rest is shown.`;
+  scanErrorsCount.textContent = `Recorded ${counted(errors.length, "error")} — the readable rest is shown.`;
   scanErrorsList.replaceChildren(
     ...errors.map((error) => {
       const item = document.createElement("li");
