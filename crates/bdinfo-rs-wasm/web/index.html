@@ -757,6 +757,9 @@
         overflow: auto;
         max-height: 60vh;
         background: var(--report-bg);
+        /* The well keeps its dark ground in the light theme, so its own
+           scrollbars must stay dark while the page around them goes light. */
+        color-scheme: dark;
       }
       .copied {
         color: var(--ok) !important;
