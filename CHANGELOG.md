@@ -80,6 +80,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command line and the desktop app, instead of `00:00:00` — which read as "about to finish" at
   the moment nothing had been read, and could stand there for minutes beside a stalled read.
   ([#378](https://github.com/agentjp/bdinfo-rs/issues/378))
+* **gui:** deciding whether a path names a disc folder or an `.iso` image no longer reads the
+  filesystem — the kind is taken from the path's spelling, and whether the path can be opened is
+  answered by the listing worker. A source that has stopped answering (an unplugged drive, a share
+  that is gone) therefore no longer freezes the window before it appears when it is the remembered
+  last source, nor freezes a running window when it is dropped onto it; the stall lands on the
+  worker, behind the scan overlay's Cancel. A path that is missing or is not a disc still reaches
+  the same failure screen with the same message. ([#379](https://github.com/agentjp/bdinfo-rs/issues/379))
 * **gui:** the log records a stall clearing as well as a stall starting, the scan overlay no longer
   passes clicks and drags through to the table beneath it, the scan-notice modal stops referring to
   a report below it, and a refused report save names the destination it tried.

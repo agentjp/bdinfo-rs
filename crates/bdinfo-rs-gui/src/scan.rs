@@ -45,30 +45,30 @@ pub enum Input {
 }
 
 impl Input {
-    /// Classifies a path arriving from outside the pickers — a drag-and-drop
-    /// item or a command-line argument — into the input the open flow takes:
-    /// a directory is a [`Input::Folder`], a file with a `.iso` extension
-    /// (case-insensitive) a [`Input::Iso`]. The one classifier both roads
-    /// share, so a dropped disc and `bdinfo-rs-gui <path>` can never diverge.
+    /// Decides which input a path arriving from outside the pickers — a
+    /// drag-and-drop item, a command-line argument, the recalled last source —
+    /// names, **from its spelling alone**: a `.iso` extension (ASCII
+    /// case-insensitive) is an [`Input::Iso`], anything else an
+    /// [`Input::Folder`]. The one classifier every such road shares, so a
+    /// dropped disc and `bdinfo-rs-gui <path>` can never diverge.
+    ///
+    /// It reads nothing, and must not: every caller runs on the UI thread —
+    /// the recall before the window even exists — and a `std::fs` stat of a
+    /// path that does not answer (a dropped network share, an optical drive
+    /// inside its retry storm) blocks in an uninterruptible kernel wait, which
+    /// on Windows leaves a process that cannot be ended. Whether the path is
+    /// there, and is the kind of thing its spelling promised, is
+    /// [`scan_structural`]'s answer — on the worker thread, where a stall
+    /// costs one thread and the user keeps a live Cancel.
     ///
     /// The extension check compares [`std::ffi::OsStr`] bytes directly, so a
-    /// non-UTF-8 path classifies (and fails) without a lossy conversion.
-    ///
-    /// # Errors
-    /// A short user-facing message when the path is neither a directory nor a
-    /// `.iso` file (or does not exist at all) — shown by the same friendly
-    /// failure state a bad pick reaches.
-    pub fn classify(path: PathBuf) -> Result<Self, String> {
-        if path.is_dir() {
-            return Ok(Self::Folder(path));
-        }
-        if path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("iso")) {
-            return Ok(Self::Iso(path));
-        }
-        if path.exists() {
-            Err(format!("Not a Blu-ray disc folder or .iso image: {}", path.display()))
+    /// non-UTF-8 path classifies without a lossy conversion.
+    #[must_use]
+    pub fn classify(path: PathBuf) -> Self {
+        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("iso")) {
+            Self::Iso(path)
         } else {
-            Err(format!("The path does not exist: {}", path.display()))
+            Self::Folder(path)
         }
     }
 
@@ -150,6 +150,34 @@ fn open(
 /// holds no readable structure at all.
 type Opened = Result<(BdRom, Vec<ScanError>), String>;
 
+/// Rejects an input the filesystem cannot serve, in the two messages the
+/// friendly failure state shows: a path that is not there, and a path that is
+/// there but is not the kind of thing [`Input::classify`] read off its
+/// spelling (a stray file, or a directory named `*.iso`).
+///
+/// This is the whole of the seam's filesystem validation, and it runs here —
+/// inside the listing, on whatever thread called it — because each of these
+/// stats blocks for as long as the filesystem makes it, and the shell
+/// classifies on its UI thread. Letting the core's own open speak instead is
+/// not equivalent: a folder that is not there reaches
+/// [`BdError::StructureNotFound`], whose "unable to locate BD structure" is
+/// both wrong and less useful than saying the path does not exist.
+fn openable(input: &Input) -> Result<(), String> {
+    let path = input.path();
+    let usable = match input {
+        Input::Folder(_) => path.is_dir(),
+        Input::Iso(_) => path.is_file(),
+    };
+    if usable {
+        return Ok(());
+    }
+    if path.exists() {
+        Err(format!("Not a Blu-ray disc folder or .iso image: {}", path.display()))
+    } else {
+        Err(format!("The path does not exist: {}", path.display()))
+    }
+}
+
 /// Recorded scan failures as display strings, for the UI's warning surfaces.
 fn error_lines(errors: &[ScanError]) -> Vec<String> {
     errors.iter().map(ToString::to_string).collect()
@@ -173,7 +201,9 @@ pub const fn no_progress(_: ScanProgress<'_>) {}
 /// never wait on one to conclude a cancelled listing is over.
 ///
 /// # Errors
-/// A short message when the input holds no readable Blu-ray structure (no
+/// A short message when the path is not there or is not the kind of thing its
+/// spelling promised (the filesystem check [`Input::classify`] leaves to this
+/// road), when the input holds no readable Blu-ray structure (no
 /// `BDMV`/`CLIPINF`/`PLAYLIST`, or a `.iso` that is not a readable UDF
 /// volume), or when `cancel` was set mid-listing.
 pub fn scan_structural(
@@ -181,6 +211,7 @@ pub fn scan_structural(
     progress: &mut dyn FnMut(ScanProgress<'_>),
     cancel: &AtomicBool,
 ) -> Result<Structural, String> {
+    openable(input)?;
     let (bdrom, errors) = listing_scan(|mode, options| {
         // The options come from `listing_scan` (the default plus its AACS
         // verdict reuse), never the user's settings: the partial-retention
@@ -433,45 +464,66 @@ mod tests {
     }
 
     #[test]
-    fn classify_takes_a_directory_as_a_folder() {
+    fn classify_takes_a_path_without_an_iso_extension_as_a_folder() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(Input::classify(dir.clone()), Ok(Input::Folder(dir)));
+        assert_eq!(Input::classify(dir.clone()), Input::Folder(dir));
         // A trailing separator classifies the same directory.
         let mut trailing = env!("CARGO_MANIFEST_DIR").to_owned();
         trailing.push(std::path::MAIN_SEPARATOR);
         let trailing = PathBuf::from(trailing);
-        assert_eq!(Input::classify(trailing.clone()), Ok(Input::Folder(trailing)));
+        assert_eq!(Input::classify(trailing.clone()), Input::Folder(trailing));
     }
 
     #[test]
-    fn classify_takes_an_iso_file_by_extension() {
+    fn classify_takes_an_iso_by_extension() {
         let iso = fixture("BigBuckBunny.iso");
-        assert_eq!(Input::classify(iso.clone()), Ok(Input::Iso(iso)));
+        assert_eq!(Input::classify(iso.clone()), Input::Iso(iso));
     }
 
     #[test]
     fn classify_ignores_the_extension_case() {
-        // `.ISO` must classify like `.iso`; the fixture is lower-case, so make a
-        // scratch file (the classifier requires the file to exist).
-        let path = std::env::temp_dir().join("bdinfo-rs-gui-classify-case.ISO");
-        std::fs::write(&path, b"x").expect("the scratch file writes");
-        let result = Input::classify(path.clone());
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(result, Ok(Input::Iso(path)));
+        // `.ISO` classifies like `.iso`.
+        let shouting = PathBuf::from("DISC.ISO");
+        assert_eq!(Input::classify(shouting.clone()), Input::Iso(shouting));
     }
 
     #[test]
-    fn classify_rejects_a_file_that_is_not_an_iso() {
+    fn classify_answers_for_a_path_that_is_not_there() {
+        // The no-IO contract, observable in-process: NEITHER path exists, so a
+        // classifier that consulted the filesystem could not return a variant
+        // for either — and on a path that never answers, the stat it would
+        // take never returns at all.
+        let folder = fixture("no-such-thing");
+        assert_eq!(Input::classify(folder.clone()), Input::Folder(folder));
+        let iso = fixture("no-such-thing.iso");
+        assert_eq!(Input::classify(iso.clone()), Input::Iso(iso));
+    }
+
+    #[test]
+    fn a_path_that_is_not_there_fails_the_listing_by_name() {
+        // The message the friendly failure state shows, whole: the core's own
+        // "unable to locate BD structure" would be both wrong and less useful.
+        let missing = fixture("no-such-thing");
+        let message = scan_structural(&Input::classify(missing.clone()))
+            .expect_err("a missing path lists nothing");
+        assert_eq!(message, format!("The path does not exist: {}", missing.display()));
+    }
+
+    #[test]
+    fn a_path_that_is_not_what_its_name_promises_fails_the_listing() {
+        // A real file with no `.iso` extension classifies as a folder, and a
+        // real directory named `*.iso` classifies as an image: both are there,
+        // and neither can be opened as what it was taken for.
         let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let message = Input::classify(file).expect_err("a stray file is rejected");
-        assert!(message.contains("Not a Blu-ray disc folder or .iso image"));
-    }
-
-    #[test]
-    fn classify_rejects_a_nonexistent_path() {
         let message =
-            Input::classify(fixture("no-such-thing.iso")).expect_err("a missing path is rejected");
-        assert!(message.contains("does not exist"));
+            scan_structural(&Input::classify(file.clone())).expect_err("a stray file is rejected");
+        assert_eq!(message, format!("Not a Blu-ray disc folder or .iso image: {}", file.display()));
+
+        let dir = scratch("dir-named-iso").join("disc.iso");
+        std::fs::create_dir_all(&dir).expect("the scratch dir creates");
+        let message = scan_structural(&Input::classify(dir.clone()))
+            .expect_err("a directory is no .iso image");
+        assert_eq!(message, format!("Not a Blu-ray disc folder or .iso image: {}", dir.display()));
     }
 
     #[test]
@@ -944,9 +996,12 @@ mod tests {
     fn classify_survives_a_non_utf8_path() {
         use std::os::windows::ffi::OsStringExt;
 
-        // An unpaired surrogate — representable in a Windows path, not in UTF-8.
+        // An unpaired surrogate — representable in a Windows path, not in
+        // UTF-8 — ending in `.iso`: the extension is compared as bytes, so it
+        // still reads as an image rather than tripping over the conversion.
         let bogus = std::ffi::OsString::from_wide(&[0xD800, 0x002E, 0x0069, 0x0073, 0x006F]);
-        assert!(Input::classify(PathBuf::from(bogus)).is_err());
+        let bogus = PathBuf::from(bogus);
+        assert_eq!(Input::classify(bogus.clone()), Input::Iso(bogus));
     }
 
     #[cfg(unix)]
@@ -954,8 +1009,11 @@ mod tests {
     fn classify_survives_a_non_utf8_path() {
         use std::os::unix::ffi::OsStringExt;
 
-        // Raw bytes that are not UTF-8, ending in `.iso`.
+        // Raw bytes that are not UTF-8, ending in `.iso`: the extension is
+        // compared as bytes, so it still reads as an image rather than
+        // tripping over the conversion.
         let bogus = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, b'.', b'i', b's', b'o']);
-        assert!(Input::classify(PathBuf::from(bogus)).is_err());
+        let bogus = PathBuf::from(bogus);
+        assert_eq!(Input::classify(bogus.clone()), Input::Iso(bogus));
     }
 }

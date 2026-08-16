@@ -267,11 +267,15 @@ fn attended_session() -> bool {
 /// Boots the app and fires a one-shot request for the OS theme, so the first
 /// frame matches the desktop's light/dark setting. The persisted state seeds
 /// the launch: the stored theme preference applies, and the last opened source
-/// — when it still exists — shows in the Source field with "Rescan" live
-/// (`BDInfo` seeds its source box from `LastPath` the same way), but nothing
-/// scans until asked; a vanished path starts clean. A command-line path
-/// (`bdinfo-rs-gui <path>`, `BDInfo`'s `args[0]`) opens at boot through the same
-/// classify-and-list road a drop takes — `open` arrives from
+/// shows in the Source field with "Rescan" live (`BDInfo` seeds its source box
+/// from `LastPath` the same way), but nothing scans until asked. The recall
+/// takes the source's kind off the path's spelling and reads nothing
+/// ([`Input::classify`]) — a stat here would run before iced has created the
+/// window, so a source that no longer answers would leave a process with no
+/// window and no way to end it. A source that has gone away is therefore
+/// recalled like any other, and says so when the user rescans it. A
+/// command-line path (`bdinfo-rs-gui <path>`, `BDInfo`'s `args[0]`) opens at
+/// boot through the same road a drop takes — `open` arrives from
 /// [`args::classify`] over the OS-native argv, so a non-UTF-8 path survives
 /// intact. In a **debug** build it also applies the screenshot-harness
 /// environment hooks (see the debug `boot_with`).
@@ -286,13 +290,8 @@ fn boot(
         persisted,
         ..App::default()
     };
-    if let Some(input) = app
-        .persisted
-        .last_path
-        .clone()
-        .and_then(|path| Input::classify(path).log_err("last-path recall").ok())
-    {
-        app.flow = Flow::recall(input);
+    if let Some(path) = app.persisted.last_path.clone() {
+        app.flow = Flow::recall(Input::classify(path));
     }
     let mut tasks = vec![iced::system::theme().map(Message::OsTheme)];
     if let Some(path) = open {
@@ -995,8 +994,8 @@ enum Message {
     FolderPicked(Option<PathBuf>),
     /// The `.iso` file dialog closed.
     IsoPicked(Option<PathBuf>),
-    /// A path arrived from outside the pickers (the boot argument) — classify
-    /// it and open like a pick, or land in the friendly failure state.
+    /// A path arrived from outside the pickers (the boot argument) — read its
+    /// kind off the spelling and open it like a pick.
     OpenPath(PathBuf),
     /// A drag-and-drop payload entered the window (one event per held file).
     FileHovered,
@@ -1902,34 +1901,14 @@ impl App {
         Task::none()
     }
 
-    /// Opens `path` — a dropped item or the boot argument — through the same
-    /// classify-and-list road the pickers take ([`Input::classify`], the one
-    /// classifier both roads share). Ignored while a scan is in flight,
-    /// the same rule that disables the Source buttons; a path that is neither a
-    /// directory nor a `.iso` file lands in the same friendly failure state as
-    /// a bad pick, with the loaded-disc chrome cleared like any new open.
+    /// Opens `path` — a dropped item or the boot argument — like a pick, with
+    /// its kind read off the spelling ([`Input::classify`], the one classifier
+    /// both roads share) so that this, the UI thread, never stats a path that
+    /// may not answer. A path that is not there, or is not the kind of thing
+    /// its name promised, lands in the same friendly failure state as a bad
+    /// pick — from the listing worker, which is where the filesystem is read.
     fn open_path(&mut self, path: PathBuf) -> Task<Message> {
-        if self.is_busy() {
-            return Task::none();
-        }
-        match Input::classify(path) {
-            Ok(input) => self.begin_listing(input),
-            Err(message) => {
-                // The one open road that ends before `begin_listing` — and so
-                // before the "listing …" line — leaving a log in which a drop
-                // or a command-line path the user swears they gave simply
-                // never appears.
-                log::info!("open failed: {message}");
-                self.status = None;
-                self.showing_report = false;
-                self.notice = None;
-                self.hovered = None;
-                self.hovered_header = None;
-                self.pane_selection = None;
-                self.flow = std::mem::take(&mut self.flow).open_failed(message);
-                Task::none()
-            }
-        }
+        self.picked(Input::classify(path))
     }
 
     /// Begins the initial scan of `input` — the bounded `Codecs` pass, which
@@ -4680,14 +4659,25 @@ mod interaction {
 
     #[test]
     fn a_bad_path_lands_in_the_friendly_failure_screen() {
-        // A REAL file that is not an `.iso` (this crate's own manifest), so
-        // the classifier's extension road runs before rejecting it.
+        // A REAL file that is not an `.iso` (this crate's own manifest). The
+        // open reads no filesystem: it takes the path for a folder on its
+        // spelling and hands it to the listing worker, so the rejection
+        // arrives as that worker's result — which is what is injected here,
+        // straight from the seam rather than as a literal.
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let mut app = App::default();
         let _ = app.update(Message::OpenPath(manifest.clone()));
+        assert_eq!(app.flow.stage(), Stage::Listing, "the open goes to the worker");
+        let input = bdinfo_rs_gui::scan::Input::classify(manifest.clone());
+        let result = bdinfo_rs_gui::scan::scan_structural(
+            &input,
+            &mut bdinfo_rs_gui::scan::no_progress,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        let _ = app.update(Message::Listed { generation: app.generation, input, result });
         assert_eq!(app.flow.stage(), Stage::Failed);
         assert!(sees(&app, "Couldn't open the disc"));
-        // The classifier's whole message renders (the selector is exact-text).
+        // The seam's whole message renders (the selector is exact-text).
         assert!(sees(
             &app,
             &format!("Not a Blu-ray disc folder or .iso image: {}", manifest.display())
@@ -4697,16 +4687,20 @@ mod interaction {
     #[test]
     fn only_the_first_dropped_item_opens() {
         // Two files dropped together: winit hovers both, then drops both. The
-        // first drop takes the hover flag and opens (here: fails classify);
-        // the second must be ignored, not clobber the first.
+        // first drop takes the hover flag and opens; the second must be
+        // ignored, not clobber the first.
         let mut app = App::default();
         let _ = app.update(Message::FileHovered);
         let _ = app.update(Message::FileHovered);
         let _ = app.update(Message::FileDropped(PathBuf::from("first.xyz")));
+        assert!(!app.drop_hover, "the first drop consumed the flag both hovers set");
         let _ = app.update(Message::FileDropped(PathBuf::from("second.xyz")));
-        assert_eq!(app.flow.stage(), Stage::Failed);
-        assert!(sees(&app, "The path does not exist: first.xyz"), "the FIRST item won the drop");
-        assert!(!sees(&app, "The path does not exist: second.xyz"));
+        assert_eq!(app.flow.stage(), Stage::Listing);
+        assert_eq!(
+            app.flow.current_input(),
+            Some(&bdinfo_rs_gui::scan::Input::Folder(PathBuf::from("first.xyz"))),
+            "the FIRST item won the drop"
+        );
     }
 
     /// A scratch directory under the crate's target dir (unique per test) for

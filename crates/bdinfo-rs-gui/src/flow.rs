@@ -514,19 +514,6 @@ impl Flow {
         }
     }
 
-    /// A path arriving from outside the pickers (a drop or the boot argument)
-    /// was not a disc folder or `.iso` — enter the same fatal state a failed
-    /// pick reaches, carrying the classifier's message. A no-op while a scan
-    /// is in flight ([`Stage::Listing`] / [`Stage::Scanning`]): the shell
-    /// ignores drops while busy, and this transition enforces the same rule.
-    #[must_use]
-    pub fn open_failed(self, message: String) -> Self {
-        match self.inner {
-            Inner::Listing { .. } | Inner::Scanning { .. } => self,
-            _ => Self { inner: Inner::Failed(message) },
-        }
-    }
-
     /// Toggles the checkbox at `index` (only while the table is editable —
     /// [`Stage::Listed`] / [`Stage::Reported`]). The scan set changed, so the
     /// retained pre-scan report refreshes with it.
@@ -1492,28 +1479,6 @@ mod tests {
         );
         assert_eq!(flow.stage(), Stage::Failed);
         assert_eq!(flow.error_message(), Some("no BD"));
-    }
-
-    #[test]
-    fn a_rejected_open_is_fatal_like_a_bad_pick() {
-        // From idle and from a loaded disc alike, the rejection lands in the
-        // same failure state a bad pick reaches.
-        let flow = Flow::idle().open_failed("not a disc".to_owned());
-        assert_eq!(flow.stage(), Stage::Failed);
-        assert_eq!(flow.error_message(), Some("not a disc"));
-        assert_eq!(listed().open_failed("not a disc".to_owned()).stage(), Stage::Failed);
-    }
-
-    #[test]
-    fn a_rejected_open_never_interrupts_a_running_scan() {
-        // While listing, the drop is ignored — the listing continues.
-        let flow = Flow::start_listing(input()).open_failed("nope".to_owned());
-        assert_eq!(flow.stage(), Stage::Listing);
-        // While a measured scan runs, likewise.
-        let mut flow = listed();
-        flow.toggle(0);
-        let flow = flow.start_scanning(1).open_failed("nope".to_owned());
-        assert_eq!(flow.stage(), Stage::Scanning);
     }
 
     #[test]
@@ -2695,7 +2660,7 @@ mod tests {
             Failed(u64),
             Cancel,
             Relist,
-            OpenRejected,
+            RelistRejected,
         }
 
         /// One of a few representative view configurations — a filter change,
@@ -2749,7 +2714,7 @@ mod tests {
                 (0_u64..4).prop_map(Event::Failed),
                 Just(Event::Cancel),
                 Just(Event::Relist),
-                Just(Event::OpenRejected),
+                Just(Event::RelistRejected),
             ]
         }
 
@@ -2826,16 +2791,13 @@ mod tests {
                         }
                         Event::Cancel => flow = flow.cancel(),
                         Event::Relist => flow = Flow::start_listing(input()).listed(&input(), Ok(structural()), ViewSettings::default()),
-                        Event::OpenRejected => {
-                            let before = flow.stage();
-                            flow = flow.open_failed("nope".to_owned());
-                            // A rejected open fails from any settled state but
-                            // never interrupts an in-flight scan.
-                            if matches!(before, Stage::Listing | Stage::Scanning) {
-                                prop_assert_eq!(flow.stage(), before);
-                            } else {
-                                prop_assert_eq!(flow.stage(), Stage::Failed);
-                            }
+                        Event::RelistRejected => {
+                            // The twin of `Relist`: the same open, refused by
+                            // the listing worker (an unopenable path, a disc
+                            // with no structure), which is fatal from wherever
+                            // the flow stood.
+                            flow = Flow::start_listing(input()).listed(&input(), Err("nope".to_owned()), ViewSettings::default());
+                            prop_assert_eq!(flow.stage(), Stage::Failed);
                         }
                     }
                     // The stage is always one of the legal states, and an
