@@ -119,8 +119,37 @@ else {
     if (-not $landed) { $failures += 'the Settings click changed no pixels (missed or blocked)' }
 }
 
-Write-Host '==> waiting for the smoke-deadline exit'
-$exited = $proc.WaitForExit($SmokeMs)
+# End the app on the walk's clock, not the boot clock — the same change as the
+# other two legs, with System Events' close button as this platform's close
+# gesture. BDINFO_GUI_SMOKE_MS is a sleep the app starts at BOOT, so waiting it
+# out burns ~100 s of pure sleep after the walk has finished. No new debug hook
+# is needed: `exit_on_close_request` is false and
+# `iced::window::close_requests()` is subscribed unconditionally, so an OS
+# close request routes CloseRequested -> close_with_geometry -> SaveAndClose ->
+# window::close and the process exits 0 once its last window is gone.
+#
+# Deliberately OUTSIDE the `$geomOk` block above: that block is skipped
+# whenever the geometry lookup is refused, and this leg still wants its exit
+# shortened when the walk never ran. Best-effort throughout — Accessibility is
+# exactly what this leg exists to probe, so a refused close is expected here
+# and must fall through to the smoke deadline rather than fail the run.
+$CloseGraceMs = 15000
+Write-Host '==> asking the window to close (System Events)'
+try {
+    & osascript -e 'tell application "System Events" to click button 1 of window 1 of (first process whose name is "bdinfo-rs-gui")' 2>&1 |
+        ForEach-Object { Write-Host "    $_" }
+}
+catch { Write-Host "!! the close gesture was refused: $_" }
+$exited = $proc.WaitForExit($CloseGraceMs)
+if ($exited) {
+    Write-Host '==> app ended by: the injected close'
+}
+else {
+    Write-Host '!! the injected close did not land — falling back to the smoke deadline'
+    Write-Host '==> waiting for the smoke-deadline exit'
+    $exited = $proc.WaitForExit($SmokeMs)
+    if ($exited) { Write-Host '==> app ended by: the smoke deadline' }
+}
 if (-not $exited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
 $code = if ($exited) { $proc.ExitCode } else { 'killed' }
 Write-Host "==> app exit code $code"

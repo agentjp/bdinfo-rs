@@ -13,8 +13,10 @@
 # probe with a visible effect). PrintWindow screenshots after every event are
 # the evidence; one hard automated assert (the Settings click must change the
 # rendered pixels vs the shot before it) proves input actually reached the
-# app. The app exits by the BDINFO_GUI_SMOKE_MS deadline — exit 0 means the
-# event loop survived the whole injected walk.
+# app. The walk ends by injecting the platform's close gesture and the app
+# exits 0 through its own save-and-close path, with the BDINFO_GUI_SMOKE_MS
+# deadline kept as the backstop — exit 0 either way means the event loop
+# survived the whole injected walk.
 #
 # Every click re-verifies GetForegroundWindow() is still the app first —
 # injected input lands wherever the OS says focus is, never click blind.
@@ -410,8 +412,34 @@ $after = Get-FileHash (Join-Path $Gallery '04-settings-open.png') -ErrorAction S
 $landed = $before -and $after -and ($before.Hash -ne $after.Hash)
 Write-Host "==> settings-click pixel change: $landed"
 
-Write-Host '==> waiting for the smoke-deadline exit'
-$exited = $proc.WaitForExit($SmokeMs)
+# End the app on the walk's clock, not the boot clock. BDINFO_GUI_SMOKE_MS is
+# a sleep the app starts at BOOT, so waiting it out burns ~100 s of pure sleep
+# after the walk has finished. The app is closable without any new debug hook:
+# `exit_on_close_request` is false and `iced::window::close_requests()` is
+# subscribed unconditionally, so an OS close request routes CloseRequested ->
+# close_with_geometry -> SaveAndClose -> window::close, and the process exits 0
+# once its last window is gone. WM_CLOSE is the same primitive Send-Click uses
+# on blocker windows above.
+#
+# The smoke deadline stays as the BACKSTOP: if the close does not land, this
+# falls through to the original wait and the original failure text, so a lost
+# close costs exactly what it costs today and reddens nothing new. Closing this
+# way also exercises the save-and-close path, which writes gui.conf into the
+# isolated config dir the walk provisioned — the log collection below reads the
+# same directory and is unaffected.
+$CloseGraceMs = 15000
+Write-Host '==> asking the window to close (WM_CLOSE)'
+[void][GuiInput]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+$exited = $proc.WaitForExit($CloseGraceMs)
+if ($exited) {
+    Write-Host '==> app ended by: the injected close'
+}
+else {
+    Write-Host '!! the injected close did not land — falling back to the smoke deadline'
+    Write-Host '==> waiting for the smoke-deadline exit'
+    $exited = $proc.WaitForExit($SmokeMs)
+    if ($exited) { Write-Host '==> app ended by: the smoke deadline' }
+}
 if (-not $exited) { Stop-Process -Id $proc.Id -Force; throw 'the app never hit its smoke deadline' }
 Write-Host ("==> app exit code {0}" -f $proc.ExitCode)
 # The app's per-launch diagnostics log (it names the debug hooks the boot

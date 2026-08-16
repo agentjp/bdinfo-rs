@@ -100,8 +100,32 @@ $after = Get-FileHash (Join-Path $Gallery '04-settings-open.png') -ErrorAction S
 $landed = $before -and $after -and ($before.Hash -ne $after.Hash)
 Write-Host "==> settings-click pixel change: $landed"
 
-Write-Host '==> waiting for the smoke-deadline exit'
-$exited = $proc.WaitForExit($SmokeMs)
+# End the app on the walk's clock, not the boot clock — the same change as the
+# Windows leg, with xdotool's windowclose as this platform's close gesture.
+# BDINFO_GUI_SMOKE_MS is a sleep the app starts at BOOT, so waiting it out
+# burns ~100 s of pure sleep after the walk has finished. No new debug hook is
+# needed: `exit_on_close_request` is false and `iced::window::close_requests()`
+# is subscribed unconditionally, so an OS close request routes CloseRequested
+# -> close_with_geometry -> SaveAndClose -> window::close and the process exits
+# 0 once its last window is gone. The smoke deadline stays as the BACKSTOP, so
+# a close that does not land costs exactly what it costs today.
+$CloseGraceMs = 15000
+Write-Host '==> asking the window to close (xdotool windowclose)'
+# Best-effort: a refused close must fall through to the backstop, not abort the
+# run. `$ErrorActionPreference = 'Stop'` plus PowerShell 7.4's native-command
+# error mapping would otherwise make a non-zero xdotool exit terminating here,
+# unlike the walk's own xdotool calls, where a failure genuinely is fatal.
+try { & xdotool windowclose $wid } catch { Write-Host "!! xdotool windowclose failed: $_" }
+$exited = $proc.WaitForExit($CloseGraceMs)
+if ($exited) {
+    Write-Host '==> app ended by: the injected close'
+}
+else {
+    Write-Host '!! the injected close did not land — falling back to the smoke deadline'
+    Write-Host '==> waiting for the smoke-deadline exit'
+    $exited = $proc.WaitForExit($SmokeMs)
+    if ($exited) { Write-Host '==> app ended by: the smoke deadline' }
+}
 if (-not $exited) { Stop-Process -Id $proc.Id -Force; throw 'the app never hit its smoke deadline' }
 Write-Host ("==> app exit code {0}" -f $proc.ExitCode)
 # The app's per-launch diagnostics log rides along in the gallery.
