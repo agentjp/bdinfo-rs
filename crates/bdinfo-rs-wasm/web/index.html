@@ -810,6 +810,61 @@
         background: var(--accent);
         border-radius: 99px;
       }
+      /* Before the scan's first progress event nothing has been measured, so
+         the bar sweeps instead of standing flat at zero. Firefox paints the
+         element's own background as the track (::-moz-progress-bar is the
+         value, which has no width at zero); Chrome paints ::-webkit-progress-bar
+         over it. Hence two SEPARATE rules — a selector list carrying a
+         pseudo-element one engine cannot parse would invalidate the whole
+         rule, and with it the animation on the engine that can. */
+      progress.indeterminate {
+        background-image: linear-gradient(
+          90deg,
+          var(--surface-2) 0%,
+          var(--accent-dim) 50%,
+          var(--surface-2) 100%
+        );
+        background-size: 200% 100%;
+        background-repeat: repeat-x;
+        animation: sweep 1.4s linear infinite;
+      }
+      progress.indeterminate::-webkit-progress-bar {
+        background-image: linear-gradient(
+          90deg,
+          var(--surface-2) 0%,
+          var(--accent-dim) 50%,
+          var(--surface-2) 100%
+        );
+        background-size: 200% 100%;
+        background-repeat: repeat-x;
+        animation: sweep 1.4s linear infinite;
+      }
+      /* One tile of travel per cycle, so the loop restarts where it ended. */
+      @keyframes sweep {
+        from {
+          background-position-x: 200%;
+        }
+        to {
+          background-position-x: 0%;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        /* The gradient goes with the animation: a highlight parked mid-bar
+           would read as a measurement rather than as "not measured yet". */
+        progress.indeterminate {
+          background-image: none;
+          animation: none;
+        }
+        progress.indeterminate::-webkit-progress-bar {
+          background-image: none;
+          animation: none;
+        }
+      }
+      .progress-row .spinner {
+        /* Sits in the percentage's reserved slot, so swapping the wheel for the
+           number at the first event does not resize the bar. */
+        margin: 0 calc((2.8rem - 14px) / 2);
+      }
       .pct {
         font-family: var(--mono);
         font-variant-numeric: tabular-nums;
@@ -1158,6 +1213,11 @@
           <div class="body">
             <div class="progress-row">
               <progress id="bar" max="100" value="0"></progress>
+              <!-- The same wheel the listing box shows: until the first progress
+                   event there is nothing measured to put a number on, so the
+                   percentage stands down and this takes its reserved space.
+                   `aria-hidden` because "Preparing…" below already says it. -->
+              <span class="spinner" id="progress-spinner" aria-hidden="true" hidden></span>
               <span class="pct" id="pct">0%</span>
               <!-- Elapsed + the remaining estimate; blank until the scan's
                    first progress event gives the estimate something to work

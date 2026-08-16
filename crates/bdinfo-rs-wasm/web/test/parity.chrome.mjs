@@ -398,6 +398,11 @@ async function main() {
           discardHidden: document.getElementById("discard-note").hidden,
           selCount: document.getElementById("sel-count").textContent,
           times: document.getElementById("progress-times").textContent,
+          // The blind window before the first progress event: sweeping bar,
+          // wheel where the percentage goes, no number.
+          indeterminate: document.getElementById("bar").classList.contains("indeterminate"),
+          spinnerHidden: document.getElementById("progress-spinner").hidden,
+          pctHidden: document.getElementById("pct").hidden,
           // The scan-set controls: live between scans, inert while one runs.
           scanDisabled: document.getElementById("scan-btn").disabled,
           boxesDisabled: [...document.querySelectorAll("#playlist-body input[type=checkbox]")].map(
@@ -546,6 +551,9 @@ async function main() {
         revealDisabled: document.getElementById("reveal-btn").disabled,
         progressHidden: document.getElementById("progress-card").hidden,
         times: document.getElementById("progress-times").textContent,
+        indeterminate: document.getElementById("bar").classList.contains("indeterminate"),
+        spinnerHidden: document.getElementById("progress-spinner").hidden,
+        pctHidden: document.getElementById("pct").hidden,
       });
       document.getElementById("scan-btn").click();
       const frozen = read();
@@ -1232,6 +1240,17 @@ async function main() {
   );
   demoOk &= demoEq("the progress card is up", demo.midScan.frozen.progressHidden, false);
   demoOk &= demoEq("the readout is blank before the first event", demo.midScan.frozen.times, "");
+  // Before the first event nothing is measured, so the strip says so: the bar
+  // sweeps, the wheel is up, and no percentage claims a measurement.
+  demoOk &= demoEq(
+    "the bar is indeterminate before the first event",
+    [
+      demo.midScan.frozen.indeterminate,
+      demo.midScan.frozen.spinnerHidden,
+      demo.midScan.frozen.pctHidden,
+    ],
+    [true, false, true],
+  );
   demoOk &= demoEq("a frozen sort header does not re-order", demo.midScan.afterEdits.names, [
     "00001.MPLS [02 Chapters]",
     "00000.MPLS",
@@ -1261,6 +1280,13 @@ async function main() {
     "the readout keeps the last elapsed and remaining",
     demo.scanned.times.replace(/\d/g, "0"),
     "Elapsed 00:00:00 · Remaining 00:00:00",
+  );
+  // The last progress event leaves the measuring state behind when the card
+  // hides: the sweep is off, the wheel is down, the percentage is back.
+  demoOk &= demoEq(
+    "a measured scan leaves the strip determinate",
+    [demo.scanned.indeterminate, demo.scanned.spinnerHidden, demo.scanned.pctHidden],
+    [false, true, false],
   );
   demoOk &= demoEq("scan keeps the active row", demo.scanned.active, "00000.MPLS");
   demoOk &= demoEq("measured size fills after the scan", demo.scanned.files, [
