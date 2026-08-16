@@ -18,11 +18,16 @@ import { discardNote } from "./settings.js";
 import { el, errMessage, errorBox, hide, type Source, show, showError, state } from "./state.js";
 import { playlistRows, playlistsCard, renderRows, scanNames } from "./table.js";
 
+const dropzone = el("dropzone");
+const orIso = el("or-iso");
+const privacy = el("privacy");
 const pickedBox = el("picked");
 const pickedName = el("picked-name");
 const pickedCount = el("picked-count");
+export const changeDiscBtn = el<HTMLButtonElement>("change-disc");
 const discLabel = el("disc-label");
 export const scanBtn = el<HTMLButtonElement>("scan-btn");
+export const viewReportBtn = el<HTMLButtonElement>("view-report-btn");
 const progressCard = el("progress-card");
 const bar = el<HTMLProgressElement>("bar");
 const pctLabel = el("pct");
@@ -40,7 +45,6 @@ const scanErrorsCount = el("scan-errors-count");
 const scanErrorsList = el("scan-errors-list");
 const mainEl = el("main");
 const listingBox = el("listing");
-const encryptedNote = el("encrypted-note");
 
 export function fileListToBdmv(list: FileList): BdmvFile[] {
   return Array.from(list, (file) => ({ path: file.webkitRelativePath || file.name, file }));
@@ -104,6 +108,27 @@ export async function loadIso(file: File): Promise<void> {
   await loadSource({ kind: "iso", file, label });
 }
 
+/**
+ * Swaps the source card between its two shapes: the dropzone that lands the
+ * user, and the slim bar naming what is loaded. The dropzone itself is
+ * unchanged either way — {@link changeDisc} simply brings it back.
+ */
+function showSourceBar(loaded: boolean): void {
+  dropzone.hidden = loaded;
+  orIso.hidden = loaded;
+  privacy.hidden = loaded;
+  pickedBox.hidden = !loaded;
+}
+
+/**
+ * Puts the dropzone back. The loaded disc is left exactly as it stands — the
+ * page keeps listing it until a new pick replaces it, so a user who opens the
+ * picker and changes their mind loses nothing.
+ */
+export function changeDisc(): void {
+  showSourceBar(false);
+}
+
 async function loadSource(src: Source): Promise<void> {
   state.source = src;
   state.discName = src.label;
@@ -111,19 +136,20 @@ async function loadSource(src: Source): Promise<void> {
   pickedCount.textContent =
     src.kind === "folder" ? counted(src.files.length, "file") : "disc image (.iso)";
   mainEl.classList.remove("landing");
-  show(pickedBox);
+  showSourceBar(true);
   hide(errorBox);
   hide(reportCard);
   hide(progressCard);
   hide(playlistsCard);
   hide(discardNote);
-  hide(encryptedNote);
   show(listingBox);
   // A fresh pick discards everything held for the previous one.
   state.scanController?.abort();
   state.disc = null;
   state.reportText = "";
   state.renderedWith = null;
+  state.previewing = false;
+  state.paneRow = null;
   const gen = ++state.generation;
   const threshold = state.settings.shortPlaylistSeconds;
   try {
@@ -164,13 +190,15 @@ async function loadSource(src: Source): Promise<void> {
  */
 export function adoptDisc(next: Disc, threshold: number): void {
   // A new disc supersedes whatever a scan was ticking: its numbers are the
-  // final form of the very cells the overlay was raising.
+  // final form of the very cells the overlay was raising. A shown pre-scan
+  // report was rendered from the disc being replaced, so it is re-rendered even
+  // when the selection names come out identical.
   state.live.clear();
+  state.previewOrder = null;
   state.disc = next;
   state.discThreshold = threshold;
   state.playlists = next.playlists;
   state.allRows = playlistRows(next.playlists);
-  encryptedNote.hidden = !next.isAacsEncrypted;
   // Only a measured scan can carry short-stream notices, so a re-inspected
   // (structural) disc clears the strip along with everything else measured.
   const notices = next.shortStreamNotices ?? [];
@@ -250,6 +278,8 @@ export async function runScan(): Promise<void> {
   hide(errorBox);
   hide(reportCard);
   hide(discardNote);
+  // Whatever this scan reports supersedes a pre-scan report of the same disc.
+  state.previewing = false;
   show(progressCard);
   setProgress(0, "Preparing…");
   // This pass starts its tallies from zero, so whatever a cancelled or failed
@@ -285,10 +315,7 @@ export async function runScan(): Promise<void> {
     }
   }, 1000);
   const threshold = state.settings.shortPlaylistSeconds;
-  const sections = {
-    streamDiagnostics: state.settings.reportStreamDiagnostics,
-    quickSummary: state.settings.reportQuickSummary,
-  };
+  const sections = reportSections();
   // The live cells: guarded by the same stamp the completion is, so a snapshot
   // from a scan the page has already moved on from writes nothing.
   const onMeasured = (snapshot: MeasuredSnapshot) => {
@@ -339,6 +366,82 @@ export async function runScan(): Promise<void> {
   void applyReportSections();
 }
 
+/** The report sections the settings currently ask for. */
+function reportSections(): { streamDiagnostics: boolean; quickSummary: boolean } {
+  return {
+    streamDiagnostics: state.settings.reportStreamDiagnostics,
+    quickSummary: state.settings.reportQuickSummary,
+  };
+}
+
+/**
+ * Renders the report over the held disc BEFORE any measured scan: the same
+ * render the desktop app serves from the moment a disc is listed, over a disc
+ * whose measured values are all zero because nothing has measured them yet.
+ *
+ * It prints the scan set the button would measure — the ticked rows, or every
+ * listed row — by handing the module that selection as the disc's
+ * `reportOrder`, which is the documented way to name what a render prints. The
+ * disc's own order would print the library's default whole-disc set instead:
+ * not the set this page is showing, and not the one a scan from here would
+ * measure.
+ */
+async function renderPreview(): Promise<void> {
+  const held = state.disc;
+  // Mid-scan the held disc is about to be replaced by the measured one, whose
+  // completion renders the real report over it.
+  if (held === null || state.scanController !== null) {
+    return;
+  }
+  const sections = reportSections();
+  const selection = scanNames();
+  const gen = ++state.generation;
+  try {
+    const text = await renderReport({ ...held, reportOrder: selection }, sections);
+    if (gen !== state.generation) {
+      return;
+    }
+    state.reportText = text;
+    state.renderedWith = sections;
+    state.previewOrder = selection;
+    reportPre.textContent = text;
+    show(reportCard);
+  } catch (error) {
+    showError(errMessage(error));
+  }
+}
+
+/** The View report button: renders the pre-scan report and keeps it shown. */
+export async function viewReport(): Promise<void> {
+  state.previewing = true;
+  await renderPreview();
+  reportCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/**
+ * Re-renders a shown pre-scan report when the scan set it prints has moved.
+ *
+ * A no-op unless one is shown — a measured report is not re-derived from a
+ * selection — and a no-op while the set is the one already on screen: a redraw
+ * for a display setting changes what the TABLE shows, and the report is not
+ * rendered from that.
+ */
+export function refreshPreview(): void {
+  if (!state.previewing) {
+    return;
+  }
+  const selection = scanNames();
+  const shown = state.previewOrder;
+  if (
+    shown !== null &&
+    shown.length === selection.length &&
+    shown.every((n, i) => n === selection[i])
+  ) {
+    return;
+  }
+  void renderPreview();
+}
+
 /**
  * Applies the report-section switches: a `renderReport` over the held measured
  * disc, replacing the held report text only — never a rescan. Without a
@@ -347,6 +450,12 @@ export async function runScan(): Promise<void> {
  * nothing at all.
  */
 export async function applyReportSections(): Promise<void> {
+  // A shown pre-scan report renders under the switches too — it is the same
+  // render, over a disc nothing has measured.
+  if (state.previewing) {
+    await renderPreview();
+    return;
+  }
   if (state.disc === null || !state.disc.measured) {
     return;
   }
@@ -355,10 +464,7 @@ export async function applyReportSections(): Promise<void> {
   if (state.scanController !== null) {
     return;
   }
-  const wanted = {
-    streamDiagnostics: state.settings.reportStreamDiagnostics,
-    quickSummary: state.settings.reportQuickSummary,
-  };
+  const wanted = reportSections();
   if (
     state.renderedWith !== null &&
     state.renderedWith.streamDiagnostics === wanted.streamDiagnostics &&

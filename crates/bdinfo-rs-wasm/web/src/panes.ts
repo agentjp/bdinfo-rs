@@ -1,9 +1,10 @@
 // The two detail panes under the playlist table — the active playlist's stream
 // files and its codecs — and the in-place cell writes that let all three tables
-// tick while a scan runs.
-import type { Clip, MeasuredPlaylist, MeasuredSnapshot, Stream } from "./analyze.js";
+// tick while a scan runs. A pane row can also be highlighted, which is what
+// aims the Ctrl+C path copy at it.
+import type { MeasuredPlaylist, MeasuredSnapshot, Playlist, Stream } from "./analyze.js";
 import { sizeCell } from "./settings.js";
-import { el, hide, show, state } from "./state.js";
+import { el, hide, show, showError, state } from "./state.js";
 import {
   cell,
   PACKET_BYTES,
@@ -14,10 +15,26 @@ import {
   textCell,
 } from "./table.js";
 
+/**
+ * A highlighted detail-pane row — the Ctrl+C copy target while it stands.
+ *
+ * It names the playlist it was picked in: the rows are rebuilt from whichever
+ * playlist is active, so an index alone would point at a row of a different
+ * playlist as soon as the active row moves.
+ */
+export interface PaneRow {
+  playlist: string;
+  region: "files" | "codecs";
+  index: number;
+}
+
 const panesBox = el("detail-panes");
 const paneLabel = el("pane-playlist");
 const filesBody = el<HTMLTableSectionElement>("files-body");
 const codecsBody = el<HTMLTableSectionElement>("codecs-body");
+
+/** How long a copied row stays flagged, matching the Copy button's label. */
+const COPIED_MS = 1500;
 
 /**
  * Keeps a row active and the panes filled: when the settings hide the active
@@ -49,8 +66,43 @@ function renderPanes(): void {
   show(panesBox);
   paneLabel.textContent = playlist.name;
   const measured = state.live.get(playlist.name);
-  filesBody.replaceChildren(...streamFileRows(playlist.clips, measured));
-  codecsBody.replaceChildren(...playlist.streams.map((stream) => codecRow(stream, measured)));
+  filesBody.replaceChildren(...streamFileRows(playlist, measured));
+  codecsBody.replaceChildren(
+    ...playlist.streams.map((stream, index) => codecRow(playlist, stream, index, measured)),
+  );
+  applyPanePick();
+}
+
+/**
+ * Highlights the picked pane row, and only while it still describes the
+ * playlist it was picked in — a pick made in another playlist's panes stands
+ * for a row that is no longer on screen.
+ */
+function applyPanePick(): void {
+  const pick = state.paneRow?.playlist === state.activeName ? state.paneRow : null;
+  for (const [region, body] of [
+    ["files", filesBody],
+    ["codecs", codecsBody],
+  ] as const) {
+    Array.from(body.rows).forEach((tr, index) => {
+      tr.classList.toggle(
+        "active",
+        pick !== null && pick.region === region && pick.index === index,
+      );
+    });
+  }
+}
+
+/** Makes `tr` the picked pane row (or drops the pick when it is picked again). */
+function pickPaneRow(row: PaneRow): void {
+  const pick = state.paneRow;
+  const same =
+    pick !== null &&
+    pick.playlist === row.playlist &&
+    pick.region === row.region &&
+    pick.index === row.index;
+  state.paneRow = same ? null : row;
+  applyPanePick();
 }
 
 /**
@@ -64,9 +116,9 @@ function renderPanes(): void {
  * rows line up with `clips` one for one; without it the cells come from the
  * held disc.
  */
-function streamFileRows(clips: Clip[], measured?: MeasuredPlaylist): HTMLTableRowElement[] {
+function streamFileRows(playlist: Playlist, measured?: MeasuredPlaylist): HTMLTableRowElement[] {
   let index = 0;
-  return clips.map((clip, position) => {
+  return playlist.clips.map((clip, position) => {
     if (clip.angleIndex === 0) {
       index += 1;
     }
@@ -87,6 +139,9 @@ function streamFileRows(clips: Clip[], measured?: MeasuredPlaylist): HTMLTableRo
     const packets = textCell(sizeCell(bytes > 0 ? bytes : null), "num");
     packets.dataset.cell = "clip-measured";
     tr.appendChild(packets);
+    tr.addEventListener("click", () => {
+      pickPaneRow({ playlist: playlist.name, region: "files", index: position });
+    });
     return tr;
   });
 }
@@ -101,8 +156,16 @@ function streamFileRows(clips: Clip[], measured?: MeasuredPlaylist): HTMLTableRo
  * row records the pair that names it, since the snapshot orders its streams
  * differently and can only be matched by `(pid, angleIndex)`.
  */
-function codecRow(stream: Stream, measured?: MeasuredPlaylist): HTMLTableRowElement {
+function codecRow(
+  playlist: Playlist,
+  stream: Stream,
+  index: number,
+  measured?: MeasuredPlaylist,
+): HTMLTableRowElement {
   const tr = document.createElement("tr");
+  tr.addEventListener("click", () => {
+    pickPaneRow({ playlist: playlist.name, region: "codecs", index });
+  });
   tr.dataset.pid = String(stream.pid);
   tr.dataset.angle = String(stream.angleIndex);
   const codecCell = cell();
@@ -130,6 +193,68 @@ function liveRate(measured: MeasuredPlaylist | undefined, stream: Stream): numbe
 function bitrateCell(bitsPerSecond: number): string {
   const kbps = Math.trunc(bitsPerSecond / 1000);
   return kbps > 0 ? `${kbps.toLocaleString("en-US")} kbps` : "—";
+}
+
+// ── Ctrl+C: the highlighted row's disc path ──────────────────────────────────
+
+/**
+ * The disc-relative path of the highlighted row, in the desktop app's
+ * precedence: a highlighted Stream File row wins (its clip's `BDMV/STREAM/…`),
+ * otherwise the active playlist's `BDMV/PLAYLIST/…`. A highlighted Codec row
+ * copies nothing, which is the scope the classic tool's Ctrl+C has.
+ *
+ * Disc-relative rather than a real path: the desktop app copies the picked
+ * folder's path or the image's virtual `iso::BDMV/…` form, and a browser page
+ * is given neither — a picked `File` carries a name, never a location.
+ *
+ * `null` for a target there is nothing to name: no active playlist, a Codec
+ * row, or a Stream File row whose clip the redraw has already replaced.
+ */
+export function copyTargetPath(): string | null {
+  const active = state.activeName;
+  if (active === null) {
+    return null;
+  }
+  const pick = state.paneRow?.playlist === active ? state.paneRow : null;
+  if (pick === null) {
+    return `BDMV/PLAYLIST/${active}`;
+  }
+  if (pick.region === "codecs") {
+    return null;
+  }
+  const clip = state.playlists.find((entry) => entry.name === active)?.clips.at(pick.index);
+  // The real `xxxxx.M2TS` stream file, never the row's display name: an
+  // interleaved clip shows its `*.ssif` there, which is a different file.
+  return clip === undefined ? null : `BDMV/STREAM/${clip.name}`;
+}
+
+/**
+ * Copies {@link copyTargetPath} to the clipboard and marks the row it came
+ * from — the row is the only label a copied path has, so it stands in for the
+ * Copy button's "Copied!" here.
+ */
+export async function copyRowPath(): Promise<void> {
+  const path = copyTargetPath();
+  if (path === null) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(path);
+  } catch {
+    showError("Could not copy to the clipboard.");
+    return;
+  }
+  const pick = state.paneRow?.playlist === state.activeName ? state.paneRow : null;
+  const row =
+    pick?.region === "files"
+      ? filesBody.rows.item(pick.index)
+      : playlistBody.querySelector<HTMLTableRowElement>("tr.active");
+  if (row !== null) {
+    row.classList.add("copied-row");
+    window.setTimeout(() => {
+      row.classList.remove("copied-row");
+    }, COPIED_MS);
+  }
 }
 
 // ── live measured cells ──────────────────────────────────────────────────────

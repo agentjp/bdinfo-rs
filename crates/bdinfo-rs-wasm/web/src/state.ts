@@ -11,6 +11,7 @@
 // uninitialized `const` — which is why the stored settings are read here rather
 // than by a call back into the settings module.
 import type { BdmvFile, Disc, MeasuredPlaylist, Playlist } from "./analyze.js";
+import type { PaneRow } from "./panes.js";
 import type { PlaylistRow, Sort } from "./table.js";
 
 /** The picked disc — a `webkitdirectory` BDMV folder, or a single `.iso`. */
@@ -168,6 +169,33 @@ export const state = {
   live: new Map<string, MeasuredPlaylist>(),
   /** The playlist whose details the panes show; null before the first draw. */
   activeName: null as string | null,
+  /**
+   * The highlighted detail-pane row — Ctrl+C's copy target while it stands, and
+   * null when no pane row has been clicked. Cleared whenever the panes are
+   * redrawn: a row index means nothing once the rows under it change.
+   */
+  paneRow: null as PaneRow | null,
+  /**
+   * Whether the transient reveal is on: the playlists the filters withhold sit
+   * in the table as ordinary rows. Session-only and deliberately outside
+   * {@link Settings} — it is never stored, and any settings change drops it,
+   * which is what keeps it from reading as a fourth filter switch.
+   */
+  revealing: false,
+  /**
+   * Whether the shown report is the PRE-SCAN structural render rather than a
+   * measured scan's. It is re-rendered whenever the selection or the settings
+   * behind it move, so what is on screen always describes the current
+   * selection; a measured scan replaces it with the report it produced.
+   */
+  previewing: false,
+  /**
+   * The playlist selection the shown pre-scan report was rendered over, by
+   * name; null while none is shown. It is what tells a selection change (a
+   * re-render) from a redraw that left the scan set exactly as it was — a
+   * display setting, say, which the report is not derived from at all.
+   */
+  previewOrder: null as string[] | null,
   /** The active sort; null draws the CLI's table order (by `position`). */
   sort: null as Sort | null,
   settings: loadSettings(),

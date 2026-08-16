@@ -14,7 +14,7 @@ import {
   showError,
   state,
 } from "./state.js";
-import { renderRows } from "./table.js";
+import { dropReveal, renderRows } from "./table.js";
 
 /** {@link formatSize} under the page's current size-format setting. */
 export function sizeCell(bytes: number | null): string {
@@ -106,6 +106,9 @@ async function applyThreshold(): Promise<void> {
     state.reportText = "";
     state.renderedWith = null;
     hide(reportCard);
+    // A re-classified table is the settings' own view of the disc, so the
+    // transient reveal over the old classification goes with it.
+    dropReveal();
     adoptDisc(next, parsed);
     discardNote.hidden = !discarding;
   } catch (error) {
@@ -146,7 +149,9 @@ export function initSettings(): void {
     settingsDialog.close();
   });
   // The four display settings are pure re-projections of the held disc: redraw
-  // the table and panes from what the page holds, no WebAssembly call.
+  // the table and panes from what the page holds, no WebAssembly call. Each one
+  // also drops the transient reveal — the settings are now saying what the
+  // table shows, which is what the reveal was standing in for.
   for (const box of [optShort, optLooping, optHumanSizes, optChapters]) {
     box.addEventListener("change", () => {
       state.settings.showShortPlaylists = optShort.checked;
@@ -154,6 +159,7 @@ export function initSettings(): void {
       state.settings.humanReadableSizes = optHumanSizes.checked;
       state.settings.displayChapterCount = optChapters.checked;
       saveSettings();
+      dropReveal();
       renderRows();
     });
   }
