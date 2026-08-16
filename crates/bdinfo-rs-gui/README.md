@@ -51,9 +51,12 @@ One per-user directory, created on first use:
 - **`gui.conf`** — settings and window geometry, saved as they change. **Deleting it is the full
   reset**: window size and position, theme, and every setting return to defaults. This is also the
   fix when the window restores off-screen, for example onto a monitor you have since unplugged.
-- **`gui.log`** — a plain-text diagnostic log, overwritten at each launch. It records which
-  renderer was selected, any panics, and dialog or portal errors. **Attach it when filing a bug** —
-  it answers the first questions a graphics issue raises.
+- **`gui.log`** — a plain-text diagnostic log, one file per launch. It opens with the launch time
+  and records which renderer was selected, the disc each scan opened, stalled reads, scan
+  durations, any panics, and dialog or portal errors. Each launch renames the previous log to
+  **`gui.log.1`** before starting a new one, so the run before the one you are in is still there.
+  **Attach it when filing a bug** — it answers the first questions a graphics issue raises, and
+  after a crash the interesting file is usually `gui.log.1`.
 
 ## Troubleshooting
 

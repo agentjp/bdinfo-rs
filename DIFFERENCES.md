@@ -255,8 +255,9 @@ deliberately diverge from BDInfo 0.8:
 - cancellation, polled once per request, takes effect within 256 KiB of reading instead
   of 5 MiB;
 - one unreadable span stalls one small request inside the drive's retry storm rather
-  than a 5 MiB one — 16 KiB in the quick codec pass (which runs first in every
-  measurement scan and alone in a codec-only browse), 256 KiB in the full pass.
+  than a 5 MiB one — 16 KiB in the quick codec pass (which runs alone in a codec-only
+  browse, and ahead of the full pass in a measurement scan that did not already read
+  the codec detail — the desktop app's does, and skips it), 256 KiB in the full pass.
 
 A damaged scan of a bare Windows drive root also keeps a degraded disc label: once any
 io error is recorded — at any scan stage, so a metadata-only browse counts too — the
@@ -370,6 +371,16 @@ Deliberately different:
 - **An encrypted disc is never scanned.** The original measures the ciphertext; the app lists the
   disc and leaves the scan action disabled — see
   [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused).
+- **A dropped stream file loses its codec detail.** The app browses a disc at codec depth before
+  you scan it, so its measured scan skips the quick codec pass rather than reading every stream
+  file's head a second time — on damaged media that second read can stall for minutes. The pass it
+  skips is also the fallback for a file the measured pass gives up on, so with *Keep partially
+  scanned stream files* turned **off** (it is on by default) a stream file that fails partway
+  through leaves its rows carrying only what the disc's clip info declares — codec name,
+  resolution, channel layout — without the profile, level, and HDR detail the stream itself would
+  have supplied. Nothing else changes: the file is still named in the warning banner and the
+  report's `WARNING` block, and with the setting left on, or on media that reads cleanly, the rows
+  are identical to the command line's.
 
 ## See also
 

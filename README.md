@@ -143,7 +143,7 @@ whole-file demux — and `scan` measures the streams, returning the report along
 model. `renderReport` re-renders that model with different report sections, and `reportFileName`
 gives the `BDINFO.{volume label}.txt` name to save it under. Every call takes either a folder pick
 or a single `.iso` `File`. Bundler, CSP, and browser-support notes:
-[`crates/bdinfo-rs-wasm`](crates/bdinfo-rs-wasm).
+[`crates/bdinfo-rs-wasm/web`](crates/bdinfo-rs-wasm/web).
 
 ## Differences from BDInfo
 

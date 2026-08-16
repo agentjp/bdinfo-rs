@@ -194,11 +194,11 @@ Multi-arch images (`linux/amd64`, `linux/arm64`) on the GitHub Container Registr
 the static binary on `scratch` — no OS, no shell, no libc, about 1 MB.
 
 ```sh
-docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :3.0.0
+docker pull ghcr.io/agentjp/bdinfo-rs:latest      # or pin a release: :4.0.0
 ```
 
-- **Updates** — `docker pull` a newer tag. Tags track the repo's versions (`3.0.0`, plus rolling
-  `3.0` and `3`).
+- **Updates** — `docker pull` a newer tag. Tags track the repo's versions (`4.0.0`, plus rolling
+  `4.0` and `4`).
 - **Uninstall** — `docker rmi ghcr.io/agentjp/bdinfo-rs`.
 
 Mount the disc and pass its in-container path. `-it` gives the interactive picker a terminal;
