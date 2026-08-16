@@ -27,9 +27,9 @@ actually see on a normal disc.
 | [AVC High 4:4:4 (profile 244)](#avc-high-444-profile-244) | **Yes** — profile token | Rare — Blu-ray video is almost always 4:2:0 |
 | [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
 | [Playlist attribute selection on short clips](#playlist-attribute-selection-on-short-clips) | **Yes** — which clip's streams are presented | Rare — multi-clip playlists whose early clips are short |
+| [Bitrate under a backwards PTS](#bitrate-under-a-backwards-pts) | **Yes** — bitrate numbers | Short playlists, by a few kbps; feature-length ones are unchanged |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
-| [Audio bitrate under a backwards PTS](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-monotone audio PTS | Damaged or non-conforming streams whose audio PTS steps backwards |
 | [Undecoded MPEG-1/2 and AAC audio names](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only when the stream was never decoded | Damaged discs whose MPA/AAC frames the scan could not read |
 | [HEVC `profile_idc` recovery](#correctness-fixes-with-no-effect-on-a-normal-disc) | Edge case only | Malformed headers with `general_profile_idc == 0` |
 | [VC-1 interlaced-field picture type](#correctness-fixes-with-no-effect-on-a-normal-disc) | **No** — internal only | Never — the picture tag is counted, never printed |
@@ -167,6 +167,26 @@ byte-identical.
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/mpls.rs` (the post-parse resolution),
 `crates/bdinfo-rs-core/src/bdrom/disc.rs` (`select_reference`).</sub>
 
+### Bitrate under a backwards PTS
+
+BDInfo 0.8 advances a stream's last-seen PTS whenever the value merely *changes*
+(`TSStreamFile`'s PES parse compares `PTS != PTSLast`), so a backwards step measures a
+negative transfer interval — discarding that access unit's bitrate sample — and drags the
+interval base backwards, overstating the next forward unit's interval and understating its
+rate. bdinfo-rs advances only on a forward step, against the running maximum, as BDInfo
+0.7.5.6 did (`PTS > PTSLast`) and as the PTS+DTS path of both tools already does.
+
+The rule governs any stream whose PES headers carry a PTS without a DTS — not audio alone
+— and the same last-seen PTS is what the final playlist-level bitrate pass reads for the
+video streams, so a video row's kbps can move too. What moves is a small **absolute** span
+of the measured timeline, a fraction of a second: enough to clear the printed resolution on
+a short playlist, and lost in the rounding of a feature-length one. That is why every
+committed golden — all feature-length — is byte-identical across the change, while a real
+disc's short playlists shift by a few kbps.
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (the PTS-only PES arm and
+`finish_scan`).</sub>
+
 ---
 
 ## Correctness fixes with no effect on a normal disc
@@ -195,14 +215,6 @@ value is never rendered.
   a PMT whose `table_id` is not 0x02. BDInfo assembles the mislabeled section and adopts
   whatever PMT PID it announces. No conforming disc carries a wrong PAT table id, so the
   report is unchanged for every real disc.
-- **Audio bitrate under a backwards PTS.** BDInfo 0.8 measures an audio access unit's
-  transfer interval whenever the PTS merely *changes* (`TSStreamFile`'s PES parse compares
-  `PTS != PTSLast`): a backwards step measures a negative interval — discarding that
-  unit's bitrate sample — and drags the interval base backwards, so the next forward
-  unit's interval is overstated and its rate understated. bdinfo-rs measures only forward
-  steps against the running maximum, as BDInfo 0.7.5.6 did (`PTS > PTSLast`) and as the
-  PTS+DTS path of both tools already does. Audio PTS within a conforming stream file is
-  monotone, so a healthy disc measures identically.
 - **Undecoded MPEG-1/2 and AAC audio names.** BDInfo derives these four codec names from
   the decoded frame header alone and renders an empty name when no frame was ever decoded
   (the unset `ExtendedData` cast to a null string). bdinfo-rs falls back to the
@@ -259,17 +271,7 @@ deliberately diverge from BDInfo 0.8:
   browse, and ahead of the full pass in a measurement scan that did not already read
   the codec detail — the desktop app's does, and skips it), 256 KiB in the full pass.
 
-A damaged scan of a bare Windows drive root also keeps a degraded disc label: once any
-io error is recorded — at any scan stage, so a metadata-only browse counts too — the
-raw-device read that recovers the UDF volume label is skipped — one more sector-by-sector
-grind of a failing drive for a cosmetic string — so the report and its file name carry
-the bare drive letter. A failure blaming the disc's bytes rather than the device (a
-malformed playlist, a missing clip file) leaves the label read in place. Classic BDInfo
-shows the OS-reported volume label there (it reads it through the filesystem before
-scanning and has no raw-device read to skip).
-
-<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`),
-`crates/bdinfo-rs-core/src/vfs/volume.rs` (the label-read gate).</sub>
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`).</sub>
 
 ### Read errors: folder input vs `.iso` input
 

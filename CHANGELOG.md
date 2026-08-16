@@ -60,17 +60,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **core:** a 3D clip whose `BDMV/STREAM/SSIF/<clip>.ssif` will not open is measured from the plain
   `*.m2ts` instead of being abandoned — the base view is reported, the dependent (MVC) row is not,
   and the failure is recorded against the `.ssif` in the `WARNING` block. ([#363](https://github.com/agentjp/bdinfo-rs/issues/363))
-* **core:** three classic-parity corrections — an audio access unit's transfer interval is measured
-  only on a forward PTS (a backwards step no longer drags the interval base back), undecoded
-  MPEG-1/2 and AAC audio rows fall back to the type-derived codec names instead of rendering an
-  empty one, and each clip's share of its playlist is computed against the finished playlist length
-  rather than the part accumulated so far. ([#364](https://github.com/agentjp/bdinfo-rs/issues/364))
-* **core:** the raw-device volume-label read on a Windows drive root is skipped once any io error
-  has been recorded, at any scan stage — one less sector-by-sector grind of a failing drive.
-  ([#341](https://github.com/agentjp/bdinfo-rs/issues/341))
+* **core:** three classic-parity corrections — an access unit's transfer interval is measured only
+  on a forward PTS (a backwards step no longer drags the interval base back), undecoded MPEG-1/2
+  and AAC audio rows fall back to the type-derived codec names instead of rendering an empty one,
+  and each clip's share of its playlist is computed against the finished playlist length rather
+  than the part accumulated so far. The first also reaches the playlist-level bitrate of a video
+  stream, where it moves a short playlist's kbps by a few counts; a feature-length one is
+  unchanged. See DIFFERENCES.md. ([#364](https://github.com/agentjp/bdinfo-rs/issues/364))
+* **core:** the volume label of a disc mounted at a Windows drive root is read from the raw device
+  **before** the scan instead of after it, so a scan that records a read error still names the disc
+  — in the report body, in the `BDINFO.<label>.txt` file name, and in the desktop app's title —
+  rather than degrading to the drive letter. The read is only attempted for an input path that can
+  walk up to a nameless drive root, so an ordinary named folder costs no extra IO.
+  ([#341](https://github.com/agentjp/bdinfo-rs/issues/341), [#378](https://github.com/agentjp/bdinfo-rs/issues/378))
 * **cli:** the progress line repaints about once a second through a stalled read, switching its
-  lead-in to `Still reading` after five seconds, so a hung drive no longer looks like a hung
-  program. ([#366](https://github.com/agentjp/bdinfo-rs/issues/366))
+  lead-in to `Still scanning` after five seconds, so a hung drive no longer looks like a hung
+  program. ([#366](https://github.com/agentjp/bdinfo-rs/issues/366), [#378](https://github.com/agentjp/bdinfo-rs/issues/378))
+* **core:** the remaining-time readout shows `--:--:--` until the first bytes are measured, on both
+  the command line and the desktop app, instead of `00:00:00` — which read as "about to finish" at
+  the moment nothing had been read, and could stand there for minutes beside a stalled read.
+  ([#378](https://github.com/agentjp/bdinfo-rs/issues/378))
+* **gui:** the log records a stall clearing as well as a stall starting, the scan overlay no longer
+  passes clicks and drags through to the table beneath it, the scan-notice modal stops referring to
+  a report below it, and a refused report save names the destination it tried.
+  ([#377](https://github.com/agentjp/bdinfo-rs/issues/377))
 * **gui:** cancelling a scan keeps the values it measured on the grids, the selection stays live
   during a scan so the panes follow the highlighted row, and the remaining-time estimate climbs
   through a stall instead of freezing. ([#365](https://github.com/agentjp/bdinfo-rs/issues/365))
