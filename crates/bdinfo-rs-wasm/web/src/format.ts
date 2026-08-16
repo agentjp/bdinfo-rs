@@ -9,7 +9,7 @@
 // assert every row of it, so a change here that is not mirrored there fails a
 // test on both.
 
-import type { ScanError, ScanErrorReason } from "./analyze.js";
+import type { Disc, ScanError, ScanErrorReason } from "./analyze.js";
 
 /**
  * The count with its noun's number agreed — `"1 error"`, `"0 errors"`,
@@ -40,6 +40,30 @@ export function sizeCell(bytes: number | null, humanReadable: boolean): string {
     unit += 1;
   }
   return `${value.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+}
+
+/**
+ * The disc's detected-feature labels, in presentation order — the `Extras:`
+ * line the report prints, and the disc-info strip's `Detected Features`.
+ *
+ * The labels and their order are the library's `BdRom::extra_features`
+ * (`crates/bdinfo-rs-core/src/bdrom/disc.rs`), written a second time here
+ * because a browser page cannot call it: the mirror carries the six flags, not
+ * the strings they stand for. `test/parity.node.mjs` renders a disc with every
+ * flag set and compares this list against the report's own `Extras:` line, so a
+ * label or an order that moves on the Rust side fails there rather than
+ * drifting quietly.
+ */
+export function featureLabels(disc: Disc): string[] {
+  const flags: [boolean, string][] = [
+    [disc.isUhd, "Ultra HD"],
+    [disc.isBdJava, "BD-Java"],
+    [disc.is50hz, "50Hz Content"],
+    [disc.is3d, "Blu-ray 3D"],
+    [disc.isDbox, "D-BOX Motion Code"],
+    [disc.isPsp, "PSP Digital Copy"],
+  ];
+  return flags.filter(([set]) => set).map(([, label]) => label);
 }
 
 /**

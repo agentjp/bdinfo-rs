@@ -377,6 +377,19 @@ async function main() {
           codecs: grid("#codecs-body tr"),
           hintHidden: document.getElementById("hidden-hint").hidden,
           hintText: document.getElementById("hidden-hint").textContent,
+          revealLabel: document.getElementById("reveal-btn").textContent,
+          // The disc-info strip: the lines it shows, and what it says on them.
+          info: [...document.querySelectorAll("#disc-info p")]
+            .filter((line) => !line.hidden)
+            .map((line) => line.textContent.replace(/\s+/g, " ").trim()),
+          badgeHidden: document.getElementById("encrypted-badge").hidden,
+          // The source card: the slim bar names what is loaded, and the
+          // dropzone is only up while there is nothing loaded to name.
+          picked: document.getElementById("picked").hidden
+            ? null
+            : document.getElementById("picked-name").textContent,
+          dropzoneHidden: document.getElementById("dropzone").hidden,
+          viewDisabled: document.getElementById("view-report-btn").disabled,
           errorsHidden: document.getElementById("scan-errors").hidden,
           errorsCount: document.getElementById("scan-errors-count").textContent,
           errorLines: texts("#scan-errors-list li"),
@@ -439,13 +452,72 @@ async function main() {
     await demoPage.click("#settings-close");
     const preScan = await readDemo();
 
+    // The transient reveal: Show puts the withheld playlist in the table and
+    // Hide takes it back out, with the stored settings untouched throughout —
+    // it is session state, not a fourth filter switch.
+    const storedShort = () =>
+      demoPage.evaluate(
+        () => JSON.parse(window.localStorage.getItem("bdinfo-rs.settings")).showShortPlaylists,
+      );
+    await demoPage.click("#reveal-btn");
+    await rowCountIs(3);
+    const revealed = { ...(await readDemo()), stored: await storedShort() };
+    await demoPage.click("#reveal-btn");
+    await rowCountIs(2);
+    const rehidden = await readDemo();
+    // A settings change drops it: the settings are then saying what the table
+    // shows, and a reveal over the old view would be describing nothing.
+    await demoPage.click("#reveal-btn");
+    await rowCountIs(3);
+    await demoPage.click("#settings-btn");
+    await demoPage.click("#opt-chapters");
+    await rowCountIs(2);
+    const revealDropped = await readDemo();
+    await demoPage.click("#opt-chapters");
+    await demoPage.click("#settings-close");
+
+    const reportNow = () => demoPage.evaluate(() => document.getElementById("report").textContent);
+
+    // The report BEFORE any measured scan: the same render over a disc whose
+    // measured values are all zero. It prints the scan set the button would
+    // measure — the table's own rows, in the table's own order, which the
+    // name-ascending sort in force here makes visible — and it is re-rendered
+    // when that set changes rather than left describing a stale selection.
+    const uncheck = (name) =>
+      demoPage.evaluate((playlist) => {
+        document
+          .querySelector(`#playlist-body tr[data-name="${playlist}"] input[type=checkbox]`)
+          .click();
+      }, name);
+    const reportChanges = async (act) => {
+      const before = await reportNow();
+      await act();
+      await demoPage.waitForFunction(
+        (prev) => document.getElementById("report").textContent !== prev,
+        before,
+        { timeout: 60000 },
+      );
+      return reportNow();
+    };
+    const preview = await reportChanges(() => demoPage.click("#view-report-btn"));
+    const previewUnchecked = await reportChanges(() => uncheck("00000.MPLS"));
+    const previewRestored = await reportChanges(() => uncheck("00000.MPLS"));
+    const previewState = await readDemo();
+
     // Back to the table order before scanning, so the page's selection order is
     // the disc's presentation order — which is what makes the re-rendered
-    // report below comparable to the scan's own, byte for byte.
+    // report below comparable to the scan's own, byte for byte. Re-ordering the
+    // table re-orders the report the pre-scan render is showing, so this one
+    // costs a render; a request is logged as the click makes it, so the counts
+    // below need no waiting.
     await demoPage.click('th[data-sort="position"]');
+    const resorted = await readDemo();
 
     // Nothing ticked is a whole-disc scan, not a refusal to scan: the button
-    // stays live and the count says what pressing it will do.
+    // stays live and the count says what pressing it will do. Neither click
+    // moves the scan SET here — every row was ticked, and unticking them all
+    // falls back to the same rows in the same order — so the shown report is
+    // already the right one and no render is asked for.
     await demoPage.click("#clear-sel");
     const cleared = await readDemo();
     await demoPage.click("#select-all");
@@ -470,6 +542,8 @@ async function main() {
         selectAllDisabled: document.getElementById("select-all").disabled,
         clearDisabled: document.getElementById("clear-sel").disabled,
         scanDisabled: document.getElementById("scan-btn").disabled,
+        viewDisabled: document.getElementById("view-report-btn").disabled,
+        revealDisabled: document.getElementById("reveal-btn").disabled,
         progressHidden: document.getElementById("progress-card").hidden,
         times: document.getElementById("progress-times").textContent,
       });
@@ -499,11 +573,48 @@ async function main() {
     const scanned = await readDemo();
     const report = await demoPage.evaluate(() => document.getElementById("report").textContent);
 
+    // Ctrl+C copies the highlighted row's disc path, in the desktop app's
+    // precedence. The clipboard write is stubbed rather than read back: what the
+    // page copies is the assertion, and a headless run has no clipboard
+    // permission to lean on.
+    const copied = await demoPage.evaluate(async () => {
+      const paths = [];
+      navigator.clipboard.writeText = (text) => {
+        paths.push(text);
+        return Promise.resolve();
+      };
+      const press = () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }),
+        );
+        // The copy awaits the clipboard write, so let the microtasks run.
+        return new Promise((done) => setTimeout(done, 0));
+      };
+      const firstFile = () => document.querySelector("#files-body tr");
+      // Nothing picked in the panes: the active playlist row is the target.
+      await press();
+      // A highlighted Stream File row wins, and carries its clip's real name.
+      firstFile().click();
+      await press();
+      const flagged = firstFile().classList.contains("copied-row");
+      // A highlighted Codec row copies nothing — the scope the classic tool has.
+      document.querySelector("#codecs-body tr").click();
+      await press();
+      // A text selection is the user's own copy; the shortcut stands aside.
+      document.querySelector("#codecs-body tr").click();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById("sel-count"));
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(range);
+      await press();
+      window.getSelection().removeAllRanges();
+      return { paths, flagged };
+    });
+
     // The report-section switches: every flip re-renders the held disc through
     // the package — the displayed text changes while the request log gains only
     // `render` kinds and the progress card never shows. Both orders of turning
     // the two sections off are walked, so the switches' composition is pinned.
-    const reportNow = () => demoPage.evaluate(() => document.getElementById("report").textContent);
     const toggleSection = async (selector) => {
       const before = await reportNow();
       await demoPage.click(selector);
@@ -572,12 +683,43 @@ async function main() {
     const cancelled = await readDemo();
     const cancelledSelection = await demoPage.evaluate(() => window.__selections.at(-1));
 
+    // The settings can withhold every playlist the disc has: there is then
+    // nothing to report on, and a shown pre-scan report is withdrawn instead of
+    // re-rendered into a report with no playlist in it. The threshold goes back
+    // to 0 afterwards — the reload below reads the stored value.
+    await demoPage.click("#view-report-btn");
+    await demoPage.waitForFunction(
+      () => !document.getElementById("report-card").hidden,
+      undefined,
+      {
+        timeout: 60000,
+      },
+    );
+    const previewAgain = await readDemo();
+    await demoPage.click("#settings-btn");
+    await demoPage.fill("#opt-short-seconds", "60");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await rowCountIs(0);
+    const emptied = await readDemo();
+    await demoPage.fill("#opt-short-seconds", "0");
+    await demoPage.locator("#opt-short-seconds").blur();
+    await rowCountIs(3);
+    await demoPage.click("#settings-close");
+
     // A phone-width viewport must not scroll the page sideways — wide tables
     // scroll inside their own wrapper instead.
     await demoPage.setViewportSize({ width: 390, height: 844 });
     const pageScrolls = await demoPage.evaluate(
       () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
     );
+
+    // The post-pick source bar: a loaded disc replaces the dropzone with the
+    // slim bar naming it, and "Change disc…" puts the dropzone back without
+    // disturbing the disc the page is showing — the re-pick below lands on the
+    // bar again.
+    const barLoaded = await readDemo();
+    await demoPage.click("#change-disc");
+    const barChanging = await readDemo();
 
     // A damaged disc through the page: the same folder plus a file in PLAYLIST
     // that is not a playlist, which the structural listing records and reads
@@ -688,11 +830,22 @@ async function main() {
       grouped,
       noSuffix,
       preScan,
+      revealed,
+      rehidden,
+      revealDropped,
+      preview,
+      previewUnchecked,
+      previewRestored,
+      previewState,
+      resorted,
       cleared,
       reselected,
       midScan,
       scanned,
       report,
+      copied,
+      barLoaded,
+      barChanging,
       sdOff,
       bothOff1,
       qsOff,
@@ -708,6 +861,8 @@ async function main() {
       beforeCancel,
       cancelled,
       cancelledSelection,
+      previewAgain,
+      emptied,
       pageScrolls,
       damagedListing,
       persisted,
@@ -884,6 +1039,26 @@ async function main() {
     ["Hidden by filters (short): 00002.MPLS - enable in settings"].join("\n"),
   );
   demoOk &= demoEq("load cost one inspect", demo.initial.calls, ["inspect"]);
+  // The disc-info strip. This disc declares no title and carries no feature
+  // flag, and none of its playlists hides a stream, so the size line is the
+  // whole strip — and it counts every file the page was handed, the six of the
+  // fixture plus the two patched playlists above.
+  const discBytes = entries.reduce(
+    (total, item) => total + Buffer.from(item.b64, "base64").length,
+    0,
+  );
+  const mplsBytes = Buffer.from(
+    entries.find((item) => item.path.endsWith("00000.mpls")).b64,
+    "base64",
+  ).length;
+  const strip = `Disc Size: ${(discBytes + mplsBytes * 2 + 14).toLocaleString("en-US")} bytes (10.63 MB)`;
+  demoOk &= demoEq("the disc-info strip carries the size line alone", demo.initial.info, [strip]);
+  demoOk &= demoEq("an unencrypted disc shows no badge", demo.initial.badgeHidden, true);
+  // The source card: a loaded disc is named by the slim bar, and the dropzone
+  // it replaces is put away until "Change disc…" asks for it.
+  demoOk &= demoEq("a loaded disc shows the source bar", demo.initial.picked, "WASMDISC");
+  demoOk &= demoEq("the dropzone stands down while loaded", demo.initial.dropzoneHidden, true);
+  demoOk &= demoEq("the report is offered before any scan", demo.initial.viewDisabled, false);
   demoOk &= demoEq("stream-file pane (unmeasured)", demo.initial.files, [
     ["00000.M2TS", "1", "00:00:40", "10.63 MB", "—"],
   ]);
@@ -937,6 +1112,75 @@ async function main() {
   ]);
   demoOk &= demoEq("display settings cost no wasm call", demo.preScan.calls, ["inspect"]);
 
+  // The transient reveal: the withheld playlist joins the table as an ordinary
+  // row, the line says so and offers the way back, and the stored setting that
+  // withheld it is untouched — which is what makes the reveal transient rather
+  // than a fourth filter switch. A settings change then drops it.
+  demoOk &= demoEq("Show reveals the withheld playlist", demo.revealed.names, [
+    "00000.MPLS",
+    "00001.MPLS [02 Chapters]",
+    "00002.MPLS",
+  ]);
+  demoOk &= demoEq(
+    "the revealed line says so and offers Hide",
+    [demo.revealed.hintText, demo.revealed.revealLabel],
+    ["Showing filtered playlists (short): 00002.MPLS - enable in settings to keep", "Hide"],
+  );
+  demoOk &= demoEq("the reveal never touched the stored setting", demo.revealed.stored, false);
+  demoOk &= demoEq(
+    "Hide takes the playlist back out",
+    [demo.rehidden.names.length, demo.rehidden.revealLabel, demo.rehidden.hintText],
+    [2, "Show", "Hidden by filters (short): 00002.MPLS - enable in settings"],
+  );
+  demoOk &= demoEq(
+    "a settings change drops the reveal",
+    [demo.revealDropped.names.length, demo.revealDropped.revealLabel],
+    [2, "Show"],
+  );
+
+  // The pre-scan report: the same render over a disc nothing has measured. It
+  // prints the rows the table is showing, in the table's own order — the
+  // name-ascending sort in force here, not the disc's presentation order, which
+  // would have put the 40 s playlist first — and it follows the selection while
+  // it is shown, at the cost of one render each time that selection moves.
+  const blocks = (text) => text.split("\r\n").filter((line) => line.startsWith("PLAYLIST: "));
+  demoOk &= demoEq(
+    "the pre-scan report prints the table's rows in its order",
+    blocks(demo.preview),
+    ["PLAYLIST: 00000.MPLS", "PLAYLIST: 00001.MPLS"],
+  );
+  // The measured Movie Size of this clip: in the scan's report, and in nothing
+  // a render before it could know.
+  demoOk &= demoEq(
+    "the pre-scan report measures nothing",
+    [demo.preview.includes("11,064,384"), demo.report.includes("11,064,384")],
+    [false, true],
+  );
+  demoOk &= demoEq("unticking a row drops its block", blocks(demo.previewUnchecked), [
+    "PLAYLIST: 00001.MPLS",
+  ]);
+  demoOk &= compare(
+    "restoring the selection renders the same report again",
+    demo.previewRestored,
+    Buffer.from(demo.preview),
+  );
+  demoOk &= demoEq("the pre-scan report cost renders only", demo.previewState.calls, [
+    ...demo.preScan.calls,
+    "render",
+    "render",
+    "render",
+  ]);
+  demoOk &= demoEq("no scan ran for it", demo.previewState.progressHidden, true);
+  demoOk &= demoEq("re-ordering the table re-renders it", demo.resorted.calls, [
+    ...demo.previewState.calls,
+    "render",
+  ]);
+  demoOk &= demoEq(
+    "a selection change that leaves the scan set alone renders nothing",
+    [demo.cleared.calls, demo.reselected.calls],
+    [demo.resorted.calls, demo.resorted.calls],
+  );
+
   // The empty selection: the button is live and the count says the scan covers
   // everything, and ticking the rows again returns the plain count.
   demoOk &= demoEq(
@@ -978,6 +1222,13 @@ async function main() {
       demo.midScan.frozen.scanDisabled,
     ],
     [true, true, true],
+  );
+  // The reveal and the pre-scan report name the scan set too, so they are
+  // frozen with the rest of it.
+  demoOk &= demoEq(
+    "a running scan disables the reveal and the report button",
+    [demo.midScan.frozen.revealDisabled, demo.midScan.frozen.viewDisabled],
+    [true, true],
   );
   demoOk &= demoEq("the progress card is up", demo.midScan.frozen.progressHidden, false);
   demoOk &= demoEq("the readout is blank before the first event", demo.midScan.frozen.times, "");
@@ -1032,7 +1283,20 @@ async function main() {
     ["973 kbps", "1,536 kbps"],
   );
   demoOk &= demoEq("the demo report renders", demo.report.includes("QUICK SUMMARY:"), true);
-  demoOk &= demoEq("the scan cost one scan call", demo.scanned.calls, ["inspect", "scan"]);
+  demoOk &= demoEq("the scan cost one scan call", demo.scanned.calls, [
+    ...demo.reselected.calls,
+    "scan",
+  ]);
+
+  // Ctrl+C, in the desktop app's precedence: a highlighted Stream File row wins
+  // and names its clip's real stream file, an unhighlighted pane falls back to
+  // the active playlist, and a Codec row copies nothing. The paths are
+  // disc-relative — a browser page is given no location for what it was handed.
+  demoOk &= demoEq("Ctrl+C copies the highlighted row's disc path", demo.copied.paths, [
+    "BDMV/PLAYLIST/00000.MPLS",
+    "BDMV/STREAM/00000.M2TS",
+  ]);
+  demoOk &= demoEq("the copied row is marked", demo.copied.flagged, true);
 
   // The section switches: eight flips, eight `render` requests, no scan and no
   // progress bar; every rendering equals the scan's own report minus exactly
@@ -1061,8 +1325,7 @@ async function main() {
   );
   demoOk &= compare("demo render: restored again", demo.restored2, Buffer.from(demo.report));
   demoOk &= demoEq("section flips cost renders only", demo.afterRenders.calls, [
-    "inspect",
-    "scan",
+    ...demo.scanned.calls,
     ...Array(8).fill("render"),
   ]);
   demoOk &= demoEq("no scan ran while re-rendering", demo.afterRenders.progressHidden, true);
@@ -1074,9 +1337,7 @@ async function main() {
   // `inspect` (one request), re-classified the 10 s playlist into the table,
   // and visibly discarded the measured results and the held report.
   demoOk &= demoEq("threshold change cost one inspect", demo.thresholdApplied.calls, [
-    "inspect",
-    "scan",
-    ...Array(8).fill("render"),
+    ...demo.afterRenders.calls,
     "inspect",
   ]);
   demoOk &= demoEq("threshold re-classifies the table", demo.thresholdApplied.names, [
@@ -1147,7 +1408,40 @@ async function main() {
     false,
   ]);
 
+  // Withholding every playlist: the report and the button that offers it both
+  // go, and the withdrawal costs no render — the threshold's own inspect is the
+  // only request the step makes.
+  demoOk &= demoEq(
+    "the report is offered again after a scan",
+    demo.previewAgain.viewDisabled,
+    false,
+  );
+  demoOk &= demoEq(
+    "an empty table withdraws the report and its button",
+    [demo.emptied.reportHidden, demo.emptied.viewDisabled, demo.emptied.scanDisabled],
+    [true, true, true],
+  );
+  demoOk &= demoEq("withdrawing it renders nothing", demo.emptied.calls, [
+    ...demo.previewAgain.calls,
+    "inspect",
+  ]);
+
   demoOk &= demoEq("no sideways page scroll at phone width", demo.pageScrolls, false);
+
+  // "Change disc…" is the way back to the dropzone, and it is only that: the
+  // disc the page is showing stays exactly where it is until a new pick
+  // replaces it, and that pick lands on the source bar again.
+  demoOk &= demoEq(
+    "Change disc… puts the dropzone back",
+    [demo.barChanging.picked, demo.barChanging.dropzoneHidden],
+    [null, false],
+  );
+  demoOk &= demoEq("it leaves the loaded disc alone", demo.barChanging.names, demo.barLoaded.names);
+  demoOk &= demoEq(
+    "a fresh pick lands on the source bar again",
+    [demo.damagedListing.picked, demo.damagedListing.dropzoneHidden],
+    ["WASMDISC", true],
+  );
 
   // The failure strip: absent for healthy media, and on a damaged listing it
   // names the file and says what was wrong with it, in the report's wording.

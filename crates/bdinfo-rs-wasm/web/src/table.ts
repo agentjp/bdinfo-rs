@@ -2,8 +2,9 @@
 // held disc, the settings filter and the renumbering, the sort, the selection
 // ticks, and the hint naming what the filters withheld.
 import type { HiddenRule, Playlist } from "./analyze.js";
+import { featureLabels, sizeCell as formatSize } from "./format.js";
 import { applyActive, ensureActive } from "./panes.js";
-import { scanBtn, scanOffered } from "./scan.js";
+import { refreshPreview, scanBtn, scanOffered, viewReportBtn } from "./scan.js";
 import { sizeCell } from "./settings.js";
 import { el, state } from "./state.js";
 
@@ -46,7 +47,18 @@ export const playlistBody = el<HTMLTableSectionElement>("playlist-body");
 export const selectAllBtn = el<HTMLButtonElement>("select-all");
 export const clearBtn = el<HTMLButtonElement>("clear-sel");
 const selCount = el("sel-count");
+const hiddenRow = el("hidden-row");
 const hiddenHint = el("hidden-hint");
+export const revealBtn = el<HTMLButtonElement>("reveal-btn");
+const infoTitle = el("info-title");
+const infoTitleValue = el("info-title-value");
+const infoFeatures = el("info-features");
+const infoFeaturesValue = el("info-features-value");
+const infoSize = el("info-size");
+const infoSizeValue = el("info-size-value");
+const hiddenTracksNote = el("hidden-tracks-note");
+const encryptedNote = el("encrypted-note");
+const encryptedBadge = el("encrypted-badge");
 
 /**
  * Whether the scan set is frozen: a running scan measures the playlists it
@@ -88,12 +100,38 @@ export function tableLength(ticks: number): string {
 
 /**
  * Whether the settings list `row`: every rule that classifies it as withheld
- * must be switched on.
+ * must be switched on. The transient reveal lists every row instead — a rule
+ * that withheld nothing has nothing to reveal, so revealing "all" and revealing
+ * "the rules that withheld something" are the same set.
  */
 function isShown(row: PlaylistRow): boolean {
-  return row.hiddenBy.every((rule) =>
-    rule === "short" ? state.settings.showShortPlaylists : state.settings.showLoopingPlaylists,
+  return (
+    state.revealing ||
+    row.hiddenBy.every((rule) =>
+      rule === "short" ? state.settings.showShortPlaylists : state.settings.showLoopingPlaylists,
+    )
   );
+}
+
+/**
+ * Flips the transient reveal. It writes no setting and saves nothing: the rows
+ * come and go for this session only, exactly like the desktop app's Show/Hide,
+ * and the next settings change drops it (see {@link dropReveal}).
+ *
+ * Inert while the scan set is frozen, like the selection controls: revealing
+ * rows under a running scan would widen the set it is measuring.
+ */
+export function toggleReveal(): void {
+  if (frozen()) {
+    return;
+  }
+  state.revealing = !state.revealing;
+  renderRows();
+}
+
+/** Drops the reveal — what every settings change does to it. */
+export function dropReveal(): void {
+  state.revealing = false;
 }
 
 // ── sorting ──────────────────────────────────────────────────────────────────
@@ -212,6 +250,7 @@ export function renderRows(): void {
   );
   renderSortIndicators();
   renderHint();
+  renderDiscInfo();
   ensureActive();
   updateSelection();
   applyFreeze();
@@ -226,6 +265,10 @@ const HINT_NAMES = 3;
  * disc, mirroring the CLI's `Hidden by filters (…)` block — a playlist that is
  * both short and looping is named on both lines and takes both settings to
  * reveal.
+ *
+ * The lines describe the SETTINGS, so the transient reveal changes their
+ * wording rather than retiring them: the rows it puts in the table are still
+ * the ones the settings withhold, and the line is where its Show/Hide lives.
  */
 function renderHint(): void {
   const lines: string[] = [];
@@ -237,6 +280,8 @@ function renderHint(): void {
   }
   hiddenHint.textContent = lines.join("\n");
   hiddenHint.hidden = lines.length === 0;
+  hiddenRow.hidden = lines.length === 0;
+  revealBtn.textContent = state.revealing ? "Hide" : "Show";
 }
 
 /** The hint line for `rule`, or nothing when the rule withheld no playlist. */
@@ -247,9 +292,44 @@ function hintLine(rule: "short" | "looping"): string[] {
   }
   const rest = names.length - HINT_NAMES;
   const more = rest > 0 ? ` and ${rest} more` : "";
+  const listed = `(${rule}): ${names.slice(0, HINT_NAMES).join(", ")}${more}`;
   return [
-    `Hidden by filters (${rule}): ${names.slice(0, HINT_NAMES).join(", ")}${more} - enable in settings`,
+    state.revealing
+      ? `Showing filtered playlists ${listed} - enable in settings to keep`
+      : `Hidden by filters ${listed} - enable in settings`,
   ];
+}
+
+/**
+ * The disc-info strip under the panes: the block the classic report prints as
+ * its footer — the disc title when the disc declares one, the detected features
+ * when it has any, its size in both the report's exact bytes and human-readable
+ * form, and the two notes. The desktop app draws the same lines in the same
+ * order.
+ *
+ * The hidden-tracks note is judged over the DISPLAYED rows, like the desktop
+ * app's: it explains the `*` markers the table is showing, so a disc whose only
+ * marked playlist the filters withhold has no marker to explain.
+ */
+function renderDiscInfo(): void {
+  const disc = state.disc;
+  const title = disc?.discTitle ?? "";
+  infoTitleValue.textContent = title;
+  infoTitle.hidden = title === "";
+  const features = disc === null ? [] : featureLabels(disc);
+  infoFeaturesValue.textContent = features.join(", ");
+  infoFeatures.hidden = features.length === 0;
+  // The report's own `Disc Size:` — the whole tree, so the interleaved *.ssif
+  // bytes that `sizeBytes` leaves out are counted in (see the mirror's two size
+  // fields). Both forms are shown whatever the size-format setting says, which
+  // is the one place the exact byte count is always readable.
+  const bytes = (disc?.sizeBytes ?? 0) + (disc?.interleavedSizeBytes ?? 0);
+  infoSizeValue.textContent = `${formatSize(bytes, false)} bytes (${formatSize(bytes, true)})`;
+  infoSize.hidden = bytes <= 0;
+  hiddenTracksNote.hidden = !state.displayed.some((row) => row.hasHidden);
+  const encrypted = disc?.isAacsEncrypted === true;
+  encryptedNote.hidden = !encrypted;
+  encryptedBadge.hidden = !encrypted;
 }
 
 export function cell(className?: string): HTMLTableCellElement {
@@ -356,12 +436,20 @@ export function updateSelection(): void {
   // The only unscannable table is one with no rows in it: the settings can
   // withhold every playlist the disc has, and there is then nothing to measure.
   scanBtn.disabled = state.displayed.length === 0 || !scanOffered() || frozen();
+  // The structural report needs no measurable stream data, so it is offered for
+  // an encrypted disc too — its structure is read from cleartext metadata and
+  // is correct, which is exactly what that report prints.
+  viewReportBtn.disabled = state.disc === null || state.displayed.length === 0 || frozen();
+  // A shown pre-scan report describes the selection, so a changed selection
+  // re-renders it — the same way a report-section switch re-renders a measured
+  // one rather than leaving a stale report on screen.
+  refreshPreview();
 }
 
 /**
  * Puts the freeze into effect on the controls that name the scan set — the row
- * checkboxes, the two selection buttons and the sortable headers. Disabled
- * rather than hidden: the user can still read what the running scan is
+ * checkboxes, the two selection buttons, the reveal and the sortable headers.
+ * Disabled rather than hidden: the user can still read what the running scan is
  * measuring.
  */
 export function applyFreeze(): void {
@@ -371,6 +459,7 @@ export function applyFreeze(): void {
   }
   selectAllBtn.disabled = scanning;
   clearBtn.disabled = scanning;
+  revealBtn.disabled = scanning;
   for (const th of playlistsCard.querySelectorAll<HTMLTableCellElement>("th[data-sort]")) {
     th.classList.toggle("frozen", scanning);
   }

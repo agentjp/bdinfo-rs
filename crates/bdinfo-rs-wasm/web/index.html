@@ -377,13 +377,20 @@
         font-size: 0.82em;
         color: var(--text);
       }
+      /* The post-pick source bar: the slim line that stands in for the whole
+         dropzone once a disc is loaded, with the action that brings the
+         dropzone back. */
       .picked {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 0.5rem;
-        padding: 0 1.1rem 0.6rem;
+        padding: 0.85rem 1.1rem;
         color: var(--muted);
         font-size: 0.85rem;
+      }
+      .picked .btn {
+        margin-left: auto;
       }
       .picked svg {
         color: var(--ok);
@@ -523,13 +530,19 @@
         font-size: 0.62rem;
         color: var(--accent);
       }
-      /* the active (master-detail) row driving the panes below the table */
+      /* the active (master-detail) row driving the panes below the table, and
+         the highlighted pane row Ctrl+C copies the path of */
       tbody tr.active {
         box-shadow: inset 2px 0 0 var(--accent);
         background: var(--surface-2);
       }
       tbody tr.active.sel {
         background: var(--accent-dim);
+      }
+      /* the row whose disc path Ctrl+C just copied: the copy button's own
+         "copied" affordance, where a table row has no label to relabel */
+      tbody tr.copied-row td {
+        color: var(--ok);
       }
 
       /* ── detail panes (stream files + codecs of the active playlist) ── */
@@ -576,12 +589,6 @@
       .pane .table-wrap {
         max-height: 16rem;
       }
-      .pane tbody tr {
-        cursor: default;
-      }
-      .pane tbody tr:hover {
-        background: transparent;
-      }
 
       .card-foot {
         display: flex;
@@ -601,6 +608,69 @@
         color: var(--muted);
         font-size: 0.82rem;
         white-space: pre-line;
+      }
+      /* the same hint carrying the transient Show/Hide reveal beside it */
+      .hint-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .hint-row p {
+        margin: 0;
+      }
+      .hint-row .btn {
+        margin-left: auto;
+        flex: none;
+      }
+
+      /* ── disc-info strip (under the panes) ───────────────────── */
+      /* The detected-disc block the classic report prints as its footer, in the
+         desktop app's order: title, features, size, then the notes. */
+      .disc-info {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.75rem;
+        padding: 0.7rem 1.1rem;
+        border-top: 1px solid var(--border);
+        background: var(--surface-2);
+        font-size: 0.8rem;
+      }
+      .info-lines {
+        min-width: 0;
+      }
+      .info-line,
+      .info-note {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .info-line {
+        color: var(--text);
+      }
+      .info-note {
+        color: var(--muted);
+      }
+      .info-line + .info-line,
+      .info-note {
+        margin-top: 0.2rem;
+      }
+      .info-label {
+        color: var(--muted);
+        margin-right: 0.4rem;
+      }
+      .info-line .mono {
+        font-family: var(--mono);
+      }
+      /* The AACS indicator: one line tall, in the slack right of the lines, so
+         a disc with it and one without lay out identically everywhere else. */
+      .badge {
+        margin-left: auto;
+        flex: none;
+        white-space: nowrap;
+        padding: 0.1rem 0.45rem;
+        border-radius: 6px;
+        color: var(--warning-text);
+        background: var(--warning-bg);
+        border: 1px solid var(--warning-border);
       }
 
       /* ── settings dialog ─────────────────────────────────────── */
@@ -928,23 +998,27 @@
             <span class="dz-hint">or the disc root — drop it (or an <code>.iso</code>) here, or click to browse</span>
             <input id="picker" type="file" webkitdirectory multiple hidden />
           </label>
-          <div class="or-iso">
+          <div class="or-iso" id="or-iso">
             <label class="iso-link" id="iso-link">
               or analyze a single <code>.iso</code> image
               <input id="iso-picker" type="file" accept=".iso,application/x-iso9660-image" hidden />
             </label>
           </div>
+          <!-- The source bar a loaded disc replaces the dropzone with: what was
+               picked, and the way back to picking. The dropzone itself is
+               untouched — "Change disc…" simply puts it back. -->
           <div class="picked" id="picked" hidden>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 6 9 17l-5-5" />
             </svg>
             <span><span class="pill" id="picked-name">disc</span> — <span id="picked-count">0 files</span></span>
+            <button class="btn small" id="change-disc" type="button">Change disc…</button>
           </div>
           <div class="listing" id="listing" hidden>
             <span class="spinner" aria-hidden="true"></span>
             Reading playlists…
           </div>
-          <p class="privacy">
+          <p class="privacy" id="privacy">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
               <path d="m9 12 2 2 4-4" />
@@ -1016,11 +1090,30 @@
               </div>
             </div>
           </div>
-          <p class="hint" id="encrypted-note" hidden>
-            This disc is AACS-encrypted — its stream data cannot be analyzed, so
-            the measured scan is unavailable. Everything above is read from the
-            disc's own metadata and is correct.
-          </p>
+          <!-- The detected-disc strip the desktop app draws under its panes,
+               carrying the same lines the classic report's footer prints. The
+               hidden-tracks note is shown rather than left to the `*` marker's
+               hover title, which a touch screen has no way to reach. -->
+          <div class="disc-info" id="disc-info">
+            <div class="info-lines">
+              <p class="info-line" id="info-title" hidden>
+                <span class="info-label">Disc Title:</span> <span id="info-title-value"></span>
+              </p>
+              <p class="info-line" id="info-features" hidden>
+                <span class="info-label">Detected Features:</span> <span id="info-features-value"></span>
+              </p>
+              <p class="info-line" id="info-size" hidden>
+                <span class="info-label">Disc Size:</span> <span class="mono" id="info-size-value"></span>
+              </p>
+              <!-- The wording of bdrom::disc::HIDDEN_STREAMS_NOTE, which the
+                   command line prints under the same table: the `*` marker and
+                   this sentence are one contract, so a surface showing the
+                   marker shows this text verbatim. -->
+              <p class="info-note" id="hidden-tracks-note" hidden>(*) Some playlists on this disc have hidden tracks. These tracks are marked with an asterisk.</p>
+              <p class="info-note" id="encrypted-note" hidden>This disc is AACS-encrypted — its stream data cannot be analyzed, so the measured scan is unavailable. Everything above is read from the disc's own metadata and is correct.</p>
+            </div>
+            <span class="badge" id="encrypted-badge" hidden>⚠ AACS-encrypted</span>
+          </div>
           <!-- Files the scan could not read or parse and continued past. It
                sits in this card rather than beside the report because a
                structural listing records them too, and that listing renders no
@@ -1037,15 +1130,26 @@
               <ul id="scan-errors-list"></ul>
             </div>
           </div>
-          <p class="hint" id="hidden-hint" hidden></p>
+          <!-- The filter hint, with the session-only reveal beside it: Show
+               puts the withheld playlists in the table without touching the
+               stored settings, which is what makes it transient. -->
+          <div class="hint hint-row" id="hidden-row" hidden>
+            <p id="hidden-hint" hidden></p>
+            <button class="btn small" id="reveal-btn" type="button">Show</button>
+          </div>
           <div class="card-foot">
             <span class="muted" id="sel-count">0 selected</span>
-            <button class="btn primary" id="scan-btn" type="button" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-              </svg>
-              Scan selected
-            </button>
+            <div class="toolbar">
+              <!-- The report before any measured scan: the same render, over a
+                   disc whose measured values are all zero. -->
+              <button class="btn small" id="view-report-btn" type="button" disabled>View report</button>
+              <button class="btn primary" id="scan-btn" type="button" disabled>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+                </svg>
+                Scan selected
+              </button>
+            </div>
           </div>
         </section>
 

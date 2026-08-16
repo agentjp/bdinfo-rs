@@ -18,7 +18,10 @@
 //
 // This module is the page's composition root: it owns the pick controls and
 // wires every listener the feature modules beside it export.
+import { copyRowPath } from "./panes.js";
 import {
+  changeDisc,
+  changeDiscBtn,
   collectAndLoad,
   copyBtn,
   copyReport,
@@ -29,6 +32,8 @@ import {
   loadIso,
   runScan,
   scanBtn,
+  viewReport,
+  viewReportBtn,
 } from "./scan.js";
 import { initSettings } from "./settings.js";
 import { el, errMessage, showError, state } from "./state.js";
@@ -36,9 +41,11 @@ import {
   clearBtn,
   clickSort,
   playlistsCard,
+  revealBtn,
   type SortColumn,
   selectAllBtn,
   setAll,
+  toggleReveal,
 } from "./table.js";
 
 const dropzone = el<HTMLLabelElement>("dropzone");
@@ -120,4 +127,27 @@ copyBtn.addEventListener("click", () => {
 });
 downloadBtn.addEventListener("click", () => {
   void downloadReport();
+});
+changeDiscBtn.addEventListener("click", changeDisc);
+viewReportBtn.addEventListener("click", () => {
+  void viewReport();
+});
+revealBtn.addEventListener("click", toggleReveal);
+
+// Ctrl+C (⌘C) copies the highlighted row's disc path, like the desktop app and
+// the classic tool before it — but only when it would otherwise copy nothing:
+// a text selection is what the user meant to copy, and a focused field owns its
+// own selection, which `getSelection` does not report.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "c" || !(event.ctrlKey || event.metaKey) || event.altKey) {
+    return;
+  }
+  const focused = document.activeElement;
+  if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+    return;
+  }
+  if (window.getSelection()?.isCollapsed === false) {
+    return;
+  }
+  void copyRowPath();
 });

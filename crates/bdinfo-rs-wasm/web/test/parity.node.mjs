@@ -275,6 +275,40 @@ async function main() {
     console.error(`FAIL — progress readout diverged: ${progressMismatches.join("; ")}`);
   }
 
+  // The demo's Detected Features list against the report's own `Extras:` line.
+  // The labels and their order are the library's (`BdRom::extra_features`) and
+  // are written a second time in TypeScript, because the mirror carries the six
+  // flags rather than the strings they stand for — so this renders a disc with
+  // every flag set and requires the demo to spell that line exactly. A label or
+  // an order that moves on the Rust side fails here.
+  const { featureLabels } = await import("../dist/format.js");
+  const featured = {
+    ...inspected,
+    isUhd: true,
+    isBdJava: true,
+    is50hz: true,
+    is3d: true,
+    isDbox: true,
+    isPsp: true,
+  };
+  const extrasLine = render_report(featured)
+    .split("\r\n")
+    .find((line) => line.startsWith("Extras:"));
+  const labels = featureLabels(featured);
+  // The report pads its labels to column 16; the value is what follows.
+  const featuresOk =
+    labels.length === 6 &&
+    extrasLine !== undefined &&
+    extrasLine.slice(16) === labels.join(", ") &&
+    // A disc with no feature flags has no Extras line and no labels either.
+    featureLabels(inspected).length === 0 &&
+    !render_report(inspected).includes("Extras:");
+  if (!featuresOk) {
+    console.error(
+      `FAIL — detected features diverged: labels ${JSON.stringify(labels)}, report line ${JSON.stringify(extrasLine)}.`,
+    );
+  }
+
   // The report save-file name, sanitized by the core rule.
   const fileNameOk =
     report_file_name("WASMDISC") === "BDINFO.WASMDISC.txt" &&
@@ -446,6 +480,7 @@ async function main() {
     codecsOk &&
     sizeOk &&
     progressOk &&
+    featuresOk &&
     fileNameOk &&
     fullOk &&
     keepPartialOk &&
@@ -457,7 +492,7 @@ async function main() {
     downloadNameOk
   ) {
     console.log(
-      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + progress readout + file name + download name + selection + round trip + retention + short-stream notices + .iso OK.`,
+      `PASS — Node measured scan matches the golden (${golden.length} bytes); inspect + table fields + classification + rejection + codecs + size vectors + progress readout + detected features + file name + download name + selection + round trip + retention + short-stream notices + .iso OK.`,
     );
     process.exit(0);
   }
