@@ -158,10 +158,12 @@ export const state = {
    * It is an overlay rather than a patch of the held disc for the reason the
    * desktop app keeps one too: the disc the page holds is what the report, the
    * sort keys and the row set are derived from, so writing half-measured numbers
-   * into it would make those disagree with the report beside them. Clearing the
-   * map is therefore all a scan's end takes — {@link adoptDisc} does it when the
-   * measured disc arrives, and a cancelled scan does it to return the cells to
-   * what the held disc knows.
+   * into it would make those disagree with the report beside them.
+   *
+   * It outlives the scan that filled it: a cancelled or failed scan leaves its
+   * partial numbers on the cells, and the NEXT scan clears them as it starts.
+   * A finished scan clears it too, but by adopting the measured disc — whose
+   * numbers are the final form of the very cells the overlay was raising.
    */
   live: new Map<string, MeasuredPlaylist>(),
   /** The playlist whose details the panes show; null before the first draw. */

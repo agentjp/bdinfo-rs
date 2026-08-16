@@ -498,13 +498,23 @@
         accent-color: var(--accent);
         cursor: pointer;
       }
+      input[type="checkbox"]:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
       /* sortable playlist-table headers: click to sort, arrow shows direction */
       th[data-sort] {
         cursor: pointer;
         user-select: none;
       }
-      th[data-sort]:hover {
+      th[data-sort]:not(.frozen):hover {
         color: var(--text);
+      }
+      /* a running scan freezes the scan set, so the headers read inert until it
+         ends — the arrow keeps showing the sort the scan is reporting in */
+      th[data-sort].frozen {
+        cursor: not-allowed;
+        color: var(--faint);
       }
       th .arrow {
         display: inline-block;
@@ -704,9 +714,12 @@
         display: flex;
         align-items: center;
         gap: 0.85rem;
+        /* the times readout is a whole line of its own on a phone: let it wrap
+           under the bar rather than squeeze it */
+        flex-wrap: wrap;
       }
       progress {
-        flex: 1;
+        flex: 1 1 12rem;
         appearance: none;
         height: 8px;
         border: none;
@@ -734,6 +747,14 @@
         color: var(--text);
         min-width: 2.8rem;
         text-align: right;
+      }
+      .times {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-left: auto;
+        white-space: nowrap;
       }
       .progress-text {
         margin: 0.7rem 0 0;
@@ -1034,6 +1055,10 @@
             <div class="progress-row">
               <progress id="bar" max="100" value="0"></progress>
               <span class="pct" id="pct">0%</span>
+              <!-- Elapsed + the remaining estimate; blank until the scan's
+                   first progress event gives the estimate something to work
+                   from. -->
+              <span class="times" id="progress-times"></span>
               <button class="btn small" id="cancel-btn" type="button">Cancel</button>
             </div>
             <p class="progress-text" id="progress-text">Preparing…</p>
