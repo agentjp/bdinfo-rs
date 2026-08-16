@@ -8,6 +8,11 @@
       name="description"
       content="Analyze a Blu-ray disc (BDMV) entirely in your browser. No upload — the bdinfo-rs measured scan, compiled to WebAssembly."
     />
+    <!-- Each content mirrors --bg in its palette. The media form only tracks
+         the OS, so a manual Light/Dark choice rewrites both contents from the
+         settings module. -->
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d10" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f9" />
     <!-- The bdinfo-rs aperture mark (crates/bdinfo-rs-gui/assets/icon.svg is
          the vector source of truth): PNG for browsers without SVG favicon
          support (Safari), the inline SVG for everything newer, and the
@@ -52,6 +57,81 @@
         --radius: 12px;
         --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, monospace;
         --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
+        color-scheme: dark;
+      }
+
+      /* The dark palette above is the fixed reference; the light palette below
+         is derived from it — the same hues with the lightness flipped, and
+         WCAG AA contrast for text, muted and accent against the light grounds.
+         It appears twice because the two states cannot share one selector:
+         the media-guarded block themes Auto (no data-theme attribute — the OS
+         decides), the attribute block an explicit Light choice on any OS; an
+         explicit Dark choice needs no block of its own, since data-theme="dark"
+         defeats the media guard and leaves the :root reference in force. Keep
+         the two copies identical. --report-bg/--report-text are deliberately
+         absent from both: the report well keeps its dark ground in either
+         theme, a terminal artifact on its own ground. Per-block color-scheme
+         is what flips the native widgets (scrollbars, checkbox and spinner
+         chrome, the dialog) with the palette. */
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme="dark"]) {
+          --bg: #f4f6f9;
+          --bg-glow: #e7edf5;
+          --surface: #ffffff;
+          --surface-2: #eef1f6;
+          --border: #d9dee7;
+          --border-strong: #c0c9d4;
+          --text: #1b222b;
+          --muted: #57626f;
+          --faint: #6d7885;
+          --accent: #0270a8;
+          --accent-strong: #015d8c;
+          --accent-dim: rgba(2, 112, 168, 0.12);
+          --danger: #c92a2a;
+          --warn: #a4720f;
+          --ok: #178a4e;
+          --accent-ink: #ffffff;
+          --link-hover: #015d8c;
+          --error-text: #942222;
+          --error-bg: rgba(201, 42, 42, 0.06);
+          --error-border: rgba(201, 42, 42, 0.35);
+          --warning-text: #7c5a10;
+          --warning-bg: rgba(164, 114, 15, 0.08);
+          --warning-border: rgba(164, 114, 15, 0.35);
+          --shadow: rgba(9, 14, 20, 0.18);
+          --backdrop: rgba(9, 14, 20, 0.35);
+          --logo-glow: rgba(2, 112, 168, 0.25);
+          color-scheme: light;
+        }
+      }
+      :root[data-theme="light"] {
+        --bg: #f4f6f9;
+        --bg-glow: #e7edf5;
+        --surface: #ffffff;
+        --surface-2: #eef1f6;
+        --border: #d9dee7;
+        --border-strong: #c0c9d4;
+        --text: #1b222b;
+        --muted: #57626f;
+        --faint: #6d7885;
+        --accent: #0270a8;
+        --accent-strong: #015d8c;
+        --accent-dim: rgba(2, 112, 168, 0.12);
+        --danger: #c92a2a;
+        --warn: #a4720f;
+        --ok: #178a4e;
+        --accent-ink: #ffffff;
+        --link-hover: #015d8c;
+        --error-text: #942222;
+        --error-bg: rgba(201, 42, 42, 0.06);
+        --error-border: rgba(201, 42, 42, 0.35);
+        --warning-text: #7c5a10;
+        --warning-bg: rgba(164, 114, 15, 0.08);
+        --warning-border: rgba(164, 114, 15, 0.35);
+        --shadow: rgba(9, 14, 20, 0.18);
+        --backdrop: rgba(9, 14, 20, 0.35);
+        --logo-glow: rgba(2, 112, 168, 0.25);
+        color-scheme: light;
       }
 
       * {
