@@ -395,6 +395,11 @@ async function renderPreview(): Promise<void> {
   }
   const sections = reportSections();
   const selection = scanNames();
+  // Recorded as the render is REQUESTED, not when it lands: it says which
+  // selection the page is rendering, so a change made during the round trip is
+  // judged against that one rather than against the older order still on
+  // screen — which would ask again for the render already on its way.
+  state.previewOrder = selection;
   const gen = ++state.generation;
   try {
     const text = await renderReport({ ...held, reportOrder: selection }, sections);
@@ -403,7 +408,6 @@ async function renderPreview(): Promise<void> {
     }
     state.reportText = text;
     state.renderedWith = sections;
-    state.previewOrder = selection;
     reportPre.textContent = text;
     show(reportCard);
   } catch (error) {
