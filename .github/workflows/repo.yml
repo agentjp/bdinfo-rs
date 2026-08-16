@@ -137,6 +137,14 @@ jobs:
           ./.github/scripts/check-workflow-permissions.ps1 -SelfTest
           ./.github/scripts/check-workflow-permissions.ps1
 
+      # A registry mint under a workflow_run trigger is refused by crates.io and
+      # npm, and nothing reveals it until a real release — see the script.
+      - name: Check trusted-publishing triggers
+        shell: pwsh
+        run: |
+          ./.github/scripts/check-trusted-publishing-triggers.ps1 -SelfTest
+          ./.github/scripts/check-trusted-publishing-triggers.ps1
+
   # TOML formatting + lint gate (taplo): every tracked TOML — the Cargo manifests,
   # the gate configs (clippy/deny/nextest/mutants/typos), dist-workspace.toml — must
   # match `taplo fmt` and pass `taplo lint`, against the committed taplo.toml. Mirrors

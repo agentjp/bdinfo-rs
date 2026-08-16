@@ -8,14 +8,37 @@ name: publish-crates
 # after a partial failure finishes the release instead of erroring — see the publish
 # step for why `cargo publish --workspace` (one command for both) can't do this.
 #
+# The publish job binds the `crates-io` environment, which holds NO secrets and
+# exists only as a publishing gate: GitHub emits the environment in the token's
+# OIDC claim and refuses the job outright on a ref the environment does not
+# admit (its rules are the `master` branch and the `v*` and `gui-v*` tags). So
+# the trusted publisher records repository agentjp/bdinfo-rs, workflow
+# `publish-crates.yml` AND environment `crates-io` — a second lock, which the
+# filename alone is not: anyone who can push a workflow could otherwise mint a
+# token, while changing an environment takes repository-settings access.
+# gui-publish-crates.yml binds the same environment for bdinfo-rs-gui.
+#
 # Bootstrap: Trusted Publishing requires the crate to already exist, so the FIRST
 # publish of each crate is done by hand; this workflow takes over for every tag
 # afterwards. Configure the trusted publisher on crates.io for BOTH crates ->
-# repository agentjp/bdinfo-rs, workflow `publish-crates.yml`.
+# repository agentjp/bdinfo-rs, workflow `publish-crates.yml`, environment
+# `crates-io`.
 
 on:
   push:
     tags: ["v*"]
+  # Re-publish without re-tagging: re-pushing a tag is refused by the immutable
+  # release ruleset and would re-fire v-release.yml, which errors on a release
+  # that already exists. Re-running the original tag run is not equivalent —
+  # that re-executes the workflow file as it stood at the TAG, not master's. The
+  # publish is idempotent, so a dispatch against a fully-published version is a
+  # no-op that still exercises the OIDC mint.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The v* tag to publish, e.g. v4.0.0
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -44,17 +67,25 @@ jobs:
     name: cargo publish --workspace (crates.io)
     needs: guard-ancestor
     runs-on: ubuntu-latest
+    # Holds no secrets — see the header. Its deployment rules admit the v* tag
+    # this runs on and the master branch a dispatch resolves to.
+    environment: crates-io
     permissions:
       contents: read
       id-token: write # mint the short-lived crates.io OIDC token
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      # The tag's own source: on the dispatch path `github.ref` is the default
+      # branch, so the ref is taken from the input instead.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           persist-credentials: false
 
-      # No build cache here: this workflow runs only on a release tag and publishes
-      # to crates.io, so a cache poisoned in a less-trusted context could taint a
-      # published crate (zizmor cache-poisoning). cargo publish builds fresh.
+      # No build cache here: this workflow publishes to crates.io, so a cache
+      # poisoned in a less-trusted context could taint a published crate
+      # (zizmor cache-poisoning). cargo publish builds fresh.
 
       # cargo publishes whatever version is in Cargo.toml, not the tag — fail fast
       # if a tag was cut that does not match (mirrors the guard in docker.yml).
@@ -69,7 +100,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           . ./.github/scripts/_common.ps1
 
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:TAG
           $base = Get-ReleaseTagBase $tag
           # Both crates inherit the version from [workspace.package], so either
           # one reports it.
