@@ -148,3 +148,11 @@ jobs:
               }
             }
           }
+
+          # The step's exit code is $LASTEXITCODE from the last native command, so a
+          # tolerated "already uploaded" on the LAST crate would fail the step with the
+          # cargo exit code this block just decided to accept. That hides only in the
+          # partial-recovery case, where the last crate really does publish and exits 0;
+          # a re-run with everything already published fails without this line. A genuine
+          # failure throws above and never reaches it.
+          exit 0
