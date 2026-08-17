@@ -39,9 +39,9 @@ name: gui-publish
 #   publish   gated on ALL of prepare (and mode == publish): pushes the
 #             pre-validated payloads. fail-fast is OFF here — cancelling a
 #             sibling mid-push is worse than letting it finish — and every
-#             leg is IDEMPOTENT (skip-if-present / commit-if-changed /
-#             tolerate-already-uploaded), so re-dispatching after a partial
-#             failure heals the failed channels and no-ops the finished ones.
+#             leg is IDEMPOTENT (skip-if-present / commit-if-changed), so
+#             re-dispatching after a partial failure heals the failed channels
+#             and no-ops the finished ones.
 #
 # `mode: prepare-only` is the rehearsal lane: a dispatch-only workflow cannot
 # run before it lands on master, so the first live exercise should be a

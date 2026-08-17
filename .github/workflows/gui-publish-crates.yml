@@ -95,14 +95,69 @@ jobs:
       # poisoned in a less-trusted context could taint a published crate
       # (zizmor cache-poisoning). cargo publish builds fresh.
 
+      # cargo publishes whatever version the manifest carries, not the tag — fail
+      # fast if a tag was cut that does not match (the publish-crates.yml guard,
+      # on the gui crate).
+      - name: Verify the tag matches the gui crate version
+        id: version
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          . ./.github/scripts/_common.ps1
+
+          $tag = $env:TAG
+          $base = Get-GuiTagVersion $tag
+          $manifest = 'crates/bdinfo-rs-gui/Cargo.toml'
+          $crate = Get-CrateVersion -Name 'bdinfo-rs-gui' -ManifestPath $manifest
+          if ($base -ne $crate) { Stop-Leg "Tag $tag (base $base) does not match the gui crate version $crate" }
+          "version=$crate" | Add-Content -Path $env:GITHUB_OUTPUT
+
       - name: Authenticate to crates.io (Trusted Publishing / OIDC)
         id: auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
-      # The tag/version guard and the tolerate-already-uploaded rule live in the
-      # script, with the reasoning for both.
-      - name: Publish bdinfo-rs-gui, tolerating a version already on crates.io
+      # Inline rather than delegated to a script under .github/scripts: the
+      # checkout above is the TAG's tree, so a script read from it would be the
+      # copy that tag shipped — which makes a dispatch unable to heal a defect in
+      # that script, since the re-run replays the same copy. The workflow file
+      # itself comes from the default branch on a dispatch, so the logic here is
+      # always current while the crate source stays the tag's.
+      #
+      # bdinfo-rs-gui is an independent workspace (the root Cargo.toml lists it
+      # under `exclude`), so the publish runs from the crate's own directory —
+      # `-p` alone from the repository root does not reach it.
+      - name: Publish bdinfo-rs-gui, skipping a version already on crates.io
         shell: pwsh
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: ./.github/scripts/publish-gui-crates.ps1 -Tag $env:TAG
+          VERSION: ${{ steps.version.outputs.version }}
+        working-directory: crates/bdinfo-rs-gui
+        run: |
+          $version = $env:VERSION
+
+          # An already-published version is SKIPPED, not overwritten: cargo resolves
+          # the index first and refuses there — "error: crate <name>@<version> already
+          # exists on crates.io index" — before packaging, verifying or uploading
+          # anything, so the published artifact is never touched. (crates.io would
+          # reject an overwrite in any case; versions are immutable.) That index read
+          # is one cargo already needs, which is why this does no separate registry
+          # pre-check: a pre-check adds a crates.io-API call that a transient 503 can
+          # fail the job on, for a verdict cargo reaches anyway.
+          Write-Host "publishing bdinfo-rs-gui@$version"
+          $out = cargo publish -p bdinfo-rs-gui --locked 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0) {
+            if ($out -match 'already (uploaded|exists)') {
+              Write-Host "bdinfo-rs-gui@$version is already on crates.io — skipped, nothing was uploaded"
+            } else {
+              throw "cargo publish -p bdinfo-rs-gui failed (exit $LASTEXITCODE)"
+            }
+          }
+
+          # The step's exit code is $LASTEXITCODE from the last native command, so a
+          # skipped publish would otherwise fail the step with the cargo exit code this
+          # block just decided to accept. A genuine failure throws above and never
+          # reaches it.
+          exit 0
