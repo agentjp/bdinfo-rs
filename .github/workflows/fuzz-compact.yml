@@ -2,10 +2,11 @@ name: fuzz-compact
 
 # COMPACT THE COMMITTED SEED CORPUS: re-derive fuzz/corpus/<target> as the
 # smallest set of units that still reaches everything the tracked set reaches,
-# and upload it for a human to commit. Dispatch only — this is maintenance, not
-# a gate, and it rewrites nothing here (the runner's checkout is scratch; the
-# corpus grows and shrinks only through a reviewed pull request, for the reasons
-# fuzz.yml's header gives).
+# upload it, and say in one rolling issue how much a compaction pull request
+# would remove. ADVISORY, never automatic — this is maintenance, not a gate, and
+# it rewrites nothing here (the runner's checkout is scratch; the corpus grows
+# and shrinks only through a reviewed pull request, for the reasons fuzz.yml's
+# header gives).
 #
 # WHY IT IS NEEDED. libFuzzer's merge decides what to keep by FEATURES, and
 # promotion decides what to offer by content hash, so a promoted unit can be an
@@ -14,6 +15,36 @@ name: fuzz-compact
 # of promotions while coverage barely moved. fuzz.yml now promotes a coverage
 # delta, which stops the growth; this workflow is what removes what already
 # landed.
+#
+# WHY IT IS SCHEDULED, AND WHAT THE SCHEDULE PRODUCES. A corpus that can be
+# compacted looks exactly like one that cannot, so without a standing
+# measurement the question is only asked when someone thinks to ask it — and
+# 63,311 files is what that costs. The promotion side is not measured that way:
+# fuzz.yml rewrites its rolling `fuzz-corpus` issue after every pass, with the
+# numbers and the command in it. This workflow does the same for the other
+# direction, under its own `fuzz-compact` label. Computing the keep-set IS the
+# report — the legs produce exactly the artifacts a compaction pull request
+# commits, so reporting from a scheduled run costs one fan-in job on top of work
+# that was happening anyway, and there is no "measure, then dispatch to produce"
+# round trip in between.
+#
+# WEEKLY, AND CHEAPER THAN WEEKLY. A pass is 30 legs of full-corpus merges,
+# measured at 8 minutes wall clock on 2026-08-15 — but the answer only moves
+# when the corpus does, so the matrix runs only when it HAS moved.
+# `git rev-parse HEAD:fuzz/corpus` is the tree object of the committed corpus:
+# it changes exactly when that content changes and needs no history, so a
+# depth-1 checkout can read it where `git log -- fuzz/corpus` cannot. The last
+# pass's value travels in an HTML marker in the issue that pass wrote. Same
+# tree, same keep-set, same answer — so a scheduled run whose marker matches
+# skips all 30 legs and leaves the issue alone. A dispatch always runs, because
+# a human pressing the button is asking for the measurement itself.
+#
+# NEITHER THE SCHEDULE NOR THE REPORT DELETES ANYTHING. The issue says how many
+# files and how many megabytes a compaction pull request would remove, and
+# carries the command that builds one. Applying it stays a human's decision and
+# a reviewed pull request. Deleted blobs also stay in git history forever, so a
+# compaction shrinks the checkout while the history grows: the issue is a signal
+# to compact when it PAYS, not a reason to compact often.
 #
 # HUMAN-NAMED SEEDS SURVIVE BY CONSTRUCTION. A seed with a readable name
 # (`codec/hevc_sps_ref_pic_set_runaway`, `clpi/magic_only`) is a hand-written
@@ -29,22 +60,44 @@ name: fuzz-compact
 # Every unit is named by the sha1 of its bytes or by a human, so unzipping both
 # artifacts into one directory IS that union.
 #
-# To commit the result of a run in which every leg is green:
+# To commit the result of a run in which every leg is green — the issue writes
+# this same block with the run id already substituted and only the targets worth
+# taking named, which is the copy the reader should use:
 #
 #   gh run download <run-id> --pattern 'fuzz-compact-*' --dir compacted
-#   for t in $(awk '!/^[[:space:]]*#/ && NF { print $1 }' fuzz/targets.txt); do
-#     d=$(mktemp -d)
-#     cp compacted/fuzz-compact-"$t"-x86_64/* compacted/fuzz-compact-"$t"-i686/* "$d/" || exit 1
-#     rm -rf "fuzz/corpus/$t" && mv "$d" "fuzz/corpus/$t"
-#   done
+#   foreach ($t in (Get-Content fuzz/targets.txt |
+#       Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() } |
+#       ForEach-Object { ($_ -split '\s+')[0] })) {
+#     $d = "$env:TEMP/keep-<run-id>-$t"
+#     New-Item -ItemType Directory $d -Force | Out-Null
+#     Copy-Item "compacted/fuzz-compact-$t-x86_64/*", "compacted/fuzz-compact-$t-i686/*" $d
+#     Remove-Item -Recurse -Force "fuzz/corpus/$t"
+#     Move-Item $d "fuzz/corpus/$t"
+#   }
 #   git add -A fuzz/corpus
+#
+# PowerShell, matching this repository's own scripts under .github/scripts: a
+# recipe nobody can paste into the shell they actually have is a recipe nobody
+# runs.
 #
 # The acceptance for that pull request is the `corpus replay (regression gate,
 # <arch>)` checks in core.yml: they replay every committed unit at both widths,
 # which is exactly the claim a compaction makes about what it kept.
 
 on:
+  schedule:
+    # Sunday 02:23 UTC. Weekly, not daily: 30 legs of full-corpus merges, and
+    # the answer moves only when a promotion pull request lands. The slot is
+    # empty — fuzz.yml's eight passes run at :11 past every third hour and the
+    # daily audit/scorecard/link pile sits at 06:00 and 07:00 UTC — so this
+    # workflow's build-cache reads never queue behind theirs.
+    - cron: "23 2 * * 0"
   workflow_dispatch:
+    inputs:
+      file_issue:
+        description: Refresh the rolling fuzz-compact issue from this run (a scheduled pass always does)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,12 +123,23 @@ jobs:
   targets:
     name: read the target list
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Read-only, and only to find the marker the last pass left behind.
+      issues: read
     outputs:
       list: ${{ steps.read.outputs.list }}
+      tree: ${{ steps.corpus.outputs.tree }}
+      skip: ${{ steps.corpus.outputs.skip }}
     steps:
+      # Sparse: this job reads fuzz/targets.txt and one tree object, and the
+      # corpus itself is 40k files it never opens. `git rev-parse HEAD:<path>`
+      # answers from the commit's tree, which a sparse checkout does not filter.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: fuzz/targets.txt
+          sparse-checkout-cone-mode: false
 
       - name: Read fuzz/targets.txt
         id: read
@@ -85,9 +149,47 @@ jobs:
           echo "list=[$list]" >> "$GITHUB_OUTPUT"
           echo "matrix: [$list]"
 
+      # THE COST KNOB. The keep-set is a pure function of the committed corpus
+      # and the target binaries, so a week in which fuzz/corpus did not change
+      # re-derives an answer the last pass already published. The tree object of
+      # fuzz/corpus is that input's identity, and the previous pass's value is
+      # the marker in the issue it wrote — read from the NEWEST fuzz-compact
+      # issue whatever its state, because a pass that found nothing to remove
+      # closes the issue and its marker has to keep counting afterwards.
+      #
+      # Only a SCHEDULED run skips. A dispatch is a human asking to measure, and
+      # it is also how a change on this workflow's own side — new guards, a new
+      # target's first pass — gets its answer without waiting for the corpus to
+      # move.
+      - name: Decide whether the corpus has moved since the last pass
+        id: corpus
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          tree=$(git rev-parse "HEAD:fuzz/corpus")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          # `|| true`: before the first report the label does not exist yet and
+          # gh exits non-zero on an unknown label. No marker means no skip,
+          # which is the correct reading of "nothing has measured this yet".
+          body=$(gh issue list --label fuzz-compact --state all --limit 1 \
+            --json body --jq '.[0].body // ""' 2>/dev/null || true)
+          last=$(printf '%s' "$body" |
+            sed -n 's/.*<!-- fuzz-compact-corpus-tree: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+          if [ "$EVENT" = "schedule" ] && [ -n "$last" ] && [ "$last" = "$tree" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "fuzz/corpus is still $tree, the tree the last pass measured — skipping the matrix." |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "fuzz/corpus is $tree; the last pass measured ${last:-(nothing)}."
+          fi
+
   compact:
     name: compact ${{ matrix.target }} (${{ matrix.arch }})
     needs: [targets]
+    if: ${{ needs.targets.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     # One merge executes every committed unit once. The slowest target in the
     # tier runs 584 exec/s (measured 2026-08-03), which puts even the largest
@@ -195,13 +297,112 @@ jobs:
           # excluding them and far cheaper than getting the exclusion wrong.
           "$BIN" -merge=1 $GUARDS "$keep" "fuzz/corpus/$TARGET"
           after=$(find "$keep" -type f | wc -l)
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "named=$named" >> "$GITHUB_OUTPUT"
           echo "after=$after" >> "$GITHUB_OUTPUT"
           echo "$TARGET/$ARCH: $before committed unit(s) ($named human-named) compact to $after"
+
+      # THE CLAIM A COMPACTION MAKES, MEASURED RATHER THAN ASSUMED. libFuzzer's
+      # merge keeps every unit that adds a FEATURE, and features are finer than
+      # edges, so a correct merge cannot lose coverage — but "cannot" is a
+      # property of a tool this workflow only calls, and what it would cost to be
+      # wrong is a permanent deletion. A -runs=0 replay loads a corpus, prints
+      # one INITED line and exits — seconds, against a merge that has already
+      # executed every unit — so two of them turn the claim into a number this
+      # leg reports. fuzz.yml's baseline step records what one costs.
+      #
+      # A LOSS DOES NOT FAIL THE LEG. The keep-set still uploads — a human may
+      # want to look at it — and the report job is what acts on the verdict, by
+      # dropping the target from the command it prints. Failing here would leave
+      # a red leg whose artifact is downloadable anyway, which reads as neither
+      # "use this" nor "do not".
+      #
+      # An unparsed replay leaves the value EMPTY and travels as null, never as
+      # 0: a zero would read as "measured, reaches nothing" and, compared
+      # against a full corpus that also failed to parse, as a clean pass.
+      - name: Prove the keep-set reaches the same coverage
+        id: cov
+        continue-on-error: true
+        env:
+          BIN: ${{ steps.build.outputs.bin }}
+        run: |
+          replay() {
+            # `#2542 INITED cov: 4065 ft: 17861 corp: 2542/...` — the one line a
+            # zero-run replay prints, read exactly as fuzz.yml's baseline reads
+            # it. The guards are the same ones the merge ran under, so a unit
+            # the merge dropped for tripping them cannot fail this comparison.
+            "$BIN" -runs=0 $GUARDS "$1" 2>&1 |
+              sed -n 's/.*INITED cov: \([0-9]*\) ft: \([0-9]*\).*/\1 \2/p' | head -1
+          }
+          set +e
+          full=$(replay "fuzz/corpus/$TARGET")
+          keep=$(replay "fuzz/keep/$TARGET")
+          set -e
+          {
+            echo "cov_full=${full% *}"
+            echo "ft_full=${full#* }"
+            echo "cov_keep=${keep% *}"
+            echo "ft_keep=${keep#* }"
+          } >> "$GITHUB_OUTPUT"
+          echo "$TARGET/$ARCH: committed [${full:-unmeasured}] vs keep-set [${keep:-unmeasured}] (cov ft)"
+
+      - name: Record this leg's numbers
+        id: stats
+        env:
+          BEFORE: ${{ steps.compact.outputs.before }}
+          NAMED: ${{ steps.compact.outputs.named }}
+          AFTER: ${{ steps.compact.outputs.after }}
+          COV_FULL: ${{ steps.cov.outputs.cov_full }}
+          FT_FULL: ${{ steps.cov.outputs.ft_full }}
+          COV_KEEP: ${{ steps.cov.outputs.cov_keep }}
+          FT_KEEP: ${{ steps.cov.outputs.ft_keep }}
+        run: |
+          out="fuzz/stats/$TARGET-$ARCH"
+          mkdir -p "$out"
+          # The keep-set as NAMES, because the set to commit is the union over
+          # the two widths and a union is over names — every unit is the sha1 of
+          # its bytes or a human's word, so the same unit carries the same name
+          # in both legs. Counts cannot be unioned, only names can, which is why
+          # the report job gets these rather than a number.
+          find "fuzz/keep/$TARGET" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$out/keep-names.txt"
+          # The committed side, with sizes, so the report can price the deletion
+          # WITHOUT a checkout of its own: what a pull request removes is
+          # committed minus the union, and only a name that survives in neither
+          # width's keep-set is removed. Both legs of a target write the same
+          # file; the report reads whichever it has.
+          find "fuzz/corpus/$TARGET" -maxdepth 1 -type f -printf '%f\t%s\n' | LC_ALL=C sort > "$out/committed.tsv"
+          # jq -n, not a heredoc: it is what makes an EMPTY coverage reading
+          # land as JSON null instead of a syntax error, which is the whole
+          # distinction the step above exists to preserve.
+          jq -n \
+            --arg target "$TARGET" --arg arch "$ARCH" \
+            --argjson before "$BEFORE" --argjson named "$NAMED" --argjson after "$AFTER" \
+            --arg cov_full "$COV_FULL" --arg ft_full "$FT_FULL" \
+            --arg cov_keep "$COV_KEEP" --arg ft_keep "$FT_KEEP" \
+            '{$target, $arch, $before, $named, $after,
+              cov_full: ($cov_full | if . == "" then null else tonumber end),
+              ft_full:  ($ft_full  | if . == "" then null else tonumber end),
+              cov_keep: ($cov_keep | if . == "" then null else tonumber end),
+              ft_keep:  ($ft_keep  | if . == "" then null else tonumber end)}' \
+            > "$out/stats.json"
+          cat "$out/stats.json"
           {
             echo "### $TARGET ($ARCH)"
             echo
-            echo "$before committed unit(s), $named of them human-named, compact to $after ($(du -sh "$keep" | cut -f1))."
+            echo "$BEFORE committed unit(s), $NAMED of them human-named, compact to $AFTER ($(du -sh "fuzz/keep/$TARGET" | cut -f1)); coverage ${COV_FULL:-?} -> ${COV_KEEP:-?} edge(s)."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # A SEPARATE ARTIFACT PREFIX, deliberately not `fuzz-compact-*`: that glob
+      # is what the reader's `gh run download` takes to build the keep-set, and a
+      # stats artifact caught by it would unpack stats.json into a corpus
+      # directory as a unit nobody generated.
+      - name: Upload this leg's numbers
+        if: ${{ !cancelled() && steps.stats.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compact-stats-${{ matrix.target }}-${{ matrix.arch }}
+          path: fuzz/stats/${{ matrix.target }}-${{ matrix.arch }}/
+          if-no-files-found: error
 
       # Per target AND per arch, because the set to commit is the UNION of the
       # two widths and only the human downloading them can take it.
@@ -212,3 +413,294 @@ jobs:
           name: fuzz-compact-${{ matrix.target }}-${{ matrix.arch }}
           path: fuzz/keep/${{ matrix.target }}/
           if-no-files-found: error
+
+  # THE FAN-IN, and the only job that talks to the issue tracker. It has to be
+  # separate from the legs for the same reason fuzz.yml's report job does: the
+  # number a human acts on is the UNION over both pointer widths, which no
+  # single leg can see, and one issue written by thirty legs is thirty races.
+  #
+  # FILING follows fuzz.yml's rule — a scheduled pass files, a dispatch only
+  # writes the step summary unless its input says otherwise. A human who pressed
+  # the button is already reading the run; the input exists so the filing path
+  # itself can be exercised deliberately rather than first executing unattended.
+  report:
+    name: compaction report
+    needs: [targets, compact]
+    # Not keyed on the legs' result: a target whose leg died has no stats, and
+    # the report's job is to say so rather than to go silent. It IS keyed on the
+    # skip, because a skipped matrix measured nothing at all — reading its
+    # absent artifacts as "nothing to compact" would close an issue that is
+    # still true.
+    if: ${{ !cancelled() && needs.targets.result == 'success' && needs.targets.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      # Only the numbers. The keep-sets themselves are megabytes this job never
+      # opens — it prices them from the names and sizes the legs recorded.
+      - name: Download every leg's numbers
+        # No artifacts at all means every leg died before its stats upload;
+        # those legs are red already and a second red job would only add noise.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: compact-stats-*
+          path: stats
+
+      - name: Refresh the compaction issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so gh has no git remote to infer the repo
+          # from — name it explicitly.
+          GH_REPO: ${{ github.repository }}
+          FILE_ISSUE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.file_issue) }}
+          CORPUS_TREE: ${{ needs.targets.outputs.tree }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $stats = @()
+          if (Test-Path stats) {
+            $stats = @(Get-ChildItem stats -Recurse -Filter stats.json | ForEach-Object {
+              $s = Get-Content -Raw $_.FullName | ConvertFrom-Json
+              # The leg's own directory travels with its numbers: keep-names.txt
+              # and committed.tsv sit beside stats.json and are read per leg.
+              $s | Add-Member -NotePropertyName dir -NotePropertyValue $_.Directory.FullName -PassThru
+            })
+          }
+          if ($stats.Count -eq 0) {
+            Write-Host 'No leg reported its numbers — nothing was measured, so nothing is said.'
+            exit 1
+          }
+
+          # The matrix's two pointer widths. A target that reported only one of
+          # them has an INCOMPLETE union, and a union missing a width is exactly
+          # the failure that deletes the units only that width needs — so such a
+          # target is reported and then kept out of every total and command
+          # below.
+          $widths = 2
+          $targets = @(
+            $stats | Group-Object target | Sort-Object Name | ForEach-Object {
+              $legs = @($_.Group)
+              # A union is over NAMES. Every unit is named by the sha1 of its
+              # bytes or by a human, so a unit both widths kept is one name, and
+              # unzipping both artifacts into one directory reproduces exactly
+              # this set.
+              $keep = [System.Collections.Generic.HashSet[string]]::new()
+              foreach ($leg in $legs) {
+                foreach ($n in @(Get-Content (Join-Path $leg.dir 'keep-names.txt'))) {
+                  if ($n) { [void]$keep.Add($n) }
+                }
+              }
+              # Both legs of a target record the same committed side, so the
+              # first one that reported carries it.
+              $committed = @{}
+              foreach ($line in @(Get-Content (Join-Path $legs[0].dir 'committed.tsv'))) {
+                $p = $line -split "`t"
+                if ($p.Count -eq 2) { $committed[$p[0]] = [long]$p[1] }
+              }
+              $removedFiles = 0
+              $removedBytes = [long]0
+              foreach ($name in $committed.Keys) {
+                if (-not $keep.Contains($name)) {
+                  $removedFiles++
+                  $removedBytes += $committed[$name]
+                }
+              }
+              # An unmeasured replay is not a pass, and it is not a failure
+              # either — the two are DIFFERENT verdicts on the table, because
+              # "this keep-set drops an edge" is a finding about the corpus while
+              # "the replay printed nothing to parse" is one about the run. Both
+              # block the target: the set to commit is the union, so one width's
+              # unverified keep-set is half of what would land.
+              $unmeasured = @($legs | Where-Object {
+                  $null -eq $_.cov_full -or $null -eq $_.cov_keep -or
+                  $null -eq $_.ft_full -or $null -eq $_.ft_keep
+                }).Count -gt 0
+              $lost = @($legs | Where-Object {
+                  $null -ne $_.cov_full -and $null -ne $_.cov_keep -and
+                  ($_.cov_keep -lt $_.cov_full -or $_.ft_keep -lt $_.ft_full)
+                }).Count -gt 0
+              $arches = @($legs | ForEach-Object arch | Sort-Object -Unique)
+              $complete = $arches.Count -eq $widths
+              [pscustomobject]@{
+                target       = $_.Name
+                arches       = $arches
+                committed    = $committed.Count
+                keep         = $keep.Count
+                removedFiles = $removedFiles
+                removedBytes = $removedBytes
+                covOk        = -not ($unmeasured -or $lost)
+                complete     = $complete
+                reason       = if (-not $complete) { "only $($arches -join ', ') reported" }
+                elseif ($lost) { 'keep-set lost coverage' }
+                elseif ($unmeasured) { 'coverage unmeasured' }
+                else { 'ok' }
+                covPairs     = @($legs | Sort-Object arch | ForEach-Object {
+                    $f = if ($null -eq $_.cov_full) { '?' } else { $_.cov_full }
+                    $k = if ($null -eq $_.cov_keep) { '?' } else { $_.cov_keep }
+                    "$($_.arch) $f->$k"
+                  })
+              }
+            }
+          )
+
+          # THE HEADLINE IS THE SIZE OF THE PULL REQUEST, counted only over the
+          # targets a reader could actually take. A target excluded for an
+          # incomplete union or a coverage loss contributes nothing to the
+          # numbers and is named separately, so the headline can never promise a
+          # deletion the command below does not perform.
+          $actionable = @($targets | Where-Object { $_.complete -and $_.covOk })
+          $blocked = @($targets | Where-Object { -not ($_.complete -and $_.covOk) })
+          $removable = @($actionable | Where-Object { $_.removedFiles -gt 0 })
+          # [int]/[long] on purpose: Measure-Object sums an empty set to $null,
+          # and $null is not 0 — a run in which every target is blocked would
+          # otherwise put a blank where the headline's count belongs.
+          $totalRemoved = [int](($actionable | Measure-Object -Property removedFiles -Sum).Sum)
+          $totalBytes = [long](($actionable | Measure-Object -Property removedBytes -Sum).Sum)
+          $totalCommitted = [int](($actionable | Measure-Object -Property committed -Sum).Sum)
+          # Invariant, not the runner's culture: these numbers go into an issue
+          # body and a step summary that a reader compares with the previous
+          # pass's, and a decimal comma against a decimal point reads as a
+          # thousand-fold difference.
+          $inv = [cultureinfo]::InvariantCulture
+          $mb = { param($b) [string]::Format($inv, '{0:N1}', $b / 1MB) }
+          $pct = if ($totalCommitted -gt 0) {
+            [string]::Format($inv, '{0:N0}', 100 * $totalRemoved / $totalCommitted)
+          }
+          else { '0' }
+
+          $rows = @($targets | ForEach-Object {
+              "| ``$($_.target)`` | $($_.committed) | $($_.keep) | $($_.removedFiles) | $(& $mb $_.removedBytes) | $($_.covPairs -join ', ') | $($_.reason) |"
+            })
+          $table = @(
+            '| target | committed | keep-set | files removed | MB removed | cov full to keep | verdict |'
+            '|---|---|---|---|---|---|---|'
+            $rows
+          )
+          @(
+            '## Compaction pass'
+            ''
+            "A compaction pull request would remove $totalRemoved of $totalCommitted committed unit(s) ($(& $mb $totalBytes) MB, $pct%) across $($removable.Count) target(s)."
+            ''
+            $table
+          ) -join "`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+
+          if ($env:FILE_ISSUE -ne 'true') {
+            Write-Host "Dispatched run — not filing. Removable: $totalRemoved unit(s), $(& $mb $totalBytes) MB; blocked target(s): $($blocked.Count)."
+            exit 0
+          }
+
+          # `automated` marks every machine-filed issue as a class, so
+          # `is:open -label:automated` is the human inbox and `label:automated`
+          # the machine one. `fuzz-compact` is deliberately NOT `fuzz-corpus`:
+          # fuzz.yml claims its rolling issue as the first open issue carrying
+          # that label, so a second issue wearing it would be silently
+          # overwritten with the promotion table. The two also say opposite
+          # things — one that the corpus can grow, one that it can shrink.
+          gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
+          gh label create fuzz-compact --color 0e8a16 --description 'Committed fuzz corpus can be compacted' --force | Out-Null
+          $open = gh issue list --state open --label fuzz-compact --json number --jq '.[0].number'
+
+          $title = if ($totalRemoved -gt 0) {
+            "Fuzz corpus: $totalRemoved unit(s), $(& $mb $totalBytes) MB, can be compacted away across $($removable.Count) target(s)"
+          }
+          elseif ($blocked.Count -gt 0) {
+            "Fuzz corpus: nothing to compact, $($blocked.Count) target(s) unmeasured"
+          }
+          else {
+            'Fuzz corpus: nothing to compact'
+          }
+
+          # Every target whose union is trustworthy goes into the command.
+          # Unlike promotion — where each added unit is a permanent addition and
+          # a low-gain target costs bytes out of all proportion to the code it
+          # reaches — a removal is uniform benefit, so there is nothing to weigh
+          # per target and no cut to draw. What a reader weighs is the HEADLINE,
+          # against the fact that the deleted blobs stay in git history: the
+          # checkout shrinks by that percentage while the history only grows.
+          $take = @($removable | ForEach-Object { $_.target })
+          $patterns = if ($take.Count -gt 0) {
+            (($take | ForEach-Object { "--pattern 'fuzz-compact-$_-*'" }) -join ' ')
+          }
+          else {
+            "--pattern 'fuzz-compact-<target>-*'"
+          }
+          $body = @(
+            "A compaction pull request built from this run would remove **$totalRemoved of $totalCommitted committed unit(s) — $(& $mb $totalBytes) MB, $pct%** — across $($removable.Count) target(s), while still reaching every edge and every feature the full committed corpus reaches at both pointer widths."
+            ''
+            'Each leg starts its merge from the target''s human-named seeds, merges the sha1-named units in after them, then replays the committed corpus and the keep-set at `-runs=0` and compares the two. The set to commit is the UNION of the two widths, so the counts here are over names rather than sums of per-leg counts: a unit both widths keep is one file.'
+            ''
+            $table
+            $(if ($blocked.Count -gt 0) {
+                @(
+                  ''
+                  "Excluded from the headline and from the command below: $((@($blocked | ForEach-Object { "``$($_.target)`` ($($_.reason))" }) -join ', ')). A union missing a width would delete the units only that width needs, and a keep-set that has not been shown to replay everything the corpus it came from replays is not a keep-set."
+                )
+              })
+            ''
+            "Latest run: $env:RUN_URL"
+            $(if ($take.Count -gt 0) {
+                @(
+                  ''
+                  'To build that pull request:'
+                  ''
+                  '```powershell'
+                  "gh run download $env:RUN_ID $patterns --dir compacted"
+                  "foreach (`$t in @($((($take | ForEach-Object { "'$_'" }) -join ', ')))) {"
+                  "  `$d = `"`$env:TEMP/keep-$env:RUN_ID-`$t`""
+                  '  New-Item -ItemType Directory $d -Force | Out-Null'
+                  '  Copy-Item "compacted/fuzz-compact-$t-x86_64/*", "compacted/fuzz-compact-$t-i686/*" $d'
+                  '  Remove-Item -Recurse -Force "fuzz/corpus/$t"'
+                  '  Move-Item $d "fuzz/corpus/$t"'
+                  '}'
+                  'git add -A fuzz/corpus'
+                  '```'
+                  ''
+                  'The acceptance is `corpus replay (regression gate, x86_64)` and `(i686)`: they replay every committed unit at both widths, which is exactly the claim a compaction makes about what it kept. Artifacts expire 90 days after their run, so a pull request built from an older one has to dispatch this workflow again first.'
+                )
+              })
+            ''
+            'This is one rolling issue, rewritten by every pass that measures. It closes itself once the committed corpus IS its own keep-set at both widths. A pass whose corpus is byte-for-byte the one already measured skips its matrix and leaves this issue untouched, so a date that stops moving here means the corpus stopped moving.'
+            ''
+            "<!-- fuzz-compact-corpus-tree: $env:CORPUS_TREE -->"
+          ) | Where-Object { $null -ne $_ }
+          $body = ($body -join "`n")
+
+          # NOTHING TO SAY still has to be RECORDED, because the marker in this
+          # body is what the next scheduled pass reads to decide whether the
+          # corpus has moved. So a pass with nothing to compact rewrites a closed
+          # issue in place rather than opening one to close it: without that,
+          # every corpus change that needs no compaction leaves a create-and-
+          # close pair behind, and dropping the write instead would make every
+          # following week re-derive an answer this run already has.
+          #
+          # Nothing here ever REOPENS. A closed issue is edited only while it
+          # stays closed and only by the branch that has nothing to ask for; a
+          # pass with something to ask for and no open issue files a new one.
+          $nothingToDo = $totalRemoved -eq 0 -and $blocked.Count -eq 0
+          $write = $open
+          $wasOpen = [bool]$open
+          if (-not $write -and $nothingToDo) {
+            $write = gh issue list --state closed --label fuzz-compact --limit 1 --json number --jq '.[0].number'
+          }
+          if ($write) {
+            gh issue edit $write --title $title --body $body --add-label automated | Out-Null
+            Write-Host "Updated issue #$write"
+          }
+          else {
+            $url = gh issue create --title $title --body $body --label fuzz-compact --label automated
+            $write = ($url | Select-String -Pattern '(\d+)\s*$').Matches.Groups[1].Value
+            $wasOpen = $true
+            Write-Host "Filed the compaction issue (#$write)"
+          }
+          # Closing needs every target MEASURED and every one of them already
+          # minimal. A blocked target proves nothing about absence, so it holds
+          # the issue open rather than being read as a clean zero. Only an issue
+          # that is OPEN is closed — the branch above may have rewritten one that
+          # already was, which is the case this leaves alone.
+          if ($nothingToDo -and $wasOpen) {
+            gh issue close $write --comment "The committed corpus is its own keep-set at both widths — nothing to remove: $env:RUN_URL" | Out-Null
+            Write-Host "Closed issue #$write"
+          }

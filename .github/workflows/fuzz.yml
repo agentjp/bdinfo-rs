@@ -999,6 +999,10 @@ jobs:
           # replayed that input.
           if ($crashes.Count -gt 0) {
             gh label create fuzz-crash --color b60205 --description 'A fuzz target crashed, hung, or blew its memory guard' --force | Out-Null
+            # `automated` is the class marker every workflow-filed issue
+            # carries, so `is:open -label:automated` is the human inbox;
+            # fuzz-compact.yml's report job carries the argument for it.
+            gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           }
           foreach ($group in ($crashes | Group-Object signature)) {
             $c = $group.Group[0]
@@ -1057,11 +1061,11 @@ jobs:
             $body = ($body -join "`n")
             $existing = gh issue list --state open --label fuzz-crash --limit 200 --json 'number,body' --jq "map(select(.body | contains(`"$marker`"))) | .[0].number"
             if ($existing) {
-              gh issue edit $existing --title $title --body $body | Out-Null
+              gh issue edit $existing --title $title --body $body --add-label automated | Out-Null
               Write-Host "Refreshed issue #$existing ($($c.signature))"
             }
             else {
-              gh issue create --title $title --body $body --label fuzz-crash | Out-Null
+              gh issue create --title $title --body $body --label fuzz-crash --label automated | Out-Null
               Write-Host "Filed a crash issue ($($c.signature))"
             }
           }
@@ -1075,6 +1079,10 @@ jobs:
           # what the body's wording below keys on — and says nothing about
           # whether there is anything to promote.
           gh label create fuzz-corpus --color 0e8a16 --description 'Fuzz corpus growth awaiting review' --force | Out-Null
+          # `automated` is the class marker every workflow-filed issue carries,
+          # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
+          # report job carries the argument for it.
+          gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           $open = gh issue list --state open --label fuzz-corpus --json number --jq '.[0].number'
           # KEYED ON COVERAGE, NOT ON UNIT COUNT, because a unit count can never
           # reach zero: every pass writes thousands of feature-distinct units of
@@ -1205,11 +1213,11 @@ jobs:
           ) | Where-Object { $null -ne $_ }
           $body = ($body -join "`n")
           if ($open) {
-            gh issue edit $open --title $title --body $body | Out-Null
+            gh issue edit $open --title $title --body $body --add-label automated | Out-Null
             Write-Host "Updated issue #$open"
           }
           else {
-            gh issue create --title $title --body $body --label fuzz-corpus | Out-Null
+            gh issue create --title $title --body $body --label fuzz-corpus --label automated | Out-Null
             Write-Host 'Filed the corpus-growth issue'
           }
 
