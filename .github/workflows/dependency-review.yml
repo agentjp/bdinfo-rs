@@ -45,16 +45,18 @@ jobs:
           # the runner and ships nothing into any artifact, so the
           # distribution-license policy does not apply (it already runs in
           # every gate workflow; only a NEW workflow file re-surfaces it here).
-          # rangemap declares `license = "MIT/Apache-2.0"`, the slash form
-          # deprecated in favour of `OR`; that is not a valid SPDX expression,
-          # so the dependency graph cannot parse it and reports the
-          # unmatchable `LicenseRef-bad-mitapache-2.0` instead. Both branches
-          # are on the allowlist above, and `cargo deny check` — which parses
-          # the slash form and stays authoritative — passes it. This is a
-          # metadata-format exemption, not a license one.
+          # rangemap declares `license = "MIT/Apache-2.0"` and minicov declares
+          # `license = "Apache-2.0/MIT"`, the slash form deprecated in favour
+          # of `OR`; that is not a valid SPDX expression, so the dependency
+          # graph cannot parse it and reports the unmatchable
+          # `LicenseRef-bad-mitapache-2.0` / `LicenseRef-bad-apache-2.0mit`
+          # instead. Both branches are on the allowlist above, and `cargo deny
+          # check` — which parses the slash form and stays authoritative —
+          # passes them. This is a metadata-format exemption, not a license
+          # one.
           allow-dependencies-licenses: >-
             pkg:cargo/bdinfo-rs-core, pkg:cargo/bdinfo-rs,
             pkg:cargo/bdinfo-rs-gui, pkg:cargo/bdinfo-rs-wasm,
-            pkg:cargo/self_cell, pkg:cargo/rangemap,
+            pkg:cargo/self_cell, pkg:cargo/rangemap, pkg:cargo/minicov,
             pkg:githubactions/Swatinem/rust-cache
           comment-summary-in-pr: on-failure
