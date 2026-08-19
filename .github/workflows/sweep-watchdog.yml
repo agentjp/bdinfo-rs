@@ -99,6 +99,10 @@ jobs:
           }
 
           gh label create ci-sweep --color ededed --description 'Daily full-sweep failures' --force | Out-Null
+          # `automated` is the class marker every workflow-filed issue carries,
+          # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
+          # report job carries the argument for it.
+          gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           $body = @(
             "The daily sweep did not report on itself: $problem."
             ''
@@ -107,5 +111,5 @@ jobs:
             ''
             'A run that GitHub rejects before creating any job has no job to file this, which is why it comes from a separate workflow. This is the same rolling issue the sweep files: the next green sweep closes it.'
           ) -join "`n"
-          gh issue create --title "Daily sweep did not report: $($latest.conclusion)" --body $body --label ci-sweep | Out-Null
+          gh issue create --title "Daily sweep did not report: $($latest.conclusion)" --body $body --label ci-sweep --label automated | Out-Null
           Write-Host "Filed the rolling issue: $problem"

@@ -407,14 +407,18 @@ jobs:
           # stale pins, so it is not matchable. The title search below adopts an issue
           # left open by the earlier fixed-title scheme instead of opening a second one.
           gh label create version-freshness --color ededed --description 'Stale or inconsistent pinned tool/toolchain versions' --force | Out-Null
+          # `automated` is the class marker every workflow-filed issue carries,
+          # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
+          # report job carries the argument for it.
+          gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           $existing = gh issue list --state open --label version-freshness --json number --jq '.[0].number'
           if (-not $existing) {
             $existing = gh issue list --state open --search 'Pinned versions are stale in:title' --json number --jq '.[0].number'
           }
           if ($existing) {
-            gh issue edit $existing --title $title --body $body --add-label version-freshness | Out-Null
+            gh issue edit $existing --title $title --body $body --add-label version-freshness --add-label automated | Out-Null
             Write-Host "Updated existing issue #$existing"
           }
           else {
-            gh issue create --title $title --body $body --label version-freshness | Out-Null
+            gh issue create --title $title --body $body --label version-freshness --label automated | Out-Null
           }

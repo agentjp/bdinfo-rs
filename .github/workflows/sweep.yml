@@ -221,6 +221,10 @@ jobs:
               Where-Object { $_.Value.result -notin 'success', 'skipped' } |
               ForEach-Object { "$($_.Name): $($_.Value.result)" })
           gh label create ci-sweep --color ededed --description 'Daily full-sweep failures' --force | Out-Null
+          # `automated` is the class marker every workflow-filed issue carries,
+          # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
+          # report job carries the argument for it.
+          gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           $existing = gh issue list --state open --label ci-sweep --json number --jq '.[0].number'
           if ($failed.Count -eq 0) {
             if ($existing) {
@@ -248,10 +252,10 @@ jobs:
             'This is one rolling issue: refreshed while the sweep stays red, closed automatically by the next green sweep — the daily one, or a workflow_dispatch run once the cause is fixed.'
           ) -join "`n"
           if ($existing) {
-            gh issue edit $existing --title $title --body $body | Out-Null
+            gh issue edit $existing --title $title --body $body --add-label automated | Out-Null
             Write-Host "Updated issue #$existing"
           }
           else {
-            gh issue create --title $title --body $body --label ci-sweep | Out-Null
+            gh issue create --title $title --body $body --label ci-sweep --label automated | Out-Null
             Write-Host 'Filed the rolling issue'
           }
