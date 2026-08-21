@@ -117,7 +117,7 @@ jobs:
       # `fallback: none`: install only from the action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / typos)
-        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
           fallback: none

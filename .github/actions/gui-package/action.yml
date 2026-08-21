@@ -90,7 +90,7 @@ runs:
     # in core.yml).
     - name: Install cargo-deb (release-pinned, prebuilt)
       if: inputs.kind == 'linux' && inputs.install-packagers == 'true'
-      uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+      uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
       with:
         tool: cargo-deb@${{ steps.pins.outputs.CARGO_DEB }}
         fallback: none
