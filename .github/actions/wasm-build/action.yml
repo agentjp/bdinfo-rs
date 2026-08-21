@@ -38,7 +38,7 @@ runs:
     # `fallback: none`: install only from install-action's checksummed manifest,
     # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
     - name: Install wasm-bindgen-cli (pinned to the crate version)
-      uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+      uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
       with:
         tool: wasm-bindgen-cli@${{ steps.pins.outputs.WASM_BINDGEN_CLI }}
         fallback: none
