@@ -2,7 +2,8 @@
 #
 # Formatting is checked/applied with the PINNED NIGHTLY rustfmt (see
 # `scripts/_common.ps1` $Nightly) so the unstable options below take effect; the
-# rest of the gate stays on stable 1.96.1. Apply: `pwsh scripts/fmt.ps1`.
+# rest of the gate stays on the stable channel `rust-toolchain.toml` pins.
+# Apply: `pwsh scripts/fmt.ps1`.
 # The gate checks with `cargo +<nightly> fmt --check`.
 
 # --- stable ---

@@ -37,9 +37,8 @@
 //!
 //! `tsify` copies the doc comment of each type and field below into the generated TypeScript
 //! declaration as `JSDoc`, so those lines are what a consumer reads in an editor. Write them for
-//! that reader, and note three things `tsify` 0.5.6 does to them on the way out:
+//! that reader, and note two things `tsify` 0.5.7 does to them on the way out:
 //!
-//! * An apostrophe is emitted escaped, as `\'` — so avoid it.
 //! * A rustdoc intra-doc link is emitted verbatim, brackets and path and all, which resolves to
 //!   nothing in TypeScript. Name a sibling field in plain backticks instead, under its published
 //!   camelCase name.
@@ -85,7 +84,6 @@ use tsify::Tsify;
 /// from the other: the report is rendered straight from the scan, and the disc
 /// mirrors that same scan.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     /// The classic disc report, rendered with the sections the scan was asked
@@ -104,11 +102,10 @@ pub struct ScanResult {
 /// Each option says which calls read it, and a call ignores the rest:
 /// `render_report` re-renders a disc a scan already produced, so the options
 /// governing what a scan reads mean nothing to it.
-// Only `from_wasm_abi`: this type crosses INTO the module as a parameter and is
-// never returned, so it needs the inverse of the `Disc` conversion and not the
-// forward one.
+// `Deserialize` only: this type crosses INTO the module as a parameter and is
+// never returned, so an export names it as `Ts<ScanOptions>` and calls
+// `to_rust`, never `into_ts`.
 #[derive(Tsify, Deserialize, Debug, Clone, Copy, PartialEq)]
-#[tsify(from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanOptions {
     /// Render the report `STREAM DIAGNOSTICS:` section, on unless switched off.
@@ -157,13 +154,12 @@ pub struct ScanOptions {
 }
 
 /// A scanned Blu-ray disc: the disc-level properties and every playlist on it.
-// `into_wasm_abi` is what lets an export return a `Disc` by value: it implements
-// wasm-bindgen's `IntoWasmAbi` over `serde_wasm_bindgen`, so the value crosses as a real
-// JavaScript object. `from_wasm_abi` is its inverse, letting an export take one back as a
-// parameter. Only the type an export names needs them; the types below are reached
-// through this one.
+// An export names this type as `tsify::Ts<Disc>`, whose `into_ts` / `to_rust`
+// convert it over `serde_wasm_bindgen`, so the value crosses as a real
+// JavaScript object rather than a JSON string. Both directions are used: a
+// scan returns a `Disc`, and `render_report` takes one back. The types below
+// are reached through this one and cross with it.
 #[derive(Tsify, Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     clippy::struct_excessive_bools,
@@ -534,8 +530,10 @@ pub struct Chapter {
 /// display keeps its last known numbers for every other playlist; and within
 /// one scan the byte tallies only grow, so a cell one snapshot raises is never
 /// walked back by a later one.
+// No wasm-bindgen conversion: this type never appears in an export's signature.
+// It reaches JavaScript only as the argument `notify_measured` hands the
+// caller's callback, built with the `Tsify::into_js` the `js` feature provides.
 #[derive(Tsify, Serialize, Debug, Clone, PartialEq, Eq)]
-#[tsify(into_wasm_abi)]
 #[serde(rename_all = "camelCase")]
 pub struct MeasuredSnapshot {
     /// The stream file the scan was demuxing when it took this snapshot, in
