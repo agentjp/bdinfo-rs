@@ -16,7 +16,7 @@ the project's guarantees intact.
 ## Building
 
 No C toolchain, no system libraries, no extra steps — the same on Windows, macOS, and Linux. The
-pinned toolchain installs itself via `rust-toolchain.toml`; **MSRV is 1.96**.
+pinned toolchain installs itself via `rust-toolchain.toml`; **MSRV is 1.98**.
 
 ```sh
 git clone https://github.com/agentjp/bdinfo-rs
