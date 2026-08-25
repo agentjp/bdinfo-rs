@@ -28,6 +28,8 @@ exclude_re = [
     "inspect_files", # the #[wasm_bindgen] structural disc-model export
     "inspect_iso", # the #[wasm_bindgen] .iso structural disc-model export
     "render_report", # the #[wasm_bindgen] re-render-from-a-disc export
+    "scan_options_arg", # the wasm32 options deserialization those five exports share
+    "mirror_conversion", # the wasm32 tsify::Error -> JsValue message shim
 ]
 
 # Enforce the committed lockfile on every mutant build (mirrors CI).
