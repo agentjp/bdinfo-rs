@@ -82,10 +82,12 @@ use bdinfo_rs_core::vfs::{BdFile, SearchOption};
 #[cfg(target_arch = "wasm32")]
 use bdinfo_rs_core::vfs::{ReadSeek, extension_of_name};
 // `Tsify` is named for its `into_js`, which turns a mirror value into the
-// JavaScript object a callback takes — the conversion the `#[wasm_bindgen]`
-// return path performs implicitly for a value an export returns.
+// JavaScript object a callback takes. `Ts` is the wrapper an export names in
+// place of a bare mirror type: it keeps the wasm-bindgen boundary infallible
+// and moves the serde conversion into the body, where a malformed value is an
+// ordinary `Err` instead of a thrown string that skips destructors.
 #[cfg(target_arch = "wasm32")]
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
@@ -696,6 +698,28 @@ fn classification_filter(short_seconds: Option<f64>) -> Result<PlaylistFilter, T
     Ok(PlaylistFilter { short_playlist_seconds, ..standard })
 }
 
+/// Deserializes the optional options object, for each of the five exports that
+/// takes one, before that export does any work.
+///
+/// A value that is not a [`ScanOptions`] is rejected here rather than at the
+/// wasm-bindgen boundary, so it costs an ordinary `Err` and not a thrown string
+/// that unwinds past the destructors of whatever the call had already built.
+#[cfg(target_arch = "wasm32")]
+fn scan_options_arg(options: Option<Ts<ScanOptions>>) -> Result<Option<ScanOptions>, JsValue> {
+    options.map(|options| options.to_rust()).transpose().map_err(mirror_conversion)
+}
+
+/// The JavaScript exception a mirror value's conversion failure raises.
+///
+/// [`tsify::Error`] carries the `serde_wasm_bindgen` message naming the field
+/// that did not fit, which is what a caller needs to fix the call. An export
+/// cannot return a typed error across the boundary, so this arrives as a thrown
+/// string, the same shape as an export's other rejections.
+#[cfg(target_arch = "wasm32")]
+fn mirror_conversion(err: tsify::Error) -> JsValue {
+    JsValue::from_str(&err.to_string())
+}
+
 /// How deep `options` asks an inspect to read: the bounded codec pass
 /// ([`ScanMode::Codecs`]) when `codecs` is on, else the metadata-only scan.
 /// An absent option — or no options object at all — means metadata-only, the
@@ -1171,21 +1195,24 @@ pub fn report_file_name(label: &str) -> String {
 /// full codec detail — profile, level, HDR — while `measured` stays false.
 ///
 /// # Errors
-/// An out-of-domain `shortPlaylistSeconds`, and then as [`scan_files`]:
-/// `paths`/`files` length mismatch, a non-`File` entry, an incoherent
-/// selection, or no readable Blu-ray structure.
+/// An `options` value that is not a `ScanOptions`, an out-of-domain
+/// `shortPlaylistSeconds`, and then as [`scan_files`]: `paths`/`files` length
+/// mismatch, a non-`File` entry, an incoherent selection, or no readable
+/// Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn inspect_files(
     paths: Vec<String>,
     files: js_sys::Array,
-    options: Option<ScanOptions>,
-) -> Result<Disc, JsValue> {
+    options: Option<Ts<ScanOptions>>,
+) -> Result<Ts<Disc>, JsValue> {
+    let options = scan_options_arg(options)?;
     let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
         .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let root = build_web_tree(&paths, &files)?;
-    inspect_disc(&root, inspect_mode(options.as_ref()), &filter)
-        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+    let disc = inspect_disc(&root, inspect_mode(options.as_ref()), &filter)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    disc.into_ts().map_err(mirror_conversion)
 }
 
 /// The structural-scan `.iso` entry point for the whole disc model: a single
@@ -1197,18 +1224,24 @@ pub fn inspect_files(
 /// meaning for every option.
 ///
 /// # Errors
-/// An out-of-domain `shortPlaylistSeconds`; a `JsValue` if the image is not a
-/// readable UDF `.iso`, or holds no readable Blu-ray structure.
+/// An `options` value that is not a `ScanOptions`, an out-of-domain
+/// `shortPlaylistSeconds`; a `JsValue` if the image is not a readable UDF
+/// `.iso`, or holds no readable Blu-ray structure.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn inspect_iso(file: web_sys::File, options: Option<ScanOptions>) -> Result<Disc, JsValue> {
+pub fn inspect_iso(
+    file: web_sys::File,
+    options: Option<Ts<ScanOptions>>,
+) -> Result<Ts<Disc>, JsValue> {
+    let options = scan_options_arg(options)?;
     let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
         .map_err(|err| JsValue::from_str(&err.to_string()))?;
     let length = file.size() as u64;
     let source = UdfSource::open_resilient(Box::new(WebIso { file, length }))
         .map_err(|err| JsValue::from_str(&format!("not a readable Blu-ray .iso ({err})")))?;
-    inspect_disc(&source.root(), inspect_mode(options.as_ref()), &filter)
-        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))
+    let disc = inspect_disc(&source.root(), inspect_mode(options.as_ref()), &filter)
+        .map_err(|err| JsValue::from_str(&format!("no readable Blu-ray structure ({err})")))?;
+    disc.into_ts().map_err(mirror_conversion)
 }
 
 /// Renders the classic disc report from a [`Disc`] — no media, no rescan.
@@ -1233,14 +1266,19 @@ pub fn inspect_iso(file: web_sys::File, options: Option<ScanOptions>) -> Result<
 /// disc's presentation order instead — the standard `--whole` set, grouped by
 /// shared clip files and longest first — every value of it zero, because an
 /// inspect measures none.
+///
+/// # Errors
+/// A `disc` or `options` value that is not the shape its type declares. Nothing
+/// is read here, so these are the only failures.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-#[must_use]
-pub fn render_report(mut disc: Disc, options: Option<ScanOptions>) -> String {
+pub fn render_report(disc: Ts<Disc>, options: Option<Ts<ScanOptions>>) -> Result<String, JsValue> {
+    let options = scan_options_arg(options)?;
+    let mut disc: Disc = disc.to_rust().map_err(mirror_conversion)?;
     let printed = disc.report_order.take();
     let (bdrom, errors) = disc.into_scan();
     let order = render_order(&bdrom, printed.as_deref());
-    text::render_with(&bdrom, &order, &errors, render_options(options.as_ref()))
+    Ok(text::render_with(&bdrom, &order, &errors, render_options(options.as_ref())))
 }
 
 /// The measured-scan entry point: a `webkitdirectory`-selected BDMV folder in,
@@ -1271,11 +1309,12 @@ pub fn render_report(mut disc: Disc, options: Option<ScanOptions>) -> String {
 /// [`render_report`] without scanning again.
 ///
 /// # Errors
-/// Returns a `JsValue` if `paths` and `files` differ in length, any `files`
-/// entry is not a `File`, the paths do not form one coherent disc selection,
-/// no readable Blu-ray structure is found (so a wrong folder pick is reported
-/// rather than silently returning an empty report), or a non-empty `selection`
-/// names no playlist on the disc (the CLI's "No matching playlists found on BD").
+/// Returns a `JsValue` if `options` is not a `ScanOptions`, `paths` and `files`
+/// differ in length, any `files` entry is not a `File`, the paths do not form
+/// one coherent disc selection, no readable Blu-ray structure is found (so a
+/// wrong folder pick is reported rather than silently returning an empty
+/// report), or a non-empty `selection` names no playlist on the disc (the CLI's
+/// "No matching playlists found on BD").
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn scan_files(
@@ -1283,9 +1322,10 @@ pub fn scan_files(
     files: js_sys::Array,
     selection: Vec<String>,
     on_progress: Option<js_sys::Function>,
-    options: Option<ScanOptions>,
+    options: Option<Ts<ScanOptions>>,
     on_measured: Option<js_sys::Function>,
-) -> Result<ScanResult, JsValue> {
+) -> Result<Ts<ScanResult>, JsValue> {
+    let options = scan_options_arg(options)?;
     // Validated before the scan: an out-of-domain threshold rejects up front
     // rather than after a multi-GB demux.
     let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
@@ -1298,7 +1338,9 @@ pub fn scan_files(
         on_progress.as_ref(),
         on_measured.as_ref(),
     )?;
-    Ok(measured_result(&scan, render_options(options.as_ref()), &filter))
+    measured_result(&scan, render_options(options.as_ref()), &filter)
+        .into_ts()
+        .map_err(mirror_conversion)
 }
 
 /// The measured-scan `.iso` entry point: a single OS-picked Blu-ray `.iso`
@@ -1318,18 +1360,20 @@ pub fn scan_files(
 /// file instead (see `DIFFERENCES.md`).
 ///
 /// # Errors
-/// Returns a `JsValue` if the image is not a readable UDF `.iso`, no readable
-/// Blu-ray structure is found inside it, or a non-empty `selection` names no
-/// playlist on the disc (the CLI's "No matching playlists found on BD").
+/// Returns a `JsValue` if `options` is not a `ScanOptions`, the image is not a
+/// readable UDF `.iso`, no readable Blu-ray structure is found inside it, or a
+/// non-empty `selection` names no playlist on the disc (the CLI's "No matching
+/// playlists found on BD").
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn scan_iso(
     file: web_sys::File,
     selection: Vec<String>,
     on_progress: Option<js_sys::Function>,
-    options: Option<ScanOptions>,
+    options: Option<Ts<ScanOptions>>,
     on_measured: Option<js_sys::Function>,
-) -> Result<ScanResult, JsValue> {
+) -> Result<Ts<ScanResult>, JsValue> {
+    let options = scan_options_arg(options)?;
     // Validated before the scan, as in `scan_files`.
     let filter = classification_filter(options.and_then(|options| options.short_playlist_seconds))
         .map_err(|err| JsValue::from_str(&err.to_string()))?;
@@ -1347,7 +1391,9 @@ pub fn scan_iso(
     // demux, and reported nowhere unless drained here (as `run_iso_report` and
     // the command line's `open_iso` both drain them).
     scan.merge_errors(source.take_errors());
-    Ok(measured_result(&scan, render_options(options.as_ref()), &filter))
+    measured_result(&scan, render_options(options.as_ref()), &filter)
+        .into_ts()
+        .map_err(mirror_conversion)
 }
 
 #[cfg(test)]

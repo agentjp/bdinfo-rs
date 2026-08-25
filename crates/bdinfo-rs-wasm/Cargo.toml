@@ -32,7 +32,7 @@ serde = { version = "1", features = ["derive"] }
 # published types. `default-features = false, features = ["js"]` selects the
 # serde-wasm-bindgen backend: mirror values cross the boundary as real
 # JavaScript objects rather than a JSON string the consumer must parse.
-tsify = { version = "=0.5.6", default-features = false, features = ["js"] }
+tsify = { version = "=0.5.7", default-features = false, features = ["js"] }
 
 # js-sys / web-sys are referenced ONLY under #[cfg(target_arch = "wasm32")] (the
 # WebReader/WebFile FileReaderSync seam + scan_files/build_web_tree), so they are
