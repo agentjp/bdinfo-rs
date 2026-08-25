@@ -631,7 +631,7 @@ mod tests {
         // 0xA5 fills the ciphertext: any byte but the 0x47 sync the probe
         // counts. Each unit then gets its one leading sync back.
         let mut bytes = vec![0xA5_u8; UNIT.checked_mul(2).expect("two units fit")];
-        for unit in bytes.chunks_exact_mut(UNIT) {
+        for unit in bytes.as_chunks_mut::<UNIT>().0 {
             let sync = unit.get_mut(4).expect("a unit holds a first packet header");
             *sync = 0x47;
         }

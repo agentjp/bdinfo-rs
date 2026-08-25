@@ -1458,7 +1458,7 @@ fn file_head_encrypted(file: &dyn BdFile) -> bool {
 /// this fingerprint and reads `false`.
 fn unit_shows_encryption(unit: &[u8; ALIGNED_UNIT_BYTES]) -> bool {
     let mut syncs =
-        unit.chunks_exact(SOURCE_PACKET_BYTES).map(|packet| packet.get(4) == Some(&0x47));
+        unit.as_chunks::<SOURCE_PACKET_BYTES>().0.iter().map(|packet| packet.get(4) == Some(&0x47));
     let first = syncs.next() == Some(true);
     let strays = syncs.filter(|&hit| hit).count();
     first && strays <= MAX_STRAY_SYNCS
@@ -3698,7 +3698,8 @@ mod tests {
     /// (packet 0 first), `0xAA` everywhere else.
     fn unit_with_syncs(present: &[bool; 32]) -> [u8; ALIGNED_UNIT_BYTES] {
         let mut unit = [0xAA_u8; ALIGNED_UNIT_BYTES];
-        for (packet, &sync) in unit.chunks_exact_mut(SOURCE_PACKET_BYTES).zip(present) {
+        for (packet, &sync) in unit.as_chunks_mut::<SOURCE_PACKET_BYTES>().0.iter_mut().zip(present)
+        {
             if sync && let Some(byte) = packet.get_mut(4) {
                 *byte = 0x47;
             }

@@ -59,16 +59,12 @@ impl Selection {
 
     /// Checks every row ("Select all").
     pub fn set_all(&mut self) {
-        for flag in &mut self.checked {
-            *flag = true;
-        }
+        self.checked.fill(true);
     }
 
     /// Unchecks every row ("Select none").
     pub fn clear(&mut self) {
-        for flag in &mut self.checked {
-            *flag = false;
-        }
+        self.checked.fill(false);
     }
 
     /// Whether the row at `index` is checked (`false` for an out-of-range index).
