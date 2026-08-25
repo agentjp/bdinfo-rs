@@ -3,7 +3,7 @@
 #
 # Match the rust-toolchain.toml pin so clippy never suggests APIs newer than
 # our actual compiler.
-msrv = "1.96.0"
+msrv = "1.98.0"
 
 # The restriction lints (`indexing_slicing`, `string_slice`, `panic`,
 # `unwrap_used`, `expect_used`, `arithmetic_side_effects`) stay fully enforced

@@ -23,7 +23,7 @@ exclude = ["fuzz", "crates/bdinfo-rs-wasm", "crates/bdinfo-rs-gui"]
 [workspace.package]
 version = "4.0.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.98"
 # LGPL (unlike GPL) permits use from other applications.
 license = "LGPL-2.1-or-later"
 authors = ["bdinfo-rs contributors"]
