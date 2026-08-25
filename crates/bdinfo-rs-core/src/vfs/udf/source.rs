@@ -2116,7 +2116,7 @@ mod tests {
     /// alone otherwise (the encryption fingerprint), `0xAA` filler elsewhere.
     fn aligned_unit(clear: bool) -> Vec<u8> {
         let mut unit = vec![0xAA_u8; 6144];
-        for (index, packet) in unit.chunks_exact_mut(192).enumerate() {
+        for (index, packet) in unit.as_chunks_mut::<192>().0.iter_mut().enumerate() {
             if (clear || index == 0)
                 && let Some(byte) = packet.get_mut(4)
             {

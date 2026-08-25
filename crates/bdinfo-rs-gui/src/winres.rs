@@ -94,7 +94,7 @@ pub fn dib(size: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 
     // The XOR image: rows bottom-up, each RGBA pixel re-ordered to BGRA.
     for row in rgba.chunks_exact(row_len).rev() {
-        for px in row.chunks_exact(4) {
+        for px in row.as_chunks::<4>().0 {
             out.push(px.get(2).copied().unwrap_or_default()); // B
             out.push(px.get(1).copied().unwrap_or_default()); // G
             out.push(px.first().copied().unwrap_or_default()); // R

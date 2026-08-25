@@ -33,11 +33,7 @@ pub fn decode_dchars(data: &[u8]) -> String {
         16 => {
             // 16-bit code units, big-endian; pair up the bytes (an odd trailing
             // byte is dropped) and decode as UTF-16 so surrogate pairs join.
-            let units = body.chunks_exact(2).map(|pair| {
-                let hi = pair.first().copied().unwrap_or(0);
-                let lo = pair.get(1).copied().unwrap_or(0);
-                u16::from_be_bytes([hi, lo])
-            });
+            let units = body.as_chunks::<2>().0.iter().map(|&pair| u16::from_be_bytes(pair));
             char::decode_utf16(units).map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
         }
         // UDF only defines 8 and 16 here (254/255 carry no characters); anything

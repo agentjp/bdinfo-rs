@@ -212,7 +212,7 @@ mod tests {
         let buf = rgba(size);
         // Every pixel carries the same amber RGB, whatever its alpha — the
         // three channels in their exact order.
-        for pixel in buf.chunks_exact(4) {
+        for pixel in buf.as_chunks::<4>().0 {
             assert_eq!(pixel.first().copied(), Some(242));
             assert_eq!(pixel.get(1).copied(), Some(166));
             assert_eq!(pixel.get(2).copied(), Some(90));
