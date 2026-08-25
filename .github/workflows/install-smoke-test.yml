@@ -50,7 +50,7 @@ jobs:
       # semver, so this pin's comment is a bare `# YYYY.MM.DD.N` where every other
       # action in the repo carries `# vX.Y.Z`. It is an immutable release tag
       # either way, which is what both the SHA-pin policy and Dependabot need.
-      - uses: Homebrew/actions/setup-homebrew@8f3d1ec8a696b3b9d9a6c3696b6c73033cab69e4 # 2026.08.14.1
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869 # 2026.08.24.1
 
       # The macOS runner image ships aws/tap + azure/bicep pre-tapped; Homebrew's tap-trust
       # check then warns about them on every brew command. We install bdinfo-rs by its
@@ -113,7 +113,7 @@ jobs:
     steps:
       # Calendar-versioned rather than semver — see the homebrew job's identical
       # line above.
-      - uses: Homebrew/actions/setup-homebrew@8f3d1ec8a696b3b9d9a6c3696b6c73033cab69e4 # 2026.08.14.1
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869 # 2026.08.24.1
 
       # The same tap-trust story as the homebrew job above, for its reasons.
       - name: Trust the taps (ours + the runner's pre-tapped ones)
