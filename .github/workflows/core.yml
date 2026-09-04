@@ -236,7 +236,7 @@ jobs:
       # downgrade to that path, and does the same for a pinned `tool@version` the
       # manifest stops carrying.
       - name: Install gate tools
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks
           fallback: none
@@ -310,7 +310,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install coverage tools
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-llvm-cov,cargo-nextest
           fallback: none
@@ -528,7 +528,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deny
           fallback: none
@@ -755,7 +755,7 @@ jobs:
       # `command -v cargo-deb` guard finds them and skips its (slower) source compile,
       # and the smoke test packages with the exact release tools.
       - name: Install cargo-deb (release pin, prebuilt)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
           tool: cargo-deb@${{ steps.pins.outputs.CARGO_DEB }}
           fallback: none
