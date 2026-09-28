@@ -79,7 +79,7 @@ jobs:
   # reusable v-release.yml wires in. Runs in dispatch mode too: the dry run
   # models the tag path, and a dispatch from master passes trivially.
   guard-ancestor:
-    uses: ./.github/workflows/guard-ancestor.yml
+    uses: $/.github/workflows/guard-ancestor.yml
     permissions:
       contents: read
 
@@ -137,7 +137,7 @@ jobs:
       # not a preference: the reason lives on the input's description. The
       # content assertion is skipped on the arm64 windows leg alone, whose zip
       # and x64-authored MSI are asserted as a pair in msi-arm64 below.
-      - uses: ./.github/actions/gui-package
+      - uses: $/.github/actions/gui-package
         with:
           kind: ${{ matrix.kind }}
           version: ${{ needs.guard-version.outputs.version }}

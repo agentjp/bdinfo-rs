@@ -48,7 +48,7 @@ jobs:
   # side branch (so it never passed the gate) cannot ship to npm: the publish job
   # `needs:` this one.
   guard-ancestor:
-    uses: ./.github/workflows/guard-ancestor.yml
+    uses: $/.github/workflows/guard-ancestor.yml
     # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
     # `git merge-base` ancestry check), so inheriting them is needless privilege
     # (and zizmor's secrets-inherit audit flags it). v-release.yml's generated copy
@@ -111,7 +111,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # The release tag drives the version guard + npm dist-tag. On a tag push it
       # is the ref; on a manual dispatch it is the input, or `v<package.json
@@ -146,7 +146,7 @@ jobs:
       # published artifact is built with the tools the gate proved. `npm ci` is
       # NOT taken from it: the npm pin and the tag/version guards below have to
       # run between setup-node and the install.
-      - uses: ./.github/actions/wasm-build
+      - uses: $/.github/actions/wasm-build
 
       # Installing an exact npm keeps the publish deterministic regardless of
       # which npm a given Node 26.x bundles; the published wasm bytes are fixed by

@@ -55,13 +55,13 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # The wasm32 target, the pinned wasm-bindgen CLI, the pinned Node, `npm ci`
       # and `npm run build` — the same block wasm.yml gates with and
       # publish-npm.yml publishes with, so the demo is the artifact the gate
       # proved.
-      - uses: ./.github/actions/wasm-build
+      - uses: $/.github/actions/wasm-build
         with:
           web: build
 

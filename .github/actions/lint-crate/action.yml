@@ -39,7 +39,7 @@ runs:
   using: composite
   steps:
     - id: pins
-      uses: ./.github/actions/pins
+      uses: $/.github/actions/pins
 
     - name: Format (nightly rustfmt)
       working-directory: ${{ inputs.working-directory }}

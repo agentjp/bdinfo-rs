@@ -231,12 +231,12 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # Nightly + target, the 32-bit C++ toolchain, the build cache, cargo-fuzz
       # and the fuzz lockfile check — the shared body core.yml's replay gate and
       # fuzz.yml's deep pass run too.
-      - uses: ./.github/actions/fuzz-toolchain
+      - uses: $/.github/actions/fuzz-toolchain
         with:
           target: ${{ matrix.triple }}
           cxx-multilib: ${{ matrix.arch == 'i686' }}

@@ -50,7 +50,7 @@ jobs:
         run: git fetch --no-tags --filter=blob:none --unshallow origin
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # `fallback: none`: install only from install-action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).

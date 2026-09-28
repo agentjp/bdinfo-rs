@@ -92,7 +92,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: ./.github/workflows/ci.yml
+    uses: $/.github/workflows/ci.yml
 
   # Full mutation over the ROOT workspace (bdinfo-rs-core + the CLI), 0
   # missed — the leg that retired the local pre-release `cargo mt` ritual;
@@ -106,7 +106,7 @@ jobs:
   # public repo; concurrency is the only budget).
   core-mutants:
     name: core full mutants
-    uses: ./.github/workflows/sweep-mutants.yml
+    uses: $/.github/workflows/sweep-mutants.yml
     with:
       shards: '["0/15","1/15","2/15","3/15","4/15","5/15","6/15","7/15","8/15","9/15","10/15","11/15","12/15","13/15","14/15"]'
       # The key must capture EVERYTHING that can change a mutants verdict for
@@ -137,7 +137,7 @@ jobs:
   # (~20) is the scarce resource, not minutes.
   gui-mutants:
     name: gui full mutants
-    uses: ./.github/workflows/sweep-mutants.yml
+    uses: $/.github/workflows/sweep-mutants.yml
     with:
       shards: '["0/5","1/5","2/5","3/5","4/5"]'
       working-directory: crates/bdinfo-rs-gui
@@ -166,7 +166,7 @@ jobs:
   # the fan-in.
   wasm-mutants:
     name: wasm full mutants
-    uses: ./.github/workflows/sweep-mutants.yml
+    uses: $/.github/workflows/sweep-mutants.yml
     with:
       working-directory: crates/bdinfo-rs-wasm
       # Byte-identical to ci.yml's advisory wasm PR-diff key (see gui-mutants).

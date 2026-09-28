@@ -56,7 +56,7 @@ jobs:
   # guard matters most here — the tag==version check alone is satisfiable by any
   # crafted Cargo.toml on any branch.
   guard-ancestor:
-    uses: ./.github/workflows/guard-ancestor.yml
+    uses: $/.github/workflows/guard-ancestor.yml
     # No `secrets: inherit` — guard-ancestor takes no secrets (checkout + a
     # `git merge-base` ancestry check), so inheriting them is needless privilege
     # (and zizmor's secrets-inherit audit flags it).

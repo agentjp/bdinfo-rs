@@ -65,7 +65,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # The LGPL hygiene rule that the npm tarball's web/ LICENSE + NOTICE copies
       # still match their repo-root originals — the single-source script the
@@ -84,7 +84,7 @@ jobs:
       # shipped artifact with. `npm run build` runs far below instead of here:
       # every gate step between the two would otherwise be measuring a stale
       # artifact.
-      - uses: ./.github/actions/wasm-build
+      - uses: $/.github/actions/wasm-build
         with:
           web: install
 
@@ -131,7 +131,7 @@ jobs:
 
       # rustfmt / typos / machete / shear — the quartet gui.yml's checks job runs
       # identically, in .github/actions/lint-crate.
-      - uses: ./.github/actions/lint-crate
+      - uses: $/.github/actions/lint-crate
         with:
           working-directory: crates/bdinfo-rs-wasm
 
@@ -268,7 +268,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/msrv-check
+      - uses: $/.github/actions/msrv-check
         with:
           package: bdinfo-rs-wasm
           manifest-path: crates/bdinfo-rs-wasm/Cargo.toml

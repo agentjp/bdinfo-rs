@@ -1,6 +1,7 @@
 #!/usr/bin/env pwsh
 # Permission-compatibility gate for local reusable-workflow edges (`uses:
-# ./.github/workflows/*.yml`).
+# $/.github/workflows/*.yml`, or the workspace-relative `./` form that
+# cargo-dist emits into v-release.yml).
 #
 # A called workflow's jobs run under the CALLING job's token, and GitHub
 # rejects a run outright when a called job requests a permission its caller
@@ -11,7 +12,7 @@
 #
 # No per-file linter catches this. action-validator schema-checks one file at
 # a time, ryl lints its style, and zizmor audits over-permissioning within a
-# file — none of the three follows a `uses: ./…` edge and compares the two
+# file — none of the three follows a local `uses:` edge and compares the two
 # ends. This script does exactly that and nothing else.
 #
 # Usage:
@@ -131,7 +132,7 @@ function Read-Workflow([string] $File) {
             }
             elseif ($l -match '^\s{4}uses:\s*(\S+)') {
                 $target = $Matches[1]
-                if ($target -like './.github/workflows/*') {
+                if ($target -like './.github/workflows/*' -or $target -like '$/.github/workflows/*') {
                     $job.Uses = $target
                     $job.UsesLine = $i + 1
                 }
@@ -248,6 +249,14 @@ if ($SelfTest) {
             # workflow's job asks for two more scopes.
             Files   = @{
                 'caller.yml' = "name: caller`non:`n  schedule:`n    - cron: `"0 0 * * *`"`npermissions:`n  contents: read`njobs:`n  call:`n    uses: ./.github/workflows/callee.yml`n"
+                'callee.yml' = "name: callee`non:`n  workflow_call:`npermissions:`n  contents: read`njobs:`n  plan:`n    runs-on: ubuntu-latest`n    permissions:`n      actions: read`n      contents: read`n    steps:`n      - run: echo hi`n"
+            }
+        },
+        @{
+            Name    = 'a caller narrower than its callee, self-repository form'
+            Expect  = 1
+            Files   = @{
+                'caller.yml' = "name: caller`non:`n  schedule:`n    - cron: `"0 0 * * *`"`npermissions:`n  contents: read`njobs:`n  call:`n    uses: `$/.github/workflows/callee.yml`n"
                 'callee.yml' = "name: callee`non:`n  workflow_call:`npermissions:`n  contents: read`njobs:`n  plan:`n    runs-on: ubuntu-latest`n    permissions:`n      actions: read`n      contents: read`n    steps:`n      - run: echo hi`n"
             }
         },

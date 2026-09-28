@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   zizmor:
-    uses: ./.github/workflows/repo.yml
+    uses: $/.github/workflows/repo.yml
     with:
       yaml: "false"
       toml: "false"

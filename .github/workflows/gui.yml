@@ -319,7 +319,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
         env:
@@ -347,7 +347,7 @@ jobs:
 
       # rustfmt / typos / machete / shear — the quartet wasm.yml's gate runs
       # identically, in .github/actions/lint-crate.
-      - uses: ./.github/actions/lint-crate
+      - uses: $/.github/actions/lint-crate
         with:
           working-directory: crates/bdinfo-rs-gui
 
@@ -408,7 +408,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/msrv-check
+      - uses: $/.github/actions/msrv-check
         with:
           package: bdinfo-rs-gui
           manifest-path: crates/bdinfo-rs-gui/Cargo.toml
@@ -476,7 +476,7 @@ jobs:
       # pre-install is taken here (ubuntu-latest, so install-action's prebuilt
       # cargo-deb runs) and declined there; the artifact name marks these as
       # throwaway hand-testing builds rather than release assets.
-      - uses: ./.github/actions/gui-package
+      - uses: $/.github/actions/gui-package
         with:
           kind: ${{ matrix.kind }}
           version: ${{ steps.version.outputs.version }}

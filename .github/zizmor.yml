@@ -35,3 +35,9 @@ rules:
   template-injection:
     ignore:
       - v-release.yml
+  # dist emits its reusable-workflow calls (guard-ancestor.yml, homebrew.yml) in
+  # the workspace-relative `uses: ./…` form; every hand-maintained workflow and
+  # composite action uses the self-repository `uses: $/…` form.
+  self-repository:
+    ignore:
+      - v-release.yml

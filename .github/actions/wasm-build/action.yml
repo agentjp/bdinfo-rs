@@ -29,7 +29,7 @@ runs:
   using: composite
   steps:
     - id: pins
-      uses: ./.github/actions/pins
+      uses: $/.github/actions/pins
 
     - name: Add the wasm32 target
       shell: bash
