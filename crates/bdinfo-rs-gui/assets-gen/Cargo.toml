@@ -21,7 +21,7 @@ bdinfo-rs-gui = { path = ".." }
 # Pure-Rust encoders for the two container formats the OSes want: .icns for
 # the macOS bundle, PNG for the hicolor set (and inside the .icns). Default
 # features off: they add a JPEG2000 decoder this generator never reads.
-icns = { version = "0.4", default-features = false, features = ["pngio"] }
+icns = { version = "0.5", default-features = false, features = ["pngio"] }
 png = "0.18"
 
 [lints]
