@@ -50,31 +50,31 @@ version = "1.5.1"
 criteria = "safe-to-run"
 
 [[exemptions.bitflags]]
-version = "2.13.1"
+version = "2.13.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.cfg-if]]
-version = "1.0.4"
+version = "1.0.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
-version = "4.6.6"
+version = "4.6.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_builder]]
-version = "4.6.6"
+version = "4.6.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_complete]]
-version = "4.6.9"
+version = "4.6.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_derive]]
-version = "4.6.4"
+version = "4.6.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
-version = "1.1.0"
+version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.clap_mangen]]
@@ -205,20 +205,24 @@ criteria = "safe-to-deploy"
 version = "1.4.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.smallvec]]
+version = "1.16.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.syn]]
 version = "2.0.119"
 criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
-version = "3.0.4"
+version = "3.0.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror-impl]]
-version = "2.0.20"
+version = "2.0.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
-version = "1.0.24"
+version = "1.0.26"
 criteria = "safe-to-deploy"
 
 [[exemptions.winapi]]
@@ -238,9 +242,9 @@ version = "0.61.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy]]
-version = "0.8.56"
+version = "0.8.59"
 criteria = "safe-to-run"
 
 [[exemptions.zerocopy-derive]]
-version = "0.8.56"
+version = "0.8.59"
 criteria = "safe-to-run"
