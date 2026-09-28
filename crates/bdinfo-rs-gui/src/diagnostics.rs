@@ -385,12 +385,29 @@ mod tests {
         assert!(anchor.ends_with(" UTC"), "the anchor names its timezone: {anchor}");
         assert_eq!(after_init.lines().count(), 1, "and nothing else survived the launch");
 
-        // The facade now reaches the file, at the Info cap.
+        // The facade now reaches the file, at the Info cap. The Debug record
+        // goes straight to the installed logger, past that cap, so the sink's
+        // own level policy is what drops it. (A `log::debug!` call would be
+        // stopped by the cap before its message is ever formatted, and
+        // llvm-cov on nightly-2026-09-27 counts that unformatted message as
+        // an uncovered region.)
+        assert_eq!(log::max_level(), log::LevelFilter::Info);
         log::info!("MARKER_HEADER");
-        log::debug!("MARKER_DEBUG");
+        log::logger().log(&record(
+            log::Level::Debug,
+            "bdinfo_rs_gui",
+            format_args!("MARKER_DEBUG"),
+        ));
         let text = std::fs::read_to_string(&path).expect("scratch read");
         assert!(text.contains("MARKER_HEADER"));
         assert!(!text.contains("MARKER_DEBUG"));
+
+        // An unknown settings key earns one Warn line, through the facade.
+        let config = scratch("global/unknown-key.conf");
+        std::fs::write(&config, "marker-unknown-key = 1\n").expect("scratch write");
+        drop(crate::settings::load_from(&config));
+        let text = std::fs::read_to_string(&path).expect("scratch read");
+        assert!(text.contains("config: ignoring unknown setting key `marker-unknown-key`"));
 
         // log_err: the Err arm logs `what` + this file's name + the error;
         // the Ok arm stays silent.
