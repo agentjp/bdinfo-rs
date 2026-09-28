@@ -10,7 +10,7 @@ members = ["cargo:."] # pull in the whole Cargo workspace rooted here
 [dist]
 # Pin dist itself (reproducibility): the generated CI installs exactly this
 # version. Must be an exact version, never a range.
-cargo-dist-version = "0.32.0"
+cargo-dist-version = "0.33.0"
 ci = "github"
 
 # Tag-only, like the hand-rolled workflow: do not spin a release run on every PR
