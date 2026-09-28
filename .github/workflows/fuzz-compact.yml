@@ -601,7 +601,26 @@ jobs:
           # things — one that the corpus can grow, one that it can shrink.
           gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
           gh label create fuzz-compact --color 0e8a16 --description 'Committed fuzz corpus can be compacted' --force | Out-Null
-          $open = gh issue list --state open --label fuzz-compact --json number --jq '.[0].number'
+          # The oldest open issue carrying $Label, closing every newer one as its
+          # duplicate; an empty first answer is re-read through the REST endpoint
+          # before it is believed. A copy of fuzz.yml's Find-OpenIssue (this job
+          # has no checkout to share a script from), whose comment carries the
+          # incident behind it.
+          function Find-OpenIssue([string] $Label) {
+            $pick = '[.[] | select(.pull_request == null) | .number] | sort | .[]'
+            $found = @(gh issue list --state open --label $Label --limit 200 --json number --jq $pick)
+            if ($LASTEXITCODE -ne 0) { throw "gh issue list --label $Label exited $LASTEXITCODE" }
+            if ($found.Count -eq 0) {
+              $found = @(gh api "repos/$env:GH_REPO/issues?labels=$Label&state=open&per_page=100" --jq $pick)
+              if ($LASTEXITCODE -ne 0) { throw "gh api issues?labels=$Label exited $LASTEXITCODE" }
+            }
+            foreach ($dup in @($found | Select-Object -Skip 1)) {
+              gh issue close $dup --reason 'not planned' --comment "Duplicate of #$($found[0]), the issue this workflow refreshes: $env:RUN_URL" | Out-Null
+              Write-Host "Closed #$dup as a duplicate of #$($found[0])"
+            }
+            if ($found.Count -gt 0) { $found[0] } else { $null }
+          }
+          $open = Find-OpenIssue fuzz-compact
 
           $title = if ($totalRemoved -gt 0) {
             "Fuzz corpus: $totalRemoved unit(s), $(& $mb $totalBytes) MB, can be compacted away across $($removable.Count) target(s)"
@@ -684,6 +703,7 @@ jobs:
           $wasOpen = [bool]$open
           if (-not $write -and $nothingToDo) {
             $write = gh issue list --state closed --label fuzz-compact --limit 1 --json number --jq '.[0].number'
+            if ($LASTEXITCODE -ne 0) { throw "gh issue list --state closed exited $LASTEXITCODE" }
           }
           if ($write) {
             gh issue edit $write --title $title --body $body --add-label automated | Out-Null

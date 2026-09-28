@@ -873,7 +873,7 @@ jobs:
 
   # One issue per distinct crash signature, plus ONE rolling issue for corpus
   # growth. Modelled on sweep.yml's report job — same `gh label create --force`,
-  # same edit-or-create over `gh issue list --json number` — with a different
+  # same edit-or-create over an open-issue lookup — with a different
   # policy, and fanned in rather than filed per leg so two targets that hit the
   # same bug in the same run cannot race each other into two issues.
   #
@@ -962,8 +962,8 @@ jobs:
           # growth issue with a blank count.
           $totalNew = [int](($stats | Measure-Object -Property new -Sum).Sum)
           $totalRestored = [int](($stats | Measure-Object -Property restored -Sum).Sum)
-          # The legs that reached code the committed seeds do not, which is what
-          # the growth issue below keys on. Summed over legs and therefore over
+          # The legs that reached code the committed seeds do not, whose best per
+          # target is what the growth issue below keys on. Summed over legs and therefore over
           # both pointer widths — and edges, unlike the units counted above, do
           # not collapse on union: the arches are different binaries, so an edge
           # counted in both is not one edge counted twice.
@@ -988,6 +988,30 @@ jobs:
           if ($env:FILE_ISSUES -ne 'true') {
             Write-Host "Dispatched run — not filing. Crashes this run: $($crashes.Count); units to promote: $unitsToPromote; edges gained: $totalGained."
             exit 0
+          }
+
+          # The OLDEST open issue carrying $Label whose body contains $Marker
+          # (every body contains the empty one), or $null. Every newer match is
+          # closed as its duplicate. An empty answer is what files a NEW issue,
+          # so it is read twice before it is believed: on 2026-09-15 run
+          # 34980609631 got an empty list from `gh issue list` with no error
+          # while #316 was open and labelled, filed #476, and every later pass
+          # edited #476 and left #316 behind. The second read goes through the
+          # REST endpoint rather than repeating the same GraphQL query, and the
+          # duplicate close repairs, on the next pass, whatever gets past both.
+          function Find-OpenIssue([string] $Label, [string] $Marker = '') {
+            $pick = "[.[] | select(.pull_request == null) | select((.body // `"`") | contains(`"$Marker`")) | .number] | sort | .[]"
+            $found = @(gh issue list --state open --label $Label --limit 200 --json 'number,body' --jq $pick)
+            if ($LASTEXITCODE -ne 0) { throw "gh issue list --label $Label exited $LASTEXITCODE" }
+            if ($found.Count -eq 0) {
+              $found = @(gh api "repos/$env:GH_REPO/issues?labels=$Label&state=open&per_page=100" --jq $pick)
+              if ($LASTEXITCODE -ne 0) { throw "gh api issues?labels=$Label exited $LASTEXITCODE" }
+            }
+            foreach ($dup in @($found | Select-Object -Skip 1)) {
+              gh issue close $dup --reason 'not planned' --comment "Duplicate of #$($found[0]), the issue this workflow refreshes: $env:RUN_URL" | Out-Null
+              Write-Host "Closed #$dup as a duplicate of #$($found[0])"
+            }
+            if ($found.Count -gt 0) { $found[0] } else { $null }
           }
 
           # --- one issue per distinct crash signature ------------------------
@@ -1059,7 +1083,7 @@ jobs:
               'This issue is keyed on the crash signature, so the nightly pass refreshes it rather than filing again. Close it with the fix: a later green run is not evidence, because the fuzzer need not have replayed this input.'
             ) | Where-Object { $null -ne $_ }
             $body = ($body -join "`n")
-            $existing = gh issue list --state open --label fuzz-crash --limit 200 --json 'number,body' --jq "map(select(.body | contains(`"$marker`"))) | .[0].number"
+            $existing = Find-OpenIssue fuzz-crash $marker
             if ($existing) {
               gh issue edit $existing --title $title --body $body --add-label automated | Out-Null
               Write-Host "Refreshed issue #$existing ($($c.signature))"
@@ -1083,32 +1107,59 @@ jobs:
           # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
           # report job carries the argument for it.
           gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
-          $open = gh issue list --state open --label fuzz-corpus --json number --jq '.[0].number'
-          # KEYED ON COVERAGE, NOT ON UNIT COUNT, because a unit count can never
-          # reach zero: every pass writes thousands of feature-distinct units of
-          # its own, so an issue that fires on units reports tens of thousands
-          # after every pass forever — measured 2026-08-13, the first pass after
-          # 37,812 units were promoted into the committed seeds reported 28,174
-          # against the 28,180 of the night before. The question worth asking a
-          # human is whether those units reach code the seeds do not, and a
-          # single edge is enough to ask it: a small gain can still be a
-          # genuinely new branch.
-          #
-          # Closing needs every leg to have MEASURED a gain of exactly zero. A
-          # leg whose baseline is null proves nothing about absence, and a run
-          # that produced no stats at all proves less still, so both hold the
-          # issue open. A closed issue is never reopened either — the next pass
-          # finds no open `fuzz-corpus` issue and creates a fresh one.
-          if (@($stats).Count -gt 0 -and $unmeasured.Count -eq 0 -and @($stats | Where-Object { $_.cov_gained -ne 0 }).Count -eq 0) {
-            if ($open) {
-              gh issue close $open --comment "Every leg's accumulated units reach exactly the edges the committed seeds already reach: $env:RUN_URL" | Out-Null
-              Write-Host "Closed issue #$open"
-            }
+          $open = Find-OpenIssue fuzz-corpus
+          if (@($stats).Count -eq 0) {
+            Write-Host 'No leg reported its numbers — neither filing nor closing.'
             exit 0
           }
-          if ($gainers.Count -eq 0) {
-            Write-Host "No leg gained an edge over the committed seeds, and $($unmeasured.Count) of $(@($stats).Count) leg(s) could not be measured — neither filing nor closing."
-            exit 0
+          # Promotion is SELECTIVE, so the recipe names targets rather than
+          # globbing `fuzz-corpus-*`: that glob takes every artifact the run
+          # uploaded, the units it adds to the committed seeds are permanent,
+          # and a low-gain target costs bytes out of all proportion to the code
+          # it reaches. Measured
+          # 2026-08-13 on the pass that reported 3,907 edges across 14 legs —
+          # the four targets whose best leg cleared 150 edges carried 98.3% of
+          # that total, while three listed-but-smaller ones would have added
+          # 12,022 units for 65 edges between them. The cut below sat in the
+          # empty band between those two groups (153 and 30 were its
+          # neighbours).
+          $promoteCut = 100
+          # One entry per TARGET however many of its arches gained: both arch
+          # artifacts are wanted, and `fuzz-corpus-<target>-*` asks for both in
+          # one pattern.
+          $promote = @($gainers | Where-Object { $_.cov_gained -ge $promoteCut } |
+            ForEach-Object { $_.target } | Sort-Object -Unique)
+          # KEYED ON THE PROMOTION CUT, because what this issue asks for is a
+          # promotion pull request, and a target below the cut is one its
+          # recipe would not take. Keyed on a single edge, the issue never
+          # closed: its edge total rose from 4,525 to 5,768 between 2026-09-03
+          # and 2026-09-28 with no pass at zero, because `wasm_report` and
+          # `parse_report` drive the whole pipeline and gain edges on nearly
+          # every pass. Keyed on units it could not close either — every pass
+          # writes thousands of feature-distinct units of its own (measured
+          # 2026-08-13: 28,174 on the first pass after 37,812 units were
+          # promoted, against 28,180 the night before).
+          #
+          # It files at $promoteCut and closes only once every leg is MEASURED
+          # below $closeCut. A leg's gain is not monotone from pass to pass
+          # (`wasm_report` x86_64 read 1,180, 1,195, 1,183, 1,192 and 1,224 on
+          # 2026-09-24 through 2026-09-28), so a single threshold would open
+          # and close the issue on alternating passes while a target sat near
+          # it, and every opening would be a NEW number: a closed issue is never
+          # reopened. A leg whose baseline is null proves nothing about absence,
+          # so it holds an open issue open.
+          $closeCut = $promoteCut / 2
+          $best = [int](($gainers | Measure-Object -Property cov_gained -Maximum).Maximum)
+          if ($promote.Count -eq 0) {
+            if (-not $open) {
+              Write-Host "No target's best leg gained $promoteCut edges or more (best: $best) — nothing to file."
+              exit 0
+            }
+            if ($unmeasured.Count -eq 0 -and $best -lt $closeCut) {
+              gh issue close $open --comment "No leg's accumulated units reach $closeCut or more edges beyond the committed seeds (best: $best): $env:RUN_URL" | Out-Null
+              Write-Host "Closed issue #$open"
+              exit 0
+            }
           }
           # One row per leg that has something to promote, sorted by what the
           # reader is deciding on. A leg whose baseline could not be measured is
@@ -1135,23 +1186,6 @@ jobs:
           else {
             "live only in this run's artifacts, which expire 90 days after it"
           }
-          # Promotion is SELECTIVE, so the recipe names targets rather than
-          # globbing `fuzz-corpus-*`: that glob takes every artifact the run
-          # uploaded, the units it adds to the committed seeds are permanent,
-          # and a low-gain target costs bytes out of all proportion to the code
-          # it reaches. Measured
-          # 2026-08-13 on the pass that reported 3,907 edges across 14 legs —
-          # the four targets whose best leg cleared 150 edges carried 98.3% of
-          # that total, while three listed-but-smaller ones would have added
-          # 12,022 units for 65 edges between them. The cut below sits in the
-          # empty band between those two groups (153 and 30 are its
-          # neighbours), so it does not balance on a boundary.
-          $promoteCut = 100
-          # One entry per TARGET however many of its arches gained: both arch
-          # artifacts are wanted, and `fuzz-corpus-<target>-*` asks for both in
-          # one pattern.
-          $promote = @($gainers | Where-Object { $_.cov_gained -ge $promoteCut } |
-            ForEach-Object { $_.target } | Sort-Object -Unique)
           if ($promote.Count -gt 0) {
             $promotePatterns = (($promote | ForEach-Object { "--pattern 'fuzz-corpus-$_-*'" }) -join ' ')
             $promoteLead = "To promote them into the regression set, naming only the $($promote.Count) target(s) whose best leg gained $promoteCut edges or more:"
@@ -1207,9 +1241,9 @@ jobs:
             '# then copy each /tmp/grown/fuzz-corpus-<target>-<arch>/* into fuzz/corpus/<target>/ and open a PR'
             '```'
             ''
-            "That cut is a guideline for what earns a pull request, not the one-edge condition this issue fires on — add ``--pattern 'fuzz-corpus-<target>-*'`` for any other row above you want. One pattern per target takes both arches, which is the point: unzipping them into one directory collapses the units they share."
+            "Add ``--pattern 'fuzz-corpus-<target>-*'`` for any other row above you want. One pattern per target takes both arches, which is the point: unzipping them into one directory collapses the units they share."
             ''
-            'This is one rolling issue, edited after every pass. It closes itself once every leg measures a gain of exactly zero — for a target that is not yet saturated, promoting the units above lowers its gain rather than ending it, because the next pass explores onward from what was promoted.'
+            "This is one rolling issue, edited after every pass. A pass files it when some target's best leg gains $promoteCut edges or more, and it closes itself once every leg measures a gain below $closeCut. Promoting the units above lowers a target's gain rather than ending it, because the next pass explores onward from what was promoted, so the issue can stay open, or return, after a promotion."
           ) | Where-Object { $null -ne $_ }
           $body = ($body -join "`n")
           if ($open) {
