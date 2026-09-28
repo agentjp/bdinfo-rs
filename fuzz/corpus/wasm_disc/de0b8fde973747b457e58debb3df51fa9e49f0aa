@@ -1,0 +1,1 @@
+{"errors":[{"file":".c","stage":"playlist","reason":{"kind":"missingClipFile","file":"\u0004."}},{"file":"","stage":"stream","reason":{"kind":"io","message":"\u0000."}},{"file":"d","stage":"stream","reason":{"kind":"io","message":"\u0009"}},{"reason":{"kind":"io","message":"6\u0000"}
