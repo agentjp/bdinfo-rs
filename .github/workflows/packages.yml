@@ -114,7 +114,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # Submit with komac DIRECTLY — the same tool winget-releaser wraps, but
       # without its `cargo-bins/cargo-binstall@main` bootstrap, which this repo's
@@ -261,7 +261,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # The package was built + attached to the release by dist `extra-artifacts`
       # (.github/build-linux-packages.sh); just pull it back to verify + republish.

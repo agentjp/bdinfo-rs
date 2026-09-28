@@ -65,7 +65,7 @@ jobs:
   # dispatch. crates.io publishing is live and irreversible (a version can be
   # yanked but never re-uploaded), so the off-master guard matters here.
   guard-ancestor:
-    uses: ./.github/workflows/guard-ancestor.yml
+    uses: $/.github/workflows/guard-ancestor.yml
     # No `secrets: inherit` — guard-ancestor takes no secrets, so inheriting
     # them is needless privilege (and zizmor's secrets-inherit audit flags it).
     permissions:

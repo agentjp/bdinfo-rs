@@ -315,7 +315,7 @@ jobs:
 
       # No marker inputs: the root workspace has no PR-side short-circuit, so
       # every run diffs and mutates.
-      - uses: ./.github/actions/mutate-crate
+      - uses: $/.github/actions/mutate-crate
         with:
           mode: pr-diff
 
@@ -350,7 +350,7 @@ jobs:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
-      - uses: ./.github/actions/mutate-crate
+      - uses: $/.github/actions/mutate-crate
         with:
           mode: pr-diff
           working-directory: crates/bdinfo-rs-gui
@@ -385,7 +385,7 @@ jobs:
           fetch-depth: 0   # need the base branch to diff the PR against
           persist-credentials: false
 
-      - uses: ./.github/actions/mutate-crate
+      - uses: $/.github/actions/mutate-crate
         with:
           mode: pr-diff
           working-directory: crates/bdinfo-rs-wasm
@@ -441,7 +441,7 @@ jobs:
       needs.plan.outputs.fuzz == 'true' ||
       needs.plan.outputs.pkg == 'true' ||
       needs.plan.outputs.test == 'true')
-    uses: ./.github/workflows/core.yml
+    uses: $/.github/workflows/core.yml
     with:
       core: ${{ needs.plan.outputs.core }}
       deps: ${{ needs.plan.outputs.deps }}
@@ -468,7 +468,7 @@ jobs:
       needs.plan.outputs.workflows == 'true' ||
       needs.plan.outputs.typos == 'true' ||
       needs.plan.outputs.links == 'true')
-    uses: ./.github/workflows/repo.yml
+    uses: $/.github/workflows/repo.yml
     with:
       yaml: ${{ needs.plan.outputs.yaml }}
       toml: ${{ needs.plan.outputs.toml }}
@@ -497,7 +497,7 @@ jobs:
       (needs.plan.outputs.gui == 'true' ||
       needs.plan.outputs.gui-full == 'true' ||
       needs.plan.outputs.deps == 'true')
-    uses: ./.github/workflows/gui.yml
+    uses: $/.github/workflows/gui.yml
     with:
       gui: ${{ needs.plan.outputs.gui }}
       full: ${{ needs.plan.outputs.gui-full }}
@@ -510,7 +510,7 @@ jobs:
       needs.plan.outputs.should_run != 'false' &&
       (needs.plan.outputs.wasm == 'true' ||
       needs.plan.outputs.deps == 'true')
-    uses: ./.github/workflows/wasm.yml
+    uses: $/.github/workflows/wasm.yml
     with:
       wasm: ${{ needs.plan.outputs.wasm }}
       deps: ${{ needs.plan.outputs.deps }}

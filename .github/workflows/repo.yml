@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # Neither tool ships via taiki-e/install-action, so cache the compiled
       # binaries instead of paying the from-source compile every run. ryl is
@@ -128,7 +128,7 @@ jobs:
       - name: Style/syntax-lint all YAML (ryl, strict)
         run: ryl -f github -o - -s .
 
-      # Neither tool above follows a `uses: ./…` edge, and the failure this
+      # Neither tool above follows a `uses: $/…` edge, and the failure this
       # catches produces no jobs and no check runs to read — see the script.
       # Self-test first, the order conventional.yml uses for its own checker.
       - name: Check reusable-workflow permission compatibility
@@ -161,10 +161,10 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       - name: Install taplo (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: taplo-cli@${{ steps.pins.outputs.TAPLO_CLI }}
           fallback: none
@@ -199,7 +199,7 @@ jobs:
           persist-credentials: false
 
       - name: Install zizmor (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: zizmor
           fallback: none
@@ -231,7 +231,7 @@ jobs:
           persist-credentials: false
 
       - name: Install typos
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: typos
           fallback: none

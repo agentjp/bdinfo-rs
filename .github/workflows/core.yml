@@ -214,7 +214,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       - name: Install pinned nightly rustfmt
         env:
@@ -236,7 +236,7 @@ jobs:
       # downgrade to that path, and does the same for a pinned `tool@version` the
       # manifest stops carrying.
       - name: Install gate tools
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-machete,cargo-shear,cargo-semver-checks
           fallback: none
@@ -298,7 +298,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       - name: Install pinned nightly with llvm-tools
         env:
@@ -310,7 +310,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install coverage tools
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-llvm-cov,cargo-nextest
           fallback: none
@@ -367,7 +367,7 @@ jobs:
       # No `package`: both members inherit `rust-version.workspace`, so the set
       # of declared floors must be a single value, and the action asserts that
       # rather than reading one member and assuming the other agrees.
-      - uses: ./.github/actions/msrv-check
+      - uses: $/.github/actions/msrv-check
         with:
           build-args: --workspace --locked
 
@@ -528,7 +528,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-deny
           fallback: none
@@ -551,7 +551,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # The committed imports.lock omits the `user-id` publisher field that
       # cargo-vet 0.10.0 still rejects; 0.10.1+ relaxed it. Only 0.10.0 ships a
@@ -645,12 +645,12 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # Nightly + target, the 32-bit C++ toolchain, the build cache, cargo-fuzz
       # and the fuzz lockfile check — the shared body fuzz.yml's deep pass runs
       # too, in .github/actions/fuzz-toolchain.
-      - uses: ./.github/actions/fuzz-toolchain
+      - uses: $/.github/actions/fuzz-toolchain
         with:
           target: ${{ matrix.triple }}
           cxx-multilib: ${{ matrix.arch == 'i686' }}
@@ -743,7 +743,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # build.rs writes the shell completions + man page into OUT_DIR during the build;
       # the host triple nests output under target/<triple>/ (mirroring what the release
@@ -755,7 +755,7 @@ jobs:
       # `command -v cargo-deb` guard finds them and skips its (slower) source compile,
       # and the smoke test packages with the exact release tools.
       - name: Install cargo-deb (release pin, prebuilt)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-deb@${{ steps.pins.outputs.CARGO_DEB }}
           fallback: none

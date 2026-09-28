@@ -50,12 +50,12 @@ jobs:
         run: git fetch --no-tags --filter=blob:none --unshallow origin
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       # `fallback: none`: install only from install-action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install convco (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: convco@${{ steps.pins.outputs.CONVCO }}
           fallback: none

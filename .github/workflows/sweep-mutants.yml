@@ -117,7 +117,7 @@ jobs:
 
       - name: Mutate
         id: mutate
-        uses: ./.github/actions/mutate-crate
+        uses: $/.github/actions/mutate-crate
         with:
           mode: full
           shard: ${{ matrix.shard }}

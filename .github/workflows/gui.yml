@@ -131,7 +131,7 @@ jobs:
       # action's checksummed manifest, never its runtime-resolved cargo-binstall
       # fallback (rationale in core.yml).
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-nextest
           fallback: none
@@ -319,7 +319,7 @@ jobs:
           persist-credentials: false
 
       - id: pins
-        uses: ./.github/actions/pins
+        uses: $/.github/actions/pins
 
       - name: Install pinned nightly rustfmt + llvm-tools (for llvm-cov)
         env:
@@ -332,7 +332,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / deny / typos)
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
           fallback: none
@@ -347,7 +347,7 @@ jobs:
 
       # rustfmt / typos / machete / shear — the quartet wasm.yml's gate runs
       # identically, in .github/actions/lint-crate.
-      - uses: ./.github/actions/lint-crate
+      - uses: $/.github/actions/lint-crate
         with:
           working-directory: crates/bdinfo-rs-gui
 
@@ -408,7 +408,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/msrv-check
+      - uses: $/.github/actions/msrv-check
         with:
           package: bdinfo-rs-gui
           manifest-path: crates/bdinfo-rs-gui/Cargo.toml
@@ -476,7 +476,7 @@ jobs:
       # pre-install is taken here (ubuntu-latest, so install-action's prebuilt
       # cargo-deb runs) and declined there; the artifact name marks these as
       # throwaway hand-testing builds rather than release assets.
-      - uses: ./.github/actions/gui-package
+      - uses: $/.github/actions/gui-package
         with:
           kind: ${{ matrix.kind }}
           version: ${{ steps.version.outputs.version }}

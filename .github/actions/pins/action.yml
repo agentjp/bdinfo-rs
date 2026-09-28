@@ -2,7 +2,7 @@
 # .github/pins.env; this action is how a workflow reads one. A job adds
 #
 #     - id: pins
-#       uses: ./.github/actions/pins
+#       uses: $/.github/actions/pins
 #
 # after its checkout (a local action needs the repository on disk), then spells
 # the version as `${{ steps.pins.outputs.NIGHTLY }}` where it used to carry a
