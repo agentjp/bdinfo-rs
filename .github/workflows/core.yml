@@ -140,12 +140,12 @@ jobs:
       # generated the committed v-release.yml, so anything else makes the check
       # below compare against the wrong generator. version-freshness.yml enforces
       # the equality and nags when a newer dist ships.
-      DIST_VERSION: 0.32.0
+      DIST_VERSION: 0.33.0
       # sha256 of the release asset named in the install step, copied once from
       # the `.sha256` file axodotdev publishes beside it. Committing the digest is
       # what makes the download verifiable: the archive is checked against this
       # value before anything inside it runs. Re-take it on every DIST_VERSION bump.
-      DIST_SHA256: 16d4394af9b91366ca92cb4601a72dd0a209a49301ef535749e2141039e26ed6
+      DIST_SHA256: 4761cff5fc547ad66d1449abbf321380b0e6bd8093b1fe6593852a3314fd0c19
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

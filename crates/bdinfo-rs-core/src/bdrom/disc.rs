@@ -4701,7 +4701,7 @@ mod tests {
         // the count below proves the scan itself demuxed nothing.
         let mut reported = 0_usize;
         let unselected = {
-            let mut progress = |_: ScanProgress<'_>| reported = reported.saturating_add(1);
+            let mut progress = progress_counter(&mut reported);
             progress(ScanProgress { file: "00000.M2TS", done: 0, total: 0 });
             BdRom::open(
                 &FsDir::new(short.root.clone()),
@@ -6839,6 +6839,16 @@ Total Bitrate:  0.00 Mbps
         AtomicBool::new(false)
     }
 
+    // The tests that assert a scan reports no progress share this one closure:
+    // llvm-cov on nightly-2026-09-27 counts a closure that never runs as an
+    // uncovered function (nightly-2026-08-05 did not). The call in
+    // a_stream_file_that_ends_before_its_declared_span_is_reported_short keeps
+    // it covered.
+    /// A progress sink that counts the observations it receives.
+    fn progress_counter(count: &mut usize) -> impl FnMut(ScanProgress<'_>) + '_ {
+        move |_| *count = count.saturating_add(1)
+    }
+
     #[test]
     fn an_observed_open_reports_progress_and_narrows_the_scan_to_selected_files() {
         let disc = TempDisc::build(
@@ -6914,19 +6924,18 @@ Total Bitrate:  0.00 Mbps
         assert_eq!(report.bdrom, bd);
 
         // Without the packet scan the callback never fires.
-        let mut fired = false;
-        let mut observe = |_: ScanProgress<'_>| fired = true;
+        let mut fired = 0;
         drop(
             BdRom::open(
                 &root,
                 ScanMode::Metadata,
                 ScanOptions::default(),
                 None,
-                ScanObservers::new(&mut observe, &never_cancel()),
+                ScanObservers::new(&mut progress_counter(&mut fired), &never_cancel()),
             )
             .expect("metadata-only scan"),
         );
-        assert!(!fired);
+        assert_eq!(fired, 0);
     }
 
     #[test]
@@ -7340,44 +7349,41 @@ Total Bitrate:  0.00 Mbps
         // Every packet-scanning mode aborts on the quick pass's first chunk
         // read, before the full pass ever fires the callback.
         for mode in [ScanMode::Codecs, ScanMode::Full] {
-            let mut fired = false;
-            let mut observe = |_: ScanProgress<'_>| fired = true;
+            let mut fired = 0;
             let err = BdRom::open(
                 &root,
                 mode,
                 ScanOptions::default(),
                 None,
-                ScanObservers::new(&mut observe, &cancel),
+                ScanObservers::new(&mut progress_counter(&mut fired), &cancel),
             )
             .expect_err("the pre-cancelled scan errors");
             assert_eq!(err.to_string(), "scan cancelled");
-            assert!(!fired, "no progress escapes a pre-cancelled scan");
+            assert_eq!(fired, 0, "no progress escapes a pre-cancelled scan");
         }
-        let mut resilient_fired = false;
-        let mut observe = |_: ScanProgress<'_>| resilient_fired = true;
+        let mut resilient_fired = 0;
         let err = BdRom::open_resilient(
             &root,
             ScanMode::Full,
             ScanOptions::default(),
             None,
-            ScanObservers::new(&mut observe, &cancel),
+            ScanObservers::new(&mut progress_counter(&mut resilient_fired), &cancel),
         )
         .expect_err("the pre-cancelled resilient scan errors");
         assert_eq!(err.to_string(), "scan cancelled");
-        assert!(!resilient_fired, "no progress escapes the resilient abort either");
+        assert_eq!(resilient_fired, 0, "no progress escapes the resilient abort either");
         // Metadata reads no packets, so the flag is never observed — the
         // bounded structural scan completes as if no flag existed.
-        let mut metadata_fired = false;
-        let mut observe = |_: ScanProgress<'_>| metadata_fired = true;
+        let mut metadata_fired = 0;
         let bd = BdRom::open(
             &root,
             ScanMode::Metadata,
             ScanOptions::default(),
             None,
-            ScanObservers::new(&mut observe, &cancel),
+            ScanObservers::new(&mut progress_counter(&mut metadata_fired), &cancel),
         )
         .expect("the metadata scan never polls the flag");
-        assert!(!metadata_fired, "a metadata scan reads no packets");
+        assert_eq!(metadata_fired, 0, "a metadata scan reads no packets");
         assert_eq!(bd.playlists.len(), 2);
     }
 
