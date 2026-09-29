@@ -308,8 +308,35 @@ jobs:
       # property of a tool this workflow only calls, and what it would cost to be
       # wrong is a permanent deletion. A -runs=0 replay loads a corpus, prints
       # one INITED line and exits — seconds, against a merge that has already
-      # executed every unit — so two of them turn the claim into a number this
-      # leg reports. fuzz.yml's baseline step records what one costs.
+      # executed every unit — so replays turn the claim into numbers this leg
+      # reports. fuzz.yml's baseline step records what one costs.
+      #
+      # REPLAY IS NOT DETERMINISTIC FOR EVERY TARGET. The targets that reach
+      # TsStreamFile::scan_threaded_observed (parse_report, wasm_report, m2ts,
+      # m2ts_differential) run the demux on a second thread, and std's channel
+      # code is monomorphised into the target binary, so it is instrumented.
+      # Which of its branches run depends on thread timing. Measured
+      # 2026-09-29: four scheduled fuzz.yml passes on one commit replayed the
+      # same committed seeds to different edge counts for exactly those four
+      # targets (m2ts x86_64: 4,458, 4,523, 4,520, 4,458) and to identical
+      # counts for the other eleven. Five local replays of one m2ts binary
+      # over one corpus varied only inside std::sync::mpmc and
+      # std::sync::mpsc: the Receiver's recv, SyncWaker::unregister and
+      # ::disconnect, and the drop glue of Receiver and SyncSender. A single
+      # keep-set replay against a single full replay then blocks those
+      # targets whatever the keep-set holds, so each side is replayed three
+      # times:
+      #
+      # - x86_64 replays with -print_coverage=1 and compares edges PER
+      #   FUNCTION. A function in std::sync::mpmc or std::sync::mpsc, or one
+      #   whose edge count differs between the three full replays, is exempt;
+      #   any other function whose best keep-set count is below its full
+      #   count is a loss, and is named in lost-funcs.txt.
+      # - i686 has no per-function data: -print_coverage needs
+      #   __sanitizer_symbolize_pc, and this leg builds without a sanitizer
+      #   (see the matrix). It records the range of the three replays on each
+      #   side, which the report job reads when the x86_64 leg of the same
+      #   target reports channel code covered.
       #
       # A LOSS DOES NOT FAIL THE LEG. The keep-set still uploads — a human may
       # want to look at it — and the report job is what acts on the verdict, by
@@ -317,34 +344,104 @@ jobs:
       # a red leg whose artifact is downloadable anyway, which reads as neither
       # "use this" nor "do not".
       #
-      # An unparsed replay leaves the value EMPTY and travels as null, never as
-      # 0: a zero would read as "measured, reaches nothing" and, compared
-      # against a full corpus that also failed to parse, as a clean pass.
+      # An unparsed replay leaves the value null, never 0: a zero would read as
+      # "measured, reaches nothing" and, compared against a full corpus that
+      # also failed to parse, as a clean pass.
+      - name: Install llvm-symbolizer
+        # -print_coverage=1 prints an empty COVERAGE block when the sanitizer
+        # runtime finds no llvm-symbolizer on PATH (seen 2026-09-29 in the
+        # rustlang/rust:nightly image), which the step below reads as "no
+        # per-function data".
+        if: ${{ matrix.arch == 'x86_64' }}
+        continue-on-error: true
+        run: command -v llvm-symbolizer || { sudo apt-get update -qq && sudo apt-get install -y -qq llvm; }
+
       - name: Prove the keep-set reaches the same coverage
         id: cov
         continue-on-error: true
+        shell: pwsh
         env:
           BIN: ${{ steps.build.outputs.bin }}
         run: |
-          replay() {
-            # `#2542 INITED cov: 4065 ft: 17861 corp: 2542/...` — the one line a
-            # zero-run replay prints, read exactly as fuzz.yml's baseline reads
-            # it. The guards are the same ones the merge ran under, so a unit
-            # the merge dropped for tripping them cannot fail this comparison.
-            "$BIN" -runs=0 $GUARDS "$1" 2>&1 |
-              sed -n 's/.*INITED cov: \([0-9]*\) ft: \([0-9]*\).*/\1 \2/p' | head -1
+          $PSNativeCommandUseErrorActionPreference = $false
+          $guards = -split $env:GUARDS
+          $perFunction = $env:ARCH -eq 'x86_64'
+          # Ordinal: two monomorphisations whose names differ only in case are
+          # two functions, and @{} folds case.
+          $newMap = { , [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal) }
+          # An absent function reads as 0 edges. GetValueOrDefault is an
+          # extension method, which PowerShell does not bind.
+          $edges = { param($map, $name) $v = 0; [void]$map.TryGetValue($name, [ref]$v); $v }
+          $replay = {
+            param([string] $Dir)
+            $flags = @('-runs=0') + $guards
+            if ($perFunction) { $flags += '-print_coverage=1' }
+            # The guards are the same ones the merge ran under, so a unit the
+            # merge dropped for tripping them cannot fail this comparison.
+            $lines = @(& $env:BIN @flags $Dir 2>&1 | ForEach-Object { "$_" })
+            $r = [pscustomobject]@{ cov = $null; ft = $null; funcs = (& $newMap) }
+            foreach ($l in $lines) {
+              # `#2542 INITED cov: 4065 ft: 17861 corp: 2542/...`, read exactly
+              # as fuzz.yml's baseline reads it.
+              if ($null -eq $r.cov -and $l -match 'INITED cov: (\d+) ft: (\d+)') {
+                $r.cov = [int]$Matches[1]
+                $r.ft = [int]$Matches[2]
+              }
+              elseif ($l -match '^(?:UN)?COVERED_FUNC: hits: \d+ edges: (\d+)/\d+ (.+)$') {
+                $r.funcs[$Matches[2]] = (& $edges $r.funcs $Matches[2]) + [int]$Matches[1]
+              }
+            }
+            $r
           }
-          set +e
-          full=$(replay "fuzz/corpus/$TARGET")
-          keep=$(replay "fuzz/keep/$TARGET")
-          set -e
-          {
-            echo "cov_full=${full% *}"
-            echo "ft_full=${full#* }"
-            echo "cov_keep=${keep% *}"
-            echo "ft_keep=${keep#* }"
-          } >> "$GITHUB_OUTPUT"
-          echo "$TARGET/$ARCH: committed [${full:-unmeasured}] vs keep-set [${keep:-unmeasured}] (cov ft)"
+          $full = @(1..3 | ForEach-Object { & $replay "fuzz/corpus/$env:TARGET" })
+          $keep = @(1..3 | ForEach-Object { & $replay "fuzz/keep/$env:TARGET" })
+          $out = [ordered]@{
+            cov_full = $full[0].cov; ft_full = $full[0].ft
+            cov_keep = $keep[0].cov; ft_keep = $keep[0].ft
+            cov_full_min = $null; cov_full_max = $null
+            cov_keep_min = $null; cov_keep_max = $null
+            uses_channels = $null; lost_funcs = $null; noisy_funcs = $null
+          }
+          foreach ($side in @(@('full', $full), @('keep', $keep))) {
+            $v = @($side[1] | ForEach-Object { $_.cov })
+            if ($v -notcontains $null) {
+              $m = $v | Measure-Object -Minimum -Maximum
+              $out["cov_$($side[0])_min"] = [int]$m.Minimum
+              $out["cov_$($side[0])_max"] = [int]$m.Maximum
+            }
+          }
+
+          $stats = "fuzz/stats/$env:TARGET-$env:ARCH"
+          New-Item -ItemType Directory $stats -Force | Out-Null
+          $measured = $perFunction -and @($full + $keep | Where-Object { $_.funcs.Count -eq 0 }).Count -eq 0
+          if ($measured) {
+            $channel = '^(core::ptr::drop_glue::<|<)?std::sync::(mpmc|mpsc)::'
+            $names = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($r in $full + $keep) { foreach ($n in $r.funcs.Keys) { [void]$names.Add($n) } }
+            $noisy = [System.Collections.Generic.List[string]]::new()
+            $lost = [System.Collections.Generic.List[string]]::new()
+            $out.uses_channels = $false
+            foreach ($n in $names) {
+              $f = @($full | ForEach-Object { & $edges $_.funcs $n })
+              $k = @($keep | ForEach-Object { & $edges $_.funcs $n })
+              $isChannel = $n -match $channel
+              if ($isChannel -and ($f | Measure-Object -Maximum).Maximum -gt 0) { $out.uses_channels = $true }
+              if ($isChannel -or @($f | Sort-Object -Unique).Count -gt 1) {
+                $noisy.Add($n)
+                continue
+              }
+              $bestKeep = ($k | Measure-Object -Maximum).Maximum
+              if ($bestKeep -lt $f[0]) { $lost.Add("$($f[0]) -> $bestKeep  $n") }
+            }
+            $out.lost_funcs = $lost.Count
+            $out.noisy_funcs = $noisy.Count
+            $lost | Set-Content "$stats/lost-funcs.txt"
+            $noisy | Set-Content "$stats/noisy-funcs.txt"
+            foreach ($l in @($lost)[0..([math]::Min($lost.Count, 40) - 1)]) { if ($l) { Write-Host "  lost: $l" } }
+          }
+          $out | ConvertTo-Json | Set-Content "$stats/coverage.json"
+          $perFn = if ($measured) { "$($out.lost_funcs) lost, $($out.noisy_funcs) exempt, channel code covered: $($out.uses_channels)" } else { 'not measured' }
+          Write-Host "${env:TARGET}/${env:ARCH}: full cov $($out.cov_full_min)..$($out.cov_full_max), keep-set cov $($out.cov_keep_min)..$($out.cov_keep_max); per function: $perFn"
 
       - name: Record this leg's numbers
         id: stats
@@ -352,10 +449,6 @@ jobs:
           BEFORE: ${{ steps.compact.outputs.before }}
           NAMED: ${{ steps.compact.outputs.named }}
           AFTER: ${{ steps.compact.outputs.after }}
-          COV_FULL: ${{ steps.cov.outputs.cov_full }}
-          FT_FULL: ${{ steps.cov.outputs.ft_full }}
-          COV_KEEP: ${{ steps.cov.outputs.cov_keep }}
-          FT_KEEP: ${{ steps.cov.outputs.ft_keep }}
         run: |
           out="fuzz/stats/$TARGET-$ARCH"
           mkdir -p "$out"
@@ -371,25 +464,25 @@ jobs:
           # width's keep-set is removed. Both legs of a target write the same
           # file; the report reads whichever it has.
           find "fuzz/corpus/$TARGET" -maxdepth 1 -type f -printf '%f\t%s\n' | LC_ALL=C sort > "$out/committed.tsv"
-          # jq -n, not a heredoc: it is what makes an EMPTY coverage reading
-          # land as JSON null instead of a syntax error, which is the whole
-          # distinction the step above exists to preserve.
+          # Every coverage field defaults to null and coverage.json overrides
+          # the ones it measured, so a coverage step that died before writing it
+          # lands as "unmeasured" rather than as a zero.
+          cov="$out/coverage.json"
+          [ -s "$cov" ] || echo '{}' > "$cov"
           jq -n \
             --arg target "$TARGET" --arg arch "$ARCH" \
             --argjson before "$BEFORE" --argjson named "$NAMED" --argjson after "$AFTER" \
-            --arg cov_full "$COV_FULL" --arg ft_full "$FT_FULL" \
-            --arg cov_keep "$COV_KEEP" --arg ft_keep "$FT_KEEP" \
+            --slurpfile cov "$cov" \
             '{$target, $arch, $before, $named, $after,
-              cov_full: ($cov_full | if . == "" then null else tonumber end),
-              ft_full:  ($ft_full  | if . == "" then null else tonumber end),
-              cov_keep: ($cov_keep | if . == "" then null else tonumber end),
-              ft_keep:  ($ft_keep  | if . == "" then null else tonumber end)}' \
+              cov_full: null, ft_full: null, cov_keep: null, ft_keep: null,
+              cov_full_min: null, cov_full_max: null, cov_keep_min: null, cov_keep_max: null,
+              uses_channels: null, lost_funcs: null, noisy_funcs: null} + $cov[0]' \
             > "$out/stats.json"
           cat "$out/stats.json"
           {
             echo "### $TARGET ($ARCH)"
             echo
-            echo "$BEFORE committed unit(s), $NAMED of them human-named, compact to $AFTER ($(du -sh "fuzz/keep/$TARGET" | cut -f1)); coverage ${COV_FULL:-?} -> ${COV_KEEP:-?} edge(s)."
+            echo "$BEFORE committed unit(s), $NAMED of them human-named, compact to $AFTER ($(du -sh "fuzz/keep/$TARGET" | cut -f1)); coverage $(jq -r '"\(.cov_full_min // "?")..\(.cov_full_max // "?") -> \(.cov_keep_min // "?")..\(.cov_keep_max // "?")"' "$out/stats.json") edge(s) over three replays each."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # A SEPARATE ARTIFACT PREFIX, deliberately not `fuzz-compact-*`: that glob
@@ -519,16 +612,37 @@ jobs:
               # "the replay printed nothing to parse" is one about the run. Both
               # block the target: the set to commit is the union, so one width's
               # unverified keep-set is half of what would land.
+              #
+              # A THREADED target — its x86_64 leg saw std channel code covered
+              # and measured every function — is judged on what does not depend
+              # on thread timing (the compact job's coverage step carries the
+              # measurement): x86_64 on its per-function losses, i686 on its
+              # replay ranges, where only a best keep-set replay below the
+              # worst full replay is a loss. Every other target, and a threaded
+              # one whose x86_64 leg could not measure per function, keeps the
+              # single-replay rule: any edge or feature fewer is a loss.
+              $threaded = @($legs | Where-Object {
+                  $_.arch -eq 'x86_64' -and $_.uses_channels -eq $true -and $null -ne $_.lost_funcs
+                }).Count -gt 0
               $unmeasured = @($legs | Where-Object {
+                  if ($threaded -and $_.arch -eq 'x86_64') { return $false }
+                  if ($threaded) { return $null -eq $_.cov_full_min -or $null -eq $_.cov_keep_max }
                   $null -eq $_.cov_full -or $null -eq $_.cov_keep -or
                   $null -eq $_.ft_full -or $null -eq $_.ft_keep
                 }).Count -gt 0
               $lost = @($legs | Where-Object {
+                  if ($null -ne $_.lost_funcs -and $_.lost_funcs -gt 0) { return $true }
+                  if ($threaded -and $_.arch -eq 'x86_64') { return $false }
+                  if ($threaded) {
+                    return $null -ne $_.cov_full_min -and $null -ne $_.cov_keep_max -and
+                      $_.cov_keep_max -lt $_.cov_full_min
+                  }
                   $null -ne $_.cov_full -and $null -ne $_.cov_keep -and
                   ($_.cov_keep -lt $_.cov_full -or $_.ft_keep -lt $_.ft_full)
                 }).Count -gt 0
               $arches = @($legs | ForEach-Object arch | Sort-Object -Unique)
               $complete = $arches.Count -eq $widths
+              $span = { param($lo, $hi) if ($null -eq $lo) { '?' } elseif ($lo -eq $hi) { "$lo" } else { "$lo..$hi" } }
               [pscustomobject]@{
                 target       = $_.Name
                 arches       = $arches
@@ -541,11 +655,10 @@ jobs:
                 reason       = if (-not $complete) { "only $($arches -join ', ') reported" }
                 elseif ($lost) { 'keep-set lost coverage' }
                 elseif ($unmeasured) { 'coverage unmeasured' }
+                elseif ($threaded) { 'ok (thread-timing edges exempt)' }
                 else { 'ok' }
                 covPairs     = @($legs | Sort-Object arch | ForEach-Object {
-                    $f = if ($null -eq $_.cov_full) { '?' } else { $_.cov_full }
-                    $k = if ($null -eq $_.cov_keep) { '?' } else { $_.cov_keep }
-                    "$($_.arch) $f->$k"
+                    "$($_.arch) $(& $span $_.cov_full_min $_.cov_full_max)->$(& $span $_.cov_keep_min $_.cov_keep_max)"
                   })
               }
             }
@@ -634,9 +747,9 @@ jobs:
             "--pattern 'fuzz-compact-<target>-*'"
           }
           $body = @(
-            "A compaction pull request built from this run would remove **$totalRemoved of $totalCommitted committed unit(s) — $(& $mb $totalBytes) MB, $pct%** — across $($removable.Count) target(s), while still reaching every edge and every feature the full committed corpus reaches at both pointer widths."
+            "A compaction pull request built from this run would remove **$totalRemoved of $totalCommitted committed unit(s) — $(& $mb $totalBytes) MB, $pct%** — across $($removable.Count) target(s), while still reaching the coverage the full committed corpus reaches at both pointer widths."
             ''
-            'Each leg starts its merge from the target''s human-named seeds, merges the sha1-named units in after them, then replays the committed corpus and the keep-set at `-runs=0` and compares the two. The set to commit is the UNION of the two widths, so the counts here are over names rather than sums of per-leg counts: a unit both widths keep is one file.'
+            'Each leg starts its merge from the target''s human-named seeds, merges the sha1-named units in after them, then replays the committed corpus and the keep-set three times each at `-runs=0` and compares them. A target is ok when the keep-set reaches every edge and every feature of the full corpus; a target marked "thread-timing edges exempt" demuxes on a second thread, so its replays vary inside std channel code, and it is ok when no other function loses an edge at x86_64 and the best i686 keep-set replay reaches the worst i686 full replay. The set to commit is the UNION of the two widths, so the counts here are over names rather than sums of per-leg counts: a unit both widths keep is one file.'
             ''
             $table
             $(if ($blocked.Count -gt 0) {
