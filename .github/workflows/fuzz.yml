@@ -901,6 +901,13 @@ jobs:
       # entries (see the prune step).
       actions: write
     steps:
+      # Sparse: this job reads one script, not the corpus.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/find-open-issue.ps1
+          sparse-checkout-cone-mode: false
+
       - name: Download every leg's result
         # No artifacts at all means every leg died before its stats upload; those
         # legs are red already and a second red job would only add noise.
@@ -914,8 +921,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          # No checkout in this job, so gh has no git remote to infer the repo
-          # from — name it explicitly.
           GH_REPO: ${{ github.repository }}
           FILE_ISSUES: ${{ github.event_name == 'schedule' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.file_issues) }}
           SAVES_CORPUS: ${{ github.event_name != 'push' }}
@@ -990,29 +995,7 @@ jobs:
             exit 0
           }
 
-          # The OLDEST open issue carrying $Label whose body contains $Marker
-          # (every body contains the empty one), or $null. Every newer match is
-          # closed as its duplicate. An empty answer is what files a NEW issue,
-          # so it is read twice before it is believed: on 2026-09-15 run
-          # 34980609631 got an empty list from `gh issue list` with no error
-          # while #316 was open and labelled, filed #476, and every later pass
-          # edited #476 and left #316 behind. The second read goes through the
-          # REST endpoint rather than repeating the same GraphQL query, and the
-          # duplicate close repairs, on the next pass, whatever gets past both.
-          function Find-OpenIssue([string] $Label, [string] $Marker = '') {
-            $pick = "[.[] | select(.pull_request == null) | select((.body // `"`") | contains(`"$Marker`")) | .number] | sort | .[]"
-            $found = @(gh issue list --state open --label $Label --limit 200 --json 'number,body' --jq $pick)
-            if ($LASTEXITCODE -ne 0) { throw "gh issue list --label $Label exited $LASTEXITCODE" }
-            if ($found.Count -eq 0) {
-              $found = @(gh api "repos/$env:GH_REPO/issues?labels=$Label&state=open&per_page=100" --jq $pick)
-              if ($LASTEXITCODE -ne 0) { throw "gh api issues?labels=$Label exited $LASTEXITCODE" }
-            }
-            foreach ($dup in @($found | Select-Object -Skip 1)) {
-              gh issue close $dup --reason 'not planned' --comment "Duplicate of #$($found[0]), the issue this workflow refreshes: $env:RUN_URL" | Out-Null
-              Write-Host "Closed #$dup as a duplicate of #$($found[0])"
-            }
-            if ($found.Count -gt 0) { $found[0] } else { $null }
-          }
+          . ./.github/scripts/find-open-issue.ps1
 
           # --- one issue per distinct crash signature ------------------------
           # Only OPEN issues are matched. A human closes a crash issue with the
@@ -1083,7 +1066,7 @@ jobs:
               'This issue is keyed on the crash signature, so the nightly pass refreshes it rather than filing again. Close it with the fix: a later green run is not evidence, because the fuzzer need not have replayed this input.'
             ) | Where-Object { $null -ne $_ }
             $body = ($body -join "`n")
-            $existing = Find-OpenIssue fuzz-crash $marker
+            $existing = Find-OpenIssue -Label fuzz-crash -Marker $marker
             if ($existing) {
               gh issue edit $existing --title $title --body $body --add-label automated | Out-Null
               Write-Host "Refreshed issue #$existing ($($c.signature))"
@@ -1107,7 +1090,7 @@ jobs:
           # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
           # report job carries the argument for it.
           gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
-          $open = Find-OpenIssue fuzz-corpus
+          $open = Find-OpenIssue -Label fuzz-corpus
           if (@($stats).Count -eq 0) {
             Write-Host 'No leg reported its numbers — neither filing nor closing.'
             exit 0
