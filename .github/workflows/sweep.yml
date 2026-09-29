@@ -205,12 +205,16 @@ jobs:
       contents: read
       issues: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/find-open-issue.ps1
+          sparse-checkout-cone-mode: false
+
       - name: File or refresh the rolling issue (close on green)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          # No checkout in this job, so gh has no git remote to infer the repo
-          # from — name it explicitly.
           GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           RESULTS: ${{ toJSON(needs) }}
@@ -225,7 +229,8 @@ jobs:
           # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
           # report job carries the argument for it.
           gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
-          $existing = gh issue list --state open --label ci-sweep --json number --jq '.[0].number'
+          . ./.github/scripts/find-open-issue.ps1
+          $existing = Find-OpenIssue -Label ci-sweep
           if ($failed.Count -eq 0) {
             if ($existing) {
               gh issue close $existing --comment "The sweep is green again: $env:RUN_URL" | Out-Null

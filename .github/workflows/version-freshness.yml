@@ -411,7 +411,8 @@ jobs:
           # so `is:open -label:automated` is the human inbox; fuzz-compact.yml's
           # report job carries the argument for it.
           gh label create automated --color ededed --description 'Filed by a workflow, not by a person' --force | Out-Null
-          $existing = gh issue list --state open --label version-freshness --json number --jq '.[0].number'
+          . ./.github/scripts/find-open-issue.ps1
+          $existing = Find-OpenIssue -Label version-freshness
           if (-not $existing) {
             $existing = gh issue list --state open --search 'Pinned versions are stale in:title' --json number --jq '.[0].number'
           }

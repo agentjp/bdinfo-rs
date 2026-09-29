@@ -145,6 +145,12 @@ jobs:
           ./.github/scripts/check-trusted-publishing-triggers.ps1 -SelfTest
           ./.github/scripts/check-trusted-publishing-triggers.ps1
 
+      # Every rolling-issue workflow finds its open issue through this lookup,
+      # and those run only on schedules and tags — see the script.
+      - name: Self-test the rolling-issue lookup
+        shell: pwsh
+        run: ./.github/scripts/find-open-issue.ps1 -SelfTest
+
   # TOML formatting + lint gate (taplo): every tracked TOML — the Cargo manifests,
   # the gate configs (clippy/deny/nextest/mutants/typos), dist-workspace.toml — must
   # match `taplo fmt` and pass `taplo lint`, against the committed taplo.toml. Mirrors

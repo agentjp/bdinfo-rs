@@ -484,6 +484,13 @@ begin {
             Match      = { param($f) $f -eq '.github/scripts/check-trusted-publishing-triggers.ps1' }
         },
         @{
+            Name       = 'rolling-issue lookup'
+            Areas      = @('yaml', 'workflows')
+            Structural = $true
+            Why        = 'The lint YAML job runs its self-test beside the permission checker. The workflows that dot-source it file issues only from scheduled and tag runs, which no pull request reaches.'
+            Match      = { param($f) $f -eq '.github/scripts/find-open-issue.ps1' }
+        },
+        @{
             Name       = 'packaging templates'
             Areas      = @()
             Structural = $true
@@ -623,6 +630,7 @@ end {
             @{ Path = '.github/scripts/publish-gui-aur.ps1'; Areas = 'links typos' }
             @{ Path = '.github/scripts/_common.ps1'; Areas = 'core deps fuzz gui links pkg toml typos wasm yaml' }
             @{ Path = '.github/scripts/cloudsmith-push.ps1'; Areas = 'links typos' }
+            @{ Path = '.github/scripts/find-open-issue.ps1'; Areas = 'links typos workflows yaml' }
             @{ Path = 'packaging/aur/PKGBUILD.template'; Areas = 'links typos' }
             @{ Path = 'Dockerfile'; Areas = 'links typos' }
             @{ Path = 'fuzz/fuzz_targets/mpls.rs'; Areas = 'fuzz links typos' }
