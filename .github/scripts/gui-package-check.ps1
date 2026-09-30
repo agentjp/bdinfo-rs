@@ -229,6 +229,14 @@ switch ($Kind) {
             foreach ($name in 'LICENSE', 'NOTICE') {
                 Assert (Test-Path (Join-Path $root "usr/share/doc/bdinfo-rs-gui/$name")) "AppImage carries $name"
             }
+            # The launcher that puts usr/lib on the library path, and the
+            # library whose absence crashes the GUI before it opens a window
+            # (the full set is derived in gui-package-linux.ps1).
+            $appRun = Join-Path $root 'AppRun'
+            Assert ((Test-Path $appRun) -and -not (Get-Item $appRun).LinkType -and
+                (Get-Content -Raw $appRun) -match 'LD_LIBRARY_PATH="\$HERE/usr/lib') 'AppRun is the usr/lib launcher script'
+            Assert (Test-Path (Join-Path $root 'usr/lib/libxkbcommon-x11.so.0')) 'AppImage bundles libxkbcommon-x11.so.0'
+            Assert (Test-Path (Join-Path $root 'usr/share/doc/libxkbcommon-x11-0/copyright')) 'AppImage carries the libxkbcommon-x11-0 copyright'
         }
         finally { Pop-Location }
         Remove-Item -Recurse -Force $work
