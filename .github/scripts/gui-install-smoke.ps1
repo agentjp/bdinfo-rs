@@ -29,7 +29,8 @@
 #                package cannot be installed).
 #   linux        dpkg -i of the .deb, probe /usr/bin, dpkg -r; then the
 #                AppImage via --appimage-extract-and-run (no FUSE on
-#                runners). The .rpm is deliberately not installed: rpm -i
+#                runners), probed, then launched to a window in a bare
+#                container. The .rpm is deliberately not installed: rpm -i
 #                onto a dpkg system is not a real install — its payload
 #                assertions live in gui-package-check.ps1.
 #   macos        mount the dmg and probe the bundle binary in place — the
@@ -193,6 +194,38 @@ switch ($Kind) {
             Assert $false 'AppImage --version exits within 30 s'
         }
         Remove-Item -Force $outFile -ErrorAction SilentlyContinue
+
+        # ── AppImage: a window on a bare system ──────────────────────────────
+        # `--version` exits before winit loads anything, and this runner has the
+        # windowing libraries installed, so neither probe above sees a library
+        # the AppImage fails to bundle. This one launches the GUI to a window in
+        # a stock Ubuntu container of the runner's own release (same glibc) that
+        # holds only an X server, the window lister and the Mesa GL/EGL stack —
+        # the Xvfb + Mesa setup AppImageHub's catalog test launches apps in,
+        # without the libraries a runner image preinstalls. It passes when a
+        # window titled `bdinfo-rs` appears while the process is still running.
+        $release = (Get-Content /etc/os-release | Where-Object { $_ -match '^VERSION_ID="?([0-9.]+)"?$' } | ForEach-Object { $Matches[1] })
+        $launch = @'
+set -u
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends xvfb x11-utils libegl1 libgl1 libgl1-mesa-dri >/dev/null || exit 2
+cp "/artifacts/$APPIMAGE" /tmp/app.AppImage && chmod +x /tmp/app.AppImage
+export DISPLAY=:99
+Xvfb :99 -screen 0 800x600x24 >/dev/null 2>&1 &
+for _ in $(seq 1 20); do xdpyinfo >/dev/null 2>&1 && break; sleep 0.5; done
+/tmp/app.AppImage --appimage-extract-and-run >/tmp/app.log 2>&1 &
+app=$!
+for _ in $(seq 1 30); do
+  sleep 1
+  kill -0 "$app" 2>/dev/null || break
+  if xwininfo -root -tree | grep -q '"bdinfo-rs"'; then kill "$app"; exit 0; fi
+done
+echo '--- application output ---'
+cat /tmp/app.log
+exit 1
+'@
+        & docker run --rm -e "APPIMAGE=bdinfo-rs-gui-$Triple.AppImage" -v "${dir}:/artifacts:ro" "ubuntu:$release" bash -c $launch
+        Assert ($LASTEXITCODE -eq 0) "AppImage opens a window in a bare ubuntu:$release container (exit $LASTEXITCODE)"
     }
 
     'macos' {
