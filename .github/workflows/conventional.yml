@@ -55,7 +55,7 @@ jobs:
       # `fallback: none`: install only from install-action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install convco (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: convco@${{ steps.pins.outputs.CONVCO }}
           fallback: none
