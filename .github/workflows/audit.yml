@@ -39,7 +39,7 @@ jobs:
       # `fallback: none`: install only from install-action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install cargo-deny (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
           tool: cargo-deny
           fallback: none
