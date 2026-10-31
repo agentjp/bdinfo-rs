@@ -9,7 +9,7 @@ name: conventional
 # commit message for a single-commit PR). A second gate bans LLM/AI-attribution
 # tokens from the commit messages AND the PR title/body, via the shared
 # single-source script .github/scripts/check-banned-words.ps1 (the same script the
-# local commit-msg hook runs).
+# local commit-msg hook runs), on every PR except Dependabot's (see that step).
 #
 # convco is a calculator/linter: it never commits, tags, or pushes. The version
 # bump + changelog (see CONTRIBUTING.md) stay manual, and only a pushed vX.Y.Z tag
@@ -88,7 +88,16 @@ jobs:
       # SECONDARY gate: no LLM/AI-attribution tokens in commit messages OR PR
       # title/body. PR title/body are attacker-controllable, so they go through env
       # and are never interpolated into the run block.
+      #
+      # Skipped on Dependabot PRs: their bodies quote upstream release notes and
+      # commit lists verbatim, and upstream operating-system names and contributor
+      # branch names collide with banned tokens (four PRs hit on 2026-10-30). That
+      # text is not ours to attribute, and it never reaches master: squash commits
+      # take their body from the commit messages (repo setting
+      # squash_merge_commit_message = COMMIT_MESSAGES), which Dependabot writes
+      # itself. The convco steps still run.
       - name: Banned words (commits + PR title/body)
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         shell: pwsh
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
