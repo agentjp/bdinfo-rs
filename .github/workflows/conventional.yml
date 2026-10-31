@@ -9,7 +9,7 @@ name: conventional
 # commit message for a single-commit PR). A second gate bans LLM/AI-attribution
 # tokens from the commit messages AND the PR title/body, via the shared
 # single-source script .github/scripts/check-banned-words.ps1 (the same script the
-# local commit-msg hook runs), on every PR except Dependabot's (see that step).
+# local commit-msg hook runs); on Dependabot PRs the body is exempt (see that step).
 #
 # convco is a calculator/linter: it never commits, tags, or pushes. The version
 # bump + changelog (see CONTRIBUTING.md) stay manual, and only a pushed vX.Y.Z tag
@@ -89,21 +89,22 @@ jobs:
       # title/body. PR title/body are attacker-controllable, so they go through env
       # and are never interpolated into the run block.
       #
-      # Skipped on Dependabot PRs: their bodies quote upstream release notes and
-      # commit lists verbatim, and upstream operating-system names and contributor
-      # branch names collide with banned tokens (four PRs hit on 2026-10-30). That
-      # text is not ours to attribute, and it never reaches master: squash commits
-      # take their body from the commit messages (repo setting
-      # squash_merge_commit_message = COMMIT_MESSAGES), which Dependabot writes
-      # itself. The convco steps still run.
+      # The PR BODY alone is skipped on Dependabot PRs: it quotes upstream release
+      # notes and commit lists verbatim, and upstream operating-system names and
+      # contributor branch names collide with banned tokens (four PRs hit on
+      # 2026-10-30). It is the one scanned text that never reaches master — squash
+      # commits take their subject from the title and their body from the commit
+      # messages (repo settings squash_merge_commit_title = PR_TITLE,
+      # squash_merge_commit_message = COMMIT_MESSAGES) — so the title and every
+      # commit, including fix commits pushed onto a Dependabot branch, stay scanned.
       - name: Banned words (commits + PR title/body)
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
         shell: pwsh
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           # Invoke the checker as a CHILD process (pwsh -File): the script calls
           # `exit`, which would otherwise terminate this whole step in-process.
@@ -116,8 +117,12 @@ jobs:
           }
           pwsh -NoProfile -File $script -Text "$env:PR_TITLE" -Label 'PR title'
           if ($LASTEXITCODE -ne 0) { $bad = $true }
-          pwsh -NoProfile -File $script -Text "$env:PR_BODY" -Label 'PR body'
-          if ($LASTEXITCODE -ne 0) { $bad = $true }
+          if ($env:PR_AUTHOR -eq 'dependabot[bot]') {
+            Write-Host 'PR body not scanned: Dependabot PR (quoted upstream text).'
+          } else {
+            pwsh -NoProfile -File $script -Text "$env:PR_BODY" -Label 'PR body'
+            if ($LASTEXITCODE -ne 0) { $bad = $true }
+          }
           if ($bad) { exit 1 }
           Write-Host 'no banned LLM/AI-attribution tokens found.'
 
