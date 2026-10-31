@@ -88,7 +88,7 @@ jobs:
         with:
           web: install
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/bdinfo-rs-wasm
           # Cache write-discipline (wgpu): PR-branch saves are invisible to
@@ -117,7 +117,7 @@ jobs:
       # `fallback: none`: install only from the action's checksummed manifest,
       # never its runtime-resolved cargo-binstall fallback (rationale in core.yml).
       - name: Install the Rust gate tools (llvm-cov / nextest / machete / shear / typos)
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: cargo-llvm-cov,cargo-nextest,cargo-machete,cargo-shear,cargo-deny,typos-cli
           fallback: none
