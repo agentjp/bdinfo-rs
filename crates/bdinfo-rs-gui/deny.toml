@@ -38,6 +38,15 @@ ignore = [
     # WINDOW TITLE from system fonts. It never touches disc data. Clears when
     # winit moves sctk-adwaita to a maintained glyph stack.
     "RUSTSEC-2026-0192",
+    # `zvariant`, `zbus_names`, `zvariant_derive` (unmaintained, not vulnerable;
+    # folded into zbus 6.0.0 with no patched 5.x) — via zbus 5, the Linux D-Bus
+    # client behind rfd -> ashpd (the XDG-portal file dialog) and iced_winit ->
+    # mundy (the desktop theme preference). They decode session-bus messages
+    # from the local desktop portal, never disc data. Clears when rfd and mundy
+    # move to zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 # A yanked crate version defaults to a WARN in advisories v2 (so it would pass
 # `cargo deny check` silently). A yanked dep is one the publisher pulled — treat it

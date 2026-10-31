@@ -49,13 +49,41 @@ criteria = "safe-to-deploy"
 version = "1.5.1"
 criteria = "safe-to-run"
 
+[[exemptions.bit-set]]
+version = "0.11.1"
+criteria = "safe-to-run"
+
+[[exemptions.bit-vec]]
+version = "0.10.1"
+criteria = "safe-to-run"
+
 [[exemptions.bitflags]]
 version = "2.13.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.borsh]]
+version = "1.8.1"
+criteria = "safe-to-run"
+
+[[exemptions.borsh-derive]]
+version = "1.8.1"
+criteria = "safe-to-run"
+
+[[exemptions.bytes]]
+version = "1.12.1"
+criteria = "safe-to-run"
+
 [[exemptions.cfg-if]]
 version = "1.0.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.cfg_aliases]]
+version = "0.2.2"
+criteria = "safe-to-run"
+
+[[exemptions.chacha20]]
+version = "0.10.2"
+criteria = "safe-to-run"
 
 [[exemptions.clap]]
 version = "4.6.7"
@@ -85,6 +113,14 @@ criteria = "safe-to-deploy"
 version = "1.0.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.core_detect]]
+version = "1.0.0"
+criteria = "safe-to-run"
+
+[[exemptions.cpufeatures]]
+version = "0.3.1"
+criteria = "safe-to-run"
+
 [[exemptions.crossterm]]
 version = "0.29.0"
 criteria = "safe-to-deploy"
@@ -92,6 +128,10 @@ criteria = "safe-to-deploy"
 [[exemptions.crossterm_winapi]]
 version = "0.9.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.equivalent]]
+version = "1.0.3"
+criteria = "safe-to-run"
 
 [[exemptions.fastrand]]
 version = "2.5.0"
@@ -105,16 +145,24 @@ criteria = "safe-to-run"
 version = "0.4.3"
 criteria = "safe-to-run"
 
+[[exemptions.hashbrown]]
+version = "0.17.1"
+criteria = "safe-to-run"
+
+[[exemptions.indexmap]]
+version = "2.14.2"
+criteria = "safe-to-run"
+
 [[exemptions.is_terminal_polyfill]]
 version = "1.70.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
-version = "0.2.189"
+version = "0.2.191"
 criteria = "safe-to-deploy"
 
 [[exemptions.litrs]]
-version = "1.0.0"
+version = "1.0.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.lock_api]]
@@ -123,6 +171,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.log]]
 version = "0.4.34"
+criteria = "safe-to-deploy"
+
+[[exemptions.mio]]
+version = "1.2.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -141,8 +193,12 @@ criteria = "safe-to-deploy"
 version = "0.9.12"
 criteria = "safe-to-deploy"
 
+[[exemptions.proc-macro-crate]]
+version = "3.5.0"
+criteria = "safe-to-run"
+
 [[exemptions.proptest]]
-version = "1.11.0"
+version = "1.12.0"
 criteria = "safe-to-run"
 
 [[exemptions.quote]]
@@ -158,7 +214,7 @@ version = "6.0.0"
 criteria = "safe-to-run"
 
 [[exemptions.rand]]
-version = "0.9.5"
+version = "0.10.3"
 criteria = "safe-to-run"
 
 [[exemptions.rand_chacha]]
@@ -166,7 +222,11 @@ version = "0.9.0"
 criteria = "safe-to-run"
 
 [[exemptions.rand_core]]
-version = "0.9.5"
+version = "0.10.1"
+criteria = "safe-to-run"
+
+[[exemptions.rand_xorshift]]
+version = "0.5.0"
 criteria = "safe-to-run"
 
 [[exemptions.redox_syscall]]
@@ -182,7 +242,11 @@ version = "1.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.roxmltree]]
-version = "0.21.1"
+version = "0.21.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.rustix]]
+version = "1.1.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.rusty-fork]]
@@ -192,6 +256,18 @@ criteria = "safe-to-run"
 [[exemptions.scopeguard]]
 version = "1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde]]
+version = "1.0.229"
+criteria = "safe-to-run"
+
+[[exemptions.serde_core]]
+version = "1.0.229"
+criteria = "safe-to-run"
+
+[[exemptions.serde_derive]]
+version = "1.0.229"
+criteria = "safe-to-run"
 
 [[exemptions.signal-hook]]
 version = "0.3.18"
@@ -206,7 +282,7 @@ version = "1.4.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.smallvec]]
-version = "1.16.2"
+version = "1.16.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
@@ -221,8 +297,20 @@ criteria = "safe-to-deploy"
 version = "2.0.21"
 criteria = "safe-to-deploy"
 
+[[exemptions.toml_datetime]]
+version = "1.1.2+spec-1.1.0"
+criteria = "safe-to-run"
+
+[[exemptions.toml_edit]]
+version = "0.25.17+spec-1.1.0"
+criteria = "safe-to-run"
+
+[[exemptions.toml_parser]]
+version = "1.1.5+spec-1.1.0"
+criteria = "safe-to-run"
+
 [[exemptions.unicode-ident]]
-version = "1.0.26"
+version = "1.0.27"
 criteria = "safe-to-deploy"
 
 [[exemptions.winapi]]
@@ -240,6 +328,10 @@ criteria = "safe-to-deploy"
 [[exemptions.windows-sys]]
 version = "0.61.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.winnow]]
+version = "1.0.4"
+criteria = "safe-to-run"
 
 [[exemptions.zerocopy]]
 version = "0.8.59"
