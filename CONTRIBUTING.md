@@ -151,7 +151,8 @@ feat(report)!: drop the legacy column from the locked report
 **No attribution, ever.** No `Co-Authored-By`, no "Generated with…", no sign-off, and no
 LLM/AI-attribution tokens anywhere in a commit message or a pull request title or body. Enforced by
 [`.github/scripts/check-banned-words.ps1`](.github/scripts/check-banned-words.ps1), which runs in
-both the commit-msg hook and CI.
+both the commit-msg hook and CI. CI does not scan the body of a Dependabot pull request, which
+quotes upstream release notes; its title and commits are still scanned.
 
 Check both before pushing — the same two things CI runs:
 
