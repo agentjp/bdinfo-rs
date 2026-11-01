@@ -370,14 +370,14 @@ mod tests {
         // A length that overruns truncates to what is present, then stops.
         assert_eq!(split_sections(&[0, 0, 0, 4, b'X', b'Y'], 6), [vec![b'X', b'Y']]);
         // No 4-byte length prefix at all yields no sections.
-        assert!(split_sections(&[0, 0], 6).is_empty());
+        assert_eq!(split_sections(&[0, 0], 6), Vec::<Vec<u8>>::new());
         // Never more than `max` sections, even with more length-prefixed data —
         // and `max` is exact, not one-off in either direction (32 zero bytes =
         // eight empty sections' worth of prefixes).
         let many: Vec<u8> = std::iter::repeat_n(0_u8, 32).collect();
         assert_eq!(split_sections(&many, 6).len(), 6);
         assert_eq!(split_sections(&many, 7).len(), 7);
-        assert!(split_sections(&many, 0).is_empty());
+        assert_eq!(split_sections(&many, 0), Vec::<Vec<u8>>::new());
     }
 
     #[test]

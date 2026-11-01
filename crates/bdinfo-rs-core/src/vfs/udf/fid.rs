@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn parse_directory_empty_input_is_empty() {
-        assert!(parse_directory(&[]).is_empty());
+        assert_eq!(parse_directory(&[]), Vec::<Fid>::new());
     }
 
     #[test]

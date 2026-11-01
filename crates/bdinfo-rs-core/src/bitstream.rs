@@ -661,14 +661,14 @@ mod tests {
     #[test]
     fn content_exposes_stored_bytes() {
         let mut b = TsStreamBuffer::new();
-        assert!(b.content().is_empty());
+        assert_eq!(b.content(), []);
         b.add(&[0xDE, 0xAD, 0xBE, 0xEF], 1, 2);
         assert_eq!(b.content(), [0xAD, 0xBE]);
         // A pure transfer-length bump does not change the content view.
         b.add_transfer_length(50);
         assert_eq!(b.content(), [0xAD, 0xBE]);
         b.reset();
-        assert!(b.content().is_empty());
+        assert_eq!(b.content(), []);
     }
 
     #[test]

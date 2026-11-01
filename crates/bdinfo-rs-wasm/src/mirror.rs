@@ -2369,7 +2369,7 @@ mod tests {
 
     #[test]
     fn difference_locates_the_first_differing_byte_and_its_line() {
-        assert!(difference(b"same", b"same").is_empty());
+        assert_eq!(difference(b"same", b"same"), "");
         // A differing byte on the second line names that byte and both lines.
         let report = difference(b"one\ntwo\n", b"one\nTWO\n");
         assert!(report.starts_with("first difference at byte 4, line 2\n"), "{report}");

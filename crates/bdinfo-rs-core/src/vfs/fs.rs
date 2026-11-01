@@ -581,12 +581,12 @@ mod tests {
     #[test]
     fn filesystem_root_name_falls_back_and_has_no_extension() {
         let root = filesystem_root();
-        assert!(!FsDir::new(root.clone()).name().is_empty());
+        assert_ne!(FsDir::new(root.clone()).name(), "");
         // FromFullName on the root: no final component → empty extension, infallible name.
         let as_file = FsFile::from_full_name(root).expect("root metadata");
         assert!(as_file.is_dir());
         assert_eq!(as_file.extension(), "");
-        assert!(!as_file.name().is_empty());
+        assert_ne!(as_file.name(), "");
     }
 
     #[test]
@@ -719,7 +719,7 @@ mod tests {
         )
         .expect("walk");
         assert!(out.is_empty());
-        assert!(drained(&sink).is_empty());
+        assert_eq!(drained(&sink), Vec::<(String, String)>::new());
     }
 
     #[test]
@@ -739,7 +739,7 @@ mod tests {
         )
         .expect_err("top-level failure propagates");
         assert_eq!(err.to_string(), "root unreadable");
-        assert!(drained(&sink).is_empty());
+        assert_eq!(drained(&sink), Vec::<(String, String)>::new());
     }
 
     #[test]

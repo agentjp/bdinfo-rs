@@ -1455,7 +1455,7 @@ mod tests {
         assert_eq!(path_components("BDMV/PLAYLIST/00000.mpls"), ["BDMV", "PLAYLIST", "00000.mpls"]);
         assert_eq!(path_components("BDMV\\STREAM\\00000.m2ts"), ["BDMV", "STREAM", "00000.m2ts"]);
         assert_eq!(path_components("//a///b//"), ["a", "b"]);
-        assert!(path_components("").is_empty());
+        assert_eq!(path_components(""), Vec::<&str>::new());
     }
 
     #[test]
@@ -2159,7 +2159,7 @@ mod tests {
                 valid_filter(None).classify(&short),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Short]
             );
-            assert!(valid_filter(Some(5.0)).classify(&short).is_empty());
+            assert_eq!(valid_filter(Some(5.0)).classify(&short), []);
             assert_eq!(
                 valid_filter(Some(5.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]
@@ -2176,7 +2176,7 @@ mod tests {
                 has_loops: true,
                 ..sample_playlist("00003.MPLS", 1.0, 0, 0, &[])
             };
-            assert!(valid_filter(Some(0.0)).classify(&brief).is_empty());
+            assert_eq!(valid_filter(Some(0.0)).classify(&brief), []);
             assert_eq!(
                 valid_filter(Some(0.0)).classify(&looping),
                 [bdinfo_rs_core::bdrom::order::HiddenRule::Looping]

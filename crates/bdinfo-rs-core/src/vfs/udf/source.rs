@@ -2782,7 +2782,7 @@ mod tests {
     fn vds_continues_through_a_volume_descriptor_pointer() {
         let src = UdfSource::open(MemIso::boxed(vdp_iso())).expect("open via vdp");
         assert_eq!(src.volume_label(), "VOLVDP");
-        assert!(file_names(&src.root()).is_empty());
+        assert_eq!(file_names(&src.root()), Vec::<String>::new());
     }
 
     #[test]
@@ -3342,8 +3342,8 @@ mod tests {
         put(&mut root, 20, &4096_u16.to_le_bytes());
         iso.write(262, &root);
         let src = UdfSource::open(MemIso::boxed(iso.into_bytes())).expect("open");
-        assert!(file_names(&src.root()).is_empty());
-        assert!(dir_names(&src.root()).is_empty());
+        assert_eq!(file_names(&src.root()), Vec::<String>::new());
+        assert_eq!(dir_names(&src.root()), Vec::<String>::new());
     }
 
     #[test]
@@ -3360,7 +3360,7 @@ mod tests {
         // sector 264 (child FE at block 4) is left as 0xFF → bad checksum.
         iso.write(264, &vec![0xFF_u8; SS]);
         let src = UdfSource::open(MemIso::boxed(iso.into_bytes())).expect("open");
-        assert!(file_names(&src.root()).is_empty());
+        assert_eq!(file_names(&src.root()), Vec::<String>::new());
     }
 
     // ── White-box guards (defensive arms unreachable from a well-formed disc) ─
@@ -3574,7 +3574,7 @@ mod tests {
         let out = read_runs(&mut cursor, &runs, 8).expect("read");
         assert_eq!(out, b"ABCD\0\0EF");
         // Zero cap → nothing.
-        assert!(read_runs(&mut cursor, &runs, 0).expect("read").is_empty());
+        assert_eq!(read_runs(&mut cursor, &runs, 0).expect("read"), Vec::<u8>::new());
     }
 
     #[test]
@@ -3686,7 +3686,7 @@ mod tests {
         let locs = vec![PartitionLoc::Physical { start: 0 }];
         let extents = collect_extents(&mut cursor, &locs, &entry, 0, SS as u64, Limits::DEFAULT)
             .expect("extents");
-        assert!(extents.is_empty());
+        assert_eq!(extents, Vec::<Extent>::new());
     }
 
     #[test]
@@ -3741,7 +3741,7 @@ mod tests {
         let bounded = Limits { max_continuations: 3, ..Limits::DEFAULT };
         let extents =
             collect_extents(&mut cursor, &locs, &entry, 0, SS as u64, bounded).expect("extents");
-        assert!(extents.is_empty()); // no real data extents, loop bounded
+        assert_eq!(extents, Vec::<Extent>::new()); // no real data extents, loop bounded
     }
 
     #[test]
@@ -4168,7 +4168,7 @@ mod tests {
         let src = UdfSource::open(MemIso::boxed(minimal_iso_with_block_size(32 << 10)))
             .expect("open at the 32 KiB cap");
         assert_eq!(src.volume_label(), "CAPBS");
-        assert!(file_names(&src.root()).is_empty());
+        assert_eq!(file_names(&src.root()), Vec::<String>::new());
     }
 
     #[test]

@@ -580,8 +580,8 @@ mod tests {
         assert_eq!(parse_allocation_area(&ext, AllocationType::Extended).len(), 1);
 
         // Embedded / Reserved areas yield no extents.
-        assert!(parse_allocation_area(&short, AllocationType::Embedded).is_empty());
-        assert!(parse_allocation_area(&short, AllocationType::Reserved).is_empty());
+        assert_eq!(parse_allocation_area(&short, AllocationType::Embedded), Vec::<Extent>::new());
+        assert_eq!(parse_allocation_area(&short, AllocationType::Reserved), Vec::<Extent>::new());
     }
 
     #[test]

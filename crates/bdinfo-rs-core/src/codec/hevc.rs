@@ -2824,7 +2824,7 @@ mod tests {
         b.add(&data, 0, data.len());
         b.begin_read();
         Hevc { ext: &mut ext, buffer: &mut b, is_initialized: false }.sei();
-        assert!(!ext.mastering_display_color_primaries.is_empty());
+        assert_ne!(ext.mastering_display_color_primaries, "");
     }
 
     #[test]

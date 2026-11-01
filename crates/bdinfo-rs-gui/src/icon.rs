@@ -192,11 +192,9 @@ mod tests {
         const { assert!(DOT_R < RING_INNER && RING_INNER < RING_OUTER && RING_OUTER < 0.5) };
     }
 
+    // Exact `==` is sound: a 3-4-5 triangle scaled by a power of two is exact in
+    // f32 end to end.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "a 3-4-5 triangle scaled by a power of two is exact in f32 end to end"
-    )]
     fn the_radius_is_the_euclidean_distance() {
         // A 3-4-5 triangle in exactly-representable f32.
         assert_eq!(radius(0.3, 0.4), 0.5);

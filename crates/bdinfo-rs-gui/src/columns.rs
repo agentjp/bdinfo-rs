@@ -60,11 +60,9 @@ pub fn portion(weight: f32) -> u16 {
 mod tests {
     use super::{MIN_WEIGHT, adjust, drag_delta, portion};
 
+    // Exact `==` on f32 is sound in the adjust tests: every expected value
+    // comes out of exact small-integer f32 arithmetic.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "every expected value comes out of exact small-integer f32 arithmetic"
-    )]
     fn adjust_moves_weight_across_one_boundary_only() {
         let mut weights = [30.0, 7.0, 19.0, 21.0, 21.0];
         // +5 asks for 35/2, but the right column floors at MIN_WEIGHT, so the
@@ -77,10 +75,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "every expected value comes out of exact small-integer f32 arithmetic"
-    )]
     fn adjust_clamps_both_directions_to_the_floor() {
         let mut weights = [10.0, 10.0];
         adjust(&mut weights, 0, -100.0);
@@ -89,11 +83,9 @@ mod tests {
         assert_eq!(weights, [16.0, MIN_WEIGHT]);
     }
 
+    // An out-of-range adjust returns before touching anything, so the weights
+    // compare bit-identically.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "an out-of-range adjust returns before touching anything, bit-identically"
-    )]
     fn adjust_out_of_range_is_a_no_op() {
         let mut weights = [10.0, 10.0];
         adjust(&mut weights, 1, 3.0); // boundary 1 needs a column 2
@@ -102,8 +94,8 @@ mod tests {
         assert_eq!(weights, [10.0, 10.0]);
     }
 
+    // The degenerate-span guard returns an exact 0.0, so `==` is sound there.
     #[test]
-    #[expect(clippy::float_cmp, reason = "the degenerate-span guard returns an exact 0.0")]
     fn drag_delta_scales_pixels_into_weight_units() {
         // 49 px of movement over a 490 px span moves 10% of the total weight.
         assert!((drag_delta(149.0, 100.0, 490.0, 98.0) - 9.8).abs() < 1e-4);

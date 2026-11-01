@@ -227,7 +227,7 @@ mod tests {
         let named: Vec<&str> = taken.playlists.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(named, ["00000.MPLS", "00002.MPLS"], "the playlist between them plays no 00011");
         // A file no playlist sequences yields a snapshot with nothing in it.
-        assert!(snapshot("00099.M2TS", &playlists).playlists.is_empty());
+        assert_eq!(snapshot("00099.M2TS", &playlists).playlists, []);
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
         let playlists = vec![playlist("00000.MPLS", &[("00011.M2TS", 0, 10)])];
         let taken = snapshot("00011.M2TS", &playlists);
         let first = taken.playlists.first().expect("the playlist plays the file");
-        assert!(first.streams.is_empty());
+        assert_eq!(first.streams, Vec::<MeasuredStream>::new());
         assert_eq!(first.clips.len(), 1);
     }
 
