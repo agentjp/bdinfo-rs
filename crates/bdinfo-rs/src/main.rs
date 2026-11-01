@@ -1884,7 +1884,7 @@ mod tests {
         // Debug-format the parsed CLI once (covers the derived Debug).
         let bd = TempBd::new();
         let cli = Cli::try_parse_from(["bdinfo-rs", &bd.root.to_string_lossy()]).expect("parse");
-        assert!(!format!("{cli:?}").is_empty());
+        assert_ne!(format!("{cli:?}"), "");
     }
 
     /// The compact help card, byte for byte: the body every help path prints,
@@ -2117,13 +2117,13 @@ Options:
             filter_looping_playlists: false,
             ..PlaylistFilter::default()
         };
-        assert!(hidden_hint(&playlists, &keep_all).is_empty());
+        assert_eq!(hidden_hint(&playlists, &keep_all), "");
         let plain = [summary("00013.MPLS", 3600.0, &["B.M2TS"])];
-        assert!(hidden_hint(&plain, &PlaylistFilter::default()).is_empty());
+        assert_eq!(hidden_hint(&plain, &PlaylistFilter::default()), "");
         // A playlist of exactly the threshold length is not short (the filter
         // drops strictly shorter ones), so it is not named either.
         let edge = [summary("00014.MPLS", 20.0, &["E.M2TS"])];
-        assert!(hidden_hint(&edge, &PlaylistFilter::default()).is_empty());
+        assert_eq!(hidden_hint(&edge, &PlaylistFilter::default()), "");
     }
 
     #[test]
@@ -2273,14 +2273,14 @@ Options:
         // Zero is out of range too (the table is 1-based).
         let mut input = Cursor::new(b"0\nq\n".to_vec());
         let mut output = Vec::new();
-        assert!(pick_playlists(2, &mut input, &mut output).is_empty());
+        assert_eq!(pick_playlists(2, &mut input, &mut output), Vec::<usize>::new());
         assert!(String::from_utf8_lossy(&output).contains("Invalid Selection!"));
         // The input ending counts as `q`.
         let mut input = Cursor::new(Vec::new());
-        assert!(pick_playlists(2, &mut input, &mut Vec::new()).is_empty());
+        assert_eq!(pick_playlists(2, &mut input, &mut Vec::new()), Vec::<usize>::new());
         // A read error ends the picker the same way (and the failing reader
         // fails through both of its entry points).
-        assert!(pick_playlists(2, &mut FailingInput, &mut Vec::new()).is_empty());
+        assert_eq!(pick_playlists(2, &mut FailingInput, &mut Vec::new()), Vec::<usize>::new());
         assert!(std::io::Read::read(&mut FailingInput, &mut [0_u8; 1]).is_err());
         std::io::BufRead::consume(&mut FailingInput, 0);
     }

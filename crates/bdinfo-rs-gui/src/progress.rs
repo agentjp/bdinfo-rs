@@ -306,11 +306,9 @@ mod tests {
         assert!((model.fraction() - 1.0).abs() < f32::EPSILON);
     }
 
+    // Exact `==` is sound: the asserted phases divide the half period exactly in
+    // f32.
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "the asserted phases divide the half period exactly in f32"
-    )]
     fn the_pulse_rises_to_the_half_period_and_falls_back() {
         // The triangle: 0 at rest, 1.0 exactly at the half period, 0 again at
         // the wrap, symmetric on the way down.

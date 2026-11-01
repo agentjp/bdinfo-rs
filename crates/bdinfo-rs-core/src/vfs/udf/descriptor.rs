@@ -501,12 +501,12 @@ mod tests {
         // A zero-length map cannot advance the cursor — the loop must break.
         let bytes = [1_u8, 0, 0, 0];
         let maps = parse_partition_maps(&bytes, 5);
-        assert!(maps.is_empty());
+        assert_eq!(maps, Vec::<PartitionMap>::new());
     }
 
     #[test]
     fn partition_map_loop_stops_when_empty() {
-        assert!(parse_partition_maps(&[], 4).is_empty());
+        assert_eq!(parse_partition_maps(&[], 4), Vec::<PartitionMap>::new());
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
         // A type-1 map declaring length 6 with only 4 bytes present → the slice
         // fetch fails and the walk stops with nothing parsed.
         let maps = parse_partition_maps(&[1, 6, 0, 0], 1);
-        assert!(maps.is_empty());
+        assert_eq!(maps, Vec::<PartitionMap>::new());
     }
 
     #[test]

@@ -258,10 +258,10 @@ mod tests {
         // backends of the same one, since only the IO differs.
         let folder_scan =
             folder(&fixture("BigBuckBunny"), ScanMode::Full).expect("the fixture folder opens");
-        assert!(folder_scan.bdrom.short_stream_files().is_empty());
+        assert_eq!(folder_scan.bdrom.short_stream_files(), []);
         let iso_scan =
             iso(&fixture("BigBuckBunny.iso"), ScanMode::Full).expect("the fixture image opens");
-        assert!(iso_scan.bdrom.short_stream_files().is_empty());
+        assert_eq!(iso_scan.bdrom.short_stream_files(), []);
     }
 
     #[test]

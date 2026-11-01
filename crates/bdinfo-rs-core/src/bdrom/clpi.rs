@@ -464,7 +464,7 @@ mod tests {
         let d = TsStreamClip::default();
         assert_eq!(d.name, "");
         assert_eq!(d.file_size, 0);
-        assert!(d.chapters.is_empty());
+        assert_eq!(d.chapters, Vec::<f64>::new());
         assert!(format!("{d:?}").starts_with("TsStreamClip"));
     }
 

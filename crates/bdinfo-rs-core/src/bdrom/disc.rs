@@ -3676,7 +3676,7 @@ mod tests {
         assert!(!bd.is_dbox); // no FilmIndex.xml in the root
         assert!(!bd.is_psp); // SNP has no *.mnv
         assert!(!bd.is_aacs_encrypted); // no AACS/Unit_Key_RO.inf
-        assert!(bd.extra_features().is_empty()); // no flag set, no label
+        assert_eq!(bd.extra_features(), Vec::<&str>::new()); // no flag set, no label
         assert!(!bd.is_50hz); // 24 fps
         assert_eq!(bd.disc_title, None); // META has no bdmt_eng.xml
 
@@ -3997,7 +3997,7 @@ mod tests {
         assert_eq!(bd.size, 1);
         assert!(!bd.is_uhd && !bd.is_3d && !bd.is_bd_plus && !bd.is_bd_java && !bd.is_psp);
         assert_eq!(bd.disc_title, None);
-        assert!(bd.playlists.is_empty());
+        assert_eq!(bd.playlists, Vec::<PlaylistSummary>::new());
     }
 
     #[test]
@@ -4008,7 +4008,7 @@ mod tests {
         let bd = disc.open().expect("scan clip-less playlist");
         let pl = bd.playlists.first().unwrap();
         assert_eq!(pl.stream_count, 0);
-        assert!(pl.streams.is_empty());
+        assert_eq!(pl.streams, []);
         assert_eq!(pl.total_length.to_bits(), 0.0_f64.to_bits());
         assert!(!bd.is_50hz);
     }
@@ -4290,7 +4290,7 @@ mod tests {
         assert_eq!(two.timeline_packet_size, 30 * 192);
 
         // No angles → no totals.
-        assert!(playlist_summary(100.0, 0, Vec::new()).angle_totals().is_empty());
+        assert_eq!(playlist_summary(100.0, 0, Vec::new()).angle_totals(), []);
     }
 
     #[test]
@@ -4428,7 +4428,7 @@ mod tests {
         let mut unresolved = playlist_with_clips(1, Vec::new());
         resolve_playlist_streams(&mut unresolved, &[], false);
         assert!(unresolved.streams.is_empty());
-        assert!(unresolved.angle_streams.is_empty());
+        assert_eq!(unresolved.angle_streams, Vec::<BTreeMap<u16, TsStream>>::new());
     }
 
     #[test]
@@ -4586,7 +4586,7 @@ mod tests {
         assert_eq!(pl.total_packet_size(), 1152);
         assert_eq!(pl.total_angle_packet_size(), 1152);
         assert_eq!(pl.total_bit_rate(), 92); // 1152 × 8 / 100 s
-        assert!(pl.angle_totals().is_empty());
+        assert_eq!(pl.angle_totals(), []);
     }
 
     #[test]
@@ -4688,12 +4688,12 @@ mod tests {
         // carry: the check reports the disagreement between the two spans, not
         // the fixture's size.
         let whole = build(180_000).open_scanned().expect("measured scan");
-        assert!(whole.short_stream_files().is_empty());
+        assert_eq!(whole.short_stream_files(), []);
 
         // Neither unmeasured mode demuxes a span to compare, so the short disc
         // is silent in both.
-        assert!(short.open().expect("metadata scan").short_stream_files().is_empty());
-        assert!(short.open_codecs().expect("codec scan").short_stream_files().is_empty());
+        assert_eq!(short.open().expect("metadata scan").short_stream_files(), []);
+        assert_eq!(short.open_codecs().expect("codec scan").short_stream_files(), []);
 
         // So is a full scan that left this file out of its selection: an
         // unscanned file measures nothing, which is not evidence of a short
@@ -4713,7 +4713,7 @@ mod tests {
             .expect("selective scan")
         };
         assert_eq!(reported, 1, "an empty selection reads no stream file");
-        assert!(unselected.short_stream_files().is_empty());
+        assert_eq!(unselected.short_stream_files(), []);
     }
 
     #[test]
@@ -5023,7 +5023,7 @@ mod tests {
         let pl = report.bdrom.playlists.first().unwrap();
         let base = pl.streams.iter().find(|s| s.pid == Pid::new(0x1011)).expect("the base view");
         assert_eq!(base.bitrate, 0, "nothing was measured");
-        assert!(pl.clips.first().unwrap().streams.is_empty());
+        assert_eq!(pl.clips.first().unwrap().streams, []);
     }
 
     #[test]
@@ -6200,7 +6200,7 @@ mod tests {
         assert_eq!(pl.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
         let clip = pl.clips.first().unwrap();
         assert!(!clip.measured, "a dropped file is not in the full-pass map");
-        assert!(clip.streams.is_empty());
+        assert_eq!(clip.streams, []);
         assert_eq!(clip.file_seconds.to_bits(), 0.0_f64.to_bits());
         // …while the in-place playlist tallies the demux flushed before dying
         // still count, exactly as they do with retention on: dropping the file
@@ -6254,7 +6254,7 @@ mod tests {
             .and_then(|pl| pl.clips.first())
             .expect("the dropped file's clip row");
         assert!(!dropped.measured);
-        assert!(off.bdrom.short_stream_files().is_empty());
+        assert_eq!(off.bdrom.short_stream_files(), []);
     }
 
     /// The whole expected report of the `keep_partial: false` scan of the
@@ -6414,7 +6414,7 @@ Total Bitrate:  0.00 Mbps
         let pl = report.bdrom.playlists.first().unwrap();
         assert_eq!(pl.chapters.len(), 2);
         assert_eq!(pl.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
-        assert!(pl.clips.first().unwrap().streams.is_empty());
+        assert_eq!(pl.clips.first().unwrap().streams, []);
     }
 
     #[test]
@@ -6538,7 +6538,7 @@ Total Bitrate:  0.00 Mbps
         assert_eq!(playlist(&every, "00002.MPLS"), third);
         let deselected = playlist(&subset, "00002.MPLS");
         assert_eq!(deselected.chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
-        assert!(deselected.clips.first().unwrap().streams.is_empty());
+        assert_eq!(deselected.clips.first().unwrap().streams, []);
         assert_eq!(playlist(&subset, "00001.MPLS"), playlist(&whole, "00001.MPLS"));
     }
 
@@ -6878,7 +6878,7 @@ Total Bitrate:  0.00 Mbps
         )
         .expect("scan with progress");
         assert_eq!(bd.playlists.len(), 2);
-        assert!(!events.is_empty());
+        assert_ne!(events, Vec::<(String, u64, u64)>::new());
         // The pre-read heartbeat precedes the first byte: the pass's first
         // event reports a zero count, naming the file about to be read.
         assert_eq!(events.first().map(|(_, done, _)| *done), Some(0));
@@ -7885,7 +7885,7 @@ Total Bitrate:  0.00 Mbps
         );
         let report =
             open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata).expect("scans");
-        assert!(report.bdrom.playlists.is_empty());
+        assert_eq!(report.bdrom.playlists, Vec::<PlaylistSummary>::new());
         assert_eq!(report.errors.len(), 1);
         assert_eq!(
             report.errors.first().expect("primary note").reason.to_string(),
@@ -7908,7 +7908,7 @@ Total Bitrate:  0.00 Mbps
         );
         let report =
             open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata).expect("scans");
-        assert!(report.bdrom.playlists.is_empty());
+        assert_eq!(report.bdrom.playlists, Vec::<PlaylistSummary>::new());
         assert_eq!(report.errors.len(), 1);
     }
 

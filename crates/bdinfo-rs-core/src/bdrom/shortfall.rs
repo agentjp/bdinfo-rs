@@ -216,8 +216,14 @@ mod tests {
     fn a_file_measured_to_its_declared_span_is_not_reported() {
         // Exactly on, and the just-over a real scan usually lands on (the
         // demuxed span closes on the frame past the declared out-time).
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 100.0)])).is_empty());
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 100.5)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 100.0)])),
+            Vec::<(String, f64, f64)>::new()
+        );
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 100.5)])),
+            Vec::<(String, f64, f64)>::new()
+        );
     }
 
     #[test]
@@ -229,15 +235,27 @@ mod tests {
     #[test]
     fn both_thresholds_have_to_be_passed() {
         // Missing 0.5 s of 100 s clears neither the 1 s floor nor the 2 s share.
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 99.5)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 100.0, 99.5)])),
+            Vec::<(String, f64, f64)>::new()
+        );
         // Missing 15 s of 1000 s clears the 1 s floor but not the 20 s fraction.
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 1000.0, 985.0)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 1000.0, 985.0)])),
+            Vec::<(String, f64, f64)>::new()
+        );
         // Exactly on the fraction is still not past it; one second more is.
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 1000.0, 980.0)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 1000.0, 980.0)])),
+            Vec::<(String, f64, f64)>::new()
+        );
         assert_eq!(reported(&disc_of(vec![measured_clip("00000.M2TS", 1000.0, 979.0)])).len(), 1);
         // On a clip short enough for the floor to dominate, the floor is what
         // has to be passed: 2% of 10 s is 0.2 s, and 0.9 s missing is quiet.
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 10.0, 9.1)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 10.0, 9.1)])),
+            Vec::<(String, f64, f64)>::new()
+        );
         assert_eq!(reported(&disc_of(vec![measured_clip("00000.M2TS", 10.0, 8.9)])).len(), 1);
     }
 
@@ -248,7 +266,7 @@ mod tests {
         // seconds, and the flag down.
         let unmeasured = fixtures::clip("00000.M2TS", 1640.0);
         assert!(!unmeasured.measured);
-        assert!(reported(&disc_of(vec![unmeasured])).is_empty());
+        assert_eq!(reported(&disc_of(vec![unmeasured])), Vec::<(String, f64, f64)>::new());
     }
 
     #[test]
@@ -258,7 +276,7 @@ mod tests {
         // registers no stream, so every number it leaves matches a file the
         // scan never touched. Only the marker tells them apart.
         let destroyed = empty_clip("00000.M2TS", 1640.0, 0.0);
-        assert!(destroyed.streams.is_empty());
+        assert_eq!(destroyed.streams, Vec::<ClipStreamTally>::new());
         assert_eq!(
             reported(&disc_of(vec![destroyed])),
             vec![("00000.M2TS".to_owned(), 1640.0, 0.0)]
@@ -268,7 +286,10 @@ mod tests {
     #[test]
     fn a_zero_length_clip_is_never_reported() {
         // Nothing declared is nothing to miss — and no division to do.
-        assert!(reported(&disc_of(vec![measured_clip("00000.M2TS", 0.0, 0.0)])).is_empty());
+        assert_eq!(
+            reported(&disc_of(vec![measured_clip("00000.M2TS", 0.0, 0.0)])),
+            Vec::<(String, f64, f64)>::new()
+        );
     }
 
     #[test]

@@ -421,8 +421,8 @@ mod tests {
 
     #[test]
     fn empty_input_yields_an_empty_order() {
-        assert!(presentation_order(&[], &PlaylistFilter::default()).is_empty());
-        assert!(presentation_groups(&[], &PlaylistFilter::default()).is_empty());
+        assert_eq!(presentation_order(&[], &PlaylistFilter::default()), Vec::<usize>::new());
+        assert_eq!(presentation_groups(&[], &PlaylistFilter::default()), Vec::<Vec<usize>>::new());
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
             playlist("D.MPLS", 5.0, false, &["W.M2TS"]),
         ];
         assert_eq!(table_rows(&playlists, &PlaylistFilter::default()), [(1, 0), (1, 1), (2, 2)]);
-        assert!(table_rows(&[], &PlaylistFilter::default()).is_empty());
+        assert_eq!(table_rows(&[], &PlaylistFilter::default()), Vec::<(usize, usize)>::new());
     }
 
     #[test]
@@ -508,8 +508,8 @@ mod tests {
         // Normalized, unknown skipped, repeat dropped, request order kept.
         assert_eq!(named_selection(&disc, &requested), ["00002.MPLS", "00000.MPLS"]);
         // A request naming nothing on the disc, and an empty request, select nothing.
-        assert!(named_selection(&disc, &["X".to_owned()]).is_empty());
-        assert!(named_selection(&disc, &[]).is_empty());
+        assert_eq!(named_selection(&disc, &["X".to_owned()]), Vec::<String>::new());
+        assert_eq!(named_selection(&disc, &[]), Vec::<String>::new());
     }
 
     #[test]
@@ -537,10 +537,16 @@ mod tests {
         );
         assert_eq!(filter.classify(&playlist("B.MPLS", 5.0, false, &[])), [HiddenRule::Short]);
         assert_eq!(filter.classify(&playlist("C.MPLS", 100.0, true, &[])), [HiddenRule::Looping]);
-        assert!(filter.classify(&playlist("D.MPLS", 100.0, false, &[])).is_empty());
+        assert_eq!(
+            filter.classify(&playlist("D.MPLS", 100.0, false, &[])),
+            Vec::<HiddenRule>::new()
+        );
         // Exactly the threshold is not short — the filter drops strictly
         // shorter playlists, so the classification agrees.
-        assert!(filter.classify(&playlist("E.MPLS", 20.0, false, &[])).is_empty());
+        assert_eq!(
+            filter.classify(&playlist("E.MPLS", 20.0, false, &[])),
+            Vec::<HiddenRule>::new()
+        );
     }
 
     #[test]
@@ -578,7 +584,7 @@ mod tests {
             [HiddenRule::Short]
         );
         let off = PlaylistFilter { short_playlist_seconds: 0.0, ..PlaylistFilter::default() };
-        assert!(off.classify(&playlist("B.MPLS", 0.0, false, &[])).is_empty());
+        assert_eq!(off.classify(&playlist("B.MPLS", 0.0, false, &[])), Vec::<HiddenRule>::new());
     }
 
     #[test]
@@ -647,12 +653,21 @@ mod tests {
             playlist("00090.MPLS", 5.0, false, &["C.M2TS"]),
         ];
         // Every switch off — nothing is withheld, whatever the classification.
-        assert!(hidden_by(&playlists, &PlaylistFilter::everything()).is_empty());
+        assert_eq!(
+            hidden_by(&playlists, &PlaylistFilter::everything()),
+            Vec::<(&PlaylistSummary, Vec<HiddenRule>)>::new()
+        );
         // A playlist of exactly the threshold length is not short, and a disc
         // with nothing to hide hides nothing.
         let edge = [playlist("00014.MPLS", 20.0, false, &["E.M2TS"])];
-        assert!(hidden_by(&edge, &PlaylistFilter::default()).is_empty());
-        assert!(hidden_by(&[], &PlaylistFilter::default()).is_empty());
+        assert_eq!(
+            hidden_by(&edge, &PlaylistFilter::default()),
+            Vec::<(&PlaylistSummary, Vec<HiddenRule>)>::new()
+        );
+        assert_eq!(
+            hidden_by(&[], &PlaylistFilter::default()),
+            Vec::<(&PlaylistSummary, Vec<HiddenRule>)>::new()
+        );
     }
 
     #[test]

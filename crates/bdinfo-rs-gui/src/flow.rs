@@ -1392,7 +1392,7 @@ mod tests {
     #[test]
     fn idle_is_the_default() {
         assert_eq!(Flow::default().stage(), Stage::Idle);
-        assert!(Flow::idle().table().is_empty());
+        assert_eq!(Flow::idle().table(), []);
         assert!(!Flow::idle().can_scan());
     }
 
@@ -1414,7 +1414,7 @@ mod tests {
         let flow = Flow::recall(input());
         // Idle to the view (the opening prompt), so nothing scans at boot…
         assert_eq!(flow.stage(), Stage::Idle);
-        assert!(flow.table().is_empty());
+        assert_eq!(flow.table(), []);
         assert!(!flow.can_scan());
         assert!(!flow.report_available());
         // …but the source shows and "Rescan" resolves it, one click to reopen.
@@ -1446,12 +1446,12 @@ mod tests {
         assert_eq!(flow.disc_size(), Some(78_000_000_000));
         assert_eq!(flow.disc_features(), ["Ultra HD"]);
         assert_eq!(flow.input_display(), Some("disc".to_owned()));
-        assert!(flow.warnings().is_empty());
+        assert_eq!(flow.warnings(), Vec::<String>::new());
         assert!(!flow.show_hidden_note());
         // Idle has no disc, so none of them resolve.
         assert_eq!(Flow::idle().disc_title(), None);
         assert_eq!(Flow::idle().disc_size(), None);
-        assert!(Flow::idle().disc_features().is_empty());
+        assert_eq!(Flow::idle().disc_features(), Vec::<String>::new());
         assert_eq!(Flow::idle().input_display(), None);
     }
 
@@ -1707,7 +1707,7 @@ mod tests {
         // Reported returns the measured report byte-for-byte (not a re-render).
         assert_eq!(flow.report(), Some("REPORT"));
         assert_eq!(flow.label(), Some("DISC"));
-        assert!(flow.report_errors().is_empty());
+        assert_eq!(flow.report_errors(), Vec::<String>::new());
         assert!(flow.report_available());
         // Reported is editable again — the user can re-select and re-scan.
         assert!(flow.editable());
@@ -1802,8 +1802,8 @@ mod tests {
         assert!(Flow::idle().report().is_none());
         assert_eq!(Flow::idle().label(), None);
         // No recorded scan errors outside Reported either.
-        assert!(Flow::idle().report_errors().is_empty());
-        assert!(listed().report_errors().is_empty());
+        assert_eq!(Flow::idle().report_errors(), Vec::<String>::new());
+        assert_eq!(listed().report_errors(), Vec::<String>::new());
         // A fatal pick failure has no disc, hence no report either.
         let failed = Flow::start_listing(input()).listed(
             &input(),
@@ -2186,13 +2186,13 @@ mod tests {
         assert_eq!(flow.stage(), Stage::Idle);
         assert_eq!(flow.current_input(), Some(&input()));
         assert_eq!(flow.input_display(), Some("disc".to_owned()));
-        assert!(flow.table().is_empty());
+        assert_eq!(flow.table(), []);
         // The cancelled worker still returns — successfully if the cancel
         // landed after the last read, with the cancellation error otherwise.
         // Neither outcome may apply.
         let stray_ok = flow.clone().listed(&input(), Ok(structural()), ViewSettings::default());
         assert_eq!(stray_ok.stage(), Stage::Idle, "a late success must not resurface the table");
-        assert!(stray_ok.table().is_empty());
+        assert_eq!(stray_ok.table(), []);
         let stray_err =
             flow.listed(&input(), Err("scan cancelled".to_owned()), ViewSettings::default());
         assert_eq!(stray_err.stage(), Stage::Idle, "a late failure must not turn fatal");
@@ -2270,8 +2270,8 @@ mod tests {
         assert!(!flow.can_scan());
         assert!(flow.scan_request().is_none());
         assert_eq!(flow.active_playlist_name(), None);
-        assert!(flow.stream_file_rows().is_empty());
-        assert!(flow.codec_rows().is_empty());
+        assert_eq!(flow.stream_file_rows(), []);
+        assert_eq!(flow.codec_rows(), []);
         // And start_scanning refuses the empty table — the same gate as
         // can_scan, on the transition itself.
         let flow = flow.start_scanning(9);
@@ -2308,7 +2308,7 @@ mod tests {
         use bdinfo_rs_core::bdrom::disc::ClipStreamTally;
 
         // No disc, and an unmeasured (structural) disc: silent.
-        assert!(Flow::idle().short_stream_notices().is_empty());
+        assert_eq!(Flow::idle().short_stream_notices(), Vec::<String>::new());
         let flow = listed().start_scanning(1);
         assert!(flow.short_stream_notices().is_empty(), "unmeasured clips raise no notice");
 

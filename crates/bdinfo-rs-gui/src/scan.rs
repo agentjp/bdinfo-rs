@@ -820,7 +820,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("the fixture lists");
-        assert!(!listed.bdrom.playlists.is_empty());
+        assert_ne!(listed.bdrom.playlists, []);
         let (file, first_done, total) = events.first().expect("the codec pass reports").clone();
         assert_eq!(file, "00000.M2TS", "the fixture's one stream file is what the pass reads");
         assert_eq!(first_done, 0, "the pass opens at zero");
@@ -877,7 +877,7 @@ mod tests {
         // The disc still lists: the core recovered the playlist from the
         // disc's BDMV/BACKUP copy — resilience, not silence; the warning above
         // is the record of the primary's corruption.
-        assert!(!structural.bdrom.playlists.is_empty());
+        assert_ne!(structural.bdrom.playlists, []);
     }
 
     #[test]
