@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "bdinfo-rs-gui"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "bdinfo-rs-core",
  "iced",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "bdinfo-rs-wasm"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "bdinfo-rs-core",
  "js-sys",
