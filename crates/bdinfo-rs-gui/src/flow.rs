@@ -816,14 +816,14 @@ impl Flow {
     /// The total disc size in bytes, when a disc is loaded — the info box's
     /// `Disc Size` line.
     ///
-    /// The WHOLE tree ([`BdRom::full_size`]), so the interleaved `*.ssif` bytes
-    /// that [`BdRom::size`] excludes are counted in. That is the size the
-    /// report's own `Disc Size:` line prints, and the info box sits in the same
-    /// window as the report: on a 3D disc, `size` alone would show the user a
-    /// smaller disc than the report this app writes for it.
+    /// [`BdRom::size`], which leaves the interleaved `*.ssif` bytes out: the
+    /// number the report's own `Disc Size:` line prints and the number classic
+    /// `BDInfo`'s main window shows (`_bdrom.Size`). On a 3D disc the `*.ssif`
+    /// shares its sectors with the `*.m2ts` files it interleaves, so adding it
+    /// would show roughly twice the disc.
     #[must_use]
     pub fn disc_size(&self) -> Option<u64> {
-        self.any_listing().map(|listing| listing.bdrom.full_size())
+        self.any_listing().map(|listing| listing.bdrom.size)
     }
 
     /// The detected-feature labels, when a disc is loaded — the info box's
@@ -855,7 +855,7 @@ impl Flow {
         }
         let flags =
             if flags.is_empty() { String::new() } else { format!(", {}", flags.join(", ")) };
-        Some(format!("{} ({} bytes{flags})", listing.bdrom.volume_label, listing.bdrom.full_size()))
+        Some(format!("{} ({} bytes{flags})", listing.bdrom.volume_label, listing.bdrom.size))
     }
 
     /// The active (highlighted) row index, when a disc is loaded.
@@ -1456,21 +1456,20 @@ mod tests {
     }
 
     #[test]
-    fn the_disc_size_counts_the_interleaved_bytes_like_the_report() {
+    fn the_disc_size_leaves_the_interleaved_bytes_out_like_the_report() {
         // A 3D disc: the `*.ssif` bytes sit outside `size`, and only such a disc
-        // can tell the two sizes apart. The info box must show what the report
-        // beside it prints — its `Disc Size:` line is `full_size`, so the number
-        // the user reads in the window is the number they read in the report.
+        // can tell the two sizes apart. The info box shows what the report
+        // beside it prints — its `Disc Size:` line is `size` — so the `*.ssif`
+        // bytes move neither the box nor the log line.
         let mut structural = structural();
         structural.bdrom.is_3d = true;
         structural.bdrom.interleaved_size = 22_000_000_000;
         let flow =
             Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
         let listing = flow.any_listing().expect("the listed disc");
-        assert_eq!(flow.disc_size(), Some(listing.bdrom.full_size()));
-        assert_eq!(flow.disc_size(), Some(100_000_000_000));
-        // The log line names the disc with that same size.
-        assert_eq!(flow.disc_identity().as_deref(), Some("DISC (100000000000 bytes, Ultra HD)"));
+        assert_eq!(flow.disc_size(), Some(listing.bdrom.size));
+        assert_eq!(flow.disc_size(), Some(78_000_000_000));
+        assert_eq!(flow.disc_identity().as_deref(), Some("DISC (78000000000 bytes, Ultra HD)"));
     }
 
     #[test]

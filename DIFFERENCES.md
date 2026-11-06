@@ -334,8 +334,9 @@ chapter rows. bdinfo-rs opens the `.m2ts` instead and measures the base view fro
 — minus the dependent-view row, which genuinely could not be read. The failure is not
 swallowed: it is recorded against the `.ssif` and printed in the report `WARNING:` block,
 and the clip is named by the `.m2ts` it was actually read from wherever the report names
-its source file. The on-disk sizes still count the `.ssif` — the file is on the disc
-either way, and an unreadable one is no smaller. A strict (fail-fast) scan still aborts;
+its source file. The clip's interleaved file size still counts the `.ssif` — the file is on
+the disc either way, and an unreadable one is no smaller. (The disc-level `Disc Size:`
+never counts it, in either tool.) A strict (fail-fast) scan still aborts;
 degrading is the resilient scan's job.
 
 This applies to the failed *open* only. An `.ssif` that opens and then fails partway is an

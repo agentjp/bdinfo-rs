@@ -139,7 +139,7 @@ fn disc_core(bdrom: &BdRom, protection: &str) -> String {
         let _ = write!(out, "{:<16}{title}\r\n", "Disc Title:");
     }
     let _ = write!(out, "{:<16}{}\r\n", "Disc Label:", bdrom.volume_label);
-    let _ = write!(out, "{:<16}{} bytes\r\n", "Disc Size:", group(u128::from(bdrom.full_size())));
+    let _ = write!(out, "{:<16}{} bytes\r\n", "Disc Size:", group(u128::from(bdrom.size)));
     let _ = write!(out, "{:<16}{protection}\r\n", "Protection:");
     out
 }
@@ -273,7 +273,7 @@ fn forums_table(bdrom: &BdRom, playlist: &PlaylistSummary, rows: &[&StreamSummar
         video_codec,
         time_hh_short(seconds_to_ticks(playlist.total_length)),
         group(u128::from(playlist.total_packet_size())),
-        group(u128::from(bdrom.full_size())),
+        group(u128::from(bdrom.size)),
         format!("{} Mbps", cents(round_long(bytes_to_f64(playlist.total_bit_rate()) / 10_000.0))),
         format!("{video_bitrate} Mbps"),
         audio1,
@@ -1237,6 +1237,16 @@ Subtitle:       English / 19.12 kbps
         let header_only = render_with(&bdrom, &[7], &[], RenderOptions::default());
         assert!(header_only.contains("INCLUDES FORUMS REPORT FOR:"));
         assert!(!header_only.contains("PLAYLIST:"));
+    }
+
+    #[test]
+    fn interleaved_bytes_never_reach_a_disc_size_cell() {
+        // `Disc Size:` (header, `DISC INFO`, quick summary) and the forums
+        // row's `Disc Size` column all print `size`, BDInfo's `BDROM.Size`;
+        // the `*.ssif` bytes change nothing, so the pin holds byte for byte.
+        let mut bdrom = full_disc();
+        bdrom.interleaved_size = 1_000_000_000;
+        assert_eq!(render(&bdrom, &[]), FULL_REPORT.replace('\n', "\r\n"));
     }
 
     #[test]
