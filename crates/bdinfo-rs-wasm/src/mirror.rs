@@ -174,10 +174,12 @@ pub struct Disc {
     /// declares none or declares only the placeholder `blu-ray`.
     pub disc_title: Option<String>,
     /// Total size of the disc in bytes, excluding the interleaved `*.ssif`
-    /// files counted by `interleavedSizeBytes`.
+    /// files counted by `interleavedSizeBytes` — the report's `Disc Size:`.
     pub size_bytes: u64,
     /// Total size of the interleaved `*.ssif` files in bytes — the bytes
-    /// `sizeBytes` leaves out. Zero on a disc that is not 3D.
+    /// `sizeBytes` leaves out. Zero on a disc that is not 3D. Informational:
+    /// an `*.ssif` shares its sectors with the `*.m2ts` files it interleaves,
+    /// so `sizeBytes + interleavedSizeBytes` is not a size the disc has.
     pub interleaved_size_bytes: u64,
     /// Whether the disc carries 3D video: a non-empty `STREAM/SSIF` directory.
     pub is_3d: bool,

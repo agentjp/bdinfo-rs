@@ -497,10 +497,14 @@ pub struct BdRom {
     /// Disc title from `META/bdmt_eng.xml`; `None` when absent or the
     /// placeholder `"blu-ray"`.
     pub disc_title: Option<String>,
-    /// Total disc size in bytes, excluding `*.ssif`.
+    /// Total disc size in bytes, excluding `*.ssif` — the report's `Disc Size:`
+    /// (BDInfo's `BDROM.Size`, whose `GetDirectorySize` skips `.SSIF`). An
+    /// interleaved `*.ssif` shares its sectors with the base and dependent
+    /// `*.m2ts` it interleaves, so counting it would count that video twice.
     pub size: u64,
     /// Total byte size of the interleaved `*.ssif` files (the bytes
-    /// [`size`](Self::size) excludes). Zero on a non-3D disc.
+    /// [`size`](Self::size) excludes). Zero on a non-3D disc. Informational
+    /// only: no report line sums it with `size`.
     pub interleaved_size: u64,
     /// 3D disc — a non-empty `STREAM/SSIF` directory.
     pub is_3d: bool,
@@ -1190,7 +1194,14 @@ impl BdRom {
 
 impl BdRom {
     /// The disc's whole-tree byte size: [`size`](Self::size) plus the
-    /// interleaved `*.ssif` bytes it excludes.
+    /// interleaved `*.ssif` bytes it excludes. Not the report's `Disc Size:`
+    /// (that is `size`), and roughly double the physical size of a 3D disc,
+    /// since an `*.ssif` shares its sectors with the `*.m2ts` files it
+    /// interleaves. Kept for API compatibility only.
+    #[deprecated(
+        since = "4.0.2",
+        note = "sums sectors a 3D disc stores once; use `size`, the report's `Disc Size:`"
+    )]
     #[must_use]
     pub const fn full_size(&self) -> u64 {
         self.size.saturating_add(self.interleaved_size)
@@ -3593,6 +3604,10 @@ mod tests {
         assert!(bd.volume_label.starts_with("bdinfo-rs-disc-"));
         assert_eq!(bd.disc_title.as_deref(), Some("Movie"));
         assert_eq!(bd.size, expected_size); // the 500-byte .ssif is excluded
+        assert_eq!(bd.interleaved_size, 500);
+        #[expect(deprecated, reason = "the compatibility accessor still has to add up")]
+        let full = bd.full_size();
+        assert_eq!(full, expected_size.checked_add(500).unwrap());
         assert!(bd.is_uhd);
         assert!(bd.is_3d);
         assert!(bd.is_bd_plus);

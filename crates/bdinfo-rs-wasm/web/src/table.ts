@@ -319,11 +319,11 @@ function renderDiscInfo(): void {
   const features = disc === null ? [] : featureLabels(disc);
   infoFeaturesValue.textContent = features.join(", ");
   infoFeatures.hidden = features.length === 0;
-  // The report's own `Disc Size:` — the whole tree, so the interleaved *.ssif
-  // bytes that `sizeBytes` leaves out are counted in (see the mirror's two size
-  // fields). Both forms are shown whatever the size-format setting says, which
-  // is the one place the exact byte count is always readable.
-  const bytes = (disc?.sizeBytes ?? 0) + (disc?.interleavedSizeBytes ?? 0);
+  // The report's own `Disc Size:` — `sizeBytes` alone; the interleaved *.ssif
+  // bytes stay out (see the mirror's two size fields). Both forms are shown
+  // whatever the size-format setting says, which is the one place the exact
+  // byte count is always readable.
+  const bytes = disc?.sizeBytes ?? 0;
   infoSizeValue.textContent = `${formatSize(bytes, false)} bytes (${formatSize(bytes, true)})`;
   infoSize.hidden = bytes <= 0;
   hiddenTracksNote.hidden = !state.displayed.some((row) => row.hasHidden);
