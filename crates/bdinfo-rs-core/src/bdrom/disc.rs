@@ -498,7 +498,7 @@ pub struct BdRom {
     /// placeholder `"blu-ray"`.
     pub disc_title: Option<String>,
     /// Total disc size in bytes, excluding `*.ssif` — the report's `Disc Size:`
-    /// (BDInfo's `BDROM.Size`, whose `GetDirectorySize` skips `.SSIF`). An
+    /// (classic `BDInfo`'s `BDROM.Size`, whose `GetDirectorySize` skips `.SSIF`). An
     /// interleaved `*.ssif` shares its sectors with the base and dependent
     /// `*.m2ts` it interleaves, so counting it would count that video twice.
     pub size: u64,

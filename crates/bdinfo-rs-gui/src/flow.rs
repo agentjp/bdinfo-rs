@@ -817,10 +817,10 @@ impl Flow {
     /// `Disc Size` line.
     ///
     /// [`BdRom::size`], which leaves the interleaved `*.ssif` bytes out: the
-    /// number the report's own `Disc Size:` line prints and the number BDInfo's
-    /// main window shows (`_bdrom.Size`). On a 3D disc the `*.ssif` shares its
-    /// sectors with the `*.m2ts` files it interleaves, so adding it would show
-    /// roughly twice the disc.
+    /// number the report's own `Disc Size:` line prints and the number classic
+    /// `BDInfo`'s main window shows (`_bdrom.Size`). On a 3D disc the `*.ssif`
+    /// shares its sectors with the `*.m2ts` files it interleaves, so adding it
+    /// would show roughly twice the disc.
     #[must_use]
     pub fn disc_size(&self) -> Option<u64> {
         self.any_listing().map(|listing| listing.bdrom.size)
