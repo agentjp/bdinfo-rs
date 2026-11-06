@@ -206,9 +206,7 @@ operation, instant and rescan-free:
 ```ts
 const disc = await inspect(picked);
 const standard = disc.playlists.filter((playlist) => playlist.hiddenBy.length === 0);
-const withoutShort = disc.playlists.filter(
-  (playlist) => !playlist.hiddenBy.includes("short"),
-);
+const withoutShort = disc.playlists.filter((playlist) => !playlist.hiddenBy.includes("short"));
 ```
 
 `shortPlaylistSeconds` moves the length threshold behind `"short"`. It is the
