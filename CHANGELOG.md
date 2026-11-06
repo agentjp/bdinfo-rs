@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v4.0.1](https://github.com/agentjp/bdinfo-rs/compare/v4.0.0...v4.0.1) (2026-11-06)
+
+### Fixes
+
+* **packaging:** the GUI AppImage bundles the windowing libraries the binary loads at runtime
+  (libxkbcommon-x11, libXcursor and the rest of the X11/Wayland set not on the AppImage
+  excludelist), so it starts on a host that lacks them instead of panicking at launch.
+  ([#505](https://github.com/agentjp/bdinfo-rs/issues/505))
+* **release:** a crates.io version that is already published no longer fails the publish job.
+  ([#390](https://github.com/agentjp/bdinfo-rs/issues/390))
+
 ## [v4.0.0](https://github.com/agentjp/bdinfo-rs/compare/v3.0.0...v4.0.0) (2026-08-16)
 
 ### ⚠ BREAKING CHANGES
