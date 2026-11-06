@@ -1197,11 +1197,7 @@ impl BdRom {
     /// interleaved `*.ssif` bytes it excludes. Not the report's `Disc Size:`
     /// (that is `size`), and roughly double the physical size of a 3D disc,
     /// since an `*.ssif` shares its sectors with the `*.m2ts` files it
-    /// interleaves. Kept for API compatibility only.
-    #[deprecated(
-        since = "4.0.2",
-        note = "sums sectors a 3D disc stores once; use `size`, the report's `Disc Size:`"
-    )]
+    /// interleaves. Kept for API compatibility only; prefer `size`.
     #[must_use]
     pub const fn full_size(&self) -> u64 {
         self.size.saturating_add(self.interleaved_size)
@@ -3605,9 +3601,7 @@ mod tests {
         assert_eq!(bd.disc_title.as_deref(), Some("Movie"));
         assert_eq!(bd.size, expected_size); // the 500-byte .ssif is excluded
         assert_eq!(bd.interleaved_size, 500);
-        #[expect(deprecated, reason = "the compatibility accessor still has to add up")]
-        let full = bd.full_size();
-        assert_eq!(full, expected_size.checked_add(500).unwrap());
+        assert_eq!(bd.full_size(), expected_size.checked_add(500).unwrap());
         assert!(bd.is_uhd);
         assert!(bd.is_3d);
         assert!(bd.is_bd_plus);
