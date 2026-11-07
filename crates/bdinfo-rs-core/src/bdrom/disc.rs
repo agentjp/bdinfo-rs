@@ -1105,19 +1105,10 @@ impl BdRom {
             .unwrap_or_else(|| detect_aacs_encryption(root, stream.as_deref()));
         let is_bd_plus =
             sink.absorb(ScanStage::Discovery, &root_name, false, has_bd_plus_dir(root))?;
-        let is_bd_java = match &bdjo {
-            Some(d) => sink.absorb(ScanStage::Discovery, d.name(), false, has_any_file(&**d))?,
-            None => false,
-        };
-        let is_psp = match &snp {
-            Some(s) => sink.absorb(ScanStage::Discovery, s.name(), false, has_mnv_file(&**s))?,
-            None => false,
-        };
+        let is_bd_java = absorb_dir_flag(sink, bdjo.as_deref(), has_any_file)?;
+        let is_psp = absorb_dir_flag(sink, snp.as_deref(), has_mnv_file)?;
         let is_dbox = sink.absorb(ScanStage::Discovery, &root_name, false, has_film_index(root))?;
-        let is_3d = match &ssif {
-            Some(s) => sink.absorb(ScanStage::Discovery, s.name(), false, has_any_file(&**s))?,
-            None => false,
-        };
+        let is_3d = absorb_dir_flag(sink, ssif.as_deref(), has_any_file)?;
         let disc_title = match &meta {
             Some(m) => {
                 sink.absorb(ScanStage::Discovery, m.name(), None, read_disc_title_from(&**m))?
@@ -1475,6 +1466,17 @@ fn unit_shows_encryption(unit: &[u8; ALIGNED_UNIT_BYTES]) -> bool {
 /// Whether `dir` contains at least one file.
 fn has_any_file(dir: &dyn BdDir) -> Result<bool, BdError> {
     Ok(!dir.get_files()?.is_empty())
+}
+
+/// A disc flag read by `probe` from an optional directory, absorbed into
+/// `sink` at the discovery stage: `false` when the directory is absent, and
+/// the sink's `false` default when the probe fails in resilient mode.
+fn absorb_dir_flag(
+    sink: &mut Sink<'_>,
+    dir: Option<&dyn BdDir>,
+    probe: fn(&dyn BdDir) -> Result<bool, BdError>,
+) -> Result<bool, BdError> {
+    dir.map_or(Ok(false), |dir| sink.absorb(ScanStage::Discovery, dir.name(), false, probe(dir)))
 }
 
 /// Whether the disc root carries a `FilmIndex.xml` file (`is_dbox` — the
@@ -2233,7 +2235,7 @@ fn build_sorted_streams(
     rows
 }
 
-/// Labels the eyes of a 3D playlist's video streams the way BDInfo's `BDROM`
+/// Labels the eyes of a 3D playlist's video streams the way `BDInfo`'s `BDROM`
 /// does after loading every playlist: when `streams` presents more than one
 /// video stream, each video stream's `base_view` becomes `Some(right_eye)`,
 /// where `right_eye` is `mvc_base_view_r` (the playlist's `MVC_Base_view_R`
@@ -2241,7 +2243,7 @@ fn build_sorted_streams(
 /// any other video codec — printed as `Right Eye` / `Left Eye`. A playlist
 /// with one video stream or fewer keeps every `base_view` as it was.
 ///
-/// BDInfo additionally skips every playlist it reaches after the first one
+/// `BDInfo` additionally skips every playlist it reaches after the first one
 /// carrying 25 or 50 fps video, in the order its unsorted playlist dictionary
 /// enumerates them — directory order, not name order. bdinfo-rs labels every
 /// 3D playlist instead; see `DIFFERENCES.md`, "Blu-ray 3D eye labels on a
