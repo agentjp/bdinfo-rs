@@ -1105,19 +1105,10 @@ impl BdRom {
             .unwrap_or_else(|| detect_aacs_encryption(root, stream.as_deref()));
         let is_bd_plus =
             sink.absorb(ScanStage::Discovery, &root_name, false, has_bd_plus_dir(root))?;
-        let is_bd_java = match &bdjo {
-            Some(d) => sink.absorb(ScanStage::Discovery, d.name(), false, has_any_file(&**d))?,
-            None => false,
-        };
-        let is_psp = match &snp {
-            Some(s) => sink.absorb(ScanStage::Discovery, s.name(), false, has_mnv_file(&**s))?,
-            None => false,
-        };
+        let is_bd_java = absorb_dir_flag(sink, bdjo.as_deref(), has_any_file)?;
+        let is_psp = absorb_dir_flag(sink, snp.as_deref(), has_mnv_file)?;
         let is_dbox = sink.absorb(ScanStage::Discovery, &root_name, false, has_film_index(root))?;
-        let is_3d = match &ssif {
-            Some(s) => sink.absorb(ScanStage::Discovery, s.name(), false, has_any_file(&**s))?,
-            None => false,
-        };
+        let is_3d = absorb_dir_flag(sink, ssif.as_deref(), has_any_file)?;
         let disc_title = match &meta {
             Some(m) => {
                 sink.absorb(ScanStage::Discovery, m.name(), None, read_disc_title_from(&**m))?
@@ -1165,6 +1156,7 @@ impl BdRom {
                 &interleaved_files,
                 detail,
                 &measured,
+                is_3d,
             );
             if let Some((summary, hz)) =
                 sink.absorb(ScanStage::Playlist, &playlist.name, None, summary.map(Some))?
@@ -1474,6 +1466,17 @@ fn unit_shows_encryption(unit: &[u8; ALIGNED_UNIT_BYTES]) -> bool {
 /// Whether `dir` contains at least one file.
 fn has_any_file(dir: &dyn BdDir) -> Result<bool, BdError> {
     Ok(!dir.get_files()?.is_empty())
+}
+
+/// A disc flag read by `probe` from an optional directory, absorbed into
+/// `sink` at the discovery stage: `false` when the directory is absent, and
+/// the sink's `false` default when the probe fails in resilient mode.
+fn absorb_dir_flag(
+    sink: &mut Sink<'_>,
+    dir: Option<&dyn BdDir>,
+    probe: fn(&dyn BdDir) -> Result<bool, BdError>,
+) -> Result<bool, BdError> {
+    dir.map_or(Ok(false), |dir| sink.absorb(ScanStage::Discovery, dir.name(), false, probe(dir)))
 }
 
 /// Whether the disc root carries a `FilmIndex.xml` file (`is_dbox` — the
@@ -2034,7 +2037,8 @@ fn build_clip_summaries(
 /// Summarises one parsed `playlist` into its [`PlaylistSummary`], returning
 /// `(summary, is_50hz)` where the flag is the playlist's contribution to the
 /// disc `is_50hz` (its reference clip carrying a 25/50 fps video stream) — the
-/// cross-clip resolution over the scanned clip files.
+/// cross-clip resolution over the scanned clip files. `is_3d` is the disc flag
+/// that turns on the video rows' eye labels ([`build_sorted_streams`]).
 ///
 /// # Errors
 /// [`BdError::MissingClipFile`] if a main (angle-0) clip has no `*.clpi`.
@@ -2045,6 +2049,7 @@ fn build_summary(
     interleaved_files: &BTreeMap<String, u64>,
     scanned: &BTreeMap<String, TsStreamFile>,
     measured: &BTreeMap<String, TsStreamFile>,
+    is_3d: bool,
 ) -> Result<(PlaylistSummary, bool), BdError> {
     let metas = collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, scanned)?;
 
@@ -2078,6 +2083,7 @@ fn build_summary(
                     r.scanned.map(|f| &f.streams),
                     playlist,
                     angle,
+                    is_3d,
                 ),
                 r.has_50hz_video,
             )
@@ -2163,11 +2169,16 @@ fn clip_has_50hz_video(streams: &BTreeMap<u16, TsStream>) -> bool {
 /// the same PID — the main map for a main row, the angle's own map for an
 /// angle clone — and stay `0` when the playlist is unresolved (no packet
 /// scan).
+///
+/// On a 3D disc (`is_3d`), a playlist presenting more than one video stream
+/// gets its eye labels (`Left Eye` / `Right Eye` in the video descriptions,
+/// see [`label_eyes`]); angle clones stay unlabelled.
 fn build_sorted_streams(
     clip_streams: &BTreeMap<u16, TsStream>,
     scanned: Option<&BTreeMap<u16, TsStream>>,
     playlist: &TsPlaylistFile,
     angle_count: usize,
+    is_3d: bool,
 ) -> Vec<StreamSummary> {
     let mut streams = clip_streams.clone();
     if let Some(scanned) = scanned {
@@ -2192,6 +2203,10 @@ fn build_sorted_streams(
         None
     };
 
+    if is_3d {
+        label_eyes(&mut streams, playlist.mvc_base_view_r);
+    }
+
     let mut rows = Vec::new();
     for (pid, stream) in &streams {
         let ssif_only = ssif_pid == Some(*pid);
@@ -2200,9 +2215,15 @@ fn build_sorted_streams(
         let is_hidden = !ssif_only && !playlist.playlist_streams.contains_key(pid);
         rows.push(stream_row(stream, 0, is_hidden, ssif_only, playlist.streams.get(pid)));
         if stream.base().is_video_stream() {
+            // An angle clone carries no eye label: BDInfo clones the angle
+            // rows (`TSPlaylistFile.LoadStreamClips`) before `BDROM` labels
+            // the playlist's main video streams, so only the main row prints
+            // `Left Eye` / `Right Eye`.
+            let mut unlabelled = stream.clone();
+            unlabelled.base_mut().base_view = None;
             for index in 0..angle_count {
                 rows.push(stream_row(
-                    stream,
+                    &unlabelled,
                     index.saturating_add(1),
                     is_hidden,
                     ssif_only,
@@ -2212,6 +2233,35 @@ fn build_sorted_streams(
         }
     }
     rows
+}
+
+/// Labels the eyes of a 3D playlist's video streams the way `BDInfo`'s `BDROM`
+/// does after loading every playlist: when `streams` presents more than one
+/// video stream, each video stream's `base_view` becomes `Some(right_eye)`,
+/// where `right_eye` is `mvc_base_view_r` (the playlist's `MVC_Base_view_R`
+/// flag) for an AVC stream, its negation for an MVC stream, and `false` for
+/// any other video codec — printed as `Right Eye` / `Left Eye`. A playlist
+/// with one video stream or fewer keeps every `base_view` as it was.
+///
+/// `BDInfo` additionally skips every playlist it reaches after the first one
+/// carrying 25 or 50 fps video, in the order its unsorted playlist dictionary
+/// enumerates them — directory order, not name order. bdinfo-rs labels every
+/// 3D playlist instead; see `DIFFERENCES.md`, "Blu-ray 3D eye labels on a
+/// 50 Hz disc".
+fn label_eyes(streams: &mut BTreeMap<u16, TsStream>, mvc_base_view_r: bool) {
+    let video_count = streams.values().filter(|stream| stream.base().is_video_stream()).count();
+    if video_count <= 1 {
+        return;
+    }
+    for stream in streams.values_mut() {
+        if let TsStream::Video(video) = stream {
+            video.base.base_view = Some(match video.base.stream_type {
+                TsStreamType::AvcVideo => mvc_base_view_r,
+                TsStreamType::MvcVideo => !mvc_base_view_r,
+                _ => false,
+            });
+        }
+    }
 }
 
 /// One report row for the presented `stream`: its [`stream_summary`] fields,
@@ -3415,11 +3465,11 @@ mod tests {
         presented.base.stream_type = TsStreamType::PresentationGraphics;
         resolved.streams = BTreeMap::from([(0x1200_u16, TsStream::Graphics(presented))]);
 
-        let rows = build_sorted_streams(&clip, None, &resolved, 0);
+        let rows = build_sorted_streams(&clip, None, &resolved, 0, false);
         assert_eq!(rows.first().unwrap().description, "1920x1080 / 837 Captions");
 
         // An unresolved playlist keeps the quick detail: an empty description.
-        let rows = build_sorted_streams(&clip, None, &bare_playlist(), 0);
+        let rows = build_sorted_streams(&clip, None, &bare_playlist(), 0, false);
         assert_eq!(rows.first().unwrap().description, "");
     }
 
@@ -3441,7 +3491,7 @@ mod tests {
         // No scan, no angles → one row per stream, ordered by PID. An
         // unresolved playlist leaves the measured rates at zero.
         let unresolved = bare_playlist();
-        let rows = build_sorted_streams(&clip, None, &unresolved, 0);
+        let rows = build_sorted_streams(&clip, None, &unresolved, 0, false);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows.first().unwrap().pid, Pid::new(0x1011));
         assert_eq!(rows.first().unwrap().stream_type.name(), "AVC_VIDEO");
@@ -3452,7 +3502,7 @@ mod tests {
         // Two extra angles → the video PID appears three times (base + 2 clones),
         // audio once → four rows, still PID-ordered with the clones grouped first.
         // The clones carry their 1-based angle index; main rows stay 0.
-        let rows = build_sorted_streams(&clip, None, &unresolved, 2);
+        let rows = build_sorted_streams(&clip, None, &unresolved, 2, false);
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().take(3).all(|r| r.pid == Pid::new(0x1011)));
         assert_eq!(rows.get(3).unwrap().pid, Pid::new(0x1100));
@@ -3473,7 +3523,7 @@ mod tests {
         angle_video.base_mut().bit_rate = 26_120_000;
         angle_video.base_mut().active_bit_rate = 26_121_000;
         resolved.angle_streams = vec![angle];
-        let rows = build_sorted_streams(&clip, None, &resolved, 1);
+        let rows = build_sorted_streams(&clip, None, &resolved, 1, false);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows.first().unwrap().bitrate, 26_030_000);
         assert_eq!(rows.first().unwrap().active_bitrate, 26_031_000);
@@ -3484,7 +3534,7 @@ mod tests {
 
         // More angle clones than resolved angle maps → the surplus clone keeps
         // zero rates rather than borrowing another angle's.
-        let rows = build_sorted_streams(&clip, None, &resolved, 2);
+        let rows = build_sorted_streams(&clip, None, &resolved, 2, false);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.get(1).unwrap().bitrate, 26_120_000);
         assert_eq!(rows.get(2).unwrap().bitrate, 0);
@@ -3496,7 +3546,7 @@ mod tests {
         scanned_video.base.stream_type = TsStreamType::AvcVideo;
         scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
         scanned.insert(0x1011, TsStream::Video(scanned_video));
-        let rows = build_sorted_streams(&clip, Some(&scanned), &unresolved, 0);
+        let rows = build_sorted_streams(&clip, Some(&scanned), &unresolved, 0, false);
         assert!(rows.first().unwrap().description.contains("High Profile 4.1"));
 
         // A scanned stream whose PID is absent from the clip is ignored — neither
@@ -3506,7 +3556,7 @@ mod tests {
         orphan_audio.base.pid = Pid::new(0x9999);
         orphan_audio.base.stream_type = TsStreamType::Ac3Audio;
         orphan.insert(0x9999, TsStream::Audio(orphan_audio));
-        assert_eq!(build_sorted_streams(&clip, Some(&orphan), &unresolved, 0).len(), 2);
+        assert_eq!(build_sorted_streams(&clip, Some(&orphan), &unresolved, 0, false).len(), 2);
     }
 
     #[test]
@@ -3527,7 +3577,7 @@ mod tests {
         mvc.base.bit_rate = 7_579_000;
         resolved.streams.insert(MVC_PID, TsStream::Video(mvc));
 
-        let rows = build_sorted_streams(&clip, None, &resolved, 0);
+        let rows = build_sorted_streams(&clip, None, &resolved, 0, false);
         assert_eq!(rows.len(), 2);
         let row = rows.get(1).unwrap();
         assert_eq!(row.pid, Pid::new(MVC_PID));
@@ -3552,13 +3602,159 @@ mod tests {
         own.base.pid = Pid::new(MVC_PID);
         own.base.stream_type = TsStreamType::MvcVideo;
         declared.insert(MVC_PID, TsStream::Video(own));
-        let rows = build_sorted_streams(&declared, None, &resolved, 0);
+        let rows = build_sorted_streams(&declared, None, &resolved, 0, false);
         assert_eq!(rows.len(), 2);
         assert!(!rows.get(1).unwrap().ssif_only);
         assert!(rows.get(1).unwrap().is_hidden);
     }
 
+    /// A clip map with an AVC video at 0x1011, an MVC video at 0x1012 (no
+    /// format, like the dependent view a base clip's info omits), and an AC3
+    /// audio at 0x1100.
+    fn stereo_clip() -> BTreeMap<u16, TsStream> {
+        let mut clip = BTreeMap::new();
+        let mut avc = TsVideoStream::default();
+        avc.base.pid = Pid::new(0x1011);
+        avc.base.stream_type = TsStreamType::AvcVideo;
+        avc.set_video_format(TsVideoFormat::Videoformat1080p);
+        clip.insert(0x1011, TsStream::Video(avc));
+        let mut mvc = TsVideoStream::default();
+        mvc.base.pid = Pid::new(0x1012);
+        mvc.base.stream_type = TsStreamType::MvcVideo;
+        clip.insert(0x1012, TsStream::Video(mvc));
+        let mut audio = TsAudioStream::default();
+        audio.base.pid = Pid::new(0x1100);
+        audio.base.stream_type = TsStreamType::Ac3Audio;
+        clip.insert(0x1100, TsStream::Audio(audio));
+        clip
+    }
+
+    /// The `(description, full_description)` pairs of `rows`' video rows, in
+    /// row order.
+    fn video_descriptions(rows: &[super::StreamSummary]) -> Vec<(String, String)> {
+        rows.iter()
+            .filter(|row| {
+                matches!(row.stream_type, TsStreamType::AvcVideo | TsStreamType::MvcVideo)
+            })
+            .map(|row| (row.description.clone(), row.full_description.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn build_sorted_streams_labels_the_eyes_of_a_3d_playlist() {
+        let clip = stereo_clip();
+        let playlist = bare_playlist();
+
+        // A 3D disc, base view left (`MVC_Base_view_R` clear): the AVC row is
+        // the left eye, the MVC row the right — in both description forms.
+        let rows = build_sorted_streams(&clip, None, &playlist, 0, true);
+        assert_eq!(
+            video_descriptions(&rows),
+            [
+                ("Left Eye / 1080p".to_owned(), "Left Eye / 1080p".to_owned()),
+                ("Right Eye".to_owned(), "Right Eye".to_owned()),
+            ]
+        );
+        // The audio row is untouched by the labelling.
+        assert_eq!(rows.get(2).unwrap().pid, Pid::new(0x1100));
+        assert_eq!(rows.get(2).unwrap().description, "");
+
+        // `MVC_Base_view_R` set: the eyes swap.
+        let mut right_base = bare_playlist();
+        right_base.mvc_base_view_r = true;
+        let rows = build_sorted_streams(&clip, None, &right_base, 0, true);
+        assert_eq!(
+            video_descriptions(&rows),
+            [
+                ("Right Eye / 1080p".to_owned(), "Right Eye / 1080p".to_owned()),
+                ("Left Eye".to_owned(), "Left Eye".to_owned()),
+            ]
+        );
+
+        // A 2D disc never labels, whatever the playlist presents.
+        let rows = build_sorted_streams(&clip, None, &playlist, 0, false);
+        assert_eq!(
+            video_descriptions(&rows),
+            [("1080p".to_owned(), "1080p".to_owned()), (String::new(), String::new())]
+        );
+    }
+
+    #[test]
+    fn eye_labels_need_a_second_video_stream_and_skip_angle_clones() {
+        // One video stream on a 3D disc: nothing to tell apart, no label.
+        let mut single = stereo_clip();
+        single.remove(&0x1012);
+        let rows = build_sorted_streams(&single, None, &bare_playlist(), 0, true);
+        assert_eq!(video_descriptions(&rows), [("1080p".to_owned(), "1080p".to_owned())]);
+
+        // Two video streams and one extra angle: the main rows are labelled,
+        // their angle clones are not.
+        let rows = build_sorted_streams(&stereo_clip(), None, &bare_playlist(), 1, true);
+        let labelled: Vec<(usize, String)> = rows
+            .iter()
+            .filter(|row| {
+                matches!(row.stream_type, TsStreamType::AvcVideo | TsStreamType::MvcVideo)
+            })
+            .map(|row| (row.angle_index, row.full_description.clone()))
+            .collect();
+        assert_eq!(
+            labelled,
+            [
+                (0, "Left Eye / 1080p".to_owned()),
+                (1, "1080p".to_owned()),
+                (0, "Right Eye".to_owned()),
+                (1, String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn label_eyes_marks_any_other_video_codec_as_the_left_eye() {
+        // BDInfo's `default` arm: a video stream that is neither AVC nor MVC,
+        // presented beside another video stream on a 3D disc, is `Left Eye`.
+        let mut streams = stereo_clip();
+        streams.remove(&0x1012);
+        let mut vc1 = TsVideoStream::default();
+        vc1.base.pid = Pid::new(0x1013);
+        vc1.base.stream_type = TsStreamType::Vc1Video;
+        streams.insert(0x1013, TsStream::Video(vc1));
+        super::label_eyes(&mut streams, true);
+        let views: Vec<Option<bool>> =
+            streams.values().map(|stream| stream.base().base_view).collect();
+        // AVC with the flag set is the right eye; the VC-1 is the left; the
+        // audio stays unlabelled.
+        assert_eq!(views, [Some(true), Some(false), None]);
+    }
+
     // ── orchestration: a full disc with every flag set ──────────────────────
+
+    #[test]
+    fn the_interleaved_dependent_view_row_takes_the_right_eye() {
+        // The real 3D shape: the clip info carries the AVC base view only (the
+        // parser yields no MVC clip stream), and the demuxed `*.ssif` presents
+        // the dependent view at `MVC_PID` through the resolved playlist. Its
+        // SSIF-only row counts as the second video stream and is labelled.
+        let mut clip = stereo_clip();
+        let mvc = clip.remove(&MVC_PID).expect("the fixture's MVC stream");
+        let mut resolved = bare_playlist();
+        resolved.streams = clip.clone();
+        resolved.streams.insert(MVC_PID, mvc);
+
+        let rows = build_sorted_streams(&clip, None, &resolved, 0, true);
+        assert_eq!(
+            video_descriptions(&rows),
+            [
+                ("Left Eye / 1080p".to_owned(), "Left Eye / 1080p".to_owned()),
+                ("Right Eye".to_owned(), "Right Eye".to_owned()),
+            ]
+        );
+        assert!(rows.get(1).unwrap().ssif_only);
+        // Without the interleaved view the base view is the only video stream:
+        // unlabelled.
+        resolved.streams.remove(&MVC_PID);
+        let rows = build_sorted_streams(&clip, None, &resolved, 0, true);
+        assert_eq!(video_descriptions(&rows), [("1080p".to_owned(), "1080p".to_owned())]);
+    }
 
     #[test]
     fn open_scans_a_full_disc() {
@@ -4838,7 +5034,14 @@ mod tests {
         let mvc_row = pl.streams.iter().find(|s| s.pid == Pid::new(0x1012)).unwrap();
         assert_eq!(mvc_row.stream_type.name(), "MVC_VIDEO");
         assert_eq!(mvc_row.codec_name, "MPEG-4 MVC Video");
-        assert_eq!(mvc_row.description, "");
+        // A 3D disc with two presented video streams labels the eyes: the
+        // dependent view is the right eye (`MVC_Base_view_R` clear), the base
+        // view the left, in both description forms.
+        assert_eq!(mvc_row.description, "Right Eye");
+        assert_eq!(mvc_row.full_description, "Right Eye");
+        let avc_row = pl.streams.iter().find(|s| s.pid == Pid::new(0x1011)).unwrap();
+        assert!(avc_row.description.starts_with("Left Eye / 1080p / 24 fps / 16:9"));
+        assert!(avc_row.full_description.starts_with("Left Eye / 1080p / 24 fps / 16:9"));
         assert!(mvc_row.ssif_only && !mvc_row.is_hidden);
         assert!(mvc_row.bitrate > 0, "the dependent view carries its measured rate");
         let clip = pl.clips.first().unwrap();

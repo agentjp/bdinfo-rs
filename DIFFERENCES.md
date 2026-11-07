@@ -28,6 +28,8 @@ actually see on a normal disc.
 | [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
 | [Playlist attribute selection on short clips](#playlist-attribute-selection-on-short-clips) | **Yes** — which clip's streams are presented | Rare — multi-clip playlists whose early clips are short |
 | [Bitrate under a backwards PTS](#bitrate-under-a-backwards-pts) | **Yes** — bitrate numbers | Short playlists, by a few kbps; feature-length ones are unchanged |
+| [Blu-ray 3D eye labels on a 50 Hz disc](#blu-ray-3d-eye-labels-on-a-50-hz-disc) | **Yes** — `Left Eye` / `Right Eye` present | 3D discs with any 25 or 50 fps playlist, when BDInfo happened to enumerate that playlist first |
+| [Disc Size of a 3D `.iso` (BDInfo 0.8.0.1)](#disc-size-of-a-3d-iso) | **Yes** — roughly half the number 0.8.0.1 prints | Every 3D disc opened as an `.iso` with BDInfo 0.8.0.1; folders and BDInfo 0.7.5.6 agree with bdinfo-rs |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
 | [Undecoded MPEG-1/2 and AAC audio names](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only when the stream was never decoded | Damaged discs whose MPA/AAC frames the scan could not read |
@@ -188,6 +190,60 @@ disc's short playlists shift by a few kbps.
 `finish_scan`).</sub>
 
 ---
+
+### Blu-ray 3D eye labels on a 50 Hz disc
+
+On a 3D disc, both tools label the video rows of every playlist that presents more than
+one video stream: the AVC base view and the MVC dependent view become `Left Eye` and
+`Right Eye`, swapped when the playlist's `MVC_Base_view_R` flag is set. BDInfo does this in
+one pass over its playlist dictionary after loading, and that pass stops labelling at the
+first playlist carrying 25 or 50 fps video — every playlist it reaches after that one is
+left unlabelled. The dictionary is unsorted, so "after" means the order the directory
+listing returned the `.mpls` files, which differs between an `.iso` and a mounted folder
+and between operating systems. The same disc can print the labels or not depending on how
+it was opened.
+
+bdinfo-rs labels every 3D playlist, in every input, whatever its frame rate. On a 3D disc
+with 50 Hz playlists, BDInfo prints the labels only when its enumeration happened to reach
+the 3D feature before a 50 Hz playlist:
+
+```diff
+ VIDEO:
+
+ Codec                   Bitrate             Description
+ ---------------         -------------       -----------
+-MPEG-4 AVC Video        21,911 kbps         720p / 50 fps / 16:9 / High Profile 4.1
+-MPEG-4 MVC Video        10,957 kbps
++MPEG-4 AVC Video        21,911 kbps         Left Eye / 720p / 50 fps / 16:9 / High Profile 4.1
++MPEG-4 MVC Video        10,957 kbps         Right Eye
+```
+
+Angle clones are unlabelled in both tools: BDInfo clones them before the labelling pass,
+and bdinfo-rs keeps that.
+
+### Disc Size of a 3D `.iso`
+
+`Disc Size:` is the byte total of the disc tree without the interleaved `.ssif` files: an
+`.ssif` shares its sectors with the base and dependent `.m2ts` files it interleaves, so
+counting it counts that video twice. Every BDInfo lineage skips `.SSIF` on a mounted folder.
+BDInfo 0.8.0.1 fails to skip it on `.iso` input: its one shared directory walk compares the
+extension against `.SSIF` with the leading dot, and the extension its `.iso` file layer
+returns has no dot, so nothing matches and the interleaved bytes are added. BDInfo 0.7.5.6
+keeps a separate `.iso` walk that compares against `SSIF` without the dot and prints the
+folder number.
+
+bdinfo-rs prints the folder number for both inputs. On a 3D `.iso`, BDInfo 0.8.0.1 prints
+roughly twice the disc:
+
+```diff
+ Disc Label:     DISC_LABEL
+-Disc Size:      98,194,245,876 bytes
++Disc Size:      49,873,019,124 bytes
+ Protection:     BD+
+ Extras:         BD-Java, Blu-ray 3D
+```
+
+Opened as a mounted folder, 0.8.0.1 prints the `+` line too.
 
 ## Correctness fixes with no effect on a normal disc
 
