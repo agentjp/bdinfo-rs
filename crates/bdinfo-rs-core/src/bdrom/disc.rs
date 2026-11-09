@@ -3251,8 +3251,9 @@ mod tests {
     fn graphics_captions_sum_over_every_measured_clip() {
         // `UpdateSubtitleChapterCount` transcribed: a main clip with captions
         // but no composition size, a second main clip, the first clip again
-        // (a repeat counts twice), an angle clip (counted too), and a clip the
-        // full pass did not measure (skipped).
+        // (a repeat counts twice), an angle clip (counted too), a clip the full
+        // pass did not measure (skipped), and a last clip whose size comes too
+        // late to count.
         let clip = |name: &str, angle_index: i32| TsStreamClip {
             angle_index,
             name: name.to_owned(),
@@ -3265,6 +3266,7 @@ mod tests {
             clip("00001.M2TS", 0),
             clip("00003.M2TS", 1),
             clip("00004.M2TS", 0),
+            clip("00005.M2TS", 0),
         ];
         // The presented PGS stream carries a stale tally and size (a skip-quick
         // back-fill's leftovers): both restart from zero.
@@ -3311,6 +3313,7 @@ mod tests {
             ),
             file("00002.m2ts", vec![(0x1200, pgs(20, 2, 1920, 0))]),
             file("00003.m2ts", vec![(0x1200, pgs(5, 0, 1280, 1080))]),
+            file("00005.m2ts", vec![(0x1200, pgs(0, 0, 1280, 720))]),
         ]);
         super::sum_graphics_captions(&mut playlist, &measured);
 
