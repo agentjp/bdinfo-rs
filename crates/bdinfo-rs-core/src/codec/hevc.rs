@@ -13,18 +13,25 @@
 //!
 //! HDR detection is one gate: 10-bit +
 //! 4:2:0 + signalled colour description with BT.2020 primaries (9) + PQ transfer
-//! (16) + BT.2020 matrix (9/10) + a present mastering display ⇒ the label is
-//! `Dolby Vision` when the stream `PID >= 4117`, else `HDR10+` when an ST 2094-40
-//! ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`.
+//! (16) + BT.2020 matrix (9/10), then the label is `Dolby Vision` when a
+//! mastering display is present and the stream `PID >= 4117`, else `HDR10+` when
+//! an ST 2094-40 ITU-T T.35 message was seen (`is_hdr10_plus`), else `HDR10`
+//! when a mastering display is present, else no label. The mastering-display,
+//! luminance and `MaxCLL` / `MaxFALL` fragments come from the SEIs alone; the
+//! chroma, bit-depth, HDR-label and colour fragments need the first SPS with
+//! `general_profile_space == 0`.
 //!
 //! The HDR SEI messages (mastering display, content light level, ST 2094-40
 //! T.35) are *sparse* on some streams — they can recur only every few seconds
 //! rather than in the first access unit that establishes the SPS — so the scan
 //! keeps collecting them on every access unit (not just before initialisation)
 //! and reassembles the `extended_format_info` from the accumulated state each
-//! time. The reassembly clears and rebuilds the fragment list, so a metadata
-//! fragment carried by hundreds of access units still appears exactly once (the
-//! lineage's per-occurrence append is the bug behind its 30×-repeated lines).
+//! time; the last value seen wins. The reassembly clears and rebuilds the
+//! fragment list, so a metadata fragment carried by hundreds of access units
+//! still appears exactly once (the lineage's per-occurrence append is the bug
+//! behind its 30×-repeated lines). Collecting past initialisation is a
+//! deliberate divergence from classic `BDInfo`, which stops at the initialising
+//! access unit — see DIFFERENCES.md "HDR10+ without a mastering display".
 //!
 //! Because the outer loop repositions the cursor back to each NAL's start after
 //! parsing it and the SEI dispatcher realigns to each message's declared end,
@@ -831,9 +838,11 @@ impl Hevc<'_, '_> {
     }
 
     /// SEI 137 — `mastering_display_colour_volume` (ST 2086). Reads the display
-    /// primaries / white point / luminance, remaps the spec-fixed G, B, R wire
-    /// order to RGB, and matches a known colour volume or formats the raw
-    /// chromaticities.
+    /// primaries / white point / luminance, assigns each primary to a channel by
+    /// its value ([`channel_order`]), and matches a known colour volume or formats
+    /// the raw chromaticities. A `0xFFFF` coordinate anywhere leaves the primaries
+    /// string empty — no primaries line and no mastering-derived HDR label — while
+    /// the luminance is still recorded, as `BDInfo` 0.8 does.
     fn sei_mastering_display_colour_volume(&mut self) {
         self.buffer.bs_reset_bits();
         // The three display primaries (x, y) then the white point (x, y) arrive
@@ -846,19 +855,16 @@ impl Hevc<'_, '_> {
         let luminance_max = self.buffer.read_bits4(32, true); // max_display_mastering_luminance
         let luminance_min = self.buffer.read_bits4(32, true); // min_display_mastering_luminance
 
-        // H.265 §D.3.28 fixes the wire order at green, blue, red, so the RGB slots
-        // are constant — FFmpeg's {2, 0, 1} remap (h2645_sei.c): red is wire[2],
-        // green wire[0], blue wire[1]. No value-based guessing.
-        let (red, green, blue) = (2_usize, 0_usize, 1_usize);
+        let (red, green, blue) = channel_order(&primaries);
 
-        let not_valid = primaries.contains(&u16::MAX);
-        let matched =
-            if not_valid { None } else { match_color_volume(&primaries, green, blue, red) };
-
-        self.ext.mastering_display_color_primaries = matched.map_or_else(
-            || format_raw_primaries(&primaries, red, green, blue),
-            |code| colour_primaries(code).to_owned(),
-        );
+        self.ext.mastering_display_color_primaries = if primaries.contains(&u16::MAX) {
+            String::new()
+        } else {
+            match_color_volume(&primaries, green, blue, red).map_or_else(
+                || format_raw_primaries(&primaries, red, green, blue),
+                |code| colour_primaries(code).to_owned(),
+            )
+        };
         self.ext.mastering_display_luminance = format_luminance(luminance_min, luminance_max);
         self.ext.mastering_display_luminance_exact =
             format_luminance_exact(luminance_min, luminance_max);
@@ -873,23 +879,23 @@ impl Hevc<'_, '_> {
 
     /// SEI 4 — `user_data_registered_itu_t_t35`; detects the ST 2094-40 HDR10+
     /// registration (country `0xB5`, provider `0x003C`, oriented `0x0001`,
-    /// application id 4). The registration is identified by that prefix alone;
-    /// `application_version` (any value) and `num_windows` (1..3) are payload
-    /// contents, not part of the registration identity (`itut35.c` +
-    /// `hdr_dynamic_metadata.c`).
+    /// application id 4) with `application_version` 0 or 1 and exactly one
+    /// window — `BDInfo`'s gate. `FFmpeg` also accepts later versions and up to
+    /// three windows; those do not set the HDR10+ flag here, as in `BDInfo`.
     fn sei_user_data_registered_itu_t_t35(&mut self, payload_size: u64) {
         let country_code = self.buffer.read_bits2(8, true);
         let terminal_provider_code = self.buffer.read_bits2(16, true);
         let terminal_provider_oriented_code = self.buffer.read_bits2(16, true);
         let application_id = self.buffer.read_bits4(8, true);
-        self.buffer.bs_skip_bits(8, true); // application_version (FFmpeg accepts any value)
+        let application_version = self.buffer.read_bits4(8, true);
         let num_windows = self.buffer.read_bits4(2, true);
         self.buffer.bs_skip_bits(6, true);
         if country_code == 0xB5
             && terminal_provider_code == 0x003C
             && terminal_provider_oriented_code == 0x0001
             && application_id == 4
-            && (1..=3).contains(&num_windows)
+            && application_version <= 1
+            && num_windows == 1
         {
             self.ext.is_hdr10_plus = true;
         }
@@ -925,6 +931,29 @@ fn register<T: Clone + Default>(sets: &mut Vec<T>, id: u32, value: T) {
     #[expect(clippy::indexing_slicing, reason = "the loop above grows `sets` to id < len")]
     {
         sets[id] = value;
+    }
+}
+
+/// The `(red, green, blue)` primary slots (0..3) of an ST 2086 primaries array,
+/// classified by value as `BDInfo` does: `x < 17500 && y < 17500` is blue, else
+/// `y >= x` is green, else red, the last slot to classify winning. Unless each
+/// channel ends up with exactly one slot, the H.265 §D.3.28 wire order
+/// (green, blue, red) is used.
+fn channel_order(primaries: &[u16; 8]) -> (usize, usize, usize) {
+    let [x0, y0, x1, y1, x2, y2, _, _] = *primaries;
+    let (mut red, mut green, mut blue) = (None, None, None);
+    for (slot, (x, y)) in [(x0, y0), (x1, y1), (x2, y2)].into_iter().enumerate() {
+        if x < 17500 && y < 17500 {
+            blue = Some(slot);
+        } else if y >= x {
+            green = Some(slot);
+        } else {
+            red = Some(slot);
+        }
+    }
+    match (red, green, blue) {
+        (Some(red), Some(green), Some(blue)) => (red, green, blue),
+        _ => (2, 0, 1),
     }
 }
 
@@ -1039,14 +1068,13 @@ fn format_luminance_exact(luminance_min: u32, luminance_max: u32) -> String {
 /// unit (it clears and rebuilds), so the HDR SEIs that accumulate across later
 /// access units fold in while each fragment still appears exactly once.
 fn finalize(stream: &mut TsVideoStream, ext: &mut HevcExtendedData, is_initialized: bool) {
-    if let Some(sps) = ext.seq_parameter_sets.first().cloned()
-        && sps.profile_space == 0
+    let sps = ext.seq_parameter_sets.first().filter(|sps| sps.profile_space == 0).cloned();
+    if let Some(sps) = &sps
+        && !is_initialized
     {
-        if !is_initialized {
-            stream.encoding_profile = Some(encoding_profile(&sps));
-        }
-        build_extended_format_info(ext, &sps, stream.base.pid);
+        stream.encoding_profile = Some(encoding_profile(sps));
     }
+    build_extended_format_info(ext, sps.as_ref(), stream.base.pid);
     if !ext.seq_parameter_sets.is_empty() {
         stream.base.is_initialized = true;
     }
@@ -1076,69 +1104,20 @@ fn encoding_profile(sps: &SeqParameterSet) -> String {
     profile
 }
 
-/// Reassembles the chroma / bit-depth / HDR / colour / mastering / light-level
-/// fragments of `extended_format_info` from the current SPS and HDR SEI state
-/// (extended stream diagnostics are always on; nothing gates these fragments
-/// off).
+/// Reassembles `extended_format_info` from the current SPS and HDR SEI state
+/// (extended stream diagnostics are always on): the chroma / bit-depth / HDR /
+/// colour fragments when `sps` (the first SPS, with `general_profile_space == 0`)
+/// is present, then the mastering / light-level fragments regardless of it.
 ///
 /// The list is cleared first and rebuilt whole, so calling this on every access
 /// unit (to fold in sparse post-init HDR SEIs) keeps each fragment present
 /// exactly once — never the lineage's per-occurrence duplication.
-fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet, pid: Pid) {
+fn build_extended_format_info(ext: &mut HevcExtendedData, sps: Option<&SeqParameterSet>, pid: Pid) {
     ext.extended_format_info.clear();
+    if let Some(sps) = sps {
+        push_sps_fragments(ext, sps, pid);
+    }
     let info = &mut ext.extended_format_info;
-    // A `chroma_format_idc` of 0 maps to `""` and is skipped — the empty-string
-    // arm doubles as the zero gate.
-    let chroma = match sps.chroma_format_idc {
-        1 => "4:2:0",
-        2 => "4:2:2",
-        3 => "4:4:4",
-        _ => "",
-    };
-    if !chroma.is_empty() {
-        info.push(chroma.to_owned());
-    }
-    if sps.bit_depth_luma_minus8 == sps.bit_depth_chroma_minus8 {
-        info.push(format!("{} bits", u16::from(sps.bit_depth_luma_minus8).wrapping_add(8)));
-    }
-    // The HDR label rides on the 10-bit BT.2020 PQ base plus *either* a present
-    // mastering display *or* a signalled ST 2094-40 (HDR10+) message. Tying it to
-    // the mastering SEI alone (as the BDInfo lineage does) drops the label on a
-    // valid HDR10+ stream that carries dynamic metadata but no static mastering
-    // display — so `is_hdr10_plus` alone is enough to claim the (HDR10+) label.
-    // Deliberate divergence from classic BDInfo — see DIFFERENCES.md "HDR10+
-    // without a mastering display".
-    if u16::from(sps.bit_depth_luma_minus8).wrapping_add(8) == 10
-        && sps.chroma_format_idc == 1
-        && sps.vui.video_signal_type_present_flag
-        && sps.vui.colour_description_present_flag
-        && sps.vui.colour_primaries == 9
-        && sps.vui.transfer_characteristics == 16
-        && (sps.vui.matrix_coefficients == 9 || sps.vui.matrix_coefficients == 10)
-        && (!ext.mastering_display_color_primaries.is_empty() || ext.is_hdr10_plus)
-    {
-        info.push(
-            if pid.get() >= 4117 {
-                "Dolby Vision"
-            } else if ext.is_hdr10_plus {
-                "HDR10+"
-            } else {
-                "HDR10"
-            }
-            .to_owned(),
-        );
-    }
-    if sps.vui.video_signal_type_present_flag {
-        info.push(
-            if sps.vui.video_full_range_flag == 1 { "Full Range" } else { "Limited Range" }
-                .to_owned(),
-        );
-        if sps.vui.colour_description_present_flag {
-            info.push(colour_primaries(sps.vui.colour_primaries).to_owned());
-            info.push(transfer_characteristics(sps.vui.transfer_characteristics).to_owned());
-            info.push(matrix_coefficients(sps.vui.matrix_coefficients).to_owned());
-        }
-    }
     if !ext.mastering_display_color_primaries.is_empty() {
         info.push(format!(
             "Mastering display color primaries: {}",
@@ -1164,13 +1143,68 @@ fn build_extended_format_info(ext: &mut HevcExtendedData, sps: &SeqParameterSet,
     }
 }
 
+/// Appends the SPS-derived chroma / bit-depth / HDR-label / colour fragments.
+fn push_sps_fragments(ext: &mut HevcExtendedData, sps: &SeqParameterSet, pid: Pid) {
+    let has_mastering_display = !ext.mastering_display_color_primaries.is_empty();
+    let info = &mut ext.extended_format_info;
+    // A `chroma_format_idc` of 0 maps to `""` and is skipped — the empty-string
+    // arm doubles as the zero gate.
+    let chroma = match sps.chroma_format_idc {
+        1 => "4:2:0",
+        2 => "4:2:2",
+        3 => "4:4:4",
+        _ => "",
+    };
+    if !chroma.is_empty() {
+        info.push(chroma.to_owned());
+    }
+    if sps.bit_depth_luma_minus8 == sps.bit_depth_chroma_minus8 {
+        info.push(format!("{} bits", u16::from(sps.bit_depth_luma_minus8).wrapping_add(8)));
+    }
+    // `BDInfo` requires a mastering display for any label; an ST 2094-40 message
+    // alone also yields `HDR10+` here, so a valid HDR10+ stream with dynamic
+    // metadata but no static mastering display keeps its label. `Dolby Vision`
+    // still needs the mastering display, as in `BDInfo`. Deliberate divergence —
+    // see DIFFERENCES.md "HDR10+ without a mastering display".
+    if u16::from(sps.bit_depth_luma_minus8).wrapping_add(8) == 10
+        && sps.chroma_format_idc == 1
+        && sps.vui.video_signal_type_present_flag
+        && sps.vui.colour_description_present_flag
+        && sps.vui.colour_primaries == 9
+        && sps.vui.transfer_characteristics == 16
+        && (sps.vui.matrix_coefficients == 9 || sps.vui.matrix_coefficients == 10)
+    {
+        let label = if has_mastering_display && pid.get() >= 4117 {
+            Some("Dolby Vision")
+        } else if ext.is_hdr10_plus {
+            Some("HDR10+")
+        } else if has_mastering_display {
+            Some("HDR10")
+        } else {
+            None
+        };
+        info.extend(label.map(str::to_owned));
+    }
+    if sps.vui.video_signal_type_present_flag {
+        info.push(
+            if sps.vui.video_full_range_flag == 1 { "Full Range" } else { "Limited Range" }
+                .to_owned(),
+        );
+        if sps.vui.colour_description_present_flag {
+            info.push(colour_primaries(sps.vui.colour_primaries).to_owned());
+            info.push(transfer_characteristics(sps.vui.transfer_characteristics).to_owned());
+            info.push(matrix_coefficients(sps.vui.matrix_coefficients).to_owned());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::{any, proptest};
 
     use super::{
-        Hevc, HevcExtendedData, StartCode, format_luminance_exact, match_color_volume, scan,
-        sei_bytes, within, within_white,
+        Hevc, HevcExtendedData, StartCode, channel_order, format_luminance_exact,
+        match_color_volume, scan, sei_bytes, within, within_white,
     };
     use crate::bitstream::TsStreamBuffer;
     use crate::primitives::Pid;
@@ -2313,6 +2347,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bt2020_matrix_without_pq_transfer_gets_no_hdr_label() {
+        // The matrix term is the HDR gate's last; a failing earlier term (here the
+        // BT.709 transfer) must still block the label despite a mastering display.
+        let cfg = SpsConfig {
+            vui: VuiConfig { transfer_characteristics: 1, ..VuiConfig::default() },
+            ..SpsConfig::default()
+        };
+        let (s, _) = run(
+            4113,
+            &[
+                vps(0),
+                sps(&cfg),
+                pps(0, 0, false, 0),
+                sei_nal(&[sei_message(137, &mastering_payload(DISPLAY_P3_COORDS, 10_000_000, 1))]),
+                slice(19, 0, 2),
+            ],
+        );
+        let desc = s.description();
+        assert!(desc.contains("10 bits / Limited Range / BT.2020 / BT.709 / "), "{desc}");
+    }
+
+    #[test]
     fn no_vui_present_still_initializes() {
         // vui_parameters_present_flag = 0 → VUI defaults (unspecified colour), so no
         // range/colour fragments, but the SPS still registers.
@@ -2587,6 +2643,38 @@ mod tests {
         assert!(desc.contains("10 bits / HDR10+ / Limited Range"), "{desc}");
     }
 
+    #[test]
+    fn dolby_vision_needs_a_mastering_display() {
+        // PID >= 4117 with an ST 2094-40 message but no mastering display: the
+        // T.35-alone path still labels HDR10+, never Dolby Vision.
+        let (s, _) = hdr_unit_with(4117, &[sei_message(4, &hdr10_plus_payload())]);
+        let desc = s.description();
+        assert!(desc.contains("10 bits / HDR10+ / Limited Range"), "{desc}");
+        assert!(!desc.contains("Dolby Vision"), "{desc}");
+        // Neither a mastering display nor T.35 at PID 4117 → no label at all.
+        let (s, _) = hdr_unit_with(4117, &[sei_message(144, &light_level_payload(1033, 311))]);
+        let desc = s.description();
+        assert!(desc.contains("10 bits / Limited Range"), "{desc}");
+    }
+
+    #[test]
+    fn mastering_and_light_level_lines_print_without_an_sps() {
+        // HDR SEIs with no SPS at all: the SEI fragments still print (the stream
+        // never initialises, so there is no profile and no SPS fragment).
+        let (s, _) = run(4113, &[sei_nal(&hdr_messages())]);
+        assert!(!s.base.is_initialized);
+        assert!(s.encoding_profile.is_none());
+        let sei_only = "Mastering display color primaries: Display P3 / Mastering display \
+                        luminance: min: 0.0001 cd/m2, max: 1000 cd/m2 / Maximum Content Light \
+                        Level: 1033 cd/m2 / Maximum Frame-Average Light Level: 311 cd/m2";
+        assert_eq!(s.description(), sei_only);
+        // An SPS with `general_profile_space != 0` gates only its own fragments.
+        let cfg = SpsConfig { profile_space: 1, ..SpsConfig::default() };
+        let (s, _) = run(4113, &[vps(0), sps(&cfg), sei_nal(&hdr_messages())]);
+        assert!(s.base.is_initialized);
+        assert_eq!(s.description(), sei_only);
+    }
+
     /// Like [`hdr_unit`] but the SEI messages are given directly (no light-level
     /// default), at `pid`.
     fn hdr_unit_with(pid: u16, messages: &[Vec<u8>]) -> (TsVideoStream, Option<String>) {
@@ -2627,8 +2715,9 @@ mod tests {
 
     #[test]
     fn unrecognized_primaries_format_as_raw_coordinates() {
-        // Wire G, B, R remaps to R = wire[2], G = wire[0], B = wire[1]; these
-        // coordinates match no known colour volume → the raw chromaticity string.
+        // All three primaries classify as blue, so the wire order G, B, R applies
+        // (R = wire[2], G = wire[0], B = wire[1]); these coordinates match no
+        // known colour volume → the raw chromaticity string.
         let desc = mastering_desc([1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000], 10_000_000, 1);
         assert!(
             desc.contains(
@@ -2637,14 +2726,61 @@ mod tests {
             ),
             "{desc}"
         );
+        // Value-classified R, G, B wire order: the raw string labels each channel
+        // by its value.
+        let desc =
+            mastering_desc([30000, 10000, 10000, 30000, 5000, 5000, 15000, 15000], 10_000_000, 1);
+        assert!(
+            desc.contains(
+                "Mastering display color primaries: R: x=0.600000 y=0.200000, G: x=0.200000 \
+                 y=0.600000, B: x=0.100000 y=0.100000, White point: x=0.300000 y=0.300000"
+            ),
+            "{desc}"
+        );
     }
 
     #[test]
-    fn a_max_value_primary_is_invalid_and_formats_raw() {
-        // A 0xFFFF coordinate marks the data invalid → the raw format is used.
+    fn out_of_order_primaries_still_match_their_colour_volume() {
+        // BT.2020 written R, G, B instead of the wire order G, B, R.
+        let desc =
+            mastering_desc([35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450], 10_000_000, 1);
+        assert!(desc.contains("Mastering display color primaries: BT.2020"), "{desc}");
+        assert!(desc.contains(" / HDR10 / "), "{desc}");
+    }
+
+    #[test]
+    fn channel_order_classifies_each_primary_by_value() {
+        // RGB and BRG wire orders resolve to their slots.
+        assert_eq!(channel_order(&[30000, 100, 100, 30000, 100, 100, 0, 0]), (0, 1, 2));
+        assert_eq!(channel_order(&[100, 100, 30000, 100, 100, 30000, 0, 0]), (1, 2, 0));
+        // x = 17500 is not blue (red here); y = 17500 is not blue (green here).
+        assert_eq!(channel_order(&[17500, 100, 100, 30000, 100, 100, 0, 0]), (0, 1, 2));
+        assert_eq!(channel_order(&[30000, 100, 100, 17500, 100, 100, 0, 0]), (0, 1, 2));
+        // y == x is green.
+        assert_eq!(channel_order(&[30000, 100, 20000, 20000, 100, 100, 0, 0]), (0, 1, 2));
+        // A channel left without a slot falls back to the wire order G, B, R.
+        assert_eq!(channel_order(&[0; 8]), (2, 0, 1));
+        assert_eq!(channel_order(&[30000, 100, 30000, 100, 100, 100, 0, 0]), (2, 0, 1));
+    }
+
+    #[test]
+    fn a_max_value_primary_leaves_only_the_luminance_line() {
+        // A 0xFFFF coordinate marks the primaries invalid: no primaries line and no
+        // mastering-derived HDR label; the luminance line still prints.
         let desc =
             mastering_desc([13250, 34500, 7500, 3000, 34000, 16000, 15635, 0xFFFF], 10_000_000, 1);
-        assert!(desc.contains("White point: x=0.312700 y=1.310700"), "{desc}");
+        assert!(
+            desc.ends_with(
+                "10 bits / Limited Range / BT.2020 / PQ / BT.2020 non-constant / Mastering \
+                 display luminance: min: 0.0001 cd/m2, max: 1000 cd/m2"
+            ),
+            "{desc}"
+        );
+        // A 0xFFFF primary (not only the white point) does the same.
+        let desc =
+            mastering_desc([0xFFFF, 34500, 7500, 3000, 34000, 16000, 15635, 16450], 10_000_000, 1);
+        assert!(!desc.contains("primaries"), "{desc}");
+        assert!(!desc.contains("HDR10"), "{desc}");
     }
 
     #[test]
@@ -2656,12 +2792,11 @@ mod tests {
     }
 
     #[test]
-    fn hdr10_plus_registration_requires_the_prefix_and_a_window_in_range() {
-        // The ST 2094-40 registration is identified by the country / provider /
-        // oriented / application-id prefix alone; application_version is
-        // unrestricted and num_windows must be 1..3 (matching FFmpeg). Each case
-        // has a present mastering display + the 10-bit BT.2020 PQ gate, so the
-        // label is HDR10, or HDR10+ with a valid T.35 (PID 4113).
+    fn hdr10_plus_registration_requires_the_prefix_version_and_one_window() {
+        // The ST 2094-40 message needs the country / provider / oriented /
+        // application-id prefix, application_version 0 or 1 and exactly one
+        // window. Each case has a present mastering display + the 10-bit BT.2020
+        // PQ gate, so the label is HDR10, or HDR10+ with a valid T.35 (PID 4113).
         let label = |t35: Vec<u8>| {
             let (s, _) = hdr_unit_with(
                 4113,
@@ -2672,13 +2807,13 @@ mod tests {
             );
             if s.description().contains("HDR10+") { "HDR10+" } else { "HDR10" }
         };
-        // Canonical prefix; version 0/1/2 and num_windows 1/2/3 all → HDR10+
-        // (version is ignored, the window count is in range).
+        // Canonical prefix; version 0/1 with one window → HDR10+.
         assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0x40]), "HDR10+"); // v0, 1 win
         assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x01, 0x40]), "HDR10+"); // version 1
-        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x02, 0x40]), "HDR10+"); // version 2
-        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0x80]), "HDR10+"); // 2 windows
-        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0xC0]), "HDR10+"); // 3 windows
+        // A later version, or two or three windows, is rejected.
+        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x02, 0x40]), "HDR10"); // version 2
+        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0x80]), "HDR10"); // 2 windows
+        assert_eq!(label(vec![0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0xC0]), "HDR10"); // 3 windows
         // Each prefix field is still required, and num_windows 0 is rejected.
         assert_eq!(label(vec![0xB6, 0x00, 0x3C, 0x00, 0x01, 0x04, 0x00, 0x40]), "HDR10"); // country
         assert_eq!(label(vec![0xB5, 0x00, 0x3D, 0x00, 0x01, 0x04, 0x00, 0x40]), "HDR10"); // provider

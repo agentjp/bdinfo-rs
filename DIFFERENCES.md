@@ -20,9 +20,12 @@ actually see on a normal disc.
 
 | Divergence | Changes the report? | When you'll see it |
 |---|---|---|
-| [DTS core bit rate (1509 → 1536 kbps)](#dts-core-bit-rate) | **Yes** — bitrate number | **Common** — most DTS-HD MA cores and full-rate DTS tracks |
+| [DTS core bit rate (1509 → 1536 kbps)](#dts-core-bit-rate) | **Yes** — bitrate number | **Common** — most DTS-HD MA cores, full-rate DTS tracks and DTS-HD High-Res totals |
 | [DTS:X IMAX detection](#dtsx-imax-detection) | **Yes** — codec name | DTS:X IMAX tracks |
-| [HDR10+ without a mastering display](#hdr10-without-a-mastering-display) | **Yes** — HDR token | HDR10+ titles whose stream carries no static mastering-display SEI |
+| [HDR10+ without a mastering display](#hdr10-without-a-mastering-display) | **Yes** — HDR token, mastering and light-level lines | HDR10+ titles whose stream carries no valid static mastering-display SEI, or whose HDR SEIs arrive after the first scanned access unit |
+| [HEVC sub-layer skip in `profile_tier_level`](#hevc-sub-layer-skip-in-profile_tier_level) | **Yes** — the whole HEVC profile/colour/HDR detail and chapter frame sizes | UHD discs whose SPS declares more than one temporal sub-layer |
+| [HDR10+ flag per stream](#hdr10-flag-per-stream) | **Yes** — HDR token | Discs that mix HDR10+ and HDR10 HEVC streams |
+| [HEVC SEI message alignment](#hevc-sei-message-alignment) | **Yes** — MaxCLL / MaxFALL values or the HDR10+ token | Rare — an SEI unit that packs a timing or recovery message before the light-level or HDR10+ message |
 | [MaxCLL unit label (`cd / m2` → `cd/m2`)](#maxcll-unit-label) | **Yes** — unit spelling | **Common** — every HDR title with a content-light-level SEI |
 | [AVC High 4:4:4 (profile 244)](#avc-high-444-profile-244) | **Yes** — profile token | Rare — Blu-ray video is almost always 4:2:0 |
 | [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
@@ -67,12 +70,22 @@ Embedded inside a DTS-HD MA track:
 + Audio: English / DTS-HD Master Audio / 5.1 / 48 kHz / 16-bit (DTS Core: 5.1 / 48 kHz /  1536 kbps / 16-bit)
 ```
 
-<sub>Source: `crates/bdinfo-rs-core/src/codec/dts.rs` (bit-rate table).</sub>
+A DTS-HD High-Res track's total bit rate includes its core, so it moves by the same
+27 kbps:
+
+```diff
+- Audio: English / DTS-HD High-Res Audio / 5.1 / 48 kHz /  3018 kbps / 24-bit (DTS Core: 5.1 / 48 kHz /  1509 kbps / 24-bit)
++ Audio: English / DTS-HD High-Res Audio / 5.1 / 48 kHz /  3045 kbps / 24-bit (DTS Core: 5.1 / 48 kHz /  1536 kbps / 24-bit)
+```
+
+<sub>Source: `crates/bdinfo-rs-core/src/codec/dts.rs` (bit-rate table),
+`crates/bdinfo-rs-core/src/codec/dts_hd.rs` (High-Res total).</sub>
 
 ### DTS:X IMAX detection
 
 DTS:X IMAX tracks carry the IMAX extension sync word (`0xF14000D0`) instead of the legacy
-DTS:X word BDInfo knows. BDInfo therefore labels them as plain DTS-HD Master Audio;
+DTS:X word BDInfo knows. bdinfo-rs compares it with the low bit ignored, as FFmpeg does, so
+`0xF14000D1` also counts as IMAX. BDInfo therefore labels them as plain DTS-HD Master Audio;
 bdinfo-rs recognizes the IMAX word and renders `DTS:X Master Audio`. Only the codec-name
 field changes — the channel/rate/bit-depth numbers are identical.
 
@@ -86,19 +99,75 @@ Source: `crates/bdinfo-rs-core/src/codec/dts_hd.rs`.</sub>
 
 ### HDR10+ without a mastering display
 
-The BDInfo lineage emits an HDR label only when a static mastering-display SEI is present.
-bdinfo-rs also recognizes HDR10+ from the ST 2094-40 (T.35) dynamic-metadata SEI alone, so
-a valid HDR10+ stream that carries no mastering display still gets its `HDR10+` token
-instead of dropping the descriptor entirely.
+The BDInfo lineage emits an HDR label only when a static mastering-display SEI with valid
+primaries is present. bdinfo-rs also recognizes HDR10+ from the ST 2094-40 (T.35)
+dynamic-metadata SEI alone, so a valid HDR10+ stream that carries no mastering display (or
+one whose primaries hold the invalid `0xFFFF`) still gets its `HDR10+` token instead of
+dropping the descriptor entirely. This applies at any PID: `Dolby Vision` still requires a
+mastering display, as in BDInfo.
 
 ```diff
 - Video: MPEG-H HEVC Video / … / 10 bits / Limited Range / …
 + Video: MPEG-H HEVC Video / … / 10 bits / HDR10+ / Limited Range / …
 ```
 
-<sub>Only changes output on the mastering-display-absent path; with a mastering display
-present, both tools already emit a label. Source: `crates/bdinfo-rs-core/src/codec/hevc.rs`
-(HDR-label gate).</sub>
+bdinfo-rs also collects the mastering-display, content-light-level and T.35 SEIs on every
+access unit it scans, where BDInfo stops at the access unit that initialises the stream.
+Metadata that first arrives in a later access unit is therefore printed — its `HDR10` /
+`HDR10+` token and its mastering and MaxCLL lines — where BDInfo prints none of them (or
+`HDR10` instead of `HDR10+`); and when the values change along the stream, bdinfo-rs
+prints the last one seen where BDInfo prints the first.
+
+<sub>When the initialising access unit carries every HDR SEI the stream has, with valid
+primaries and values that never change, both tools print the same lines. Source: `crates/bdinfo-rs-core/src/codec/hevc.rs` (HDR-label gate, `sei`).</sub>
+
+### HEVC sub-layer skip in `profile_tier_level`
+
+When an SPS declares `sps_max_sub_layers_minus1` = n ≥ 1, `profile_tier_level` carries
+(8 − n) × 2 reserved bits before the sub-layer fields (H.265 §7.3.3, FFmpeg
+`decode_profile_tier_level`). BDInfo skips 2 bits whatever n is, so for n < 7 it reads the
+rest of the SPS from the wrong position. The misread fields typically fall outside the
+ranges BDInfo accepts, so it discards the SPS, no picture parameter set can register
+against it, and the stream never initialises. BDInfo then prints the video line without any HEVC detail and an
+average frame size of 0 bytes on every chapter; bdinfo-rs skips the spec length and prints
+the full detail.
+
+```diff
+- Video: MPEG-H HEVC Video / … / 2160p / 23.976 fps / 16:9
++ Video: MPEG-H HEVC Video / … / 2160p / 23.976 fps / 16:9 / Main 10 @ Level 5.1 @ High / 4:2:0 / 10 bits / HDR10 / …
+```
+
+<sub>Source: `crates/bdinfo-rs-core/src/codec/hevc.rs` (`profile_tier_level`).</sub>
+
+### HDR10+ flag per stream
+
+BDInfo keeps its HDR10+ flag in one process-wide static that is set by the first ST 2094-40
+message it sees and never cleared. Every HEVC stream that initialises after that point is
+labelled `HDR10+`, whether or not it carries HDR10+ metadata. BDInfo scans a disc's stream
+files from smallest to largest, so one small HDR10+ clip relabels every larger HDR10 clip
+on the disc, and in the BDInfo GUI the flag carries over to later discs in the same
+session. bdinfo-rs keeps the flag per stream.
+
+```diff
+- Video: MPEG-H HEVC Video / … / 10 bits / HDR10+ / Limited Range / …
++ Video: MPEG-H HEVC Video / … / 10 bits / HDR10 / Limited Range / …
+```
+
+<sub>Dolby Vision streams are unaffected: their PID decides the label first. Source:
+`crates/bdinfo-rs-core/src/codec/hevc.rs` (`HevcExtendedData`).</sub>
+
+### HEVC SEI message alignment
+
+One SEI unit can hold several messages. BDInfo parses the buffering-period, picture-timing,
+recovery-point, active-parameter-sets and alternative-transfer messages (types 0, 1, 6,
+129, 147) bit by bit, then moves to the next message by whole bytes only, keeping the bit
+offset the parse left. Only its mastering-display handler resets that offset, so a
+light-level or T.35 message that follows one of those five without a mastering display in
+between can be read shifted: wrong MaxCLL / MaxFALL values, or a missed `HDR10+`.
+bdinfo-rs skips those five message types whole and reads every following message aligned
+to its first byte.
+
+<sub>Source: `crates/bdinfo-rs-core/src/codec/hevc.rs` (`sei`).</sub>
 
 ### MaxCLL unit label
 
@@ -256,9 +325,11 @@ conforming Blu-ray — either the triggering input never occurs on Blu-ray, or t
 value is never rendered.
 
 - **E-AC-3 reduced data-rate (`fscod2`).** When the `fscod` field signals a reduced sample
-  rate (24 / 22.05 / 16 kHz), bdinfo-rs halves the rate and derives the bit rate from it.
-  Reduced-rate E-AC-3 is not used on Blu-ray (E-AC-3 there is 48 kHz), so this never fires
-  on a real disc.
+  rate (24 / 22.05 / 16 kHz), bdinfo-rs halves the table rate and derives the bit rate
+  from the halved rate over the fixed 6 audio blocks, as ETSI TS 102 366 and FFmpeg do.
+  BDInfo uses the same 6 blocks but does not halve the rate, so its sample rate and bit
+  rate are both twice the true value. Reduced-rate E-AC-3 is not used on Blu-ray (E-AC-3
+  there is 48 kHz), so this never fires on a real disc.
 - **AC-3 low-sample-rate shift (`bsid` 9/10).** Legacy half/quarter-rate AC-3 right-shifts
   both the sample rate and the table bit rate. Conforming Blu-ray AC-3 is always `bsid` 8
   (shift 0), so the output is unchanged.
