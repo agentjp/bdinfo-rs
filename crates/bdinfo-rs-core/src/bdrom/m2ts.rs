@@ -26,11 +26,13 @@
 //! * **Fixed-width packet math wraps** (`wrapping_*`); the BE shift-accumulate steps use
 //!   `wrapping_add` over their **disjoint** bit ranges (identical to `|=`, and — unlike `|=` — not
 //!   equivalent under the mutation gate's `| → ^`).
-//! * **PTS/DTS via `i128`**; the first timestamp byte's `parse & 0xE` is widened *before* the `<<
-//!   29`, so the full 33-bit timestamp is preserved. This diverges from classic `BDInfo`, which
-//!   evaluates the shift in 32-bit and drops bit 32 (any PTS past ~13.26 h wraps); real discs never
-//!   reach that range, so reports stay byte-identical. The other four byte-arms mask and shift
-//!   exactly as before, with `wrapping_add` over their disjoint bit ranges.
+//! * **PTS/DTS decode to 32 bits, held in `i128`**; the first timestamp byte's `parse & 0xE` is
+//!   shifted `<< 29` in `u32`, so bit 32 of the 33-bit field is dropped and a timestamp past 2^32
+//!   ticks (13 h 15 m 21.86 s at 90 kHz) wraps — `BDInfo` 0.7.5.6 and 0.8 `TSStreamFile.Scan` shift
+//!   the `uint` `Parse` the same way. The wrap keeps the demux on the clock the playlist reads:
+//!   [`super::mpls`] masks its 45 kHz IN/OUT times to 31 bits, the same 2^32-tick period, so a clip
+//!   whose timestamps cross it still matches its playlist time window. Interval arithmetic stays in
+//!   `i128`.
 //! * **No dead state.** Header fields the analysis never reads (the time code, the
 //!   transport-error/priority bits, the adaptation-field PCR reconstruction, the transport-stream
 //!   id, the PMT program/version bytes, and the program-info descriptors) are consumed by the same
@@ -58,10 +60,26 @@ use crate::error::BdError;
 use crate::primitives::Pid;
 use crate::stream::{StreamKind, TsStream, TsStreamType};
 
-/// Read-chunk size (256 KiB) for each underlying full-pass read. The packet
-/// state machine is chunk-boundary-agnostic, so the value changes no healthy
-/// output byte (tests drive a small size to exercise the cross-chunk deferral
-/// paths) — it sets read granularity, and with it three damaged-media bounds:
+/// The chunk size (5 MiB) whose boundaries the skipped-packet arithmetic in
+/// [`TsStreamFile::parse_chunk`] reproduces: `BDInfo` 0.8 `TSStreamFile.Scan`
+/// reads `dataSize = 5242880` bytes per call, and when such a call ends inside
+/// a packet it skips (a PID outside the PMT, a scrambled packet, SIT), its
+/// resume count is off — the packet is taken as finished one byte early when
+/// exactly its last byte falls in the next call, and otherwise ends two bytes
+/// early. The misframing resynchronises at the next `0x47` unless a
+/// `TP_extra_header` byte at the resume point is `0x47`, in which case one
+/// real packet is swallowed. Applying that arithmetic only at absolute file
+/// offsets that are multiples of this size — and the exact count at every
+/// other chunk boundary — makes every read size that divides it ([`DATA_SIZE`]
+/// and [`QUICK_DATA_SIZE`] on every target) measure what 0.8 measures. See
+/// DIFFERENCES.md, "Damaged-media read granularity".
+const BDINFO_CHUNK_SIZE: u64 = 5_242_880;
+
+/// Read-chunk size (256 KiB) for each underlying full-pass read. A full pass
+/// measures the same values with every chunk size that divides
+/// [`BDINFO_CHUNK_SIZE`] (tests drive small sizes to exercise the cross-chunk
+/// deferral paths), so the value changes no measured value on a healthy disc
+/// — it sets read granularity, and with it three damaged-media bounds:
 /// how long one blocking read can stall (a stalled optical request spans the
 /// chunk's 128 optical sectors of in-device retries), how stale the per-chunk cancel
 /// poll ([`fill_buffer`]) can get, and how many bytes a failed read discards
@@ -120,13 +138,14 @@ fn to_byte(x: i64) -> u8 {
     u8::try_from(x & 0xFF).unwrap_or(0)
 }
 
-/// Widens an `i128` timestamp to `f64`. Real PTS/DTS values are ≤ 2^33 (the demux
-/// keeps the full 33 bits), so this is exact in practice (f64's 52-bit
-/// mantissa represents every integer ≤ 2^33).
+/// Widens an `i128` timestamp to `f64`. Decoded PTS/DTS values are below 2^32
+/// (the demux keeps 32 bits, module note) and their differences lie within
+/// ±2^32, so this is exact (f64's 52-bit mantissa represents every integer of
+/// that magnitude).
 #[expect(
     clippy::cast_precision_loss,
     clippy::as_conversions,
-    reason = "PTS/DTS values fit f64 exactly (≤ 2^33) (int→float; TryFrom inapplicable)"
+    reason = "PTS/DTS values and their differences fit f64 exactly (|v| < 2^32) (int→float; TryFrom inapplicable)"
 )]
 const fn pts_to_f64(v: i128) -> f64 {
     v as f64
@@ -231,8 +250,11 @@ pub struct TsStreamDiagnostics {
     /// one entry is emitted per completed window, stamped with its closing
     /// frame's time, not its start. Exception: the end-of-scan flush closing
     /// each stream's final window stamps it with the running maximum video
-    /// timestamp across streams, so on an interleaved (MVC) scan a dependent
-    /// view's last entry can carry the base view's time and interval.
+    /// timestamp over the video streams flushed so far, in
+    /// [`stream_order`](TsStreamFile::stream_order), with the interval of the
+    /// stream that set it — so on an interleaved (MVC) scan, whose dependent
+    /// view registers first, the base view's last entry can carry the
+    /// dependent view's time and interval.
     pub marker: f64,
     /// Window length in seconds (the PTS delta `/ 90000`).
     pub interval: f64,
@@ -1122,6 +1144,13 @@ impl TsStreamFile {
     ) -> bool {
         {
             let bl = i64::try_from(buffer.len()).unwrap_or(i64::MAX);
+            // Whether this chunk ends where a `BDInfo` 0.8 read call would
+            // ([`BDINFO_CHUNK_SIZE`]): `size` counts the bytes of every
+            // earlier chunk, and every chunk but the last is full.
+            let bdinfo_boundary = self
+                .size
+                .wrapping_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX))
+                .is_multiple_of(BDINFO_CHUNK_SIZE);
             let mut offset: i64 = 0;
             let mut i: i64 = 0;
             while i < bl {
@@ -1193,7 +1222,8 @@ impl TsStreamFile {
                     // no-op; on malformed input (length > the remaining packet) it
                     // stops the oversized field from bleeding its leftover countdown
                     // into the next packet's payload — libbluray rejects any payload
-                    // offset >= 188 outright.
+                    // offset >= 188 outright; `BDInfo` lets it bleed (DIFFERENCES.md,
+                    // "Oversized adaptation field").
                     parser.adaption_field_parse = b.min(parser.packet_length);
                     parser.adaption_field_state = false;
                     parser.variable_packet_end = true;
@@ -1341,8 +1371,9 @@ impl TsStreamFile {
                                 state.pts_parse = state.pts_parse.wrapping_sub(1);
                                 match state.pts_parse {
                                     4 => {
+                                        // `u32` shift: bit 32 is dropped (module note).
                                         state.pts_temp =
-                                            u64::from(state.parse & 0xE).wrapping_shl(29);
+                                            u64::from((state.parse & 0xE).wrapping_shl(29));
                                     }
                                     3 => {
                                         state.pts_temp = state.pts_temp.wrapping_add(u64::from(
@@ -1399,8 +1430,9 @@ impl TsStreamFile {
                                 state.dts_parse = state.dts_parse.wrapping_sub(1);
                                 match state.dts_parse {
                                     9 => {
+                                        // `u32` shift: bit 32 is dropped (module note).
                                         state.pts_temp =
-                                            u64::from(state.parse & 0xE).wrapping_shl(29);
+                                            u64::from((state.parse & 0xE).wrapping_shl(29));
                                     }
                                     8 => {
                                         state.pts_temp = state.pts_temp.wrapping_add(u64::from(
@@ -1426,8 +1458,9 @@ impl TsStreamFile {
                                         state.pts_last = state.pts_last.max(state.pts);
                                     }
                                     4 => {
+                                        // `u32` shift: bit 32 is dropped (module note).
                                         state.dts_temp =
-                                            i128::from(state.parse & 0xE).wrapping_shl(29);
+                                            i128::from((state.parse & 0xE).wrapping_shl(29));
                                     }
                                     3 => {
                                         state.dts_temp = state.dts_temp.wrapping_add(i128::from(
@@ -1488,14 +1521,22 @@ impl TsStreamFile {
                         parser.sync_state = false;
                     }
                 } else {
+                    // A skipped packet: `packet_length` counts its bytes after
+                    // byte `i`, and `rest` the chunk's bytes after byte `i`.
                     parser.packet_length = parser.packet_length.wrapping_sub(1);
-                    if (bl.wrapping_sub(i)) >= i64::from(parser.packet_length) {
+                    let rest = bl.wrapping_sub(i).wrapping_sub(1);
+                    // At a `BDINFO_CHUNK_SIZE` boundary, `BDInfo` 0.8's count:
+                    // it compares `bl - i` and consumes `bl - i + 1`.
+                    let (fits, consumed) = if bdinfo_boundary {
+                        (rest.wrapping_add(1), rest.wrapping_add(2))
+                    } else {
+                        (rest, rest)
+                    };
+                    if fits >= i64::from(parser.packet_length) {
                         i = i.wrapping_add(i64::from(parser.packet_length));
                         parser.packet_length = 0;
                     } else {
-                        parser.packet_length = parser
-                            .packet_length
-                            .wrapping_sub(to_byte(bl.wrapping_sub(i).wrapping_add(1)));
+                        parser.packet_length = parser.packet_length.wrapping_sub(to_byte(consumed));
                         i = bl;
                     }
                     if parser.packet_length == 0 {
@@ -1523,17 +1564,24 @@ impl TsStreamFile {
         false
     }
 
-    /// The scan tail: the final bitrate pass over every video stream. Runs
-    /// only when the whole stream was read (neither an early finish nor a
-    /// failed read cut the scan short).
+    /// The scan tail: the final bitrate pass over every video stream, in
+    /// [`stream_order`](Self::stream_order) (first PMT registration), carrying
+    /// the running maximum last timestamp and the interval of the stream that
+    /// set it. Runs only when the whole stream was read (neither an early
+    /// finish nor a failed read cut the scan short).
     fn finish_scan(&mut self, relevant: &mut Vec<&mut TsPlaylistFile>) {
         let mut pts_last: i128 = 0;
         let mut pts_diff: i128 = 0;
+        // Registration order, not PID order: `BDInfo` 0.7.5.6 and 0.8
+        // `TSStreamFile.Scan` walk `Streams.Values`, a `Dictionary` that
+        // enumerates in insertion order, so on an interleaved `*.ssif` the
+        // dependent view (registered first) sets the running maximum the base
+        // view's final window then inherits.
         let video_pids: Vec<u16> = self
-            .streams
+            .stream_order
             .iter()
-            .filter(|(_, s)| s.base().is_video_stream())
-            .map(|(p, _)| *p)
+            .copied()
+            .filter(|p| self.streams.get(p).is_some_and(|s| s.base().is_video_stream()))
             .collect();
         for pid in video_pids {
             if let Some(state) = self.stream_states.get(&pid)
@@ -1899,7 +1947,8 @@ impl TsStreamFile {
 
     /// Registers a stream of `stream_type_byte` at `stream_pid`. Unhandled types
     /// create no stream but still ensure the PID has an (empty) diagnostics
-    /// list.
+    /// list, and the PMT walk goes on to the next entry (`BDInfo` 0.8 abandons
+    /// the walk instead — DIFFERENCES.md, "Unknown PMT stream type").
     fn create_stream(&mut self, stream_pid: u16, stream_type_byte: u8) {
         let stream_type = TsStreamType::from_u8(stream_type_byte);
         if let Some(mut stream) = stream_type.default_stream() {
@@ -2092,7 +2141,7 @@ pub mod packets {
     }
 
     /// Encodes a 33-bit `pts` into the 5-byte MPEG PTS field (standard marker bits).
-    /// The demuxer decodes this back to the full 33-bit `pts`, bit 32 included.
+    /// The demuxer decodes this back to the low 32 bits of `pts` (bit 32 dropped).
     pub(crate) fn encode_pts(pts: u64) -> [u8; 5] {
         [
             0x21 | u8::try_from(pts.wrapping_shr(29) & 0x0E).unwrap(),
@@ -2437,24 +2486,105 @@ mod tests {
     }
 
     #[test]
-    fn dts_path_preserves_pts_dts_bit_32() {
-        // A timestamp with bit 32 set (>= 2^32 ticks ≈ 13.26 h of 90 kHz time)
-        // must keep its high bit. Three DTS video PES; the third's DTS is
-        // 2^32 + 180 000. The length spans the 2nd→3rd marker (the DTS path's
-        // `dts_temp`, arm 4), so a full-33-bit decode gives a 2^32-tick span —
-        // classic BDInfo's 32-bit shift would drop bit 32, collapsing it to 0 s.
+    fn timestamp_decodes_drop_pts_dts_bit_32() {
+        // The last timestamp of each run has bit 32 set; each decode site
+        // must drop it, leaving the low 32 bits.
+        let bit_32 = 1_u64 << 32;
         let pmt_pid = 0x0100;
-        let mut bytes = packet(0, true, &pat_payload(pmt_pid));
-        bytes.extend(packet(pmt_pid, true, &pmt_payload(&[(0x1B, 0x1011)])));
-        let hi = (1_u64 << 32).wrapping_add(180_000);
-        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 90_000, 90_000, &[0xAA; 100])));
-        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, 180_000, 180_000, &[0xAA; 100])));
-        bytes.extend(packet(0x1011, true, &pes_dts(0xE0, hi, hi, &[0xAA; 100])));
-        let mut pls = [video_playlist(0x1011)];
-        let file = scan("00000.m2ts", &bytes, &mut pls, true);
-        // (2^32) / 90 000 — non-zero only because bit 32 survives the decode.
-        let expected = 4_294_967_296.0_f64 / 90_000.0;
-        assert_eq!(file.length.to_bits(), expected.to_bits());
+        let mut header = packet(0, true, &pat_payload(pmt_pid));
+        header.extend(packet(pmt_pid, true, &pmt_payload(&[(0x1B, 0x1011)])));
+
+        // PTS+DTS path: timestamps 1 s, 2 s, 3 s + 2^32. The length spans the
+        // 2nd→3rd DTS (the `dts_temp` site), 1 s only if bit 32 is dropped;
+        // the trailing payload-only packet leaves a window open for the
+        // end-of-scan flush, which closes it at the running maximum PTS (this
+        // path's PTS site): 3 s.
+        let mut bytes = header.clone();
+        for ticks in [90_000, 180_000, bit_32.wrapping_add(270_000)] {
+            bytes.extend(packet(0x1011, true, &pes_dts(0xE0, ticks, ticks, &[0xAA; 100])));
+        }
+        bytes.extend(packet(0x1011, false, &[]));
+        let file = scan("00000.m2ts", &bytes, &mut [video_playlist(0x1011)], true);
+        assert_eq!(file.length.to_bits(), 1.0_f64.to_bits());
+        let flushed = file.stream_diagnostics.get(&0x1011).unwrap().last().unwrap();
+        assert_eq!(flushed.marker.to_bits(), 3.0_f64.to_bits());
+
+        // PTS-only path: the second PES's window closes at its PTS, 2 s.
+        let mut bytes = header;
+        bytes.extend(packet(0x1011, true, &pes_pts(0xE0, 90_000, &[0xAA; 100])));
+        bytes.extend(packet(
+            0x1011,
+            true,
+            &pes_pts(0xE0, bit_32.wrapping_add(180_000), &[0xAA; 100]),
+        ));
+        let file = scan("00000.m2ts", &bytes, &mut [video_playlist(0x1011)], true);
+        let window = file.stream_diagnostics.get(&0x1011).unwrap().first().unwrap();
+        assert_eq!(window.marker.to_bits(), 2.0_f64.to_bits());
+    }
+
+    #[test]
+    fn a_skipped_packet_straddling_a_5_mib_offset_resumes_like_bdinfo() {
+        // A 129-byte junk prefix places four chunk boundaries inside skipped
+        // packets (PID 0x1FFF, outside the PMT), each followed by a video PES
+        // packet with a 0x47 time-code byte where a misframed resume hunts for
+        // the sync byte:
+        //   16 KiB, 10 MiB — packet byte 127 starts the next chunk (TC3 trap)
+        //   32 KiB,  5 MiB — packet byte 191, its last, starts it (TC4 trap)
+        // Only the two multiples of 5 MiB take BDInfo's resume count, so only
+        // their traps fire, whatever the read size: each swallows its video
+        // packet (DTS 4 s, 5 s) and counts a bogus one instead — PID 0x0750
+        // after the one-byte-early end, PID 0x0047 after the two-byte-early end.
+        const PREFIX: usize = 129;
+        let pmt_pid = 0x0100;
+        let video = |dts: u64| packet(0x1011, true, &pes_dts(0xE0, dts, dts, &[0xAA; 100]));
+        let filler = packet(0x1FFF, false, &[]);
+        let mut packets = vec![
+            packet(0, true, &pat_payload(pmt_pid)),
+            packet(pmt_pid, true, &pmt_payload(&[(0x1B, 0x1011)])),
+            video(90_000),
+        ];
+        let traps = [
+            (16_384_usize, 127_usize, 2_usize, 180_000_u64),
+            (32_768, 191, 3, 270_000),
+            (5_242_880, 191, 3, 360_000),
+            (10_485_760, 127, 2, 450_000),
+        ];
+        for (boundary, byte, time_code, dts) in traps {
+            let relative = boundary.wrapping_sub(PREFIX);
+            assert_eq!(relative % 192, byte, "the boundary at {boundary} lands on byte {byte}");
+            packets.resize((relative / 192).wrapping_add(1), filler.clone());
+            let mut victim = video(dts);
+            *victim.get_mut(time_code).unwrap() = 0x47;
+            packets.push(victim);
+        }
+        packets.push(filler.clone());
+        let fillers = packets.iter().filter(|p| **p == filler).count();
+        let mut bytes = vec![0_u8; PREFIX];
+        bytes.extend(packets.concat());
+
+        for chunk in [16_384, 262_144, 5_242_880] {
+            let mut file = TsStreamFile::new("00000.m2ts");
+            let mut cur = Cursor::new(bytes.clone());
+            let mut pls = [video_playlist(0x1011)];
+            file.scan_chunked(&mut cur, &mut pls, true, chunk, &mut |_, _| {}).unwrap();
+            let packets_on = |pid| file.stream_states.get(&pid).map_or(0, |s| s.total_packets);
+            assert_eq!(packets_on(0x1011), 3, "{chunk}: the 4 s and 5 s packets are swallowed");
+            assert_eq!(packets_on(0x0750), 1, "{chunk}: one-byte-early bogus packet");
+            assert_eq!(packets_on(0x0047), 1, "{chunk}: two-byte-early bogus packet");
+            assert_eq!(packets_on(0x1FFF), u64::try_from(fillers).unwrap(), "{chunk}: fillers");
+            let state = file.stream_states.get(&0x1011).unwrap();
+            assert_eq!(state.pts_count, 3, "{chunk}: timestamps decoded");
+            assert_eq!(state.pts_last, 270_000, "{chunk}: last PTS");
+            let markers: Vec<u64> = file
+                .stream_diagnostics
+                .get(&0x1011)
+                .unwrap()
+                .iter()
+                .map(|d| d.marker.to_bits())
+                .collect();
+            assert_eq!(markers, [2.0_f64.to_bits(), 3.0_f64.to_bits()], "{chunk}: windows");
+            assert_eq!(file.size, u64::try_from(bytes.len()).unwrap(), "{chunk}: size");
+        }
     }
 
     #[test]
@@ -3796,6 +3926,7 @@ mod tests {
         let mut file = TsStreamFile::new("00000.m2ts");
         for (pid, dts_prev) in [(0x1011_u16, 45_000_i128), (0x1012, 30_000)] {
             file.streams.insert(pid, seeded_video(pid, false));
+            file.stream_order.push(pid);
             let state = file.stream_states.entry(pid).or_default();
             state.pts_last = 90_000;
             state.dts_prev = dts_prev;
@@ -3814,6 +3945,33 @@ mod tests {
         assert_eq!(d1.interval.to_bits(), 0.5_f64.to_bits());
         assert_eq!(d2.marker.to_bits(), 1.0_f64.to_bits());
         assert_eq!(d2.interval.to_bits(), 0.5_f64.to_bits());
+    }
+
+    #[test]
+    fn finish_scan_flushes_video_streams_in_registration_order() {
+        // The dependent view (PID 0x1012) registers before the base view
+        // (0x1011), as on an interleaved `*.ssif`, and ends later. Flushed
+        // first, it sets the running maximum, so the base view's final window
+        // closes at 1 s with the dependent view's 2/3 s interval; a PID-order
+        // flush would close it at its own 29/30 s with a 1/30 s interval.
+        let mut file = TsStreamFile::new("00000.m2ts");
+        for (pid, pts_last, dts_prev) in
+            [(0x1012_u16, 90_000_i128, 30_000_i128), (0x1011, 87_000, 84_000)]
+        {
+            file.streams.insert(pid, seeded_video(pid, false));
+            file.stream_order.push(pid);
+            let state = file.stream_states.entry(pid).or_default();
+            state.pts_last = pts_last;
+            state.dts_prev = dts_prev;
+            state.window_packets = 1;
+            state.window_bytes = 100;
+        }
+        let mut pl = video_playlist(0x1011);
+        let mut relevant: Vec<&mut TsPlaylistFile> = vec![&mut pl];
+        file.finish_scan(&mut relevant);
+        let base = file.stream_diagnostics.get(&0x1011).unwrap().first().unwrap();
+        assert_eq!(base.marker.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(base.interval.to_bits(), (60_000.0_f64 / 90_000.0).to_bits());
     }
 
     #[test]
@@ -4466,8 +4624,11 @@ mod tests {
     proptest! {
         #[test]
         fn chunk_size_does_not_change_the_result(chunk in 64_usize..=400) {
-            // The state machine is chunk-boundary agnostic: a tiny read size must
-            // yield the same registered streams/length as one big read.
+            // A tiny read size must yield the same registered streams/length as
+            // one big read. The 960-byte input ends before the first 5 MiB
+            // offset and carries no skipped packet, so the size range need not
+            // divide 5 MiB: this proves invariance, not the 5 MiB resume
+            // emulation (`a_skipped_packet_straddling_a_5_mib_offset_…`).
             let pmt_pid = 0x0100;
             let mut bytes = packet(0, true, &pat_payload(pmt_pid));
             bytes.extend(packet(pmt_pid, true, &pmt_payload(&[(0x1B, 0x1011), (0x81, 0x1100)])));
