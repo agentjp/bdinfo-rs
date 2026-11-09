@@ -314,7 +314,9 @@ fn clip_extension(codec_id: &str) -> &'static str {
 /// The raw value is masked to its low 31 bits (`t & 0x7FFF_FFFF`) — bit 31 is
 /// not part of the 45 kHz timestamp — then divided by 45 000. The mask is a
 /// no-op when the bit is clear, so it is applied unconditionally, keeping the
-/// read unsigned and panic-free.
+/// read unsigned and panic-free. The 31-bit mask at 45 kHz wraps with the same
+/// 2^32-tick period as the demux's 32-bit PTS/DTS decode at 90 kHz
+/// ([`super::m2ts`]), so clip times and demuxed timestamps stay comparable.
 fn read_time(data: &[u8], off: usize) -> Result<f64, BdError> {
     let raw = u32_be(data, off)? & 0x7FFF_FFFF;
     Ok(f64::from(raw) / 45_000.0)
