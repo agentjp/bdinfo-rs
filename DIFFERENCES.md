@@ -27,7 +27,7 @@ actually see on a normal disc.
 | [AVC High 4:4:4 (profile 244)](#avc-high-444-profile-244) | **Yes** — profile token | Rare — Blu-ray video is almost always 4:2:0 |
 | [PGS forced-caption counts](#pgs-forced-caption-counts) | **Yes** — caption tally | Discs with multi-object subtitle compositions |
 | [Playlist attribute selection on short clips](#playlist-attribute-selection-on-short-clips) | **Yes** — which clip's streams are presented | Rare — multi-clip playlists whose early clips are short |
-| [Bitrate under a backwards PTS](#bitrate-under-a-backwards-pts) | **Yes** — bitrate numbers | Short playlists, by a few kbps; feature-length ones are unchanged |
+| [Bitrate under a backwards PTS](#bitrate-under-a-backwards-pts) | **Yes** — every VBR bitrate, by a few kbps on features | **Common** — any stream whose PES headers carry a PTS without a DTS |
 | [Blu-ray 3D eye labels on a 50 Hz disc](#blu-ray-3d-eye-labels-on-a-50-hz-disc) | **Yes** — `Left Eye` / `Right Eye` present | 3D discs with any 25 or 50 fps playlist, when BDInfo happened to enumerate that playlist first |
 | [Disc Size of a 3D `.iso` (BDInfo 0.8.0.1)](#disc-size-of-a-3d-iso) | **Yes** — roughly half the number 0.8.0.1 prints | Every 3D disc opened as an `.iso` with BDInfo 0.8.0.1; folders and BDInfo 0.7.5.6 agree with bdinfo-rs |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
@@ -36,6 +36,9 @@ actually see on a normal disc.
 | [HEVC `profile_idc` recovery](#correctness-fixes-with-no-effect-on-a-normal-disc) | Edge case only | Malformed headers with `general_profile_idc == 0` |
 | [VC-1 interlaced-field picture type](#correctness-fixes-with-no-effect-on-a-normal-disc) | **No** — internal only | Never — the picture tag is counted, never printed |
 | [PAT `table_id` validation](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — no conforming disc carries a wrong PAT table id |
+| [Signed interval on a backwards timestamp](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only against BDInfo 0.7.5.6 — variable bitrates | Discontinuities and damaged streams |
+| [Unknown PMT stream type](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only against BDInfo 0.8 — streams after the entry | Rare — a PMT entry of a type neither tool handles |
+| [Oversized adaptation field](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — ISO 13818-1 caps the length |
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 | [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
@@ -178,13 +181,14 @@ interval base backwards, overstating the next forward unit's interval and unders
 rate. bdinfo-rs advances only on a forward step, against the running maximum, as BDInfo
 0.7.5.6 did (`PTS > PTSLast`) and as the PTS+DTS path of both tools already does.
 
+BDInfo 0.8's `!=` dates from a January 2023 change ("Workaround negative frame
+timestamps"); the Jellyfin and Go ports copy 0.8 here, so they print what 0.8 prints.
+
 The rule governs any stream whose PES headers carry a PTS without a DTS — not audio alone
-— and the same last-seen PTS is what the final playlist-level bitrate pass reads for the
-video streams, so a video row's kbps can move too. What moves is a small **absolute** span
-of the measured timeline, a fraction of a second: enough to clear the printed resolution on
-a short playlist, and lost in the rounding of a feature-length one. That is why every
-committed golden — all feature-length — is byte-identical across the change, while a real
-disc's short playlists shift by a few kbps.
+— and the same last-seen PTS is what the end-of-file bitrate pass reads for the video
+streams, so it sets the measured seconds every variable-bitrate row divides by. Video rows
+move by 1–5 kbps on feature-length playlists and by more on short clips, and the CHAPTERS
+table's peak windows shift with them.
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (the PTS-only PES arm and
 `finish_scan`).</sub>
@@ -278,6 +282,21 @@ value is never rendered.
   codec names) and `MPEG-2 AAC` / `MPEG-4 AAC` (the short-name constants) — so an audio
   row whose stream the scan could not read never renders a hole. A decoded stream prints
   the same header-derived name as BDInfo.
+- **Signed interval on a backwards timestamp.** When a video DTS (or a PTS without a DTS)
+  steps backwards inside one file, bdinfo-rs and BDInfo 0.8 measure a negative interval.
+  BDInfo 0.7.5.6 subtracts in unsigned 64-bit arithmetic, so the interval wraps to about
+  2 × 10^14 seconds and the playlist's variable bitrates collapse to 0. Only a
+  discontinuity or damage steps a timestamp backwards.
+- **Unknown PMT stream type.** bdinfo-rs skips a PMT entry whose stream type it does not
+  handle and registers the entries after it, as BDInfo 0.7.5.6 does. BDInfo 0.8 looks up a
+  stream it never created for that entry, catches the resulting exception, and abandons the
+  rest of that PMT — every later PMT repeat stops at the same entry, so the streams listed
+  after it never register. A Blu-ray PMT rarely lists a stream type outside the set both
+  tools handle.
+- **Oversized adaptation field.** An adaptation-field length longer than the rest of its
+  packet is clamped to the packet. BDInfo lets the leftover countdown run on into the next
+  packet's bytes. Only malformed input carries such a length (ISO 13818-1 caps it at 183
+  bytes).
 
 ---
 
@@ -311,8 +330,19 @@ BDInfo 0.8 reads stream files in 5 MiB requests in both measurement passes (rais
 0.7.5.6's 16 KiB by a throughput change with no correctness motive). bdinfo-rs reads
 256 KiB per request in the full pass and 16 KiB in the quick codec pass; the browser
 package keeps 5 MiB for both, since its file reads each cost one synchronous round trip.
-Healthy discs produce byte-identical reports either way — the packet state machine carries
-its state across chunk boundaries, so the request size cannot change a measured value.
+
+The packet state machine carries its state across request boundaries, with one exception
+that bdinfo-rs reproduces on purpose. When one of BDInfo 0.8's requests ends inside a
+packet the demux is skipping — a PID the PMT does not list, a scrambled packet, the SIT —
+its resume count is off: the packet is taken as finished one byte early when only its last
+byte lies in the next request, and two bytes early otherwise. The misframing heals at the
+next `0x47` sync byte unless a time-code byte at the resume point is itself `0x47`; then
+one real packet is swallowed and a bogus one counted in its place, which moves that PID's
+packet tally and can merge two PES. bdinfo-rs applies that count exactly at absolute file
+offsets that are multiples of 5 MiB, where 0.8's requests end, and the correct count at
+every other boundary. Every request size above divides 5 MiB, so a healthy disc measures
+what 0.8 measures on every surface and in both passes. BDInfo 0.7.5.6, with 16 KiB
+requests, hits the miscount at every 16 KiB boundary instead.
 
 On damaged media the request size is the failure granularity, and there the outputs
 deliberately diverge from BDInfo 0.8:
@@ -327,7 +357,8 @@ deliberately diverge from BDInfo 0.8:
   browse, and ahead of the full pass in a measurement scan that did not already read
   the codec detail — the desktop app's does, and skips it), 256 KiB in the full pass.
 
-<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`).</sub>
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/m2ts.rs` (`DATA_SIZE`, `QUICK_DATA_SIZE`,
+`BDINFO_CHUNK_SIZE`).</sub>
 
 ### Read errors: folder input vs `.iso` input
 

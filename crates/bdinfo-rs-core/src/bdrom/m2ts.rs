@@ -1222,7 +1222,8 @@ impl TsStreamFile {
                     // no-op; on malformed input (length > the remaining packet) it
                     // stops the oversized field from bleeding its leftover countdown
                     // into the next packet's payload — libbluray rejects any payload
-                    // offset >= 188 outright.
+                    // offset >= 188 outright; `BDInfo` lets it bleed (DIFFERENCES.md,
+                    // "Oversized adaptation field").
                     parser.adaption_field_parse = b.min(parser.packet_length);
                     parser.adaption_field_state = false;
                     parser.variable_packet_end = true;
@@ -1946,7 +1947,8 @@ impl TsStreamFile {
 
     /// Registers a stream of `stream_type_byte` at `stream_pid`. Unhandled types
     /// create no stream but still ensure the PID has an (empty) diagnostics
-    /// list.
+    /// list, and the PMT walk goes on to the next entry (`BDInfo` 0.8 abandons
+    /// the walk instead — DIFFERENCES.md, "Unknown PMT stream type").
     fn create_stream(&mut self, stream_pid: u16, stream_type_byte: u8) {
         let stream_type = TsStreamType::from_u8(stream_type_byte);
         if let Some(mut stream) = stream_type.default_stream() {
