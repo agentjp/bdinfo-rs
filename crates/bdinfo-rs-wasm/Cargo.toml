@@ -1,6 +1,6 @@
 [package]
 name = "bdinfo-rs-wasm"
-version = "4.0.1"
+version = "5.0.0"
 publish = false
 edition = "2024"
 rust-version = "1.98"
