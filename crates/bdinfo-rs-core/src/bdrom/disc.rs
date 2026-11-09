@@ -71,9 +71,14 @@ pub struct PlaylistSummary {
     /// clip file from the same in-time. The presentation order can filter
     /// looping playlists out (see [`super::order::PlaylistFilter`]).
     pub has_loops: bool,
-    /// The presented streams, sorted by PID — the rows the `streams` diff level
-    /// emits. Codec detail is only filled when the disc was opened with the
-    /// packet scan (the disc/`playlists` levels are scan-free).
+    /// The presented streams — the rows the `streams` diff level emits — in
+    /// `BDInfo`'s order: video, audio, graphics, text, each kind in the
+    /// reference clip's clip-info declaration order, with the interleaved
+    /// dependent view after every declared video stream and each video
+    /// stream's angle clones right after its main row. The first row is
+    /// therefore the first declared video stream when the playlist has one.
+    /// Codec detail is only filled when the disc was opened with the packet
+    /// scan (the disc/`playlists` levels are scan-free).
     pub streams: Vec<StreamSummary>,
     /// The sequenced clips with their measured tallies, in playlist order
     /// (including angle clips). One row per clip at every level; the demux
@@ -835,8 +840,8 @@ impl Sink<'_> {
 /// the selected reference can build its presented streams without a second
 /// lookup. Borrowing keeps [`select_reference`] pure and directly unit-testable.
 struct ClipMeta<'a> {
-    /// The clip's clip-info (`*.clpi`) streams.
-    clip_streams: &'a BTreeMap<u16, TsStream>,
+    /// The clip's clip-info (`*.clpi`) streams, in declaration order.
+    clip_streams: &'a [TsStream],
     /// The clip's scanned stream file, or `None` when the packet scan did
     /// not run (disc/`playlists` level) or the file was absent.
     scanned: Option<&'a TsStreamFile>,
@@ -1191,6 +1196,10 @@ impl BdRom {
     /// since an `*.ssif` shares its sectors with the `*.m2ts` files it
     /// interleaves. Kept for API compatibility only; prefer `size`.
     #[must_use]
+    #[deprecated(
+        since = "5.0.0",
+        note = "Disc Size excludes the interleaved .ssif bytes; use the `size` field"
+    )]
     pub const fn full_size(&self) -> u64 {
         self.size.saturating_add(self.interleaved_size)
     }
@@ -1817,21 +1826,17 @@ fn run_measurement_scan(
     )?;
     // The PGS caption tallies and dimensions only exist after the full pass
     // (the quick pass never reads the graphics payloads), so the presented
-    // streams re-merge the reference clip's full-scanned graphics detail —
-    // the classic GUI's post-scan refresh; without it every subtitle row
-    // would present an empty description.
+    // graphics streams take them from the measured files only now; without
+    // this every subtitle row would present an empty description.
     for playlist in parsed.iter_mut() {
-        if let Ok(metas) =
-            collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &full)
+        if skip_quick
+            && let Ok(metas) =
+                collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &full)
             && let Some(reference) = select_reference(&metas)
         {
-            if skip_quick {
-                remove_mvc_placeholder(playlist, reference);
-            }
-            if let Some(file) = reference.scanned {
-                remerge_graphics_detail(playlist, &file.streams);
-            }
+            remove_mvc_placeholder(playlist, reference);
         }
+        sum_graphics_captions(playlist, &full);
     }
     Ok((quick, full))
 }
@@ -1848,7 +1853,7 @@ fn run_measurement_scan(
 fn remove_mvc_placeholder(playlist: &mut TsPlaylistFile, reference: &ClipMeta<'_>) {
     if let Some(file) = reference.scanned
         && !file.streams.contains_key(&MVC_PID)
-        && !reference.clip_streams.contains_key(&MVC_PID)
+        && !reference.clip_streams.iter().any(|stream| stream.pid() == Pid::new(MVC_PID))
     {
         playlist.streams.remove(&MVC_PID);
         for angle in &mut playlist.angle_streams {
@@ -1917,10 +1922,11 @@ fn resolve_playlist_streams(
     let Some(reference) = select_reference(metas) else {
         return;
     };
-    let mut streams: BTreeMap<u16, TsStream> = BTreeMap::new();
-    for (pid, stream) in reference.clip_streams {
-        streams.insert(*pid, stream.ts_clone());
-    }
+    let mut streams: BTreeMap<u16, TsStream> = reference
+        .clip_streams
+        .iter()
+        .map(|stream| (stream.pid().get(), stream.ts_clone()))
+        .collect();
     if synthesize_mvc && reference.interleaved_file_present && !streams.contains_key(&MVC_PID) {
         let mut mvc = TsStream::Video(TsVideoStream::default());
         mvc.base_mut().pid = Pid::new(MVC_PID);
@@ -1953,15 +1959,53 @@ fn resolve_playlist_streams(
     playlist.angle_streams = angle_streams;
 }
 
-/// Re-merges full-scanned graphics detail (PGS caption tallies, dimensions)
-/// from the reference clip's `scanned` streams into the playlist's presented
-/// streams. The resolution ahead of the full pass merged the quick pass's
-/// detail, but the quick pass skips the PGS payloads — only the full pass
-/// counts captions. Non-graphics streams keep their quick-merged detail.
-fn remerge_graphics_detail(playlist: &mut TsPlaylistFile, scanned: &BTreeMap<u16, TsStream>) {
-    merge_matching(&mut playlist.streams, scanned, |stream| {
-        matches!(stream, TsStream::Graphics(_))
-    });
+/// Sums the full-pass PGS caption tallies of every clip into `playlist`'s
+/// presented graphics streams — a port of the `BDInfo` 0.8 app's
+/// `MainWindowViewModel.UpdateSubtitleChapterCount`, which runs between the
+/// scan and the report. Each presented graphics stream restarts at zero
+/// captions, forced captions and dimensions; then every clip of
+/// `stream_clips` whose file is in `measured` — angle clips and every repeat
+/// of a clip included — adds its graphics streams' `captions` and
+/// `forced_captions` into the presented stream of the same PID, and the
+/// first non-zero width and height stick. A PID whose presented stream is not
+/// a graphics stream is skipped. Non-graphics streams are untouched. See
+/// `DIFFERENCES.md`, "PGS caption counts are summed over every clip".
+fn sum_graphics_captions(playlist: &mut TsPlaylistFile, measured: &BTreeMap<String, TsStreamFile>) {
+    // `BDInfo`'s dimensions start at zero because its quick scan never runs the
+    // PGS scanner; ours can carry a skip-quick back-fill's last write
+    // (`backfill_playlist_detail`), so they are reset too, landing both scan
+    // shapes on the first measured clip's.
+    for stream in playlist.streams.values_mut() {
+        if let TsStream::Graphics(graphics) = stream {
+            graphics.captions = 0;
+            graphics.forced_captions = 0;
+            graphics.width = 0;
+            graphics.height = 0;
+        }
+    }
+    for clip in &playlist.stream_clips {
+        let Some(file) = measured.get(&clip.name) else {
+            continue;
+        };
+        for (pid, stream) in &file.streams {
+            if let (TsStream::Graphics(src), Some(TsStream::Graphics(dst))) =
+                (stream, playlist.streams.get_mut(pid))
+            {
+                // C# `int +=`, unchecked: wraps.
+                dst.captions = dst.captions.wrapping_add(src.captions);
+                dst.forced_captions = dst.forced_captions.wrapping_add(src.forced_captions);
+                // `BDInfo` also requires a positive source; the PGS scanner
+                // stores the composition's unsigned 16-bit size, so taking a
+                // zero source onto a zero destination is the same no-op.
+                if dst.width == 0 {
+                    dst.width = src.width;
+                }
+                if dst.height == 0 {
+                    dst.height = src.height;
+                }
+            }
+        }
+    }
 }
 
 /// Zeroes every clip's demux tallies across `playlists` — the reset between
@@ -2006,16 +2050,19 @@ fn build_clip_summaries(
                 }
             }
         }
-        let stem = clip_stem(&clip.name);
+        let ssif_name = format!("{}.SSIF", clip_stem(&clip.name));
+        let interleaved_file_size = interleaved_files.get(&ssif_name).copied();
+        // An unmeasured clip is named by the disc's files alone, as `BDInfo`'s
+        // `TSStreamClip.DisplayName` names any clip whose stream file has an
+        // interleaved file: the `*.ssif` when one exists.
+        let unmeasured_name = || {
+            if interleaved_file_size.is_some() { ssif_name.clone() } else { clip.name.clone() }
+        };
         clips.push(ClipSummary {
             name: clip.name.clone(),
-            display_name: file
-                .map_or_else(|| clip.name.clone(), |f| f.display_name(true).to_owned()),
+            display_name: file.map_or_else(unmeasured_name, |f| f.display_name(true).to_owned()),
             file_size: stream_files.get(&clip.name).copied().unwrap_or(0),
-            interleaved_file_size: interleaved_files
-                .get(&format!("{stem}.SSIF"))
-                .copied()
-                .unwrap_or(0),
+            interleaved_file_size: interleaved_file_size.unwrap_or(0),
             angle_index: clip.angle_index,
             relative_time_in: clip.relative_time_in,
             length: clip.length,
@@ -2090,6 +2137,7 @@ fn build_summary(
         },
     );
 
+    let chapters = build_chapter_summaries(playlist, &streams, measured, total_length);
     Ok((
         PlaylistSummary {
             name: playlist.name.clone(),
@@ -2102,26 +2150,25 @@ fn build_summary(
             angle_count: angle,
             streams,
             clips: build_clip_summaries(playlist, stream_files, interleaved_files, measured),
-            chapters: build_chapter_summaries(playlist, measured, total_length),
+            chapters,
         },
         is_50hz,
     ))
 }
 
 /// Walks `playlist`'s chapter marks against the measured per-frame video
-/// diagnostics: the diagnostics PID is the first (lowest-PID) presented video
-/// stream, and each sequenced clip contributes its measured file's list for
-/// that PID (`None` — skipped whole — when the file or the PID is absent).
+/// diagnostics: the diagnostics PID is the first video row of `rows`
+/// ([`build_sorted_streams`]) — the reference clip's first declared video
+/// stream, `BDInfo`'s `VideoStreams[0]` — and each sequenced clip contributes
+/// its measured file's list for that PID (`None` — skipped whole — when the
+/// file or the PID is absent).
 fn build_chapter_summaries(
     playlist: &TsPlaylistFile,
+    rows: &[StreamSummary],
     measured: &BTreeMap<String, TsStreamFile>,
     total_length: f64,
 ) -> Vec<ChapterSummary> {
-    let diag_pid = playlist
-        .streams
-        .iter()
-        .find(|(_, stream)| stream.base().is_video_stream())
-        .map(|(pid, _)| *pid);
+    let diag_pid = rows.iter().find(|row| row.stream_type.is_video()).map(|row| row.pid.get());
     let clips: Vec<ChapterClip<'_>> = playlist
         .stream_clips
         .iter()
@@ -2154,38 +2201,43 @@ fn playlist_has_loops(playlist: &TsPlaylistFile) -> bool {
 
 /// Whether any video stream in `streams` is 25 or 50 fps — one playlist's
 /// contribution to the disc `is_50hz` flag.
-fn clip_has_50hz_video(streams: &BTreeMap<u16, TsStream>) -> bool {
-    streams.values().any(|stream| {
+fn clip_has_50hz_video(streams: &[TsStream]) -> bool {
+    streams.iter().any(|stream| {
         matches!(stream, TsStream::Video(video)
             if matches!(video.frame_rate(), TsFrameRate::Framerate25 | TsFrameRate::Framerate50))
     })
 }
 
-/// Builds a playlist's presented streams in PID order: clone the reference
-/// clip's clip-info streams, merge the scanned `*.m2ts` codec detail into them,
+/// Builds a playlist's presented stream rows: clone the reference clip's
+/// clip-info streams, merge the scanned `*.m2ts` codec detail into them, and
 /// repeat each video stream `1 + angle_count` times (one angle clone per extra
-/// camera angle), ordered by PID (a video stream's angle clones follow its main
-/// row). Each row's measured rates come from the playlist's resolved stream of
-/// the same PID — the main map for a main row, the angle's own map for an
-/// angle clone — and stay `0` when the playlist is unresolved (no packet
-/// scan).
+/// camera angle, following its main row). The rows run video, audio,
+/// graphics, text — each kind in the clip info's declaration order, the
+/// interleaved dependent view after every declared video stream — which is
+/// `BDInfo`'s `TSPlaylistFile.SortedStreams` under its default
+/// `KeepStreamOrder`. Each row's measured rates come from the playlist's
+/// resolved stream of the same PID — the main map for a main row, the angle's
+/// own map for an angle clone — and stay `0` when the playlist is unresolved
+/// (no packet scan).
 ///
 /// On a 3D disc (`is_3d`), a playlist presenting more than one video stream
 /// gets its eye labels (`Left Eye` / `Right Eye` in the video descriptions,
 /// see [`label_eyes`]); angle clones stay unlabelled.
 fn build_sorted_streams(
-    clip_streams: &BTreeMap<u16, TsStream>,
+    clip_streams: &[TsStream],
     scanned: Option<&BTreeMap<u16, TsStream>>,
     playlist: &TsPlaylistFile,
     angle_count: usize,
     is_3d: bool,
 ) -> Vec<StreamSummary> {
-    let mut streams = clip_streams.clone();
+    let mut order: Vec<u16> = clip_streams.iter().map(|stream| stream.pid().get()).collect();
+    let mut streams: BTreeMap<u16, TsStream> =
+        clip_streams.iter().map(|stream| (stream.pid().get(), stream.clone())).collect();
     if let Some(scanned) = scanned {
         merge_matching(&mut streams, scanned, |_| true);
     }
     // Graphics detail only exists after the full pass, which
-    // [`remerge_graphics_detail`] merged into the resolved presented streams —
+    // [`sum_graphics_captions`] summed into the resolved presented streams —
     // so the rows take it from there rather than from the quick merge above.
     merge_matching(&mut streams, &playlist.streams, |stream| {
         matches!(stream, TsStream::Graphics(_))
@@ -2193,11 +2245,13 @@ fn build_sorted_streams(
     // The interleaved dependent view: when the clip info omits the MVC PID but
     // the resolution presented it from the demuxed file (see
     // [`resolve_playlist_streams`]), it gets a row of its own — never marked
-    // hidden (only clip-info streams take the hidden check).
+    // hidden (only clip-info streams take the hidden check). Appended last,
+    // the stable kind sort below places it after the declared video rows.
     let ssif_pid = if !streams.contains_key(&MVC_PID)
         && let Some(mvc) = playlist.streams.get(&MVC_PID)
     {
         streams.insert(MVC_PID, mvc.ts_clone());
+        order.push(MVC_PID);
         Some(MVC_PID)
     } else {
         None
@@ -2207,13 +2261,16 @@ fn build_sorted_streams(
         label_eyes(&mut streams, playlist.mvc_base_view_r);
     }
 
+    let mut ordered: Vec<(u16, &TsStream)> =
+        order.iter().filter_map(|pid| streams.get(pid).map(|stream| (*pid, stream))).collect();
+    ordered.sort_by_key(|(_, stream)| kind_rank(stream));
     let mut rows = Vec::new();
-    for (pid, stream) in &streams {
-        let ssif_only = ssif_pid == Some(*pid);
+    for (pid, stream) in ordered {
+        let ssif_only = ssif_pid == Some(pid);
         // A presented clip stream the playlist's Stream-Number table never
         // declared is hidden — the clip carries it, the playlist hides it.
-        let is_hidden = !ssif_only && !playlist.playlist_streams.contains_key(pid);
-        rows.push(stream_row(stream, 0, is_hidden, ssif_only, playlist.streams.get(pid)));
+        let is_hidden = !ssif_only && !playlist.playlist_streams.contains_key(&pid);
+        rows.push(stream_row(stream, 0, is_hidden, ssif_only, playlist.streams.get(&pid)));
         if stream.base().is_video_stream() {
             // An angle clone carries no eye label: BDInfo clones the angle
             // rows (`TSPlaylistFile.LoadStreamClips`) before `BDROM` labels
@@ -2227,7 +2284,7 @@ fn build_sorted_streams(
                     index.saturating_add(1),
                     is_hidden,
                     ssif_only,
-                    playlist.angle_streams.get(index).and_then(|angle| angle.get(pid)),
+                    playlist.angle_streams.get(index).and_then(|angle| angle.get(&pid)),
                 ));
             }
         }
@@ -2235,13 +2292,27 @@ fn build_sorted_streams(
     rows
 }
 
+/// The presentation group of `stream`'s kind: video `0`, audio `1`, graphics
+/// `2`, text `3` — the order `BDInfo` appends its per-kind lists to
+/// `SortedStreams` in.
+const fn kind_rank(stream: &TsStream) -> u8 {
+    match stream {
+        TsStream::Video(_) => 0,
+        TsStream::Audio(_) => 1,
+        TsStream::Graphics(_) => 2,
+        TsStream::Text(_) => 3,
+    }
+}
+
 /// Labels the eyes of a 3D playlist's video streams the way `BDInfo`'s `BDROM`
 /// does after loading every playlist: when `streams` presents more than one
 /// video stream, each video stream's `base_view` becomes `Some(right_eye)`,
 /// where `right_eye` is `mvc_base_view_r` (the playlist's `MVC_Base_view_R`
-/// flag) for an AVC stream, its negation for an MVC stream, and `false` for
-/// any other video codec — printed as `Right Eye` / `Left Eye`. A playlist
-/// with one video stream or fewer keeps every `base_view` as it was.
+/// flag) for an AVC stream and its negation for an MVC stream — printed as
+/// `Right Eye` / `Left Eye`. Any other video codec keeps its `base_view`, as
+/// in `BDInfo` 0.7.5.6 (0.8 labels it `Left Eye`; see `DIFFERENCES.md`,
+/// "Blu-ray 3D eye labels only on AVC and MVC streams"). A playlist with one
+/// video stream or fewer keeps every `base_view` as it was.
 ///
 /// `BDInfo` additionally skips every playlist it reaches after the first one
 /// carrying 25 or 50 fps video, in the order its unsorted playlist dictionary
@@ -2255,11 +2326,11 @@ fn label_eyes(streams: &mut BTreeMap<u16, TsStream>, mvc_base_view_r: bool) {
     }
     for stream in streams.values_mut() {
         if let TsStream::Video(video) = stream {
-            video.base.base_view = Some(match video.base.stream_type {
-                TsStreamType::AvcVideo => mvc_base_view_r,
-                TsStreamType::MvcVideo => !mvc_base_view_r,
-                _ => false,
-            });
+            match video.base.stream_type {
+                TsStreamType::AvcVideo => video.base.base_view = Some(mvc_base_view_r),
+                TsStreamType::MvcVideo => video.base.base_view = Some(!mvc_base_view_r),
+                _ => {}
+            }
         }
     }
 }
@@ -2381,7 +2452,9 @@ fn merge_stream(dst: &mut TsStream, src: &TsStream) {
             }
             dst.has_extensions = src.has_extensions;
             dst.ext_data.clone_from(&src.ext_data);
-            if src.core_stream.is_some() && dst.core_stream.is_none() {
+            // A scanned core replaces the destination's, as in `BDInfo` 0.8's
+            // `TSPlaylistFile.LoadStreamClips`; no core leaves it in place.
+            if src.core_stream.is_some() {
                 dst.core_stream.clone_from(&src.core_stream);
             }
         }
@@ -3066,12 +3139,16 @@ mod tests {
         );
     }
 
-    /// A clip-info stream map of `n` dummy streams — controls `clip_streams.len()`,
-    /// the only thing [`select_reference`] reads off it.
-    fn dummy_streams(n: usize) -> BTreeMap<u16, TsStream> {
-        (0..n)
-            .map(|i| (u16::try_from(i).unwrap(), TsStream::Audio(TsAudioStream::default())))
-            .collect()
+    /// A clip-info stream list of `n` dummy streams — controls
+    /// `clip_streams.len()`, the only thing [`select_reference`] reads off it.
+    fn dummy_streams(n: usize) -> Vec<TsStream> {
+        vec![TsStream::Audio(TsAudioStream::default()); n]
+    }
+
+    /// `map`'s streams as a clip-info declaration list, in PID order — for the
+    /// tests where the declaration order is not under test.
+    fn declared(map: &BTreeMap<u16, TsStream>) -> Vec<TsStream> {
+        map.values().cloned().collect()
     }
 
     /// A playlist with no clips and empty stream maps — the unresolved stand-in
@@ -3093,7 +3170,7 @@ mod tests {
     /// Builds a [`ClipMeta`] borrowing `streams`, varying the reference-selection
     /// fields the selection loop reads.
     fn meta(
-        streams: &BTreeMap<u16, TsStream>,
+        streams: &[TsStream],
         length: f64,
         relative: f64,
         has_stream_file: bool,
@@ -3147,14 +3224,14 @@ mod tests {
         v.set_frame_rate(TsFrameRate::Framerate25);
         at25.insert(0x1011, TsStream::Video(v));
         at25.insert(0x1100, TsStream::Audio(TsAudioStream::default()));
-        assert!(clip_has_50hz_video(&at25));
+        assert!(clip_has_50hz_video(&declared(&at25)));
 
         // 50 fps too.
         let mut at50 = BTreeMap::new();
         let mut v = TsVideoStream::default();
         v.set_frame_rate(TsFrameRate::Framerate50);
         at50.insert(0x1011, TsStream::Video(v));
-        assert!(clip_has_50hz_video(&at50));
+        assert!(clip_has_50hz_video(&declared(&at50)));
 
         // A 24 fps video (and audio) → not 50 Hz.
         let mut at24 = BTreeMap::new();
@@ -3162,7 +3239,7 @@ mod tests {
         v.set_frame_rate(TsFrameRate::Framerate24);
         at24.insert(0x1011, TsStream::Video(v));
         at24.insert(0x1100, TsStream::Audio(TsAudioStream::default()));
-        assert!(!clip_has_50hz_video(&at24));
+        assert!(!clip_has_50hz_video(&declared(&at24)));
     }
 
     /// The video stream inside `s`, or `None` for any other variant.
@@ -3170,46 +3247,88 @@ mod tests {
         if let TsStream::Video(video) = s { Some(video) } else { None }
     }
 
-    /// The audio stream inside `s`, or `None` for any other variant.
     #[test]
-    fn graphics_detail_remerges_after_the_full_pass() {
-        // The presented PGS stream starts with the quick pass's empty detail;
-        // the re-merge copies the full scan's caption tallies and dimensions.
-        let mut playlist =
-            TsPlaylistFile::scan("00000.mpls", &mpls("00000", 0, 4_500_000, &[])).unwrap();
-        playlist.streams = BTreeMap::from([
-            (0x1200_u16, TsStream::Graphics(TsGraphicsStream::default())),
-            (0x1011, TsStream::Video(TsVideoStream::default())),
-        ]);
-        let scanned_pgs = TsGraphicsStream {
-            captions: 837,
-            width: 1920,
-            height: 1080,
+    fn graphics_captions_sum_over_every_measured_clip() {
+        // `UpdateSubtitleChapterCount` transcribed: a main clip with captions
+        // but no composition size, a second main clip, the first clip again
+        // (a repeat counts twice), an angle clip (counted too), a clip the full
+        // pass did not measure (skipped), and a last clip whose size comes too
+        // late to count.
+        let clip = |name: &str, angle_index: i32| TsStreamClip {
+            angle_index,
+            name: name.to_owned(),
+            ..TsStreamClip::default()
+        };
+        let mut playlist = bare_playlist();
+        playlist.stream_clips = vec![
+            clip("00001.M2TS", 0),
+            clip("00002.M2TS", 0),
+            clip("00001.M2TS", 0),
+            clip("00003.M2TS", 1),
+            clip("00004.M2TS", 0),
+            clip("00005.M2TS", 0),
+        ];
+        // The presented PGS stream carries a stale tally and size (a skip-quick
+        // back-fill's leftovers): both restart from zero.
+        let stale = TsGraphicsStream {
+            width: 640,
+            height: 480,
+            captions: 999,
+            forced_captions: 99,
             ..TsGraphicsStream::default()
         };
-        let mut scanned_video = TsVideoStream::default();
-        scanned_video.set_video_format(TsVideoFormat::Videoformat2160p);
-        // Detail a whole-map merge WOULD copy, so the graphics filter has teeth.
-        scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
-        let scanned = BTreeMap::from([
-            (0x1200_u16, TsStream::Graphics(scanned_pgs)),
-            // A non-graphics source is skipped (the quick-merged detail
-            // stays), and a PID the playlist does not present adds nothing.
-            (0x1011, TsStream::Video(scanned_video)),
-            (0x1300, TsStream::Graphics(TsGraphicsStream::default())),
+        playlist.streams = BTreeMap::from([
+            (0x1200_u16, TsStream::Graphics(stale)),
+            (0x1011, TsStream::Video(TsVideoStream::default())),
+            (0x1100, TsStream::Audio(TsAudioStream::default())),
         ]);
-        super::remerge_graphics_detail(&mut playlist, &scanned);
+        let pgs = |captions: i32, forced_captions: i32, width: i32, height: i32| {
+            TsStream::Graphics(TsGraphicsStream {
+                width,
+                height,
+                captions,
+                forced_captions,
+                ..TsGraphicsStream::default()
+            })
+        };
+        let file = |name: &str, streams: Vec<(u16, TsStream)>| {
+            let mut file = TsStreamFile::new(name);
+            file.streams = streams.into_iter().collect();
+            (name.to_ascii_uppercase(), file)
+        };
+        let mut scanned_video = TsVideoStream::default();
+        scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
+        let measured = BTreeMap::from([
+            file(
+                "00001.m2ts",
+                vec![
+                    (0x1200, pgs(10, 1, 0, 0)),
+                    // A non-graphics source adds nothing; a graphics source on
+                    // a PID presented as audio, or on a PID not presented at
+                    // all, is skipped.
+                    (0x1011, TsStream::Video(scanned_video)),
+                    (0x1100, pgs(7, 7, 7, 7)),
+                    (0x1300, pgs(7, 7, 7, 7)),
+                ],
+            ),
+            file("00002.m2ts", vec![(0x1200, pgs(20, 2, 1920, 0))]),
+            file("00003.m2ts", vec![(0x1200, pgs(5, 0, 1280, 1080))]),
+            file("00005.m2ts", vec![(0x1200, pgs(0, 0, 1280, 720))]),
+        ]);
+        super::sum_graphics_captions(&mut playlist, &measured);
 
-        // The summary view proves the merge: the PGS row carries the full
-        // pass's dimensions and caption count; the video row kept its quick
-        // detail (non-graphics sources are not re-merged).
-        let graphics = stream_summary(playlist.streams.get(&0x1200).unwrap());
-        assert_eq!(graphics.description, "1920x1080 / 837 Captions");
+        // 10 + 20 + 10 + 5 captions, 1 + 2 + 1 + 0 forced; the first non-zero
+        // width (the second clip's) and height (the angle clip's) stick.
+        let graphics = as_graphics(playlist.streams.get(&0x1200).unwrap()).unwrap();
+        assert_eq!((graphics.captions, graphics.forced_captions), (45, 4));
+        assert_eq!((graphics.width, graphics.height), (1920, 1080));
         let video = as_video(playlist.streams.get(&0x1011).unwrap()).unwrap();
-        assert!(video.encoding_profile.is_none(), "non-graphics sources are not re-merged");
+        assert!(video.encoding_profile.is_none(), "non-graphics streams are untouched");
+        assert!(as_audio(playlist.streams.get(&0x1100).unwrap()).is_some());
         assert!(!playlist.streams.contains_key(&0x1300));
     }
 
+    /// The audio stream inside `s`, or `None` for any other variant.
     fn as_audio(s: &TsStream) -> Option<&TsAudioStream> {
         if let TsStream::Audio(audio) = s { Some(audio) } else { None }
     }
@@ -3290,10 +3409,9 @@ mod tests {
 
     #[test]
     fn merge_stream_core_and_dialnorm_edge_cases() {
-        // dial-norm min keeps the already-lower clip value; an existing core stream is
-        // NOT overwritten by the source's (the `dst.core_stream.is_none()` guard). The
-        // two cores carry distinct channel counts so a `&&`→`||` mutant — which would
-        // overwrite — is caught: the merged core must stay the destination's.
+        // dial-norm min keeps the already-lower clip value; a scanned core stream
+        // replaces the destination's existing one (the two carry distinct channel
+        // counts, so a keep-first rule would leave 9).
         let mut dst = TsAudioStream::default();
         dst.base.stream_type = TsStreamType::Ac3TrueHdAudio;
         dst.dial_norm = -31; // already lower than the source's -27
@@ -3308,7 +3426,13 @@ mod tests {
         merge_stream(&mut audio, &TsStream::Audio(src));
         let merged = as_audio(&audio).unwrap();
         assert_eq!(merged.dial_norm, -31); // min(-31, -27)
-        assert_eq!(merged.core_stream.as_ref().unwrap().channel_count, 9); // kept dst's core
+        assert_eq!(merged.core_stream.as_ref().unwrap().channel_count, 5); // the source's core
+
+        // A source with no core leaves the destination's in place.
+        let mut no_core = TsAudioStream::default();
+        no_core.base.stream_type = TsStreamType::Ac3TrueHdAudio;
+        merge_stream(&mut audio, &TsStream::Audio(no_core));
+        assert_eq!(as_audio(&audio).unwrap().core_stream.as_ref().unwrap().channel_count, 5);
 
         // A source with no core, onto a destination with no core → still none.
         let mut dst = TsAudioStream::default();
@@ -3465,11 +3589,11 @@ mod tests {
         presented.base.stream_type = TsStreamType::PresentationGraphics;
         resolved.streams = BTreeMap::from([(0x1200_u16, TsStream::Graphics(presented))]);
 
-        let rows = build_sorted_streams(&clip, None, &resolved, 0, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 0, false);
         assert_eq!(rows.first().unwrap().description, "1920x1080 / 837 Captions");
 
         // An unresolved playlist keeps the quick detail: an empty description.
-        let rows = build_sorted_streams(&clip, None, &bare_playlist(), 0, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &bare_playlist(), 0, false);
         assert_eq!(rows.first().unwrap().description, "");
     }
 
@@ -3488,10 +3612,10 @@ mod tests {
         audio.base.set_language_code("eng");
         clip.insert(0x1100, TsStream::Audio(audio));
 
-        // No scan, no angles → one row per stream, ordered by PID. An
+        // No scan, no angles → one row per stream, video first. An
         // unresolved playlist leaves the measured rates at zero.
         let unresolved = bare_playlist();
-        let rows = build_sorted_streams(&clip, None, &unresolved, 0, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &unresolved, 0, false);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows.first().unwrap().pid, Pid::new(0x1011));
         assert_eq!(rows.first().unwrap().stream_type.name(), "AVC_VIDEO");
@@ -3500,9 +3624,9 @@ mod tests {
         assert_eq!(rows.get(1).unwrap().language_name, "English");
 
         // Two extra angles → the video PID appears three times (base + 2 clones),
-        // audio once → four rows, still PID-ordered with the clones grouped first.
+        // audio once → four rows, the clones right after their main video row.
         // The clones carry their 1-based angle index; main rows stay 0.
-        let rows = build_sorted_streams(&clip, None, &unresolved, 2, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &unresolved, 2, false);
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().take(3).all(|r| r.pid == Pid::new(0x1011)));
         assert_eq!(rows.get(3).unwrap().pid, Pid::new(0x1100));
@@ -3523,7 +3647,7 @@ mod tests {
         angle_video.base_mut().bit_rate = 26_120_000;
         angle_video.base_mut().active_bit_rate = 26_121_000;
         resolved.angle_streams = vec![angle];
-        let rows = build_sorted_streams(&clip, None, &resolved, 1, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 1, false);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows.first().unwrap().bitrate, 26_030_000);
         assert_eq!(rows.first().unwrap().active_bitrate, 26_031_000);
@@ -3534,7 +3658,7 @@ mod tests {
 
         // More angle clones than resolved angle maps → the surplus clone keeps
         // zero rates rather than borrowing another angle's.
-        let rows = build_sorted_streams(&clip, None, &resolved, 2, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 2, false);
         assert_eq!(rows.len(), 4);
         assert_eq!(rows.get(1).unwrap().bitrate, 26_120_000);
         assert_eq!(rows.get(2).unwrap().bitrate, 0);
@@ -3546,7 +3670,7 @@ mod tests {
         scanned_video.base.stream_type = TsStreamType::AvcVideo;
         scanned_video.encoding_profile = Some("High Profile 4.1".to_owned());
         scanned.insert(0x1011, TsStream::Video(scanned_video));
-        let rows = build_sorted_streams(&clip, Some(&scanned), &unresolved, 0, false);
+        let rows = build_sorted_streams(&declared(&clip), Some(&scanned), &unresolved, 0, false);
         assert!(rows.first().unwrap().description.contains("High Profile 4.1"));
 
         // A scanned stream whose PID is absent from the clip is ignored — neither
@@ -3556,7 +3680,10 @@ mod tests {
         orphan_audio.base.pid = Pid::new(0x9999);
         orphan_audio.base.stream_type = TsStreamType::Ac3Audio;
         orphan.insert(0x9999, TsStream::Audio(orphan_audio));
-        assert_eq!(build_sorted_streams(&clip, Some(&orphan), &unresolved, 0, false).len(), 2);
+        assert_eq!(
+            build_sorted_streams(&declared(&clip), Some(&orphan), &unresolved, 0, false).len(),
+            2
+        );
     }
 
     #[test]
@@ -3577,7 +3704,7 @@ mod tests {
         mvc.base.bit_rate = 7_579_000;
         resolved.streams.insert(MVC_PID, TsStream::Video(mvc));
 
-        let rows = build_sorted_streams(&clip, None, &resolved, 0, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 0, false);
         assert_eq!(rows.len(), 2);
         let row = rows.get(1).unwrap();
         assert_eq!(row.pid, Pid::new(MVC_PID));
@@ -3597,12 +3724,12 @@ mod tests {
 
         // A clip that declares the MVC PID itself yields a plain clip-stream
         // row — no SSIF presentation, and the hidden check applies as usual.
-        let mut declared = clip.clone();
+        let mut with_own = clip.clone();
         let mut own = TsVideoStream::default();
         own.base.pid = Pid::new(MVC_PID);
         own.base.stream_type = TsStreamType::MvcVideo;
-        declared.insert(MVC_PID, TsStream::Video(own));
-        let rows = build_sorted_streams(&declared, None, &resolved, 0, false);
+        with_own.insert(MVC_PID, TsStream::Video(own));
+        let rows = build_sorted_streams(&declared(&with_own), None, &resolved, 0, false);
         assert_eq!(rows.len(), 2);
         assert!(!rows.get(1).unwrap().ssif_only);
         assert!(rows.get(1).unwrap().is_hidden);
@@ -3647,7 +3774,7 @@ mod tests {
 
         // A 3D disc, base view left (`MVC_Base_view_R` clear): the AVC row is
         // the left eye, the MVC row the right — in both description forms.
-        let rows = build_sorted_streams(&clip, None, &playlist, 0, true);
+        let rows = build_sorted_streams(&declared(&clip), None, &playlist, 0, true);
         assert_eq!(
             video_descriptions(&rows),
             [
@@ -3662,7 +3789,7 @@ mod tests {
         // `MVC_Base_view_R` set: the eyes swap.
         let mut right_base = bare_playlist();
         right_base.mvc_base_view_r = true;
-        let rows = build_sorted_streams(&clip, None, &right_base, 0, true);
+        let rows = build_sorted_streams(&declared(&clip), None, &right_base, 0, true);
         assert_eq!(
             video_descriptions(&rows),
             [
@@ -3672,11 +3799,82 @@ mod tests {
         );
 
         // A 2D disc never labels, whatever the playlist presents.
-        let rows = build_sorted_streams(&clip, None, &playlist, 0, false);
+        let rows = build_sorted_streams(&declared(&clip), None, &playlist, 0, false);
         assert_eq!(
             video_descriptions(&rows),
             [("1080p".to_owned(), "1080p".to_owned()), (String::new(), String::new())]
         );
+    }
+
+    /// A clip-info stream of `stream_type` at `pid`: AVC/MVC build a video
+    /// stream, AC-3 an audio stream, PGS a graphics stream, anything else a
+    /// text stream.
+    fn declared_stream(pid: u16, stream_type: TsStreamType) -> TsStream {
+        let mut stream = match stream_type {
+            TsStreamType::AvcVideo | TsStreamType::MvcVideo => {
+                TsStream::Video(TsVideoStream::default())
+            }
+            TsStreamType::Ac3Audio => TsStream::Audio(TsAudioStream::default()),
+            TsStreamType::PresentationGraphics => TsStream::Graphics(TsGraphicsStream::default()),
+            _ => TsStream::Text(TsTextStream::default()),
+        };
+        stream.base_mut().pid = Pid::new(pid);
+        stream.base_mut().stream_type = stream_type;
+        stream
+    }
+
+    #[test]
+    fn build_sorted_streams_groups_kinds_in_declaration_order() {
+        // Declared out of PID order and with the kinds interleaved: the rows
+        // run video, audio, graphics, text, each kind in declaration order.
+        let clip = [
+            declared_stream(0x1101, TsStreamType::Ac3Audio),
+            declared_stream(0x1800, TsStreamType::Subtitle),
+            declared_stream(0x1B00, TsStreamType::AvcVideo),
+            declared_stream(0x1200, TsStreamType::PresentationGraphics),
+            declared_stream(0x1011, TsStreamType::AvcVideo),
+            declared_stream(0x1100, TsStreamType::Ac3Audio),
+        ];
+        let rows = build_sorted_streams(&clip, None, &bare_playlist(), 0, false);
+        let pids: Vec<u16> = rows.iter().map(|row| row.pid.get()).collect();
+        assert_eq!(pids, [0x1B00, 0x1011, 0x1101, 0x1100, 0x1200, 0x1800]);
+    }
+
+    #[test]
+    fn a_declared_pip_subtitle_row_is_not_hidden() {
+        use crate::bdrom::mpls::playlists::{build_item, build_mpls, pl_stream};
+
+        // One PG and one PiP-PG declaration; the clip also carries an
+        // undeclared PG stream, which alone is hidden.
+        let mut declarations = pl_stream(1, 0x1200, 0x90, [b'e', b'n', b'g', 0]);
+        declarations.extend(pl_stream(1, 0x1210, 0x90, [b'f', b'r', b'a', 0]));
+        let item =
+            build_item("00000", 2_700_000, 4_500_000, None, [0, 0, 1, 0, 0, 0, 1], &declarations);
+        let playlist = TsPlaylistFile::scan("p.mpls", &build_mpls(0, &[item], &[])).unwrap();
+        let clip = [0x1200, 0x1210, 0x1220]
+            .map(|pid| declared_stream(pid, TsStreamType::PresentationGraphics));
+        let rows = build_sorted_streams(&clip, None, &playlist, 0, false);
+        let hidden: Vec<(u16, bool)> =
+            rows.iter().map(|row| (row.pid.get(), row.is_hidden)).collect();
+        assert_eq!(hidden, [(0x1200, false), (0x1210, false), (0x1220, true)]);
+    }
+
+    #[test]
+    fn the_interleaved_dependent_view_row_follows_every_declared_video_row() {
+        // A 3D clip with an in-mux picture-in-picture video above the MVC PID:
+        // the dependent view comes after it, not at its PID position.
+        let clip = [
+            declared_stream(0x1011, TsStreamType::AvcVideo),
+            declared_stream(0x1B00, TsStreamType::AvcVideo),
+            declared_stream(0x1100, TsStreamType::Ac3Audio),
+        ];
+        let mut resolved = bare_playlist();
+        resolved.streams =
+            BTreeMap::from([(MVC_PID, declared_stream(MVC_PID, TsStreamType::MvcVideo))]);
+        let rows = build_sorted_streams(&clip, None, &resolved, 0, true);
+        let pids: Vec<(u16, bool)> =
+            rows.iter().map(|row| (row.pid.get(), row.ssif_only)).collect();
+        assert_eq!(pids, [(0x1011, false), (0x1B00, false), (MVC_PID, true), (0x1100, false)]);
     }
 
     #[test]
@@ -3684,12 +3882,12 @@ mod tests {
         // One video stream on a 3D disc: nothing to tell apart, no label.
         let mut single = stereo_clip();
         single.remove(&0x1012);
-        let rows = build_sorted_streams(&single, None, &bare_playlist(), 0, true);
+        let rows = build_sorted_streams(&declared(&single), None, &bare_playlist(), 0, true);
         assert_eq!(video_descriptions(&rows), [("1080p".to_owned(), "1080p".to_owned())]);
 
         // Two video streams and one extra angle: the main rows are labelled,
         // their angle clones are not.
-        let rows = build_sorted_streams(&stereo_clip(), None, &bare_playlist(), 1, true);
+        let rows = build_sorted_streams(&declared(&stereo_clip()), None, &bare_playlist(), 1, true);
         let labelled: Vec<(usize, String)> = rows
             .iter()
             .filter(|row| {
@@ -3709,21 +3907,23 @@ mod tests {
     }
 
     #[test]
-    fn label_eyes_marks_any_other_video_codec_as_the_left_eye() {
-        // BDInfo's `default` arm: a video stream that is neither AVC nor MVC,
-        // presented beside another video stream on a 3D disc, is `Left Eye`.
-        let mut streams = stereo_clip();
-        streams.remove(&0x1012);
-        let mut vc1 = TsVideoStream::default();
-        vc1.base.pid = Pid::new(0x1013);
-        vc1.base.stream_type = TsStreamType::Vc1Video;
-        streams.insert(0x1013, TsStream::Video(vc1));
-        super::label_eyes(&mut streams, true);
-        let views: Vec<Option<bool>> =
-            streams.values().map(|stream| stream.base().base_view).collect();
-        // AVC with the flag set is the right eye; the VC-1 is the left; the
-        // audio stays unlabelled.
-        assert_eq!(views, [Some(true), Some(false), None]);
+    fn label_eyes_leaves_any_other_video_codec_unlabelled() {
+        // A video stream that is neither AVC nor MVC, presented beside another
+        // video stream on a 3D disc, gets no eye label (`BDInfo` 0.7.5.6).
+        for other in [TsStreamType::HevcVideo, TsStreamType::Mpeg2Video] {
+            let mut streams = stereo_clip();
+            streams.remove(&0x1012);
+            let mut video = TsVideoStream::default();
+            video.base.pid = Pid::new(0x1013);
+            video.base.stream_type = other;
+            streams.insert(0x1013, TsStream::Video(video));
+            super::label_eyes(&mut streams, true);
+            let views: Vec<Option<bool>> =
+                streams.values().map(|stream| stream.base().base_view).collect();
+            // AVC with the flag set is the right eye; the other codec and the
+            // audio stay unlabelled.
+            assert_eq!(views, [Some(true), None, None], "{other:?}");
+        }
     }
 
     // ── orchestration: a full disc with every flag set ──────────────────────
@@ -3740,7 +3940,7 @@ mod tests {
         resolved.streams = clip.clone();
         resolved.streams.insert(MVC_PID, mvc);
 
-        let rows = build_sorted_streams(&clip, None, &resolved, 0, true);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 0, true);
         assert_eq!(
             video_descriptions(&rows),
             [
@@ -3752,7 +3952,7 @@ mod tests {
         // Without the interleaved view the base view is the only video stream:
         // unlabelled.
         resolved.streams.remove(&MVC_PID);
-        let rows = build_sorted_streams(&clip, None, &resolved, 0, true);
+        let rows = build_sorted_streams(&declared(&clip), None, &resolved, 0, true);
         assert_eq!(video_descriptions(&rows), [("1080p".to_owned(), "1080p".to_owned())]);
     }
 
@@ -3797,7 +3997,9 @@ mod tests {
         assert_eq!(bd.disc_title.as_deref(), Some("Movie"));
         assert_eq!(bd.size, expected_size); // the 500-byte .ssif is excluded
         assert_eq!(bd.interleaved_size, 500);
-        assert_eq!(bd.full_size(), expected_size.checked_add(500).unwrap());
+        #[expect(deprecated, reason = "the deprecated total stays pinned until it is removed")]
+        let full_size = bd.full_size();
+        assert_eq!(full_size, expected_size.checked_add(500).unwrap());
         assert!(bd.is_uhd);
         assert!(bd.is_3d);
         assert!(bd.is_bd_plus);
@@ -3832,6 +4034,9 @@ mod tests {
         let clip0 = pl.clips.first().unwrap();
         assert_eq!(clip0.file_size, 1000);
         assert_eq!(clip0.interleaved_file_size, 500);
+        // Unmeasured (no packet scan), the clip is still named by its `*.ssif`.
+        assert!(!clip0.measured);
+        assert_eq!(clip0.display_name, "00000.SSIF");
         assert_eq!(pl.chapter_count, 1);
         assert_eq!(pl.stream_count, 4);
         // The scan-free open leaves the presented streams unfilled by codec detail
@@ -3839,7 +4044,7 @@ mod tests {
         assert_eq!(pl.streams.len(), 4);
 
         // The packet scan reads the (synthetic, codec-less) `*.m2ts`: the streams are
-        // still the four clip-info entries (no codec detail to merge), in PID order.
+        // still the four clip-info entries (no codec detail to merge), one per kind.
         let scanned = disc.open_scanned().expect("packet-scan the disc");
         let pl = scanned.playlists.first().unwrap();
         assert_eq!(pl.stream_count, 4);
@@ -4370,25 +4575,33 @@ mod tests {
     }
 
     #[test]
-    fn chapter_summaries_walk_the_first_video_pid_diagnostics() {
+    fn chapter_summaries_walk_the_first_video_row_diagnostics() {
         use crate::bdrom::m2ts::TsStreamDiagnostics;
 
-        // An audio stream below the video PID proves the diagnostics PID is the
-        // first *video* stream, not merely the first stream.
+        // A leading audio row proves the diagnostics PID is the first *video*
+        // row, not merely the first row; the second video row's lower PID
+        // proves it is the first in row order, not the lowest PID.
+        let row = |pid: u16, stream: TsStream| {
+            let mut stream = stream;
+            stream.base_mut().pid = Pid::new(pid);
+            stream_summary(&stream)
+        };
         let mut audio = TsAudioStream::default();
         audio.base.stream_type = TsStreamType::Ac3Audio;
         let mut video = TsVideoStream::default();
         video.base.stream_type = TsStreamType::AvcVideo;
-        let mut playlist = TsPlaylistFile {
+        let mut rows = vec![
+            row(0x1010, TsStream::Audio(audio)),
+            row(0x1B00, TsStream::Video(video.clone())),
+            row(0x1011, TsStream::Video(video)),
+        ];
+        let playlist = TsPlaylistFile {
             file_type: "MPLS0200".to_owned(),
             name: "00000.MPLS".to_owned(),
             mvc_base_view_r: false,
             chapters: vec![0.0],
             playlist_streams: BTreeMap::new(),
-            streams: BTreeMap::from([
-                (0x1010, TsStream::Audio(audio)),
-                (0x1011, TsStream::Video(video)),
-            ]),
+            streams: BTreeMap::new(),
             angle_streams: Vec::new(),
             stream_clips: vec![
                 TsStreamClip { name: "00000.M2TS".to_owned(), ..TsStreamClip::default() },
@@ -4398,8 +4611,16 @@ mod tests {
             angle_count: 0,
         };
         let mut file = TsStreamFile::new("00000.m2ts");
+        let lower_pid = TsStreamDiagnostics {
+            bytes: 9999,
+            packets: 1,
+            marker: 1.0,
+            interval: 1.0,
+            tag: Some("I".to_owned()),
+        };
+        file.stream_diagnostics.insert(0x1011, vec![lower_pid]);
         file.stream_diagnostics.insert(
-            0x1011,
+            0x1B00,
             vec![
                 TsStreamDiagnostics {
                     bytes: 1000,
@@ -4419,20 +4640,20 @@ mod tests {
         );
         let measured = BTreeMap::from([("00000.M2TS".to_owned(), file)]);
 
-        let rows = build_chapter_summaries(&playlist, &measured, 4.0);
-        assert_eq!(rows.len(), 1);
-        let row = rows.first().unwrap();
-        assert_eq!(row.length.to_bits(), 4.0_f64.to_bits());
-        assert_eq!(row.avg_rate.to_bits(), 4000.0_f64.to_bits()); // 2000 B × 8 / 4 s
-        assert_eq!(row.avg_frame_size.to_bits(), 2000.0_f64.to_bits()); // one tagged frame
+        let chapters = build_chapter_summaries(&playlist, &rows, &measured, 4.0);
+        assert_eq!(chapters.len(), 1);
+        let chapter = chapters.first().unwrap();
+        assert_eq!(chapter.length.to_bits(), 4.0_f64.to_bits());
+        assert_eq!(chapter.avg_rate.to_bits(), 4000.0_f64.to_bits()); // 2000 B × 8 / 4 s
+        assert_eq!(chapter.avg_frame_size.to_bits(), 2000.0_f64.to_bits()); // one tagged frame
 
-        // Without a presented video stream there is no diagnostics PID: the
-        // rows keep their times but measure nothing.
-        playlist.streams.remove(&0x1011);
-        let rows = build_chapter_summaries(&playlist, &measured, 4.0);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(rows.first().unwrap().length.to_bits(), 4.0_f64.to_bits());
+        // Without a video row there is no diagnostics PID: the chapters keep
+        // their times but measure nothing.
+        rows.truncate(1);
+        let chapters = build_chapter_summaries(&playlist, &rows, &measured, 4.0);
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters.first().unwrap().avg_rate.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(chapters.first().unwrap().length.to_bits(), 4.0_f64.to_bits());
     }
 
     #[test]
@@ -4597,7 +4818,7 @@ mod tests {
         file.streams.insert(0x1011, TsStream::Video(scanned_video));
 
         let metas = [ClipMeta {
-            clip_streams: &clip_streams,
+            clip_streams: &declared(&clip_streams),
             scanned: Some(&file),
             has_50hz_video: false,
             relative_length: 1.0,
@@ -4659,7 +4880,7 @@ mod tests {
 
         let mut playlist = playlist_with_clips(0, Vec::new());
         let metas = [ClipMeta {
-            clip_streams: &clip_streams,
+            clip_streams: &declared(&clip_streams),
             scanned: Some(&file),
             has_50hz_video: false,
             relative_length: 1.0,
@@ -4676,7 +4897,7 @@ mod tests {
         plain.streams.insert(MVC_PID, mvc(MVC_PID));
         let mut playlist = playlist_with_clips(0, Vec::new());
         let metas = [ClipMeta {
-            clip_streams: &clip_streams,
+            clip_streams: &declared(&clip_streams),
             scanned: Some(&plain),
             has_50hz_video: false,
             relative_length: 1.0,
@@ -4688,16 +4909,16 @@ mod tests {
         assert!(!playlist.streams.contains_key(&MVC_PID));
 
         // A clip-info-declared stream on the MVC PID is not overwritten.
-        let mut declared = clip_streams.clone();
+        let mut with_own = clip_streams.clone();
         let mut own = TsAudioStream::default();
         own.base.pid = Pid::new(MVC_PID);
         own.base.stream_type = TsStreamType::Ac3Audio;
-        declared.insert(MVC_PID, TsStream::Audio(own));
+        with_own.insert(MVC_PID, TsStream::Audio(own));
         let mut file = TsStreamFile::new("00000.m2ts");
         file.interleaved_file = Some(interleaved());
         file.streams.insert(MVC_PID, mvc(MVC_PID));
         let metas = [ClipMeta {
-            clip_streams: &declared,
+            clip_streams: &declared(&with_own),
             scanned: Some(&file),
             has_50hz_video: false,
             relative_length: 1.0,
@@ -5499,7 +5720,7 @@ mod tests {
             playlist.angle_streams = vec![BTreeMap::from([(MVC_PID, mvc())])];
             playlist
         };
-        let empty = BTreeMap::new();
+        let empty: Vec<TsStream> = Vec::new();
         let meta = |clip_streams, scanned| ClipMeta {
             clip_streams,
             scanned,
@@ -5514,7 +5735,7 @@ mod tests {
         // from the main map and every angle map.
         let unconfirmed = TsStreamFile::new("00000.m2ts");
         let mut playlist = placeholder_playlist();
-        remove_mvc_placeholder(&mut playlist, &meta(&empty, Some(&unconfirmed)));
+        remove_mvc_placeholder(&mut playlist, &meta(empty.as_slice(), Some(&unconfirmed)));
         assert!(playlist.streams.is_empty());
         assert!(playlist.angle_streams.iter().all(BTreeMap::is_empty));
 
@@ -5522,20 +5743,20 @@ mod tests {
         let mut confirmed = TsStreamFile::new("00000.m2ts");
         confirmed.streams.insert(MVC_PID, mvc());
         let mut playlist = placeholder_playlist();
-        remove_mvc_placeholder(&mut playlist, &meta(&empty, Some(&confirmed)));
+        remove_mvc_placeholder(&mut playlist, &meta(empty.as_slice(), Some(&confirmed)));
         assert!(playlist.streams.contains_key(&MVC_PID));
 
         // No measured file to consult (a dropped partial): the entry stays —
         // the interleaved file's existence remains the best evidence.
         let mut playlist = placeholder_playlist();
-        remove_mvc_placeholder(&mut playlist, &meta(&empty, None));
+        remove_mvc_placeholder(&mut playlist, &meta(empty.as_slice(), None));
         assert!(playlist.streams.contains_key(&MVC_PID));
 
         // A clip-info-declared MVC PID is not a placeholder and stays even
         // when the measured file carries none.
-        let declared = BTreeMap::from([(MVC_PID, mvc())]);
+        let own = vec![mvc()];
         let mut playlist = placeholder_playlist();
-        remove_mvc_placeholder(&mut playlist, &meta(&declared, Some(&unconfirmed)));
+        remove_mvc_placeholder(&mut playlist, &meta(own.as_slice(), Some(&unconfirmed)));
         assert!(playlist.streams.contains_key(&MVC_PID));
     }
 
@@ -5546,6 +5767,7 @@ mod tests {
         video.base.pid = Pid::new(0x1011);
         video.base.stream_type = TsStreamType::AvcVideo;
         clip_streams.insert(0x1011, TsStream::Video(video));
+        let clip_streams = declared(&clip_streams);
         let meta = |interleaved: bool| ClipMeta {
             clip_streams: &clip_streams,
             scanned: None,

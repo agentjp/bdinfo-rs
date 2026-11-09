@@ -4,11 +4,11 @@
 //! elementary streams (PID + `stream_coding_type` + per-type coding info) per
 //! program sequence. The parser locates that block via the header's
 //! `ProgramInfo_start_address` (offset 12), then walks every program sequence's
-//! stream entries into [`crate::stream::TsStream`]s. Pressed BD-ROM clips carry
-//! exactly one program sequence; recorder-authored clips can carry several, and
-//! their streams merge into the one PID-keyed map (a PID redeclared by a later
-//! sequence overwrites the earlier entry — the report models a clip as one
-//! stream set per PID).
+//! stream entries into [`crate::stream::TsStream`]s, kept in declaration order.
+//! Pressed BD-ROM clips carry exactly one program sequence; recorder-authored
+//! clips can carry several, and their streams merge into the one list (a PID
+//! redeclared by a later sequence replaces the earlier entry in its original
+//! position — the report models a clip as one stream set per PID).
 //!
 //! Every file byte is read through the bounds-checked [`super`] helpers, so a
 //! short or truncated file surfaces as [`BdError`] rather than a panic (disc
@@ -65,6 +65,7 @@ pub struct TsStreamClip {
 
 /// A parsed clip-information file.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TsStreamClipFile {
     /// The 8-byte type magic, e.g. `"HDMV0300"`.
     pub file_type: String,
@@ -73,8 +74,10 @@ pub struct TsStreamClipFile {
     pub is_valid: bool,
     /// The upper-cased file name, e.g. `"00000.CLPI"`.
     pub name: String,
-    /// The clip's elementary streams, keyed by PID.
-    pub streams: BTreeMap<u16, TsStream>,
+    /// The clip's elementary streams in the order the file declares them, one
+    /// entry per PID. A playlist presents its rows in this order within each
+    /// stream kind, as `BDInfo` does under its default `KeepStreamOrder`.
+    pub streams: Vec<TsStream>,
 }
 
 impl TsStreamClipFile {
@@ -101,10 +104,14 @@ impl TsStreamClipFile {
         // program-sequence count; each program carries an 8-byte header
         // (`spn_program_sequence_start` + `program_map_pid` + the stream
         // count + `num_groups`) followed by its stream entries. Streams from
-        // every program sequence merge into the one PID-keyed map; a PID
-        // redeclared by a later sequence overwrites the earlier entry.
+        // every program sequence merge into one list; a PID redeclared by a
+        // later sequence replaces the earlier entry but keeps its position (the
+        // overwrite-in-place of the .NET `Dictionary` indexer `BDInfo` stores
+        // its clip streams in). `declared` maps each PID to its declaration
+        // slot and stream, so hostile input with thousands of entries resolves
+        // a redeclaration by lookup, not by a linear search.
         let num_prog = byte(clip_data, 1)?;
-        let mut streams = BTreeMap::new();
+        let mut declared: BTreeMap<u16, (usize, TsStream)> = BTreeMap::new();
         let mut prog_offset: usize = 2;
         for _ in 0..num_prog {
             let stream_count = byte(clip_data, prog_offset.saturating_add(6))?;
@@ -124,7 +131,10 @@ impl TsStreamClipFile {
                 if let Some(mut stream) = build_clip_stream(clip_data, info, stream_type)? {
                     stream.base_mut().pid = Pid::new(pid);
                     stream.base_mut().stream_type = stream_type;
-                    streams.insert(pid, stream);
+                    // A new PID takes the next slot: `len()` counts the
+                    // distinct PIDs declared so far.
+                    let slot = declared.get(&pid).map_or(declared.len(), |(slot, _)| *slot);
+                    declared.insert(pid, (slot, stream));
                 }
 
                 // The next entry starts after the length byte plus its `len`
@@ -136,6 +146,9 @@ impl TsStreamClipFile {
             prog_offset = stream_offset;
         }
 
+        let mut slotted: Vec<(usize, TsStream)> = declared.into_values().collect();
+        slotted.sort_unstable_by_key(|(slot, _)| *slot);
+        let streams = slotted.into_iter().map(|(_, stream)| stream).collect();
         Ok(Self { file_type, is_valid: true, name: name.to_ascii_uppercase(), streams })
     }
 }
@@ -211,8 +224,6 @@ pub mod clips {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use proptest::prelude::{any, proptest};
 
     use super::clips::{build_clpi, entry_bytes, program_header};
@@ -242,8 +253,8 @@ mod tests {
         assert_eq!(file.name, "00000.CLPI"); // upper-cased
 
         // Build the exact streams expected from the bytes above and compare the
-        // whole map — MVC + the unknown type produce nothing, so neither appears.
-        let mut expected: BTreeMap<u16, TsStream> = BTreeMap::new();
+        // whole list — MVC + the unknown type produce nothing, so neither appears.
+        let mut expected: Vec<TsStream> = Vec::new();
 
         let mut video = TsVideoStream::default();
         video.set_video_format(TsVideoFormat::Videoformat1080p); // 0x62 >> 4 == 6
@@ -251,7 +262,7 @@ mod tests {
         video.aspect_ratio = TsAspectRatio::Aspect16_9; // 0x30 >> 4 == 3
         video.base.pid = Pid::new(0x1011);
         video.base.stream_type = TsStreamType::AvcVideo;
-        expected.insert(0x1011, TsStream::Video(video));
+        expected.push(TsStream::Video(video));
 
         let mut audio = TsAudioStream {
             channel_layout: TsChannelLayout::ChannellayoutMulti, // 0x61 >> 4 == 6
@@ -261,19 +272,19 @@ mod tests {
         audio.base.set_language_code("deu");
         audio.base.pid = Pid::new(0x1100);
         audio.base.stream_type = TsStreamType::DtsHdMasterAudio;
-        expected.insert(0x1100, TsStream::Audio(audio));
+        expected.push(TsStream::Audio(audio));
 
         let mut graphics = TsGraphicsStream::default();
         graphics.base.set_language_code("eng");
         graphics.base.pid = Pid::new(0x1200);
         graphics.base.stream_type = TsStreamType::PresentationGraphics;
-        expected.insert(0x1200, TsStream::Graphics(graphics));
+        expected.push(TsStream::Graphics(graphics));
 
         let mut text = TsTextStream::default();
         text.base.set_language_code("fra");
         text.base.pid = Pid::new(0x1A00);
         text.base.stream_type = TsStreamType::Subtitle;
-        expected.insert(0x1A00, TsStream::Text(text));
+        expected.push(TsStream::Text(text));
 
         assert_eq!(file.streams, expected);
     }
@@ -297,29 +308,49 @@ mod tests {
         clip_data.extend(program_header(1));
         clip_data.extend(entry_bytes(0x1100, 0x86, [0x61, b'd', b'e', b'u']));
         let file = TsStreamClipFile::scan("p.clpi", &wrap_clip_data(&clip_data)).unwrap();
-        let pids: Vec<u16> = file.streams.keys().copied().collect();
-        assert_eq!(pids, vec![0x1011, 0x1100]);
         assert_eq!(
-            file.streams.get(&0x1100).map(TsStream::stream_type),
-            Some(TsStreamType::DtsHdMasterAudio)
+            declared(&file),
+            [(0x1011, TsStreamType::AvcVideo), (0x1100, TsStreamType::DtsHdMasterAudio)]
         );
     }
 
     #[test]
-    fn a_pid_redeclared_by_a_later_program_overwrites_the_earlier_entry() {
+    fn scan_keeps_the_declaration_order_whatever_the_pids() {
+        // Same-kind streams declared out of PID order stay in file order.
+        let buf = build_clpi(
+            *b"HDMV0300",
+            &[
+                (0x1101, 0x81, [0x61, b'e', b'n', b'g']),
+                (0x1011, 0x1B, [0x62, 0x30, 0, 0]),
+                (0x1100, 0x81, [0x61, b'd', b'e', b'u']),
+            ],
+        );
+        let file = TsStreamClipFile::scan("p.clpi", &buf).unwrap();
+        let pids: Vec<u16> = file.streams.iter().map(|stream| stream.pid().get()).collect();
+        assert_eq!(pids, [0x1101, 0x1011, 0x1100]);
+    }
+
+    #[test]
+    fn a_pid_redeclared_by_a_later_program_replaces_the_entry_in_place() {
         // The same PID in two program sequences with different coding: the
-        // later sequence's declaration wins (the documented merge rule).
+        // later sequence's declaration wins and keeps the first one's slot,
+        // ahead of a PID declared between the two.
         let mut clip_data = vec![0_u8, 2];
-        clip_data.extend(program_header(1));
+        clip_data.extend(program_header(2));
         clip_data.extend(entry_bytes(0x1011, 0x1B, [0x62, 0x30, 0, 0])); // AVC
+        clip_data.extend(entry_bytes(0x1100, 0x81, [0x61, b'e', b'n', b'g']));
         clip_data.extend(program_header(1));
         clip_data.extend(entry_bytes(0x1011, 0x24, [0x62, 0x30, 0, 0])); // HEVC
         let file = TsStreamClipFile::scan("p.clpi", &wrap_clip_data(&clip_data)).unwrap();
-        assert_eq!(file.streams.len(), 1);
         assert_eq!(
-            file.streams.get(&0x1011).map(TsStream::stream_type),
-            Some(TsStreamType::HevcVideo)
+            declared(&file),
+            [(0x1011, TsStreamType::HevcVideo), (0x1100, TsStreamType::Ac3Audio)]
         );
+    }
+
+    /// `file`'s streams as `(PID, stream type)` pairs, in list order.
+    fn declared(file: &TsStreamClipFile) -> Vec<(u16, TsStreamType)> {
+        file.streams.iter().map(|stream| (stream.pid().get(), stream.stream_type())).collect()
     }
 
     #[test]
@@ -334,7 +365,7 @@ mod tests {
         clip_data.push(0);
         clip_data.extend(entry_bytes(0x1011, 0x1B, [0x62, 0x30, 0, 0]));
         let file = TsStreamClipFile::scan("p.clpi", &wrap_clip_data(&clip_data)).unwrap();
-        assert!(file.streams.is_empty());
+        assert_eq!(file.streams, []);
     }
 
     #[test]
@@ -483,9 +514,7 @@ mod tests {
         ) {
             let buf = build_clpi(*b"HDMV0300", &[(pid, 0x1B, [format, aspect, 0, 0])]);
             let file = TsStreamClipFile::scan("p.clpi", &buf).unwrap();
-            let stream = file.streams.get(&pid).unwrap();
-            assert_eq!(stream.pid(), Pid::new(pid));
-            assert_eq!(stream.stream_type(), TsStreamType::AvcVideo);
+            assert_eq!(declared(&file), [(pid, TsStreamType::AvcVideo)]);
         }
     }
 }
