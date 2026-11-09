@@ -47,14 +47,12 @@ pub fn ac3_chan_map(chan_map: u32) -> u8 {
     channels
 }
 
-/// Truncates a `f64` bit-rate toward zero into an `i64`.
-///
-/// Saturating on the unreachable non-finite case (e.g. a malformed zero
-/// block-count divisor).
+/// Truncates a `f64` bit-rate toward zero into an `i64`, saturating out of
+/// range (the only caller's divisor is never zero, so its quotient is finite).
 #[expect(
     clippy::cast_possible_truncation,
     clippy::as_conversions,
-    reason = "deliberate truncate-toward-zero float→int; E-AC-3 bit rates fit i64, saturating on the non-finite case (TryFrom inapplicable)"
+    reason = "deliberate truncate-toward-zero float→int; E-AC-3 bit rates fit i64 (TryFrom inapplicable to floats)"
 )]
 const fn to_i64_trunc(x: f64) -> i64 {
     x as i64
@@ -169,9 +167,11 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
         if sr_code == 3 {
             // fscod == 3: the 2-bit `fscod2` field selects a reduced sample rate
             // that is exactly half the matching `fscod` rate, and `numblkscod` is
-            // absent — a reduced-rate frame always carries 6 audio blocks.
+            // absent — a reduced-rate frame always carries 6 audio blocks, which
+            // is block code 3 (`num_blocks` holds the code, not the count; see
+            // the bit-rate formula below).
             sr_code = u32::from(buffer.read_bits2(2, false));
-            num_blocks = 6;
+            num_blocks = 3;
             half_rate = true;
         } else {
             num_blocks = u32::from(buffer.read_bits2(2, false));
@@ -300,7 +300,8 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
     if half_rate {
         // Reduced-rate E-AC-3 (`fscod2`): the decoded rate is half the table value
         // (24 / 22.05 / 16 kHz), which also feeds the derived bit-rate below.
-        // Classic BDInfo does not halve it — a deliberate divergence that cannot
+        // Classic BDInfo does not halve it, so its bit rate is twice the
+        // ETSI TS 102 366 / FFmpeg value — a deliberate divergence that cannot
         // change a disc report, since Blu-ray E-AC-3 is always 48 kHz. See
         // DIFFERENCES.md "Correctness fixes with no effect on a normal disc".
         stream.sample_rate = stream.sample_rate.wrapping_div(2);
@@ -322,7 +323,18 @@ pub fn scan(stream: &mut TsAudioStream, buffer: &mut TsStreamBuffer, tag: &mut O
         if let Some(&br) = AC3_BITRATE.get(idx) {
             stream.base.bit_rate = i64::from(br.wrapping_mul(1000)).wrapping_shr(sr_shift);
         }
+    } else if num_blocks == 0 {
+        // Block code 0 (one block per frame) makes `BDInfo`'s divisor zero; its
+        // `(long)` of the infinite quotient is negative even after the core rate
+        // is added, so the `BitRate > 0` test drops the kbps token. A zero rate
+        // with no core added omits the token the same way.
+        stream.base.bit_rate = 0;
     } else {
+        // `BDInfo`'s formula, with `num_blocks` the 2-bit block code: the `4.0` is
+        // 8 bits / 2, so code 3 gives the spec's `8 * frame_size * rate / (6 *
+        // 256)` and code 1 its 2-block value. Code 2 (3 blocks) divides as if 4
+        // blocks, 3/4 of the spec value — kept for `BDInfo` parity; Blu-ray
+        // E-AC-3 frames carry 6 blocks.
         stream.base.bit_rate = to_i64_trunc(
             4.0 * f64::from(frame_size) * f64::from(stream.sample_rate)
                 / f64::from(num_blocks.wrapping_mul(256)),
@@ -791,7 +803,8 @@ mod tests {
     #[test]
     fn eac3_sr_code_3_halves_rate_and_uses_six_blocks() {
         // sr_code 3 → read the fscod2 field (here 1 = 44.1 kHz table value) and,
-        // per the reduced-rate spec, report half of it with the fixed 6 blocks.
+        // per the reduced-rate spec, report half of it with the fixed 6 blocks
+        // (block code 3).
         let mut f: Vec<(u64, u32)> = vec![
             (0x0B77, 16),
             (0, 2), // frame_type
@@ -808,8 +821,9 @@ mod tests {
         f.push((0, 256));
         let s = run(TsStreamType::Ac3PlusAudio, &f);
         assert_eq!(s.sample_rate, 22_050);
-        // num_blocks = 6 → trunc(4*2*22050/(6*256)) = trunc(114.84) = 114.
-        assert_eq!(s.base.bit_rate, 114);
+        // trunc(4*2*22050/(3*256)) = trunc(229.69) = 229, FFmpeg's
+        // 8*2*22050/(6*256).
+        assert_eq!(s.base.bit_rate, 229);
     }
 
     #[test]
@@ -831,8 +845,30 @@ mod tests {
         f.push((0, 256));
         let s = run(TsStreamType::Ac3PlusAudio, &f);
         assert_eq!(s.sample_rate, 24_000);
-        // num_blocks = 6 → trunc(4*2*24000/(6*256)) = trunc(125.0) = 125.
-        assert_eq!(s.base.bit_rate, 125);
+        // trunc(4*2*24000/(3*256)) = 250.
+        assert_eq!(s.base.bit_rate, 250);
+    }
+
+    #[test]
+    fn eac3_block_code_zero_leaves_no_bit_rate() {
+        // numblkscod 0 (one block per frame): BDInfo divides by zero and drops the
+        // kbps token, so the bit rate is 0 — with no core, and with a core whose
+        // rate is not added.
+        let mut f = eac3_prefix(0, 0, 0, 0, 2, 0);
+        f.push((0, 256));
+        let s = run(TsStreamType::Ac3PlusAudio, &f);
+        assert_eq!(s.base.bit_rate, 0);
+        assert!(s.base.is_initialized);
+        assert!(!s.description().contains("kbps"), "{}", s.description());
+
+        let mut cored = stream(TsStreamType::Ac3PlusAudio);
+        cored.base.bit_rate = 5000; // the dependent-frame clone copies this as the core rate
+        let mut f = eac3_prefix(1, 0, 0, 0, 2, 0);
+        f.push((0, 256));
+        let mut b = buf(&pack(&f));
+        scan(&mut cored, &mut b, &mut None);
+        assert!(cored.core_stream.is_some());
+        assert_eq!(cored.base.bit_rate, 0);
     }
 
     #[test]

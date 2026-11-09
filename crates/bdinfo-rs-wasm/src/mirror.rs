@@ -319,7 +319,9 @@ pub struct Playlist {
     /// The threshold behind `short` defaults to 20 seconds, and
     /// `shortPlaylistSeconds` on the scanning calls is what moves it.
     pub hidden_by: Vec<HiddenRule>,
-    /// The presented streams, sorted by PID.
+    /// The presented streams in the report's row order: video, audio,
+    /// graphics, text, each kind in the clip-info declaration order (see
+    /// `PlaylistSummary::streams` in `bdinfo-rs-core`).
     pub streams: Vec<Stream>,
     /// The sequenced clips in playlist order, angle clips included.
     pub clips: Vec<Clip>,
