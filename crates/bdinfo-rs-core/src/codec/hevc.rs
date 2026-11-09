@@ -2347,6 +2347,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bt2020_matrix_without_pq_transfer_gets_no_hdr_label() {
+        // The matrix term is the HDR gate's last; a failing earlier term (here the
+        // BT.709 transfer) must still block the label despite a mastering display.
+        let cfg = SpsConfig {
+            vui: VuiConfig { transfer_characteristics: 1, ..VuiConfig::default() },
+            ..SpsConfig::default()
+        };
+        let (s, _) = run(
+            4113,
+            &[
+                vps(0),
+                sps(&cfg),
+                pps(0, 0, false, 0),
+                sei_nal(&[sei_message(137, &mastering_payload(DISPLAY_P3_COORDS, 10_000_000, 1))]),
+                slice(19, 0, 2),
+            ],
+        );
+        let desc = s.description();
+        assert!(desc.contains("10 bits / Limited Range / BT.2020 / BT.709 / "), "{desc}");
+    }
+
+    #[test]
     fn no_vui_present_still_initializes() {
         // vui_parameters_present_flag = 0 → VUI defaults (unspecified colour), so no
         // range/colour fragments, but the SPS still registers.
