@@ -189,11 +189,13 @@ impl TsPlaylistFile {
                 pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             // PiP-PG entries sit in-line in the PG section, before the IG
-            // entries; they are consumed to keep the walk aligned but not
-            // modelled.
+            // entries (libbluray `_parse_stream_table`), and register like
+            // every other declared stream, so a PiP subtitle is not hidden.
+            // `BDInfo` never reads this section and parses its IG loop from
+            // the PiP-PG entries instead; see `DIFFERENCES.md`, "Secondary and
+            // picture-in-picture stream declarations".
             for _ in 0..count_pip {
-                let (_, next) = create_playlist_stream(data, pos)?;
-                pos = next;
+                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
             }
             for _ in 0..count_interactive {
                 pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
@@ -218,7 +220,7 @@ impl TsPlaylistFile {
         // relative_length is each clip's share of the finished playlist, so it
         // and the duplicate-PID rule it gates resolve only now that every play
         // item's length is summed. Classic BDInfo divides by the running total
-        // before the clip is appended (`TSPlaylistFile.LoadPlaylist`), so its
+        // before the clip is appended (`TSPlaylistFile.Scan`), so its
         // first clip divides by zero into `+Infinity` and always overwrites —
         // see DIFFERENCES.md. Angle clips keep the default `0.0`, as in
         // classic. An unseen PID is always inserted; a duplicate overwrites
@@ -802,15 +804,16 @@ mod tests {
     }
 
     #[test]
-    fn pip_pg_entries_are_consumed_inside_the_pg_section() {
-        // The PiP-PG entry must be consumed (else the IG loop parses the PiP
-        // entry instead) but is not modelled, so the PiP PID never appears in
-        // the playlist streams.
+    fn pip_pg_entries_register_inside_the_pg_section() {
+        // The PiP-PG entry is read in the PG section (else the IG loop parses
+        // the PiP entry instead) and registers its PID, so the clip's PiP
+        // subtitle stream is a declared, unhidden one.
         let file = TsPlaylistFile::scan("p.mpls", &pip_pg_mpls()).unwrap();
         let pids: Vec<u16> = file.playlist_streams.keys().copied().collect();
-        assert_eq!(pids, vec![0x1200, 0x1300]);
+        assert_eq!(pids, vec![0x1200, 0x1210, 0x1300]);
         let kind = |pid: u16| file.playlist_streams.get(&pid).map(TsStream::stream_type);
         assert_eq!(kind(0x1200), Some(TsStreamType::PresentationGraphics));
+        assert_eq!(kind(0x1210), Some(TsStreamType::PresentationGraphics));
         assert_eq!(kind(0x1300), Some(TsStreamType::InteractiveGraphics));
     }
 

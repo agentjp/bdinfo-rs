@@ -32,6 +32,8 @@ actually see on a normal disc.
 | [Playlist attribute selection on short clips](#playlist-attribute-selection-on-short-clips) | **Yes** — which clip's streams are presented | Rare — multi-clip playlists whose early clips are short |
 | [Bitrate under a backwards PTS](#bitrate-under-a-backwards-pts) | **Yes** — every VBR bitrate, by a few kbps on features | **Common** — any stream whose PES headers carry a PTS without a DTS |
 | [Blu-ray 3D eye labels on a 50 Hz disc](#blu-ray-3d-eye-labels-on-a-50-hz-disc) | **Yes** — `Left Eye` / `Right Eye` present | 3D discs with any 25 or 50 fps playlist, when BDInfo happened to enumerate that playlist first |
+| [Blu-ray 3D eye labels only on AVC and MVC streams](#blu-ray-3d-eye-labels-only-on-avc-and-mvc-streams) | Only against BDInfo 0.8 — no `Left Eye` on a third video codec | Rare — a 3D playlist that also presents an MPEG-2, VC-1 or HEVC video stream |
+| [PGS caption counts are summed over every clip](#pgs-caption-counts-are-summed-over-every-clip) | Only against BDInfo 0.7.5.6 and the 0.8 library ports — caption tally | **Common** — multi-clip and multi-angle playlists with subtitles; matches the BDInfo 0.8 app |
 | [Disc Size of a 3D `.iso` (BDInfo 0.8.0.1)](#disc-size-of-a-3d-iso) | **Yes** — roughly half the number 0.8.0.1 prints | Every 3D disc opened as an `.iso` with BDInfo 0.8.0.1; folders and BDInfo 0.7.5.6 agree with bdinfo-rs |
 | [E-AC-3 reduced data-rate](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Reduced-rate E-AC-3 (24 / 22.05 / 16 kHz) isn't used on Blu-ray |
 | [AC-3 low-sample-rate shift](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on non-BD input | Legacy `bsid` 9/10; conforming Blu-ray AC-3 is always `bsid` 8 |
@@ -42,6 +44,15 @@ actually see on a normal disc.
 | [Signed interval on a backwards timestamp](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only against BDInfo 0.7.5.6 — variable bitrates | Discontinuities and damaged streams |
 | [Unknown PMT stream type](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only against BDInfo 0.8 — streams after the entry | Rare — a PMT entry of a type neither tool handles |
 | [Oversized adaptation field](#correctness-fixes-with-no-effect-on-a-normal-disc) | Only on malformed input | Never — ISO 13818-1 caps the length |
+| [Secondary and picture-in-picture stream declarations](#disc-structures-bdinfo-misreads) | **Yes** — the hidden marker on commentary, PiP video and PiP subtitle rows | BonusView discs with commentary tracks or picture-in-picture |
+| [Angle copies of a hidden video stream](#disc-structures-bdinfo-misreads) | **Yes** — the hidden marker on angle rows | Rare — a multi-angle playlist that does not declare its video stream |
+| [`MPLS0240` / `HDMV0240` files](#disc-structures-bdinfo-misreads) | **Yes** — the playlist's clips and streams | Discs whose playlists or clip infos carry version `0240` |
+| [`FMTS` play items](#disc-structures-bdinfo-misreads) | **Yes** — the clip is measured | Rare — play items whose codec id is `FMTS` |
+| [Several program sequences in one clip info](#disc-structures-bdinfo-misreads) | **Yes** — the later sequences' streams | Recorder-authored clips; pressed discs carry one sequence |
+| [Header type 4 stream entries](#disc-structures-bdinfo-misreads) | **Yes** — the hidden marker | Rare — a type-4 entry outside the Dolby Vision section |
+| [Directory names in any case](#disc-structures-bdinfo-misreads) | **Yes** — the disc opens, its features are detected | Folder rips with lower- or mixed-case directory names |
+| [Chapter-mark edge cases](#disc-structures-bdinfo-misreads) | Only on malformed input — chapters kept | Marks with bit 31 set or a bad play-item index |
+| [A playlist without a video stream](#disc-structures-bdinfo-misreads) | **Yes** — a report where BDInfo prints none | Audio-only or graphics-only playlists |
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 | [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
@@ -220,23 +231,27 @@ composition-object parse).</sub>
 
 ### Playlist attribute selection on short clips
 
-BDInfo 0.8 guards its per-playlist stream table against negligibly short clips: when two
-play items declare the same PID, the later item's declared attributes win only if that
-clip's `RelativeLength` exceeds 1% of the playlist, and the same guard gates whether a
-clip with more streams becomes the reference clip whose streams the report presents. The
-intent is sound — a 3-second logo clip must not decide a feature's stream layout — but
-0.8 computes `RelativeLength` against the playlist length accumulated *before* the clip
-is appended (`TSPlaylistFile.LoadPlaylist`): the first clip divides by zero into
-`+Infinity`, the second is measured against the opener alone, and every clip against a
-partial total — so early clips pass the guard however short they are. bdinfo-rs computes
-each clip's true fraction of the finished playlist. (BDInfo 0.7.5.6 has no guard at all:
-the last duplicate always wins.)
+BDInfo 0.8 guards its reference clip — the clip whose streams the report presents —
+against negligibly short clips: a clip with more clip-info streams takes over only if its
+`RelativeLength` exceeds 1% of the playlist. The intent is sound — a 3-second logo clip
+must not decide a feature's stream layout — but 0.8 computes `RelativeLength` against the
+playlist length accumulated *before* the clip is appended (`TSPlaylistFile.Scan`):
+the first clip divides by zero into `+Infinity`, the second is measured against the opener
+alone, and every clip against a partial total — so early clips pass the guard however
+short they are. bdinfo-rs computes each clip's true fraction of the finished playlist.
 
-The outcome differs only when a playlist's clips disagree about the declared attributes
-or stream counts — mainly playlists that open with short logo or warning clips whose
-stream layout differs from the feature's. On such a playlist the reference clip, and with
-it the presented stream rows, can change; on a playlist whose clips agree, the report is
-byte-identical.
+The outcome differs only when a playlist's clips disagree about their stream counts —
+mainly playlists that open with short logo or warning clips whose stream layout differs
+from the feature's. On such a playlist the reference clip, and with it the presented
+stream rows, can change; on a playlist whose clips agree, the report is byte-identical.
+
+The rest of the reference-clip rule is 0.8's (`TSPlaylistFile.LoadStreamClips`): a clip
+whose stream file exists replaces a reference without one, and a longer clip takes over
+only when its stream file exists. BDInfo 0.7.5.6 has none of the three conditions — the
+clip with more streams wins, else the longer clip, whatever its length or files. The same
+1% guard also decides which of two play items' declarations of one PID is kept; that
+choice never reaches the report, because a playlist's declarations only decide which
+streams are marked hidden.
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/mpls.rs` (the post-parse resolution),
 `crates/bdinfo-rs-core/src/bdrom/disc.rs` (`select_reference`).</sub>
@@ -293,6 +308,37 @@ the 3D feature before a 50 Hz playlist:
 
 Angle clones are unlabelled in both tools: BDInfo clones them before the labelling pass,
 and bdinfo-rs keeps that.
+
+### Blu-ray 3D eye labels only on AVC and MVC streams
+
+When a 3D playlist presents a video stream that is neither AVC nor MVC beside its 3D pair —
+an MPEG-2, VC-1 or HEVC picture-in-picture stream, say — bdinfo-rs prints no eye label on
+that row, as BDInfo 0.7.5.6 does (`BDROM.Scan` sets `BaseView` on AVC and MVC streams
+only). BDInfo 0.8's `switch` sets `BaseView = false` in its `default:` arm, so it prints a
+second `Left Eye` on that row; the Jellyfin and Go ports print no label.
+
+```diff
+ MPEG-4 AVC Video        21,911 kbps         Left Eye / 1080p / 23.976 fps / 16:9 / High Profile 4.1
+ MPEG-4 MVC Video        10,957 kbps         Right Eye
+-MPEG-2 Video             4,012 kbps         Left Eye / 480i / 29.970 fps / 4:3 / Main Profile Main Level
++MPEG-2 Video             4,012 kbps         480i / 29.970 fps / 4:3 / Main Profile Main Level
+```
+
+### PGS caption counts are summed over every clip
+
+The SUBTITLES description `1920x1080 / N Captions (M Forced Captions)` counts the
+captions of every clip in the playlist, as the BDInfo 0.8 app does: between the scan and
+the report it zeroes each graphics stream's tallies and adds in each clip's measured
+tallies (`MainWindowViewModel.UpdateSubtitleChapterCount`). The sum counts every angle's
+captions, as the 0.8 app does, so a multi-angle playlist counts the subtitles of each angle
+clip on top of the main clip's, and a clip the playlist plays twice counts twice. The
+resolution is the first clip's that has one.
+
+BDInfo 0.7.5.6 prints no tally. The 0.8 library, which the Jellyfin and Go ports run
+without the app's post-scan step, copies the reference clip's tally alone, so on a
+multi-clip feature they print the count of one clip.
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/disc.rs` (`sum_graphics_captions`).</sub>
 
 ### Disc Size of a 3D `.iso`
 
@@ -368,6 +414,57 @@ value is never rendered.
   packet is clamped to the packet. BDInfo lets the leftover countdown run on into the next
   packet's bytes. Only malformed input carries such a length (ISO 13818-1 caps it at 183
   bytes).
+
+## Disc structures BDInfo misreads
+
+BDInfo reads these disc structures differently from their on-disc layout (libbluray's
+parsers as the reference). bdinfo-rs reads the layout, so each one changes the report only
+on the disc shape named.
+
+- **Secondary and picture-in-picture stream declarations.** A playlist's Stream-Number
+  table follows each secondary-audio entry with a list of the primary tracks it mixes with,
+  and each secondary-video entry with two such lists, each `2 + n` bytes padded to even.
+  BDInfo skips a fixed 2 bytes after every secondary-audio entry and 6 after every
+  secondary-video entry (`TSPlaylistFile.Scan`), so after the first commentary
+  track that names a primary track it parses the following entries out of those lists:
+  later commentary tracks and the picture-in-picture video lose their declaration and
+  print as hidden (`* `). BDInfo also never reads the picture-in-picture subtitle entries
+  (the loop is commented out), so its interactive-graphics loop parses them in their
+  place. bdinfo-rs walks every list at its real length and registers the
+  picture-in-picture subtitle entries, so those streams print unhidden.
+- **Angle copies of a hidden video stream stay hidden.** A multi-angle playlist whose video
+  stream the Stream-Number table does not declare prints that stream as hidden on every
+  angle row. BDInfo's angle copies lose the marker because `TSStream.CopyTo` does not copy
+  `IsHidden`.
+- **`MPLS0240` and `HDMV0240` files are read.** Version `0240` is the BD-ROM 2.4 format of
+  Blu-ray 3D, which libbluray accepts. BDInfo accepts only `0100`, `0200` and `0300`
+  (`TSPlaylistFile.Scan`, `TSStreamClipFile.Scan`), so it presents such a playlist with no
+  clips and such a clip with no streams.
+- **`FMTS` play items are measured.** A play item whose codec id is `FMTS` names a
+  `<clip>.FMTS` stream file; bdinfo-rs finds and measures it. BDInfo names every clip
+  `<clip>.M2TS` and lists `*.m2ts` files only, so the clip is never measured.
+- **Every program sequence of a clip-info file is read.** Recorder-authored clips can
+  declare more than one program sequence; bdinfo-rs reads the streams of all of them.
+  BDInfo reads the first sequence only (`TSStreamClipFile.Scan` takes its stream count at
+  a fixed offset).
+- **Stream entries of header type 4 read their PID at offset 2.** libbluray reads the PID
+  of a type-4 entry where type 3 has it; BDInfo reads it one byte later
+  (`TSPlaylistFile.CreatePlaylistStream`), so the stream that entry declares prints as
+  hidden.
+- **Directory names match in any case.** `BDMV`, `CLIPINF`, `PLAYLIST`, `STREAM`, `SSIF`,
+  `BDJO`, `BDSVM` and the other disc directories are found whatever their case. BDInfo
+  compares the names exactly (`BDROM.GetDirectory`), so a lower-case folder rip either
+  fails to open or loses the feature that directory signals — no BD-Java, no 3D, `AACS`
+  instead of `BD+`.
+- **Chapter marks: the time is masked to 31 bits, and a bad play-item index skips the
+  mark.** Both tools mask play-item times to 31 bits; BDInfo reads the mark time unmasked,
+  so a mark with bit 31 set lands about 47,722 s later and is dropped. An out-of-range
+  play-item index makes BDInfo throw and lose every chapter of the playlist
+  (`TSPlaylistFile.Scan`); bdinfo-rs skips that one mark.
+- **A playlist without a video stream still reports.** An audio-only or graphics-only
+  playlist prints its report with zero chapter rates. BDInfo's chapter table reads
+  `VideoStreams[0]` unconditionally (`FormReport`, `ReportWindowViewModel`), so report
+  generation throws and nothing is printed.
 
 ---
 
@@ -492,7 +589,8 @@ chapter rows. bdinfo-rs opens the `.m2ts` instead and measures the base view fro
 — minus the dependent-view row, which genuinely could not be read. The failure is not
 swallowed: it is recorded against the `.ssif` and printed in the report `WARNING:` block,
 and the clip is named by the `.m2ts` it was actually read from wherever the report names
-its source file. The clip's interleaved file size still counts the `.ssif` — the file is on
+its source file. (A 3D clip the scan never measured at all is named by its `.ssif`, as in
+BDInfo.) The clip's interleaved file size still counts the `.ssif` — the file is on
 the disc either way, and an unreadable one is no smaller. (The disc-level `Disc Size:`
 never counts it, in either tool.) A strict (fail-fast) scan still aborts;
 degrading is the resilient scan's job.
@@ -510,7 +608,8 @@ kept, and the base view is not re-read from the `.m2ts`.
 
 The report is byte-identical; the window around it is not a pixel-for-pixel port. The three-pane
 Playlist / Stream File / Codec view, the playlist table, sorting, drag-and-drop, the settings
-dialog, and the report toggles all behave as in the original.
+dialog, and the report toggles all behave as in the original. The Stream File pane names a
+3D clip by its `.ssif` file before any scan has measured it, as the original does.
 
 Not carried over:
 
@@ -519,7 +618,9 @@ Not carried over:
   there is nothing to plot. The chart-tied image-prefix setting is absent with them.
 - **Custom playlist builder.** Playlists are selected from the disc's own table, not assembled.
 - **Taskbar progress.** Progress is shown in the window, not painted into the taskbar button.
-- **The `KeepStreamOrder`, `EnableSSIF`, and `ExtendedStreamDiagnostics` toggles.**
+- **The `KeepStreamOrder`, `EnableSSIF`, and `ExtendedStreamDiagnostics` toggles.** Stream
+  rows always take `KeepStreamOrder`'s default: the clip-info declaration order within each
+  stream kind.
 - **Selectable report text.** The text widgets in use cannot span-select; *Copy report* and
   *Save report…* cover the same need.
 
