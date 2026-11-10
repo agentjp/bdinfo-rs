@@ -8,7 +8,9 @@
 //! Pressed BD-ROM clips carry exactly one program sequence; recorder-authored
 //! clips can carry several, and their streams merge into the one list (a PID
 //! redeclared by a later sequence replaces the earlier entry in its original
-//! position — the report models a clip as one stream set per PID).
+//! position — the report models a clip as one stream set per PID). A PID
+//! declared twice within one sequence is malformed and stops the parse with
+//! [`BdError::DuplicatePid`].
 //!
 //! Every file byte is read through the bounds-checked [`super`] helpers, so a
 //! short or truncated file surfaces as [`BdError`] rather than a panic (disc
@@ -19,7 +21,7 @@
 //! it, so a parse that fails part-way still yields the streams declared before
 //! the failure.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ascii, build_coded_stream, byte, u16_be, u32_off};
 use crate::error::{BdError, PartialParse};
@@ -88,8 +90,9 @@ impl TsStreamClipFile {
     ///
     /// # Errors
     /// Returns [`BdError::UnknownFileType`] if the 8-byte magic is not
-    /// `HDMV0100`/`HDMV0200`/`HDMV0240`/`HDMV0300`, or [`BdError::UnexpectedEof`] if any
-    /// field runs past the end of `data` (a truncated or malformed file).
+    /// `HDMV0100`/`HDMV0200`/`HDMV0240`/`HDMV0300`, [`BdError::UnexpectedEof`] if any
+    /// field runs past the end of `data` (a truncated or malformed file), or
+    /// [`BdError::DuplicatePid`] if one program sequence declares a PID twice.
     pub fn scan(name: &str, data: &[u8]) -> Result<Self, BdError> {
         Self::scan_partial(name, data).map_err(|partial| partial.error)
     }
@@ -159,16 +162,22 @@ fn walk(
     // (`spn_program_sequence_start` + `program_map_pid` + the stream
     // count + `num_groups`) followed by its stream entries. Streams from
     // every program sequence merge into one list; a PID redeclared by a
-    // later sequence replaces the earlier entry but keeps its position (the
-    // overwrite-in-place of the .NET `Dictionary` indexer `BDInfo` stores
-    // its clip streams in). `declared` maps each PID to its declaration
-    // slot and stream, so hostile input with thousands of entries resolves
-    // a redeclaration by lookup, not by a linear search.
+    // later sequence replaces the earlier entry but keeps its position, so a
+    // clip stays one stream set per PID (`BDInfo` reads the first sequence
+    // only). `declared` maps each PID to its declaration slot and stream, so
+    // hostile input with thousands of entries resolves a redeclaration by
+    // lookup, not by a linear search.
     let num_prog = byte(clip_data, 1)?;
     let mut prog_offset: usize = 2;
     for _ in 0..num_prog {
         let stream_count = byte(clip_data, prog_offset.saturating_add(6))?;
         let mut stream_offset = prog_offset.saturating_add(8);
+        // The PIDs this sequence has built a stream for. `BDInfo` stores
+        // each built stream with `Dictionary.Add`, which throws on a PID
+        // already present, so a second one within a sequence stops the
+        // parse; an entry that builds no stream (MVC, an unknown type) is
+        // never stored and so never collides.
+        let mut in_sequence: BTreeSet<u16> = BTreeSet::new();
         for _ in 0..stream_count {
             let pid = u16_be(clip_data, stream_offset)?;
             // Advance past the 2-byte PID — `info` is now the coding-info
@@ -182,6 +191,9 @@ fn walk(
             let stream_type = TsStreamType::from_u8(type_byte);
 
             if let Some(mut stream) = build_clip_stream(clip_data, info, stream_type)? {
+                if !in_sequence.insert(pid) {
+                    return Err(BdError::DuplicatePid(pid));
+                }
                 stream.base_mut().pid = Pid::new(pid);
                 stream.base_mut().stream_type = stream_type;
                 // A new PID takes the next slot: `len()` counts the
@@ -394,6 +406,40 @@ mod tests {
             declared(&file),
             [(0x1011, TsStreamType::HevcVideo), (0x1100, TsStreamType::Ac3Audio)]
         );
+    }
+
+    #[test]
+    fn a_pid_declared_twice_in_one_sequence_stops_the_parse_there() {
+        // Audio, video, then the audio PID again: the parse stops at the
+        // repeat and keeps the two streams before it.
+        let buf = build_clpi(
+            *b"HDMV0300",
+            &[
+                (0x1100, 0x81, [0x61, b'e', b'n', b'g']),
+                (0x1011, 0x1B, [0x62, 0x30, 0, 0]),
+                (0x1100, 0x81, [0x61, b'd', b'e', b'u']),
+                (0x1200, 0x90, [b'e', b'n', b'g', 0]),
+            ],
+        );
+        let partial = TsStreamClipFile::scan_partial("d.clpi", &buf).unwrap_err();
+        assert_eq!(partial.error.to_string(), "duplicate stream PID: 0x1100");
+        let file = partial.value.expect("two streams were read");
+        assert_eq!(
+            declared(&file),
+            [(0x1100, TsStreamType::Ac3Audio), (0x1011, TsStreamType::AvcVideo)]
+        );
+    }
+
+    #[test]
+    fn a_repeated_pid_that_builds_no_stream_is_no_duplicate() {
+        // The MVC entry builds no stream, so the AVC entry on the same PID is
+        // the first stream that PID declares.
+        let buf = build_clpi(
+            *b"HDMV0300",
+            &[(0x1011, 0x20, [0, 0, 0, 0]), (0x1011, 0x1B, [0x62, 0x30, 0, 0])],
+        );
+        let file = TsStreamClipFile::scan("m.clpi", &buf).unwrap();
+        assert_eq!(declared(&file), [(0x1011, TsStreamType::AvcVideo)]);
     }
 
     /// `file`'s streams as `(PID, stream type)` pairs, in list order.

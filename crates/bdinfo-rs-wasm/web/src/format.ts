@@ -92,6 +92,8 @@ export function errorReason(reason: ScanErrorReason): string {
       return "unable to locate BD structure";
     case "missingClipFile":
       return `referenced missing clip file: ${reason.file}`;
+    case "duplicatePid":
+      return `duplicate stream PID: 0x${reason.pid.toString(16).toUpperCase().padStart(4, "0")}`;
     case "io":
       return `io error: ${reason.message}`;
     case "metadataTooLarge":
