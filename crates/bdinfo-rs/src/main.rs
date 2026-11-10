@@ -719,7 +719,8 @@ fn row_names(
 /// line) and one row per listed playlist. Both byte columns read `-` when the
 /// size is not known — estimated per
 /// [`PlaylistSummary::estimated_bytes`](bdinfo_rs_core::bdrom::disc::PlaylistSummary::estimated_bytes),
-/// measured until a packet scan has measured the playlist.
+/// measured until a packet scan has measured the playlist. Measured bytes
+/// count every clip, angle clips included, as `BDInfo`'s table does.
 fn selection_table(playlists: &[PlaylistSummary], rows: &[(usize, usize)]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -734,7 +735,7 @@ fn selection_table(playlists: &[PlaylistSummary], rows: &[(usize, usize)]) -> St
         };
         let cell = |bytes: u64| text::group(u128::from(bytes));
         let estimated = playlist.estimated_bytes().map_or_else(|| "-".to_owned(), cell);
-        let measured = match playlist.total_packet_size() {
+        let measured = match playlist.total_angle_packet_size() {
             0 => "-".to_owned(),
             bytes => cell(bytes),
         };
@@ -2050,8 +2051,8 @@ Options:
     #[test]
     fn the_selection_table_spells_the_classic_columns() {
         // A (interleaved size wins, 1 h 1 min 5 s), B (plain file size,
-        // measured packets), C (no sizes at all). A+B share a clip (group 1);
-        // C is group 2.
+        // measured packets on the main clip and an angle clip), C (no sizes
+        // at all). A+B share a clip (group 1); C is group 2.
         let mut a = summary("00001.MPLS", 3665.0, &["X.M2TS", "Y.M2TS"]);
         a.interleaved_file_size = 1_234_567;
         a.file_size = 5;
@@ -2060,6 +2061,10 @@ Options:
         for clip in &mut b.clips {
             clip.packet_count = 10;
         }
+        let mut angle = b.clips.first().expect("the playlist has a clip").clone();
+        angle.angle_index = 1;
+        angle.packet_count = 5;
+        b.clips.push(angle);
         let c = summary("00003.MPLS", 30.0, &["Z.M2TS"]);
         let playlists = [a, b, c];
         let rows = table_rows(&playlists, &PlaylistFilter::default());
@@ -2069,7 +2074,7 @@ Options:
             "#   Group  Playlist File  Length    Estimated Bytes Measured Bytes  \n\
              \n\
              1   1      00001.MPLS     01:01:05  1,234,567       -               \n\
-             2   1      00002.MPLS     00:01:05  1,000           1,920           \n\
+             2   1      00002.MPLS     00:01:05  1,000           2,880           \n\
              3   2      00003.MPLS     00:00:30  -               -               \n"
         );
         // An out-of-range row index renders nothing.

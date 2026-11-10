@@ -813,11 +813,13 @@ fn fixed_even(value: f64, decimals: usize) -> String {
     format!("{value:.decimals$}")
 }
 
-/// Splits non-negative ticks into the `(hours, minutes, seconds, millis)`
-/// time components. The hours component wraps at 24 (days are dropped), like
-/// the report's time spellings; negative ticks clamp to zero.
-fn time_parts(ticks: i64) -> (i64, i64, i64, i64) {
-    let ticks = ticks.max(0);
+/// Splits ticks into the `(hours, minutes, seconds, millis)` time components
+/// of their magnitude. The hours component wraps at 24 (days are dropped), like
+/// the report's time spellings. A negative value (a chapter mark before its
+/// clip's in-time) spells its magnitude with no sign, as .NET's custom
+/// `TimeSpan` format strings print it for `BDInfo`.
+fn time_parts(ticks: i64) -> (u64, u64, u64, u64) {
+    let ticks = ticks.unsigned_abs();
     let total_seconds = ticks.wrapping_div(10_000_000);
     let millis = ticks.wrapping_rem(10_000_000).wrapping_div(10_000);
     let hours = total_seconds.wrapping_div(3600).wrapping_rem(24);
@@ -839,7 +841,7 @@ fn time_hh(ticks: i64) -> String {
 }
 
 /// `hh:mm:ss` — two-digit hours, the seconds-resolution spelling. Hours wrap at
-/// 24 and negative ticks clamp to zero (see [`time_parts`]).
+/// 24 and negative ticks print their magnitude (see [`time_parts`]).
 ///
 /// Public because the playlist-length cell a surface prints beside the report
 /// is this spelling; feed it
@@ -1547,13 +1549,21 @@ Subtitle:       English / 19.12 kbps
     }
 
     #[test]
-    fn time_spellings_truncate_wrap_and_clamp() {
+    fn time_spellings_truncate_and_wrap() {
         // 26 h 3 min 4.5678 s: hours wrap at 24, millis truncate.
         let ticks = 938_045_678_999_i64;
         assert_eq!(time_h(ticks), "2:03:24.567");
         assert_eq!(time_hh(ticks), "02:03:24.567");
         assert_eq!(time_hh_short(ticks), "02:03:24");
+    }
+
+    #[test]
+    fn a_negative_time_spells_its_magnitude() {
+        assert_eq!(time_h(seconds_to_ticks(-1.25)), "0:00:01.250");
+        assert_eq!(time_hh(-938_045_678_999), "02:03:24.567");
         assert_eq!(time_parts(-1), (0, 0, 0, 0));
+        // 2^63 ticks = 10 675 199 days 2:48:05.477 — no overflow at the floor.
+        assert_eq!(time_parts(i64::MIN), (2, 48, 5, 477));
     }
 
     #[test]
@@ -1565,8 +1575,8 @@ Subtitle:       English / 19.12 kbps
         assert_eq!(cell(100.0), "00:01:40");
         assert_eq!(cell(3661.0), "01:01:01");
         assert_eq!(cell(93_600.0 + 65.0), "02:01:05");
-        // A negative length clamps to zero; 25 h 01 min 01 s wraps the day.
-        assert_eq!(cell(-5.0), "00:00:00");
+        // A negative length prints its magnitude; 25 h 01 min 01 s wraps the day.
+        assert_eq!(cell(-5.0), "00:00:05");
         assert_eq!(cell(90_061.0), "01:01:01");
     }
 

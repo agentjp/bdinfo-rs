@@ -185,7 +185,7 @@ notices beside the report, the way the demo shows them above it.
 
 `reportFileName` gives the name a report is saved under — `BDINFO.<label>.txt`,
 the same name the native CLI writes — with every character illegal in a file
-name replaced by `_`:
+name deleted:
 
 ```ts
 const name = await reportFileName(disc.volumeLabel); // "BDINFO.MY_DISC.txt"

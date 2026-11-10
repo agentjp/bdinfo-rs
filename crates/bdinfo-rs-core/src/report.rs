@@ -20,16 +20,19 @@ pub fn counted(n: usize, noun: &str) -> String {
 }
 
 /// Characters illegal in a Windows filename component, plus the separators that
-/// would re-root the report path. Replaced so [`file_name`] is always one
-/// writable file; applied uniformly on every platform so the report filename is
-/// identical everywhere.
+/// would re-root the report path. With the C0 controls this is the set .NET's
+/// `Path.GetInvalidFileNameChars` returns on Windows; [`file_name`] also drops
+/// DEL and the C1 controls, which that set lacks. Deleted so [`file_name`]
+/// is always one writable file; applied uniformly on every platform so the
+/// report filename is identical everywhere.
 const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 
 /// The report's save-file name for a disc labelled `label`: `BDINFO.<stem>.txt`.
 ///
-/// The stem is `label` with each illegal or control character replaced by `_`.
-/// A clean label — a folder name, a `.iso` volume identifier, a resolved drive
-/// label — passes through unchanged.
+/// The stem is `label` with each illegal or control character deleted, as
+/// `BDInfo` 0.8 names its report (a `J:\` label gives `BDINFO.J.txt`). A clean
+/// label — a folder name, a `.iso` volume identifier, a resolved drive label —
+/// passes through unchanged, and an empty one gives `BDINFO..txt`.
 ///
 /// The disc controls its own label bytes and a caller may save without a user in
 /// the loop, so the result is always **one flat path component**: a label
@@ -37,10 +40,7 @@ const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
 /// path nor break the write.
 #[must_use]
 pub fn file_name(label: &str) -> String {
-    let stem: String = label
-        .chars()
-        .map(|c| if c.is_control() || ILLEGAL.contains(&c) { '_' } else { c })
-        .collect();
+    let stem: String = label.chars().filter(|c| !c.is_control() && !ILLEGAL.contains(c)).collect();
     format!("BDINFO.{stem}.txt")
 }
 
@@ -64,14 +64,15 @@ mod tests {
     }
 
     #[test]
-    fn illegal_and_control_characters_become_underscores() {
-        assert_eq!(file_name(r"J:\"), "BDINFO.J__.txt");
-        assert_eq!(file_name("a/b"), "BDINFO.a_b.txt");
-        assert_eq!(file_name("x<y>z|?*\""), "BDINFO.x_y_z____.txt");
-        assert_eq!(file_name("tab\there"), "BDINFO.tab_here.txt");
+    fn illegal_and_control_characters_are_deleted() {
+        assert_eq!(file_name(r"J:\"), "BDINFO.J.txt");
+        assert_eq!(file_name("a/b:c"), "BDINFO.abc.txt");
+        assert_eq!(file_name("x<y>z|?*\""), "BDINFO.xyz.txt");
+        assert_eq!(file_name("tab\there"), "BDINFO.tabhere.txt");
+        assert_eq!(file_name("\u{7f}/"), "BDINFO..txt");
         // The disc-controlled relative-write shape: a label that would
         // lexically escape the chosen directory stays one flat component.
-        assert_eq!(file_name(r"..\..\x"), "BDINFO..._.._x.txt");
+        assert_eq!(file_name(r"..\..\x"), "BDINFO.....x.txt");
     }
 
     mod prop {

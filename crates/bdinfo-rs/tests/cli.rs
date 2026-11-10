@@ -733,6 +733,37 @@ fn a_real_bdmv_folder_scan_matches_the_golden_byte_for_byte() {
     );
 }
 
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
+)]
+fn a_relative_disc_path_names_the_disc_after_its_folder() {
+    let disc = real_fixture("BigBuckBunny");
+    let bdmv = disc.join("BDMV");
+    for (tag, cwd, arg) in [
+        ("dot", &disc, "."),
+        ("dotdot", &bdmv, ".."),
+        ("bdmv", &disc, "BDMV"),
+        ("stream", &disc, "BDMV/STREAM"),
+    ] {
+        let dest =
+            std::env::temp_dir().join(format!("bdinfo-rs-relative-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dest).expect("create dest");
+        let output = bdinfo_rs()
+            .current_dir(cwd)
+            .args([arg.as_ref(), dest.as_os_str(), "-m".as_ref(), "00000".as_ref()])
+            .output()
+            .expect("spawn bdinfo-rs");
+        let report = std::fs::read(dest.join("BDINFO.BigBuckBunny.txt"));
+        let _ = std::fs::remove_dir_all(&dest).is_ok();
+        assert!(output.status.success(), "{arg}: {}", String::from_utf8_lossy(&output.stderr));
+        let report = String::from_utf8(report.expect("the report is named after the folder"))
+            .expect("the report is valid UTF-8");
+        assert_eq!(report, include_str!("fixtures/golden/folder.txt"), "{arg} drifted from golden");
+    }
+}
+
 // The two report-section switches change the report bytes by design, so each
 // gets a golden of its own beside the full one. Each golden is the full report
 // minus exactly its own section — the pair pins that the switches subtract and
