@@ -734,10 +734,6 @@ fn a_real_bdmv_folder_scan_matches_the_golden_byte_for_byte() {
 }
 
 #[test]
-#[expect(
-    clippy::expect_used,
-    reason = "end-to-end test driver; a failed spawn / read / decode should abort the test loudly"
-)]
 fn a_relative_disc_path_names_the_disc_after_its_folder() {
     let disc = real_fixture("BigBuckBunny");
     let bdmv = disc.join("BDMV");

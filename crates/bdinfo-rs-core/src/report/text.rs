@@ -818,7 +818,7 @@ fn fixed_even(value: f64, decimals: usize) -> String {
 /// the report's time spellings. A negative value (a chapter mark before its
 /// clip's in-time) spells its magnitude with no sign, as .NET's custom
 /// `TimeSpan` format strings print it for `BDInfo`.
-fn time_parts(ticks: i64) -> (u64, u64, u64, u64) {
+const fn time_parts(ticks: i64) -> (u64, u64, u64, u64) {
     let ticks = ticks.unsigned_abs();
     let total_seconds = ticks.wrapping_div(10_000_000);
     let millis = ticks.wrapping_rem(10_000_000).wrapping_div(10_000);
