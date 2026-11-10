@@ -14,11 +14,12 @@
 //! - The extension ([`extension_of`]) is derived from the final path component by the
 //!   backend-shared [`extension_of_name`]; no further path normalization is applied.
 //! - The full name ([`full_name_of`]) is the path as opened, not canonicalized to a rooted absolute
-//!   path.
+//!   path. A directory's name and parent come from that path made absolute and lexically normalised
+//!   ([`absolute_lexical`]), so a relative `.` or `..` still names a real directory.
 
 use std::fs::{File, metadata, read_dir};
 use std::io::{self, BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{BdDir, BdFile, ReadSeek, SearchOption, extension_of_name};
@@ -119,7 +120,15 @@ pub(crate) fn open_sequential(path: &Path) -> io::Result<File> {
 /// [`take_errors`](FsDir::take_errors) after a scan.
 #[derive(Debug)]
 pub struct FsDir {
+    /// The path as given, or derived from the given one: every read and every
+    /// recorded failure uses it, so a relative input is reported relative.
     path: PathBuf,
+    /// `path` made absolute and lexically normalised ([`absolute_lexical`]) —
+    /// the source of [`name`](BdDir::name) and of the [`parent`](BdDir::parent)
+    /// chain, so `.`, `..` and `BDMV` typed from inside a disc name the
+    /// directories they mean, as .NET's always-absolute `DirectoryInfo` does
+    /// for `BDInfo`.
+    canon: PathBuf,
     name: String,
     full_name: String,
     /// The shared per-entry enumeration-failure sink (see the type docs).
@@ -225,23 +234,20 @@ impl FsDir {
     /// filesystem only when the directory is later enumerated or opened.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        Self {
-            name: name_of(&path),
-            full_name: full_name_of(&path),
-            path,
-            errors: Arc::new(Mutex::new(Vec::new())),
-        }
+        let canon = absolute_lexical(&path);
+        Self::with_sink(path, canon, Arc::new(Mutex::new(Vec::new())))
     }
 
-    /// A handle on `path` sharing this directory's error sink — children, parents,
-    /// and recursion all record into the one root sink.
-    fn related(&self, path: PathBuf) -> Self {
-        Self {
-            name: name_of(&path),
-            full_name: full_name_of(&path),
-            path,
-            errors: Arc::clone(&self.errors),
-        }
+    /// A handle on `path` (normalised as `canon`) recording into `errors`.
+    fn with_sink(path: PathBuf, canon: PathBuf, errors: Arc<Mutex<Vec<ScanError>>>) -> Self {
+        Self { name: name_of(&canon), full_name: full_name_of(&path), path, canon, errors }
+    }
+
+    /// A handle on `path` (normalised as `canon`) sharing this directory's
+    /// error sink — children, parents, and recursion all record into the one
+    /// root sink.
+    fn related(&self, path: PathBuf, canon: PathBuf) -> Self {
+        Self::with_sink(path, canon, Arc::clone(&self.errors))
     }
 
     /// Drains the per-entry enumeration failures recorded since the last call
@@ -266,12 +272,21 @@ impl BdDir for FsDir {
     }
 
     fn parent(&self) -> Option<Box<dyn BdDir>> {
-        let parent = self.path.parent()?;
-        // A bare relative name's parent is the empty path; open it as `.` so the
-        // handle stays enumerable (the disc-root ancestor walk lands here when
-        // the input is a bare `BDMV`).
-        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
-        Some(Box::new(self.related(parent.to_path_buf())))
+        let canon = self.canon.parent()?.to_path_buf();
+        // The given path's own parent while it ends in a name. A bare relative
+        // name's parent is the empty path, opened as `.` so the handle stays
+        // enumerable (the disc-root ancestor walk lands here when the input is
+        // a bare `BDMV`). A path ending in `.` or `..` has no lexical parent of
+        // its own, so `..` is appended instead.
+        let path = if matches!(self.path.components().next_back(), Some(Component::Normal(_))) {
+            self.path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+        } else {
+            self.path.join("..")
+        };
+        Some(Box::new(self.related(path, canon)))
     }
 
     fn get_files_pattern_option(
@@ -297,7 +312,10 @@ impl BdDir for FsDir {
             &self.path,
             list_dir(&self.path)?,
             &mut record_into(&self.errors),
-            |path| out.push(Box::new(self.related(path))),
+            |path| {
+                let canon = self.canon.join(path.file_name().unwrap_or_default());
+                out.push(Box::new(self.related(path, canon)));
+            },
         );
         Ok(out)
     }
@@ -310,6 +328,36 @@ fn name_of(path: &Path) -> String {
         || path.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// `path` made absolute against the current directory, then with every `.`
+/// dropped and every `..` popping the component before it, so its final
+/// component is the directory the input names (`.` inside `J:\` gives `J:\`,
+/// which the drive-root probe recognises).
+///
+/// [`std::path::absolute`] already folds `..` on Windows but keeps it on Unix,
+/// where `absolute("..")` has no `file_name`; the lexical pass covers both.
+/// Never `canonicalize`: it resolves symlinks, which `DirectoryInfo.Name` does
+/// not, and spells Windows paths with a `\\?\` prefix. An input `absolute`
+/// rejects (the empty path) is returned as given.
+pub(crate) fn absolute_lexical(path: &Path) -> PathBuf {
+    std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |absolute| lexical(&absolute))
+}
+
+/// `path` with every `.` component dropped and every `..` popping the
+/// component before it; a `..` with nothing left to pop is dropped.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The path as opened, rendered to a `String`. Not canonicalized to a rooted
@@ -368,7 +416,10 @@ mod tests {
 
     use proptest::prelude::{any, prop_assert, proptest};
 
-    use super::{FsDir, FsFile, RawEntry, collect_directories, glob_ci, record_into, walk_files};
+    use super::{
+        FsDir, FsFile, RawEntry, absolute_lexical, collect_directories, glob_ci, lexical,
+        record_into, walk_files,
+    };
     use crate::discovery::{BdFileKind, BdmvDir};
     use crate::error::ScanStage;
     use crate::vfs::{BdDir, BdFile, SearchOption, find_directory, find_files};
@@ -579,6 +630,60 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_path_takes_its_names_from_the_directories_it_means() {
+        let disc = TempDisc::new();
+        let root_name = disc.root.file_name().expect("root has a name").to_string_lossy();
+        let typed = disc.root.join("bdmv").join("..");
+        let root = FsDir::new(typed.clone());
+        assert_eq!(root.name(), root_name);
+        // What a recorded failure would print stays the path as given.
+        assert_eq!(root.full_name(), typed.to_string_lossy());
+        let bdmv = root
+            .get_directories()
+            .expect("the root lists")
+            .into_iter()
+            .find(|dir| dir.name() == "bdmv")
+            .expect("the root holds bdmv");
+        assert_eq!(bdmv.full_name(), typed.join("bdmv").to_string_lossy());
+        // A path ending in `..` climbs by appending another one.
+        let parent = root.parent().expect("the root has a parent");
+        assert_eq!(parent.full_name(), typed.join("..").to_string_lossy());
+        let above = disc.root.parent().and_then(Path::file_name).expect("temp dir has a name");
+        assert_eq!(parent.name(), above.to_string_lossy());
+    }
+
+    #[test]
+    fn a_dot_names_the_current_directory_and_climbs_out_of_it() {
+        let cwd = std::env::current_dir().expect("the test has a working directory");
+        let dot = FsDir::new(".");
+        assert_eq!(dot.full_name(), ".");
+        assert_eq!(dot.name(), cwd.file_name().expect("cwd has a name").to_string_lossy());
+        let parent = dot.parent().expect("cwd has a parent");
+        assert_eq!(parent.full_name(), Path::new(".").join("..").to_string_lossy());
+        let above = cwd.parent().and_then(Path::file_name).expect("cwd's parent has a name");
+        assert_eq!(parent.name(), above.to_string_lossy());
+    }
+
+    #[test]
+    fn the_lexical_pass_drops_dots_and_pops_parents() {
+        let base = Path::new("a").join("b");
+        assert_eq!(
+            lexical(&Path::new(".").join(&base).join("..").join("c")),
+            Path::new("a").join("c")
+        );
+        assert_eq!(lexical(&Path::new("..").join("a")), Path::new("a"), "nothing left to pop");
+        assert_eq!(lexical(&base.join("..").join("..")), PathBuf::new());
+    }
+
+    #[test]
+    fn a_path_absolute_rejects_is_kept_as_given() {
+        assert_eq!(absolute_lexical(Path::new("")), PathBuf::new());
+        let named = absolute_lexical(Path::new("disc"));
+        assert!(named.is_absolute());
+        assert_eq!(named.file_name(), Some(std::ffi::OsStr::new("disc")));
+    }
+
+    #[test]
     fn filesystem_root_name_falls_back_and_has_no_extension() {
         let root = filesystem_root();
         assert_ne!(FsDir::new(root.clone()).name(), "");
@@ -776,7 +881,7 @@ mod tests {
         assert!(root.take_errors().is_empty());
 
         // A child handle records into the root's sink (one shared sink per tree).
-        let child = root.related(disc.root.join("bdmv"));
+        let child = root.related(disc.root.join("bdmv"), disc.root.join("bdmv"));
         record_into(&child.errors)(disc.root.join("hurt.mpls"), io::Error::other("bad entry"));
         let errors = root.take_errors();
         assert_eq!(errors.len(), 1);

@@ -13,32 +13,30 @@
 //! untouched.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions, ScanReport};
 use crate::error::BdError;
-use crate::vfs::fs::FsDir;
+use crate::vfs::fs::{self, FsDir};
 use crate::vfs::udf::source::{PathIso, UdfSource};
 use crate::vfs::volume;
 
 /// Opens the Blu-ray folder at `path` through `std::fs`, resiliently.
 ///
 /// `path` is the disc root, its `BDMV` directory, or any directory inside it
-/// (the scan walks up). It is made absolute and lexically normalised
-/// ([`absolute_lexical`]) before anything reads it, so `.`, `..`, `BDMV` and a
-/// trailing separator all name the disc after its real root directory, the
-/// name .NET's always-absolute `DirectoryInfo` gives `BDInfo`; every path the
-/// scan records is then absolute too. [`ScanReport::errors`] carries the scan's own recorded
-/// failures **plus** the enumeration's per-entry ones
+/// (the scan walks up); a relative `.`, `..` or `BDMV` names the disc after its
+/// real root directory ([`FsDir`]'s names come from the absolute path), while
+/// every recorded failure keeps the path as given. [`ScanReport::errors`] carries the scan's own
+/// recorded failures **plus** the enumeration's per-entry ones
 /// ([`FsDir::take_errors`]) — a directory that could not be read is damage the
 /// scan itself never sees.
 ///
 /// The label is the [`volume`] repair's: a folder scan names the disc after
 /// its root directory, which a bare Windows drive root (`J:\`) does not have.
 /// The repair's raw-device read runs **before** the scan, on the letter the
-/// input path spells, so a disc whose scan goes on to fail reads still carries
-/// its real name; what that read found is applied only if the finished scan's
-/// own label turned out to be a bare drive root.
+/// input path spells once made absolute (so `.` typed at `J:\` reaches it), so a disc whose scan
+/// goes on to fail reads still carries its real name; what that read found is applied only if the
+/// finished scan's own label turned out to be a bare drive root.
 ///
 /// `mode`, `options`, `scan_files` and `observers` are
 /// [`BdRom::open_resilient`]'s, passed through unchanged.
@@ -60,44 +58,13 @@ pub fn open_folder(
     // the tree afterwards to recover the same letter is not an option: `FsDir`
     // shares its error sink across derived handles, so a second walk would
     // record a damaged listing's failures into the report twice.
-    let path = absolute_lexical(path);
-    let probed = volume::drive_root_probe(&path).and_then(volume::real_volume_label);
+    let probed =
+        volume::drive_root_probe(&fs::absolute_lexical(path)).and_then(volume::real_volume_label);
     let root = FsDir::new(path);
     let mut report = BdRom::open_resilient(&root, mode, options, scan_files, observers)?;
     report.errors.extend(root.take_errors());
     report.bdrom.volume_label = volume::apply_drive_root_probe(&report.bdrom.volume_label, probed);
     Ok(report)
-}
-
-/// `path` made absolute against the current directory, then with every `.`
-/// dropped and every `..` popping the component before it, so its final
-/// component is the directory the input names (`.` inside `J:\` gives `J:\`,
-/// which the drive-root probe recognises).
-///
-/// [`std::path::absolute`] already folds `..` on Windows but keeps it on Unix,
-/// where `absolute("..")` has no `file_name`; the lexical pass covers both.
-/// Never `canonicalize`: it resolves symlinks, which `DirectoryInfo.Name` does
-/// not, and spells Windows paths with a `\\?\` prefix. An input `absolute`
-/// rejects (the empty path) is returned as given, and the scan then fails on
-/// that path's own listing error.
-fn absolute_lexical(path: &Path) -> PathBuf {
-    std::path::absolute(path).map_or_else(|_| path.to_path_buf(), |absolute| lexical(&absolute))
-}
-
-/// `path` with every `.` component dropped and every `..` popping the
-/// component before it; a `..` with nothing left to pop is dropped.
-fn lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Opens the Blu-ray `.iso` image at `path` through the UDF reader,
@@ -133,10 +100,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use super::{
-        BdError, ScanMode, ScanObservers, ScanOptions, ScanReport, absolute_lexical, lexical,
-        open_folder, open_iso,
-    };
+    use super::{BdError, ScanMode, ScanObservers, ScanOptions, ScanReport, open_folder, open_iso};
     use crate::bdrom::disc::ScanProgress;
     use crate::bdrom::measured::MeasuredSnapshot;
 
@@ -293,25 +257,6 @@ mod tests {
             let report = folder(&path, ScanMode::Metadata).expect("the fixture folder opens");
             assert_eq!(report.bdrom.volume_label, "BigBuckBunny", "{}", path.display());
         }
-    }
-
-    #[test]
-    fn the_lexical_pass_drops_dots_and_pops_parents() {
-        let base = Path::new("a").join("b");
-        assert_eq!(
-            lexical(&Path::new(".").join(&base).join("..").join("c")),
-            Path::new("a").join("c")
-        );
-        assert_eq!(lexical(&Path::new("..").join("a")), Path::new("a"), "nothing left to pop");
-        assert_eq!(lexical(&base.join("..").join("..")), PathBuf::new());
-    }
-
-    #[test]
-    fn a_path_absolute_rejects_is_kept_as_given() {
-        assert_eq!(absolute_lexical(Path::new("")), PathBuf::new());
-        let named = absolute_lexical(Path::new("disc"));
-        assert!(named.is_absolute());
-        assert_eq!(named.file_name(), Some(std::ffi::OsStr::new("disc")));
     }
 
     #[test]
