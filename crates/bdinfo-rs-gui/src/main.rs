@@ -4715,11 +4715,13 @@ mod interaction {
         );
     }
 
-    /// A scratch directory under the crate's target dir (unique per test) for
-    /// the save-destination tests.
+    /// An empty scratch directory under the crate's target dir (unique per
+    /// test) for the save-destination tests. Emptied first: the save tests
+    /// assert that a file exists, so one left by an earlier run would pass them.
     fn scratch(name: &str) -> PathBuf {
         let dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/interaction-tests").join(name);
+        let _ = std::fs::remove_dir_all(&dir).is_ok();
         std::fs::create_dir_all(&dir).expect("the scratch dir creates");
         dir
     }
@@ -4808,7 +4810,7 @@ mod interaction {
         );
         let mut app = App { flow, ..App::default() };
         let _ = app.update(Message::SaveDest(Some(dir.clone())));
-        let target = dir.join("BDINFO..._.._EVIL.txt");
+        let target = dir.join("BDINFO.....EVIL.txt");
         assert!(target.exists(), "the sanitized name landed inside the chosen directory");
         assert!(
             app.status.as_deref().is_some_and(|status| status.starts_with("Report saved to:")),

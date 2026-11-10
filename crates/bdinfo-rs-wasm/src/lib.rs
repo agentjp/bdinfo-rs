@@ -1154,9 +1154,9 @@ pub fn scan_report(data: &[u8]) -> String {
 
 /// The report's save-file name for a disc labelled `label`.
 ///
-/// `BDINFO.<stem>.txt` with every illegal or control character replaced by
-/// `_`, the same name the `bdinfo-rs` command line and the desktop app save
-/// their reports under.
+/// `BDINFO.<stem>.txt` with every illegal or control character deleted, the
+/// same name the `bdinfo-rs` command line and the desktop app save their
+/// reports under.
 ///
 /// This wraps the core library's sanitizer (property-tested there): whatever
 /// bytes a disc puts in its volume label, the result is one flat path
@@ -1903,11 +1903,11 @@ mod tests {
         use super::report_file_name;
 
         // A clean label passes through; separators, illegal-on-Windows
-        // characters and control bytes become underscores — the sanitizer
-        // itself is property-tested in the core library, so these pin the
-        // wrapping, not the rule set.
+        // characters and control bytes are deleted — the sanitizer itself is
+        // property-tested in the core library, so these pin the wrapping, not
+        // the rule set.
         assert_eq!(report_file_name("WASMDISC"), "BDINFO.WASMDISC.txt");
-        assert_eq!(report_file_name("a/b:c"), "BDINFO.a_b_c.txt");
+        assert_eq!(report_file_name("a/b:c"), "BDINFO.abc.txt");
         assert_eq!(report_file_name(""), "BDINFO..txt");
     }
 

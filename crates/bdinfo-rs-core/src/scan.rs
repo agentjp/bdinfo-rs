@@ -17,24 +17,26 @@ use std::path::Path;
 
 use crate::bdrom::disc::{BdRom, ScanMode, ScanObservers, ScanOptions, ScanReport};
 use crate::error::BdError;
-use crate::vfs::fs::FsDir;
+use crate::vfs::fs::{self, FsDir};
 use crate::vfs::udf::source::{PathIso, UdfSource};
 use crate::vfs::volume;
 
 /// Opens the Blu-ray folder at `path` through `std::fs`, resiliently.
 ///
 /// `path` is the disc root, its `BDMV` directory, or any directory inside it
-/// (the scan walks up). [`ScanReport::errors`] carries the scan's own recorded
-/// failures **plus** the enumeration's per-entry ones
+/// (the scan walks up); a relative `.`, `..` or `BDMV` names the disc after its
+/// real root directory ([`FsDir`]'s names come from the absolute path), while
+/// every recorded failure keeps the path as given. [`ScanReport::errors`] carries the scan's own
+/// recorded failures **plus** the enumeration's per-entry ones
 /// ([`FsDir::take_errors`]) — a directory that could not be read is damage the
 /// scan itself never sees.
 ///
 /// The label is the [`volume`] repair's: a folder scan names the disc after
 /// its root directory, which a bare Windows drive root (`J:\`) does not have.
 /// The repair's raw-device read runs **before** the scan, on the letter the
-/// input path spells, so a disc whose scan goes on to fail reads still carries
-/// its real name; what that read found is applied only if the finished scan's
-/// own label turned out to be a bare drive root.
+/// input path spells once made absolute (so `.` typed at `J:\` reaches it), so a disc whose scan
+/// goes on to fail reads still carries its real name; what that read found is applied only if the
+/// finished scan's own label turned out to be a bare drive root.
 ///
 /// `mode`, `options`, `scan_files` and `observers` are
 /// [`BdRom::open_resilient`]'s, passed through unchanged.
@@ -56,7 +58,8 @@ pub fn open_folder(
     // the tree afterwards to recover the same letter is not an option: `FsDir`
     // shares its error sink across derived handles, so a second walk would
     // record a damaged listing's failures into the report twice.
-    let probed = volume::drive_root_probe(path).and_then(volume::real_volume_label);
+    let probed =
+        volume::drive_root_probe(&fs::absolute_lexical(path)).and_then(volume::real_volume_label);
     let root = FsDir::new(path);
     let mut report = BdRom::open_resilient(&root, mode, options, scan_files, observers)?;
     report.errors.extend(root.take_errors());
@@ -237,6 +240,23 @@ mod tests {
         assert_eq!(report.bdrom.volume_label, "BigBuckBunny");
         assert!(!report.bdrom.playlists.is_empty(), "the structure lists");
         assert!(report.errors.is_empty(), "healthy media records no failure");
+    }
+
+    #[test]
+    fn every_spelling_of_the_disc_folder_names_the_disc_after_it() {
+        let disc = fixture("BigBuckBunny");
+        let mut trailing = disc.clone().into_os_string();
+        trailing.push(std::path::MAIN_SEPARATOR_STR);
+        for path in [
+            disc.join("BDMV").join(".."),
+            disc.join("BDMV").join("STREAM").join("..").join(".."),
+            disc.join("BDMV").join("STREAM").join("."),
+            disc.join("BDMV"),
+            PathBuf::from(trailing),
+        ] {
+            let report = folder(&path, ScanMode::Metadata).expect("the fixture folder opens");
+            assert_eq!(report.bdrom.volume_label, "BigBuckBunny", "{}", path.display());
+        }
     }
 
     #[test]

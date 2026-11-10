@@ -430,7 +430,7 @@ export function renderReport(disc: Disc, options?: ScanOptions): Promise<string>
 
 /**
  * The file name a report for a disc labelled `label` is saved under —
- * `BDINFO.<label>.txt` with every character illegal in a file name replaced,
+ * `BDINFO.<label>.txt` with every character illegal in a file name deleted,
  * exactly the name the native CLI and the desktop app write.
  *
  * The sanitizer is the core library's (property-tested there): whatever bytes

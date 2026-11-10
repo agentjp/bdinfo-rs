@@ -966,7 +966,7 @@ async function main() {
     surface.rejected.includes("shortPlaylistSeconds") &&
     surface.codecsMeasured === false &&
     surface.codecsVideo.includes("High Profile 4.1") &&
-    surface.fileName === "BDINFO.a_b_c.txt";
+    surface.fileName === "BDINFO.abc.txt";
   if (surfaceOk) {
     console.log("PASS — Worker rejection, codecs inspect and reportFileName behave.");
   } else {

@@ -97,8 +97,9 @@ pub struct Structural {
     /// the classic report with zero (unmeasured) bitrates: the pre-scan "View
     /// Report", exactly as `BDInfo` shows it before the bitrate scan.
     pub bdrom: BdRom,
-    /// The detected-feature labels (`Ultra HD`, `BD-Java`, …) in the core's
-    /// fixed order — the info box's `Detected Features` line.
+    /// The detected-feature labels (`Ultra HD`, `BD+ Copy Protection`, …) in
+    /// the original `BDInfo` app's order — the info box's `Detected Features`
+    /// line.
     pub features: Vec<String>,
     /// Any failures recorded while reading the structure (a corrupt playlist,
     /// an unreadable directory, a stream head that never returned) — shown as
@@ -225,8 +226,26 @@ pub fn scan_structural(
         open(input, mode, options, None, ScanObservers::new(&mut *progress, cancel))
             .map_err(|err: BdError| err.to_string())
     })?;
-    let features = bdrom.extra_features().into_iter().map(str::to_owned).collect();
+    let features = detected_features(&bdrom);
     Ok(Structural { bdrom, features, warnings: error_lines(&errors) })
+}
+
+/// The info box's `Detected Features` labels, in `BDInfo` 0.8's
+/// `MainWindowViewModel` order: Ultra HD, 50Hz Content, BD+ Copy Protection,
+/// BD-Java, Blu-ray 3D, D-BOX Motion Code, PSP Digital Copy — one entry per set
+/// flag. Not [`BdRom::extra_features`], which is the report's Extras line: a
+/// different order and no BD+.
+fn detected_features(bdrom: &BdRom) -> Vec<String> {
+    let flags = [
+        (bdrom.is_uhd, "Ultra HD"),
+        (bdrom.is_50hz, "50Hz Content"),
+        (bdrom.is_bd_plus, "BD+ Copy Protection"),
+        (bdrom.is_bd_java, "BD-Java"),
+        (bdrom.is_3d, "Blu-ray 3D"),
+        (bdrom.is_dbox, "D-BOX Motion Code"),
+        (bdrom.is_psp, "PSP Digital Copy"),
+    ];
+    flags.into_iter().filter(|&(set, _)| set).map(|(_, label)| label.to_owned()).collect()
 }
 
 /// Opens the disc for the selection table, choosing how deep to read: the
@@ -446,6 +465,38 @@ mod tests {
                 std::fs::copy(entry.path(), &target).expect("the file copies");
             }
         }
+    }
+
+    #[test]
+    fn detected_features_follow_the_original_order_with_bd_plus() {
+        let mut bdrom = open(&fixture("BigBuckBunny"), ScanMode::Metadata);
+        assert_eq!(super::detected_features(&bdrom), Vec::<String>::new());
+        bdrom.is_uhd = true;
+        bdrom.is_50hz = true;
+        bdrom.is_bd_plus = true;
+        bdrom.is_bd_java = true;
+        bdrom.is_3d = true;
+        bdrom.is_dbox = true;
+        bdrom.is_psp = true;
+        assert_eq!(
+            super::detected_features(&bdrom),
+            [
+                "Ultra HD",
+                "50Hz Content",
+                "BD+ Copy Protection",
+                "BD-Java",
+                "Blu-ray 3D",
+                "D-BOX Motion Code",
+                "PSP Digital Copy",
+            ]
+        );
+        bdrom.is_uhd = false;
+        bdrom.is_50hz = false;
+        bdrom.is_bd_java = false;
+        bdrom.is_3d = false;
+        bdrom.is_dbox = false;
+        bdrom.is_psp = false;
+        assert_eq!(super::detected_features(&bdrom), ["BD+ Copy Protection"]);
     }
 
     #[test]

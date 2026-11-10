@@ -834,9 +834,8 @@ impl Flow {
     }
 
     /// The loaded disc named for a diagnostic log: volume label, byte size,
-    /// detected features, and the two content-protection flags the feature
-    /// list leaves out (`BdRom::extra_features` carries neither). `None`
-    /// before any disc is listed.
+    /// detected features (BD+ among them), and the AACS flag the feature list
+    /// leaves out. `None` before any disc is listed.
     ///
     /// Which disc a log came from is otherwise unrecoverable from it — the
     /// path a log records is the user's, and says nothing about the media.
@@ -849,9 +848,6 @@ impl Flow {
         let mut flags: Vec<&str> = listing.features.iter().map(String::as_str).collect();
         if listing.bdrom.is_aacs_encrypted {
             flags.push("AACS");
-        }
-        if listing.bdrom.is_bd_plus {
-            flags.push("BD+");
         }
         let flags =
             if flags.is_empty() { String::new() } else { format!(", {}", flags.join(", ")) };
@@ -1478,16 +1474,16 @@ mod tests {
         assert_eq!(listed().disc_identity().as_deref(), Some("DISC (78000000000 bytes, Ultra HD)"));
         // A disc with no detected feature carries no trailing list.
         assert_eq!(listed3().disc_identity().as_deref(), Some("DISC (78000000000 bytes)"));
-        // The two protection flags are appended after the features, because
-        // the core's feature list carries neither.
+        // AACS is appended after the features, which carry no AACS label;
+        // BD+ arrives as one of the features.
         let mut structural = structural();
         structural.bdrom.is_aacs_encrypted = true;
-        structural.bdrom.is_bd_plus = true;
+        structural.features.push("BD+ Copy Protection".to_owned());
         let flow =
             Flow::start_listing(input()).listed(&input(), Ok(structural), ViewSettings::default());
         assert_eq!(
             flow.disc_identity().as_deref(),
-            Some("DISC (78000000000 bytes, Ultra HD, AACS, BD+)")
+            Some("DISC (78000000000 bytes, Ultra HD, BD+ Copy Protection, AACS)")
         );
         // No disc, no identity.
         assert_eq!(Flow::idle().disc_identity(), None);

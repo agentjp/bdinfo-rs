@@ -312,7 +312,7 @@ async function main() {
   // The report save-file name, sanitized by the core rule.
   const fileNameOk =
     report_file_name("WASMDISC") === "BDINFO.WASMDISC.txt" &&
-    report_file_name("a/b:c") === "BDINFO.a_b_c.txt";
+    report_file_name("a/b:c") === "BDINFO.abc.txt";
   if (!fileNameOk) {
     console.error(
       `FAIL — report_file_name unexpected: ${report_file_name("WASMDISC")}, ${report_file_name("a/b:c")}.`,

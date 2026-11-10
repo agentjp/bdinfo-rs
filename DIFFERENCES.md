@@ -57,6 +57,8 @@ actually see on a normal disc.
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 | [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
 | [An unreadable `.ssif` falls back to the base view](#an-unreadable-ssif-falls-back-to-the-base-view) | Only on damaged media — the clip is measured in 2D instead of lost | 3D discs whose `STREAM/SSIF` file will not open |
+| [Angle block layout](#angle-block-layout) | **Yes** — the per-angle bitrate unit and line breaks | Multi-angle playlists |
+| [Disc label of a non-UDF Windows drive root](#disc-label-of-a-non-udf-windows-drive-root) | **Yes** — `Disc Label:` and the report file name | A disc folder copied to the root of a USB stick, external disk or mapped share on Windows |
 
 ---
 
@@ -602,6 +604,40 @@ kept, and the base view is not re-read from the `.m2ts`.
 
 <sub>Source: `crates/bdinfo-rs-core/src/bdrom/disc.rs` (`scan_one_stream_file`).</sub>
 
+### Angle block layout
+
+A playlist with extra angles prints a block of per-angle lines after `Total Bitrate:`. bdinfo-rs
+prints BDInfo 0.8's layout — two-digit hours, `(h:mm:ss.ms)` on the angle lines, no blank lines —
+with two of its slips repaired:
+
+```diff
+- Angle 1 Total Bitrate:  2.05 kbps Mbps / 2.05 kbps MbpsAngle 2 Length:         00:00:00.000 (h:mm:ss.ms) / 00:00:30.000 (h:mm:ss.ms)
++ Angle 1 Total Bitrate:  2.05 Mbps / 2.05 Mbps
++ Angle 2 Length:         00:00:00.000 (h:mm:ss.ms) / 00:00:30.000 (h:mm:ss.ms)
+```
+
+The value is megabits per second in every BDInfo version (bytes × 8 / seconds / 10⁶, rounded
+to two decimals), so the stray `kbps` 0.8 places before `Mbps` is dropped. 0.8 also ends
+each `Angle N Total Bitrate:` line without a line break, so with two or more extra angles that
+line runs into the next angle's `Length:` line; bdinfo-rs ends every line. Each line bdinfo-rs
+prints exists in some BDInfo output: the `Total Bitrate` line equals 0.7.5.6's byte for byte.
+BDInfo 0.7.5.6 lays the block out differently again — a blank line before each angle and before
+`All Angles`, unpadded hours, and `(h:m:s.ms)` on every line; bdinfo-rs keeps the 0.8 layout the
+rest of its report follows.
+
+<sub>Source: `crates/bdinfo-rs-core/src/report/text.rs` (`playlist_report`).</sub>
+
+### Disc label of a non-UDF Windows drive root
+
+A `BDMV` folder at the root of a Windows drive that is not a UDF disc — an NTFS, exFAT or FAT USB
+stick, an external disk, a mapped network share — prints the bare drive letter as its
+`Disc Label:` (and names the report `BDINFO.<letter>.txt`), where BDInfo prints the filesystem's
+volume label. Reading that label needs a Windows API call, which bdinfo-rs's no-`unsafe` rule
+rules out. A disc folder inside a named directory is unaffected, and so is a UDF disc in a drive:
+its label is read off the raw volume.
+
+<sub>Source: `crates/bdinfo-rs-core/src/vfs/volume.rs` (`resolve_folder_label`).</sub>
+
 ---
 
 ## Desktop app vs. the BDInfo GUI
@@ -609,7 +645,10 @@ kept, and the base view is not re-read from the `.m2ts`.
 The report is byte-identical; the window around it is not a pixel-for-pixel port. The three-pane
 Playlist / Stream File / Codec view, the playlist table, sorting, drag-and-drop, the settings
 dialog, and the report toggles all behave as in the original. The Stream File pane names a
-3D clip by its `.ssif` file before any scan has measured it, as the original does.
+3D clip by its `.ssif` file before any scan has measured it, as the original does. The info box's
+`Detected Features:` line follows the original's order and includes BD+ — Ultra HD, 50Hz Content,
+BD+ Copy Protection, BD-Java, Blu-ray 3D, D-BOX Motion Code, PSP Digital Copy — while the report's
+`Extras:` line keeps the report's own order, without BD+.
 
 Not carried over:
 
