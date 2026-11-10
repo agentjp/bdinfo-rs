@@ -12,6 +12,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      heading shape used below, which cargo-dist parses for the GitHub Release notes. See
      CONTRIBUTING.md § "Cutting a release". -->
 
+## [v5.0.0](https://github.com/agentjp/bdinfo-rs/compare/v4.0.0...v5.0.0) (2026-11-10)
+
+### ⚠ BREAKING CHANGES
+
+* **core:** `TsStreamClipFile.streams` is a `Vec<TsStream>` in clip-info declaration order instead
+  of a PID-keyed `BTreeMap`, and the struct is `#[non_exhaustive]`. Migration: iterate the vector,
+  or search it by `pid`, where a caller indexed the map. `BdRom::full_size` is deprecated: the
+  report prints `BdRom::size`. ([#604](https://github.com/agentjp/bdinfo-rs/issues/604))
+* **report:** stream rows follow BDInfo's default order — video, audio, graphics, text, each kind in
+  clip-info declaration order — so a disc whose clip info declares
+  its streams out of PID order prints its rows in a different order than 4.0.0 did.
+  ([#604](https://github.com/agentjp/bdinfo-rs/issues/604))
+
+### Fixes
+
+* **report:** `Disc Size` no longer counts the interleaved `.ssif` files of a 3D disc. An `.ssif`
+  shares its sectors with the `.m2ts` files it interleaves, so every 3D title printed roughly twice
+  its size — in the report, the desktop app and the web demo.
+  ([#586](https://github.com/agentjp/bdinfo-rs/issues/586), [#592](https://github.com/agentjp/bdinfo-rs/issues/592))
+* **report:** the video rows of a 3D playlist carry `Left Eye` and `Right Eye`, swapped when the
+  playlist's `MVC_Base_view_R` flag is set. Only AVC and MVC rows are labelled.
+  ([#593](https://github.com/agentjp/bdinfo-rs/issues/593), [#604](https://github.com/agentjp/bdinfo-rs/issues/604))
+* **bdrom:** on a 3D clip the MVC dependent view follows every declared video row, the CHAPTERS
+  table measures the first declared video stream, and a 3D clip the scan never measured is named by
+  its `.ssif`. ([#604](https://github.com/agentjp/bdinfo-rs/issues/604))
+* **bdrom:** PGS caption counts are the sum over every measured clip of the playlist, angle clips
+  and repeated clips included, as the BDInfo 0.8 app counts them; a multi-clip feature printed the
+  tally of one clip. Picture-in-picture subtitle rows are no longer marked hidden, and a scanned
+  embedded audio core always replaces the merged one.
+  ([#604](https://github.com/agentjp/bdinfo-rs/issues/604))
+* **m2ts:** three demux measurements match BDInfo — PES timestamps decode to 32 bits, so a clip
+  whose timestamps pass 13 h 15 m matches its playlist window instead of measuring 0; the
+  end-of-file flush walks the video streams in PMT registration order; and a read that ends inside
+  a skipped packet resumes where BDInfo 0.8 resumes, at every 5 MiB file offset.
+  ([#602](https://github.com/agentjp/bdinfo-rs/issues/602))
+* **codec:** HEVC HDR metadata follows BDInfo's rules — mastering-display primaries are assigned to
+  R/G/B by value, a `0xFFFF` coordinate prints the luminance line alone, HDR10+ needs application
+  version 0 or 1 and one window, the Dolby Vision label needs a mastering display, and the
+  mastering, luminance and MaxCLL/MaxFALL fragments no longer need an SPS.
+  ([#603](https://github.com/agentjp/bdinfo-rs/issues/603))
+* **codec:** a reduced-rate E-AC-3 frame prints the ETSI TS 102 366 bit rate, and a frame with
+  block code 0 prints no bit rate where `4294967295 kbps` was printed.
+  ([#603](https://github.com/agentjp/bdinfo-rs/issues/603))
+* **cli:** the disc label comes from the absolute path, so a relative path given inside the disc
+  folder, its `BDMV` folder or `BDMV/STREAM` names the disc after its root directory. The report
+  file name deletes illegal characters instead of replacing them with an underscore, negative times
+  print their magnitude, and the playlist table counts angle clips in `Measured Bytes`.
+  ([#613](https://github.com/agentjp/bdinfo-rs/issues/613))
+* **gui:** `Detected Features` lists the features in BDInfo's order, with `BD+ Copy Protection`.
+  ([#613](https://github.com/agentjp/bdinfo-rs/issues/613))
+* **bdrom:** a damaged playlist or clip-information file keeps what was parsed before the failure —
+  clips, stream entries and chapter marks — instead of being dropped whole, and a play item naming
+  a missing clip-information file ends the playlist before that clip. `BDMV/BACKUP` recovery
+  applies only when the primary yields nothing. Every failure is still recorded in the `WARNING`
+  block, which prints the file name in upper case. ([#614](https://github.com/agentjp/bdinfo-rs/issues/614))
+* **clpi:** a clip-information file that declares one stream PID twice in a program sequence stops
+  parsing at the second declaration and keeps the streams before it; the browser package reports
+  the new error kind as `duplicatePid`. ([#615](https://github.com/agentjp/bdinfo-rs/issues/615))
+* **packaging:** the GUI AppImage bundles the windowing libraries the binary loads at runtime
+  (libxkbcommon-x11, libXcursor and the rest of the X11/Wayland set not on the AppImage
+  excludelist), so it starts on a host that lacks them instead of panicking at launch.
+  ([#505](https://github.com/agentjp/bdinfo-rs/issues/505))
+* **packaging:** the GUI AppImage carries its AppStream metadata as `<id>.appdata.xml`, the one name
+  appimagetool and the AppImageHub catalog read. ([#622](https://github.com/agentjp/bdinfo-rs/issues/622))
+* **release:** a crates.io version that is already published no longer fails the publish job.
+  ([#390](https://github.com/agentjp/bdinfo-rs/issues/390))
+
+### Differences from BDInfo
+
+[DIFFERENCES.md](DIFFERENCES.md) gains or corrects these entries:
+
+* **3D:** eye labels on a 50 Hz disc, eye labels only on AVC and MVC streams, and the `Disc Size`
+  BDInfo 0.8.0.1 doubles on a 3D `.iso`.
+* **Subtitles:** PGS caption counts summed over every clip — the BDInfo 0.8 app's number, not the
+  one 0.7.5.6 and the 0.8 library ports print.
+* **Demux:** the true scope of the backwards-PTS rule (every variable bit rate, by a few kbps on a
+  feature), the signed interval on a backwards timestamp, the unknown PMT stream type, the
+  oversized adaptation field, and the 5 MiB read emulation.
+* **HEVC:** the `profile_tier_level` sub-layer skip, the per-stream HDR10+ flag, the SEI message
+  alignment, and HDR10+ from a T.35 message without a mastering display.
+* **Audio:** the DTS-HD High-Res total moves with the DTS core rate (3018 to 3045 kbps), DTS:X IMAX
+  also matches `0xF14000D1`, and the reduced-rate E-AC-3 entry is corrected.
+* **Disc structures BDInfo misreads:** a new section of nine — secondary and picture-in-picture
+  stream declarations, angle copies of a hidden video stream, `MPLS0240` / `HDMV0240` files, `FMTS`
+  play items, several program sequences in one clip info, header type 4 stream entries, directory
+  names in any case, chapter-mark edge cases, and a playlist without a video stream.
+* **Damaged media:** no sticky scan exception, damaged metadata, and a corrected read-errors entry.
+* **Layout:** the angle block, the playlist banner, the disc label of a non-UDF Windows drive root,
+  and the desktop app's feature order and stream pane.
+
 ## [v4.0.0](https://github.com/agentjp/bdinfo-rs/compare/v3.0.0...v4.0.0) (2026-08-16)
 
 ### ⚠ BREAKING CHANGES
