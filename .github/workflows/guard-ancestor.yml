@@ -26,10 +26,14 @@ jobs:
 
       - name: Verify the tagged commit is an ancestor of origin/master
         shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
-          if git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+          # REHEARSAL BRANCH ONLY (never merged): a pull request checks its base commit.
+          CHECK_SHA="${PR_BASE_SHA:-$GITHUB_SHA}"
+          if git merge-base --is-ancestor "$CHECK_SHA" origin/master; then
             echo "OK: $GITHUB_SHA is on master."
           else
             echo "::error::Tagged commit $GITHUB_SHA is not on master (not an ancestor of origin/master); refusing to release."
