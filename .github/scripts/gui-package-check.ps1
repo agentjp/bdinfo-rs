@@ -229,6 +229,11 @@ switch ($Kind) {
             foreach ($name in 'LICENSE', 'NOTICE') {
                 Assert (Test-Path (Join-Path $root "usr/share/doc/bdinfo-rs-gui/$name")) "AppImage carries $name"
             }
+            # The one name appimagetool and the AppImageHub catalog test read
+            # (gui-package-linux.ps1 has the reason); a second copy under the
+            # deb/rpm name would declare the component twice.
+            Assert (Test-Path (Join-Path $root "usr/share/metainfo/$appId.appdata.xml")) "AppImage carries usr/share/metainfo/$appId.appdata.xml"
+            Assert (-not (Test-Path (Join-Path $root "usr/share/metainfo/$appId.metainfo.xml"))) "AppImage carries no second copy as $appId.metainfo.xml"
             # The launcher that puts usr/lib on the library path, and the
             # library whose absence crashes the GUI before it opens a window
             # (the full set is derived in gui-package-linux.ps1).
