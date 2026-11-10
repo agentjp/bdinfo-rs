@@ -96,7 +96,11 @@ Copy-Item $binary (Join-Path $appDir 'usr/bin/bdinfo-rs-gui')
 & chmod +x (Join-Path $appDir 'usr/bin/bdinfo-rs-gui')
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: chmod'; exit 1 }
 Copy-Item (Join-Path $packaging "$appId.desktop") (Join-Path $appDir 'usr/share/applications')
-Copy-Item (Join-Path $packaging "$appId.metainfo.xml") (Join-Path $appDir 'usr/share/metainfo')
+# Under the `.appdata.xml` name, unlike the deb and the rpm: appimagetool and
+# the AppImageHub catalog test both look for `<id>.appdata.xml` alone and
+# treat an AppDir that holds only `<id>.metainfo.xml` as having no AppStream
+# metadata. AppStream reads both names for a desktop application.
+Copy-Item (Join-Path $packaging "$appId.metainfo.xml") (Join-Path $appDir "usr/share/metainfo/$appId.appdata.xml")
 # The LGPL-2.1 text and the attribution notice ride inside the AppImage — a
 # portable format carries no package-manager license metadata, so the texts
 # themselves are the only license information a recipient gets.
