@@ -673,6 +673,13 @@ pub enum ScanErrorReason {
         /// The name of the missing file.
         file: String,
     },
+    /// A clip-information (`*.clpi`) file declared the same stream PID twice
+    /// within one program sequence.
+    #[serde(rename_all = "camelCase")]
+    DuplicatePid {
+        /// The PID declared twice.
+        pid: u16,
+    },
     /// Reading the disc failed: listing a directory, or opening or reading a
     /// file.
     #[serde(rename_all = "camelCase")]
@@ -991,6 +998,7 @@ impl From<&error::BdError> for ScanErrorReason {
             error::BdError::UnexpectedEof => Self::UnexpectedEof,
             error::BdError::StructureNotFound => Self::StructureNotFound,
             error::BdError::MissingClipFile(file) => Self::MissingClipFile { file: file.clone() },
+            error::BdError::DuplicatePid(pid) => Self::DuplicatePid { pid: *pid },
             // The wrapped `io::Error`, not the `BdError` around it: the mirror
             // supplies the `io error: ` framing itself when it names the kind.
             error::BdError::Io(err) => Self::Io { message: err.to_string() },
@@ -1226,6 +1234,7 @@ impl From<ScanErrorReason> for error::BdError {
             ScanErrorReason::UnexpectedEof => Self::UnexpectedEof,
             ScanErrorReason::StructureNotFound => Self::StructureNotFound,
             ScanErrorReason::MissingClipFile { file } => Self::MissingClipFile(file),
+            ScanErrorReason::DuplicatePid { pid } => Self::DuplicatePid(pid),
             // The message is the wrapped `io::Error`'s, so it goes back inside a
             // fresh one: the `io error: ` framing the report prints comes from
             // the `BdError` around it, and the original `io::ErrorKind` is not
@@ -1704,6 +1713,10 @@ mod tests {
                 json!({ "kind": "missingClipFile", "file": "00003.CLPI" }),
             ),
             (
+                ScanErrorReason::DuplicatePid { pid: 0x1011 },
+                json!({ "kind": "duplicatePid", "pid": 0x1011 }),
+            ),
+            (
                 ScanErrorReason::Io { message: "denied".to_owned() },
                 json!({ "kind": "io", "message": "denied" }),
             ),
@@ -2144,6 +2157,7 @@ mod tests {
                 error::BdError::MissingClipFile("00003.CLPI".to_owned()),
                 ScanErrorReason::MissingClipFile { file: "00003.CLPI".to_owned() },
             ),
+            (error::BdError::DuplicatePid(0x1011), ScanErrorReason::DuplicatePid { pid: 0x1011 }),
             (
                 error::BdError::Io(io::Error::other("denied")),
                 ScanErrorReason::Io { message: "denied".to_owned() },
@@ -2263,6 +2277,7 @@ mod tests {
             error::BdError::UnexpectedEof,
             error::BdError::StructureNotFound,
             error::BdError::MissingClipFile("00003.CLPI".to_owned()),
+            error::BdError::DuplicatePid(0x1011),
             error::BdError::Io(io::Error::other("denied")),
             error::BdError::MetadataTooLarge { file: "00000.MPLS".to_owned(), limit: 67_108_864 },
             error::BdError::ScanCancelled,

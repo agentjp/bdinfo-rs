@@ -42,6 +42,10 @@ pub enum BdError {
     /// on the disc. Carries the missing file's name.
     #[error("referenced missing clip file: {0}")]
     MissingClipFile(String),
+    /// A clip-information (`*.clpi`) file declared the same stream PID twice
+    /// within one program sequence. Carries the PID.
+    #[error("duplicate stream PID: 0x{0:04X}")]
+    DuplicatePid(u16),
     /// An IO error reading the disc (enumerating a directory, opening or reading a
     /// file). Wraps the underlying [`std::io::Error`] as its source; the disc-scan
     /// and parser layers surface filesystem failures rather than panicking on
@@ -166,6 +170,7 @@ mod tests {
             BdError::MissingClipFile("00000.CLPI".to_owned()).to_string(),
             "referenced missing clip file: 00000.CLPI"
         );
+        assert_eq!(BdError::DuplicatePid(0x1011).to_string(), "duplicate stream PID: 0x1011");
         let io = BdError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
         assert_eq!(io.to_string(), "io error: denied");
         assert_eq!(
@@ -189,7 +194,7 @@ mod tests {
     fn only_the_io_variant_exposes_an_underlying_cause() {
         // The wrapped IO error is reachable as the error's `source` (the chain the
         // stringifying predecessor discarded); every other variant has no source.
-        // Exercising `source` on all six covers each arm thiserror generates.
+        // Exercising `source` on every variant covers each arm thiserror generates.
         let io = BdError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "short"));
         assert_eq!(io.source().expect("Io carries a source").to_string(), "short");
         for sourceless in [
@@ -197,6 +202,7 @@ mod tests {
             BdError::UnexpectedEof,
             BdError::StructureNotFound,
             BdError::MissingClipFile("00000.CLPI".to_owned()),
+            BdError::DuplicatePid(0x1011),
             BdError::MetadataTooLarge { file: "00000.MPLS".to_owned(), limit: 1 },
             BdError::ScanCancelled,
         ] {

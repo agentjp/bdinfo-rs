@@ -448,7 +448,8 @@ on the disc shape named.
   `<clip>.FMTS` stream file; bdinfo-rs finds and measures it. BDInfo names every clip
   `<clip>.M2TS` and lists `*.m2ts` files only, so the clip is never measured.
 - **Every program sequence of a clip-info file is read.** Recorder-authored clips can
-  declare more than one program sequence; bdinfo-rs reads the streams of all of them.
+  declare more than one program sequence; bdinfo-rs reads the streams of all of them, and a
+  PID a later sequence declares again replaces the earlier declaration in its place.
   BDInfo reads the first sequence only (`TSStreamClipFile.Scan` takes its stream count at
   a fixed offset).
 - **Stream entries of header type 4 read their PID at offset 2.** libbluray reads the PID
@@ -613,7 +614,9 @@ failure, as BDInfo keeps its half-built object:
 - **A clip-information file** keeps the streams read before the failure. One that fails
   before its first stream, or cannot be read at all, stays on the disc with no streams, as
   BDInfo lists every clip-information file before parsing any; the playlists that use it
-  keep that clip.
+  keep that clip. A stream PID declared twice within one program sequence is such a
+  failure: the parse stops at the second declaration, where BDInfo's stream dictionary
+  throws.
 
 Every such failure is recorded in the report's `WARNING:` block and makes the scan exit with
 code 3. BDInfo shows it in a prompt during the scan instead, and lists only stream files in
