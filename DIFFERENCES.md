@@ -56,6 +56,8 @@ actually see on a normal disc.
 | [AACS-encrypted discs are refused](#aacs-encrypted-discs-are-refused) | **Yes** — no report at all | Discs whose stream content is still encrypted |
 | [Damaged-media read granularity](#damaged-media-read-granularity) | Only on damaged media — partial scans retain more | Discs with unreadable spans |
 | [Read errors: folder input vs `.iso` input](#read-errors-folder-input-vs-iso-input) | Only on damaged media — the same disc measures differently through the two inputs | Damaged discs and damaged disc images |
+| [No sticky scan exception](#no-sticky-scan-exception) | Only on damaged media — the `WARNING:` lines | Discs where a stream file other than the last one fails |
+| [Damaged metadata](#damaged-metadata) | Only on damaged media — playlists recovered from `BDMV/BACKUP` or kept past a missing angle file | Discs with a corrupt or missing `.mpls` or `.clpi` |
 | [An unreadable `.ssif` falls back to the base view](#an-unreadable-ssif-falls-back-to-the-base-view) | Only on damaged media — the clip is measured in 2D instead of lost | 3D discs whose `STREAM/SSIF` file will not open |
 | [Angle block layout](#angle-block-layout) | **Yes** — the per-angle bitrate unit and line breaks | Multi-angle playlists |
 | [Disc label of a non-UDF Windows drive root](#disc-label-of-a-non-udf-windows-drive-root) | **Yes** — `Disc Label:` and the report file name | A disc folder copied to the root of a USB stick, external disk or mapped share on Windows |
@@ -534,7 +536,9 @@ deliberately diverge from BDInfo 0.8:
 
 A read that fails is handled at a different layer for the two inputs, so the same damaged
 disc measures differently depending on which one it is scanned through. Both are
-deliberate; neither has a BDInfo counterpart, which reads folders only.
+deliberate. BDInfo reads both inputs too (0.7.5.6 and 0.8.0.1 open `.iso` images), and on
+either one a failed read throws out of that stream file's scan, which then lists the file in
+its report's `WARNING:` block.
 
 - **Folder input** — the failing read aborts that stream file. Everything demuxed before
   it is kept (unless the retention switch discards it) and everything after it is never
@@ -554,29 +558,84 @@ stream file, which is why the `.iso` path keeps it. Every surface that takes an 
 drains those recordings — the command line, the desktop app and the browser package alike
 — so an unreadable image is never reported as a clean scan.
 
-The split reaches the report text: the `WARNING:` block names a different thing for each
-input, because a different thing failed.
+The split reaches the report text. Folder input names the stream file that a failed read
+aborted, upper-cased as BDInfo prints it, but without the exception's stack trace BDInfo
+prints on the line after:
+
+```diff
+  WARNING: File errors were encountered during scan:
+
+  00011.M2TS	<the read failure>
+- <the exception's stack trace>
+```
+
+`.iso` input names the open file handle and the byte offset it first found unreadable, a
+shape BDInfo never prints:
 
 ```diff
   WARNING: File errors were encountered during scan:
 
 - 00011.M2TS	<the read failure>
+- <the exception's stack trace>
 + 00011.M2TS @ byte 5242880	<the read failure>
 ```
 
-The `-` line is folder input, the `+` line the same disc as an `.iso`. Folder input names
-the stream file that a failed read aborted. `.iso` input names the open file handle and
-the byte offset it first found unreadable; the reader then serves that handle zeros and
-reads on, so further bad sectors under the same handle add no further lines. Both shapes
-are per attempt, not per disc: a damaged span that both measurement passes read as far as
-prints a line for each of them.
-
-Neither shape is BDInfo's — it reads folders only, and prompts per failing file instead of
-collecting the failures into the report.
+The reader then serves that handle zeros and reads on, so further bad sectors under the
+same handle add no further lines. Both shapes are per attempt, not per disc: a damaged span
+that both measurement passes read as far as prints a line for each of them.
 
 <sub>Source: `crates/bdinfo-rs-core/src/vfs/udf/source.rs` (`UdfSource::open_resilient`,
 `take_errors`), `crates/bdinfo-rs-core/src/scan.rs` (`open_iso`),
 `crates/bdinfo-rs-wasm/src/lib.rs` (`scan_iso`, `run_iso_report`).</sub>
+
+### No sticky scan exception
+
+Both BDInfo apps keep one scan state for the whole measured scan and never clear its error
+(`ScanBDROMThread` in 0.7.5.6's `FormMain` and 0.8's `MainWindowViewModel`). After the first
+stream file that fails, every later stream file is listed in the `WARNING:` block too, each
+with the earlier file's message. bdinfo-rs lists only the files that failed, each with its
+own failure, and prints no stack-trace line under any of them.
+
+<sub>Source: `crates/bdinfo-rs-core/src/report/text.rs` (`warnings`).</sub>
+
+### Damaged metadata
+
+A playlist or clip-information file that fails to parse keeps what was read before the
+failure, as BDInfo keeps its half-built object:
+
+- **A playlist** keeps the clips read before the failure — a play item's clip counts as read
+  once its in and out times are — with the Stream-Number-table entries and chapter marks read
+  before it. A failure among the play items leaves it with no chapters. A playlist that
+  fails before its first clip is left out: BDInfo 0.8 keeps it at length zero, which its
+  default short-playlist filter hides, and 0.7.5.6's scan fails on it.
+- **A play item whose clip-information file is not on the disc** ends the playlist before
+  that item's clip, where BDInfo throws.
+- **A clip-information file** keeps the streams read before the failure. One that fails
+  before its first stream, or cannot be read at all, stays on the disc with no streams, as
+  BDInfo lists every clip-information file before parsing any; the playlists that use it
+  keep that clip.
+
+Every such failure is recorded in the report's `WARNING:` block and makes the scan exit with
+code 3. BDInfo shows it in a prompt during the scan instead, and lists only stream files in
+the block.
+
+bdinfo-rs goes further than BDInfo in two places:
+
+- **`BDMV/BACKUP` recovery.** When a damaged `.mpls` or `.clpi` yields nothing — no clip or
+  no stream — and its `BDMV/BACKUP` copy parses in full, the copy is used. A primary that
+  yields part of its content is kept over the backup. The primary's failure is still
+  recorded. BDInfo never reads `BDMV/BACKUP`.
+- **Angle clips with missing files.** An extra angle whose clip-information file is missing
+  is left out, and one whose stream file is missing stays in the clip list unmeasured. The
+  playlist keeps its later play items. BDInfo throws at that angle and ends the playlist
+  there.
+
+A chapter mark with a bad play-item index is covered under
+[Disc structures BDInfo misreads](#disc-structures-bdinfo-misreads).
+
+<sub>Source: `crates/bdinfo-rs-core/src/bdrom/mpls.rs` (`TsPlaylistFile::scan_partial`),
+`crates/bdinfo-rs-core/src/bdrom/clpi.rs` (`TsStreamClipFile::scan_partial`),
+`crates/bdinfo-rs-core/src/bdrom/disc.rs` (`Sink::absorb_parse`).</sub>
 
 ### An unreadable `.ssif` falls back to the base view
 

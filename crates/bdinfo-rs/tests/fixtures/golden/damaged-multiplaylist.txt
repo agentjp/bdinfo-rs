@@ -17,7 +17,7 @@ INCLUDES FORUMS REPORT FOR:
 
 WARNING: File errors were encountered during scan:
 
-00011.m2ts	<reason>
+00011.M2TS	<reason>
 
 ********************
 PLAYLIST: 00002.MPLS

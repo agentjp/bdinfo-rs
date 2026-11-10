@@ -15,12 +15,14 @@
 //! bytes are never indexed raw; malformed input → `Result`). Disc offsets
 //! advance with `saturating_add` (an out-of-range offset then fails the next
 //! bounds-checked read as [`BdError::UnexpectedEof`]); the entry-length math
-//! uses fixed-width `wrapping_*` arithmetic.
+//! uses fixed-width `wrapping_*` arithmetic. The walk fills maps held outside
+//! it, so a parse that fails part-way still yields the streams declared before
+//! the failure.
 
 use std::collections::BTreeMap;
 
 use super::{ascii, build_coded_stream, byte, u16_be, u32_off};
-use crate::error::BdError;
+use crate::error::{BdError, PartialParse};
 use crate::primitives::Pid;
 use crate::stream::{TsStream, TsStreamType};
 
@@ -69,8 +71,9 @@ pub struct TsStreamClip {
 pub struct TsStreamClipFile {
     /// The 8-byte type magic, e.g. `"HDMV0300"`.
     pub file_type: String,
-    /// Whether the file scanned successfully; always `true` here,
-    /// since a failed scan returns [`BdError`] instead.
+    /// Whether the file parsed in full, as `BDInfo`'s `IsValid`: `false` on a
+    /// file a disc scan kept after its parse failed, holding the streams read
+    /// before the failure (possibly none).
     pub is_valid: bool,
     /// The upper-cased file name, e.g. `"00000.CLPI"`.
     pub name: String,
@@ -88,69 +91,114 @@ impl TsStreamClipFile {
     /// `HDMV0100`/`HDMV0200`/`HDMV0240`/`HDMV0300`, or [`BdError::UnexpectedEof`] if any
     /// field runs past the end of `data` (a truncated or malformed file).
     pub fn scan(name: &str, data: &[u8]) -> Result<Self, BdError> {
-        let file_type = ascii(data, 0, 8)?;
-        if !matches!(file_type.as_str(), "HDMV0100" | "HDMV0200" | "HDMV0240" | "HDMV0300") {
-            return Err(BdError::UnknownFileType(file_type));
-        }
+        Self::scan_partial(name, data).map_err(|partial| partial.error)
+    }
 
-        // ProgramInfo_start_address (offset 12) → its 4-byte length → the block.
-        let clip_index = u32_off(data, 12)?;
-        let clip_length = u32_off(data, clip_index)?;
-        let clip_start = clip_index.saturating_add(4);
-        let clip_end = clip_start.saturating_add(clip_length);
-        let clip_data = data.get(clip_start..clip_end).ok_or(BdError::UnexpectedEof)?;
-
-        // ProgramInfo: a reserved byte (block offset 0), then the
-        // program-sequence count; each program carries an 8-byte header
-        // (`spn_program_sequence_start` + `program_map_pid` + the stream
-        // count + `num_groups`) followed by its stream entries. Streams from
-        // every program sequence merge into one list; a PID redeclared by a
-        // later sequence replaces the earlier entry but keeps its position (the
-        // overwrite-in-place of the .NET `Dictionary` indexer `BDInfo` stores
-        // its clip streams in). `declared` maps each PID to its declaration
-        // slot and stream, so hostile input with thousands of entries resolves
-        // a redeclaration by lookup, not by a linear search.
-        let num_prog = byte(clip_data, 1)?;
-        let mut declared: BTreeMap<u16, (usize, TsStream)> = BTreeMap::new();
-        let mut prog_offset: usize = 2;
-        for _ in 0..num_prog {
-            let stream_count = byte(clip_data, prog_offset.saturating_add(6))?;
-            let mut stream_offset = prog_offset.saturating_add(8);
-            for _ in 0..stream_count {
-                let pid = u16_be(clip_data, stream_offset)?;
-                // Advance past the 2-byte PID — `info` is now the coding-info
-                // length byte; the stream_coding_type is the byte after it. The
-                // length is read first (before the type) to keep both reads
-                // fallible — reading the type first would make the length read
-                // provably in-bounds and so an unreachable error path.
-                let info = stream_offset.saturating_add(2);
-                let len = byte(clip_data, info)?;
-                let type_byte = byte(clip_data, info.saturating_add(1))?;
-                let stream_type = TsStreamType::from_u8(type_byte);
-
-                if let Some(mut stream) = build_clip_stream(clip_data, info, stream_type)? {
-                    stream.base_mut().pid = Pid::new(pid);
-                    stream.base_mut().stream_type = stream_type;
-                    // A new PID takes the next slot: `len()` counts the
-                    // distinct PIDs declared so far.
-                    let slot = declared.get(&pid).map_or(declared.len(), |(slot, _)| *slot);
-                    declared.insert(pid, (slot, stream));
-                }
-
-                // The next entry starts after the length byte plus its `len`
-                // coding-info bytes (`len` ≤ 255, so the `+ 1` cannot overflow
-                // the fixed-width wrapping_add).
-                stream_offset = info.saturating_add(usize::from(len).wrapping_add(1));
-            }
-            // The next program's header starts where this program's entries end.
-            prog_offset = stream_offset;
-        }
-
+    /// [`scan`](Self::scan) that keeps the streams a failed parse read before
+    /// the failure, as `BDInfo`'s `TSStreamClipFile.Scan` keeps its partly
+    /// filled stream dictionary.
+    ///
+    /// # Errors
+    /// The [`scan`](Self::scan) failures, each carrying the file built from the
+    /// streams read before it (in declaration order, `is_valid` false), or
+    /// `None` when no stream was read.
+    pub(crate) fn scan_partial(name: &str, data: &[u8]) -> Result<Self, PartialParse<Self>> {
+        let mut file_type = String::new();
+        let mut declared = BTreeMap::new();
+        let walked = walk(data, &mut file_type, &mut declared);
+        let read_any = !declared.is_empty();
+        let mut file = Self::unparsed(name);
+        file.file_type = file_type;
+        file.is_valid = walked.is_ok();
+        // A new PID took the next slot as it was declared, so sorting by slot
+        // restores declaration order.
         let mut slotted: Vec<(usize, TsStream)> = declared.into_values().collect();
         slotted.sort_unstable_by_key(|(slot, _)| *slot);
-        let streams = slotted.into_iter().map(|(_, stream)| stream).collect();
-        Ok(Self { file_type, is_valid: true, name: name.to_ascii_uppercase(), streams })
+        file.streams = slotted.into_iter().map(|(_, stream)| stream).collect();
+        match walked {
+            Ok(()) => Ok(file),
+            Err(error) => Err(PartialParse { value: read_any.then(|| Box::new(file)), error }),
+        }
     }
+
+    /// The file named `name` with no stream read — what `BDInfo` registers for
+    /// every clip-information file on the disc before parsing any, and keeps
+    /// when the parse fails before its first stream.
+    pub(crate) fn unparsed(name: &str) -> Self {
+        Self {
+            file_type: String::new(),
+            is_valid: false,
+            name: name.to_ascii_uppercase(),
+            streams: Vec::new(),
+        }
+    }
+}
+
+/// Walks `data`'s header and `ProgramInfo` streams into `file_type` and
+/// `declared` (PID → declaration slot and stream), stopping at the first
+/// failure with everything read before it in place.
+fn walk(
+    data: &[u8],
+    file_type: &mut String,
+    declared: &mut BTreeMap<u16, (usize, TsStream)>,
+) -> Result<(), BdError> {
+    *file_type = ascii(data, 0, 8)?;
+    if !matches!(file_type.as_str(), "HDMV0100" | "HDMV0200" | "HDMV0240" | "HDMV0300") {
+        return Err(BdError::UnknownFileType(file_type.clone()));
+    }
+
+    // ProgramInfo_start_address (offset 12) → its 4-byte length → the block.
+    let clip_index = u32_off(data, 12)?;
+    let clip_length = u32_off(data, clip_index)?;
+    let clip_start = clip_index.saturating_add(4);
+    let clip_end = clip_start.saturating_add(clip_length);
+    let clip_data = data.get(clip_start..clip_end).ok_or(BdError::UnexpectedEof)?;
+
+    // ProgramInfo: a reserved byte (block offset 0), then the
+    // program-sequence count; each program carries an 8-byte header
+    // (`spn_program_sequence_start` + `program_map_pid` + the stream
+    // count + `num_groups`) followed by its stream entries. Streams from
+    // every program sequence merge into one list; a PID redeclared by a
+    // later sequence replaces the earlier entry but keeps its position (the
+    // overwrite-in-place of the .NET `Dictionary` indexer `BDInfo` stores
+    // its clip streams in). `declared` maps each PID to its declaration
+    // slot and stream, so hostile input with thousands of entries resolves
+    // a redeclaration by lookup, not by a linear search.
+    let num_prog = byte(clip_data, 1)?;
+    let mut prog_offset: usize = 2;
+    for _ in 0..num_prog {
+        let stream_count = byte(clip_data, prog_offset.saturating_add(6))?;
+        let mut stream_offset = prog_offset.saturating_add(8);
+        for _ in 0..stream_count {
+            let pid = u16_be(clip_data, stream_offset)?;
+            // Advance past the 2-byte PID — `info` is now the coding-info
+            // length byte; the stream_coding_type is the byte after it. The
+            // length is read first (before the type) to keep both reads
+            // fallible — reading the type first would make the length read
+            // provably in-bounds and so an unreachable error path.
+            let info = stream_offset.saturating_add(2);
+            let len = byte(clip_data, info)?;
+            let type_byte = byte(clip_data, info.saturating_add(1))?;
+            let stream_type = TsStreamType::from_u8(type_byte);
+
+            if let Some(mut stream) = build_clip_stream(clip_data, info, stream_type)? {
+                stream.base_mut().pid = Pid::new(pid);
+                stream.base_mut().stream_type = stream_type;
+                // A new PID takes the next slot: `len()` counts the
+                // distinct PIDs declared so far.
+                let slot = declared.get(&pid).map_or(declared.len(), |(slot, _)| *slot);
+                declared.insert(pid, (slot, stream));
+            }
+
+            // The next entry starts after the length byte plus its `len`
+            // coding-info bytes (`len` ≤ 255, so the `+ 1` cannot overflow
+            // the fixed-width wrapping_add).
+            stream_offset = info.saturating_add(usize::from(len).wrapping_add(1));
+        }
+        // The next program's header starts where this program's entries end.
+        prog_offset = stream_offset;
+    }
+    Ok(())
 }
 
 /// Builds the [`TsStream`] for one clip-info entry whose coding-info length byte
@@ -477,6 +525,33 @@ mod tests {
     }
 
     #[test]
+    fn a_parse_cut_inside_the_second_stream_keeps_the_first() {
+        // Two entries; the block ends three bytes into the second (past its
+        // PID and length byte, before its coding type).
+        let mut clip_data = vec![0_u8, 1];
+        clip_data.extend(program_header(2));
+        clip_data.extend(entry_bytes(0x1101, 0x81, [0x61, b'e', b'n', b'g']));
+        clip_data.extend(entry_bytes(0x1011, 0x1B, [0x62, 0x30, 0, 0]));
+        clip_data.truncate(21);
+        let partial =
+            TsStreamClipFile::scan_partial("p.clpi", &wrap_clip_data(&clip_data)).unwrap_err();
+        assert_eq!(partial.error.to_string(), "unexpected end of input");
+        let file = partial.value.expect("the first stream was read");
+        assert_eq!(declared(&file), [(0x1101, TsStreamType::Ac3Audio)]);
+        assert!(!file.is_valid);
+        assert_eq!((file.file_type.as_str(), file.name.as_str()), ("HDMV0300", "P.CLPI"));
+    }
+
+    #[test]
+    fn a_parse_that_reads_no_stream_hands_back_nothing() {
+        let bad = build_clpi(*b"XXXX0100", &[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        assert!(TsStreamClipFile::scan_partial("b.clpi", &bad).unwrap_err().value.is_none());
+        let unparsed = TsStreamClipFile::unparsed("b.clpi");
+        assert_eq!((unparsed.name.as_str(), unparsed.is_valid), ("B.CLPI", false));
+        assert_eq!(unparsed.streams, []);
+    }
+
+    #[test]
     fn ts_stream_clip_model_defaults_and_clone() {
         let clip = TsStreamClip {
             name: "00000.M2TS".to_owned(),
@@ -504,6 +579,17 @@ mod tests {
         fn scan_never_panics_on_arbitrary_input(data in any::<Vec<u8>>()) {
             // Whatever the bytes, scan returns Ok or Err — never panics.
             drop(TsStreamClipFile::scan("fuzz.clpi", &data));
+        }
+
+        #[test]
+        fn a_partial_parse_keeps_only_read_streams(data in any::<Vec<u8>>()) {
+            // A kept partial always holds a stream and is never marked valid.
+            if let Err(partial) = TsStreamClipFile::scan_partial("fuzz.clpi", &data)
+                && let Some(file) = partial.value
+            {
+                assert_ne!(file.streams.len(), 0);
+                assert!(!file.is_valid);
+            }
         }
 
         #[test]

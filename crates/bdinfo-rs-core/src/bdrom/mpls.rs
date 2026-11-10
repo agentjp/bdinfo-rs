@@ -22,12 +22,15 @@
 //! * Offsets advance with `saturating_add`; an out-of-range offset then fails the next
 //!   bounds-checked read as [`BdError::UnexpectedEof`] (disc bytes are never indexed raw). Time
 //!   math is plain `f64` arithmetic.
+//! * The walk fills a model held outside it, so a parse that fails part-way still yields the clips,
+//!   Stream-Number-table entries and chapter marks read before the failure — the half-built
+//!   playlist `BDInfo` keeps after a throw.
 
 use std::collections::BTreeMap;
 
 use super::clpi::TsStreamClip;
 use super::{ascii, build_coded_stream, byte, u16_be, u32_be};
-use crate::error::BdError;
+use crate::error::{BdError, PartialParse};
 use crate::primitives::Pid;
 use crate::stream::{TsStream, TsStreamType};
 
@@ -70,14 +73,68 @@ impl TsPlaylistFile {
     /// Returns [`BdError::UnknownFileType`] if the 8-byte magic is not
     /// `MPLS0100`/`MPLS0200`/`MPLS0240`/`MPLS0300`, or [`BdError::UnexpectedEof`] if any
     /// field runs past the end of `data` (a truncated or malformed file).
+    pub fn scan(name: &str, data: &[u8]) -> Result<Self, BdError> {
+        Self::scan_partial(name, data, &|_| true).map_err(|partial| partial.error)
+    }
+
+    /// [`scan`](Self::scan) that keeps what a failed parse read before the
+    /// failure, as `BDInfo`'s `TSPlaylistFile.Scan` keeps the clips it appended
+    /// before a throw.
+    ///
+    /// `has_clip_info` says whether the disc holds a clip-information file
+    /// (named like `"00001.CLPI"`). A play item naming one the disc lacks stops
+    /// the parse with [`BdError::MissingClipFile`] before its clip is added,
+    /// where `BDInfo` throws; angle entries are not checked.
+    ///
+    /// # Errors
+    /// The [`scan`](Self::scan) failures and that missing clip, each carrying
+    /// the playlist built from the clips, Stream-Number-table entries and
+    /// chapter marks read before it — relative lengths and duplicate PIDs
+    /// resolved over those clips alone — or `None` when no clip was read.
+    pub(crate) fn scan_partial(
+        name: &str,
+        data: &[u8],
+        has_clip_info: &dyn Fn(&str) -> bool,
+    ) -> Result<Self, PartialParse<Self>> {
+        let mut parse = PlaylistParse::default();
+        let walked = parse.walk(data, has_clip_info);
+        let has_clips = !parse.stream_clips.is_empty();
+        let playlist = parse.finish(name);
+        match walked {
+            Ok(()) => Ok(playlist),
+            Err(error) => Err(PartialParse { value: has_clips.then(|| Box::new(playlist)), error }),
+        }
+    }
+}
+
+/// The model a playlist parse accumulates, held outside the walk so a parse
+/// that fails part-way still has everything it read.
+#[derive(Default)]
+struct PlaylistParse {
+    file_type: String,
+    mvc_base_view_r: bool,
+    stream_clips: Vec<TsStreamClip>,
+    /// Each play item's main clip, as its index into `stream_clips` — the
+    /// index a chapter mark's play-item reference resolves through.
+    chapter_clips: Vec<usize>,
+    /// Stream-Number-table entries, each with its play item's length, queued
+    /// for the duplicate-PID resolution in [`finish`](Self::finish) — the rule
+    /// needs the finished playlist length, unknowable mid-parse.
+    pending_streams: Vec<(f64, TsStream)>,
+    angle_count: i32,
+    chapters: Vec<f64>,
+}
+
+impl PlaylistParse {
+    /// Walks `data` into the model, stopping at the first failure.
     #[expect(
         clippy::too_many_lines,
-        reason = "the scan is one sequential walk of the playlist layout; splitting it would scatter the offset bookkeeping"
+        reason = "the walk is one sequential pass over the playlist layout; splitting it would scatter the offset bookkeeping"
     )]
-    pub fn scan(name: &str, data: &[u8]) -> Result<Self, BdError> {
-        let file_type = ascii(data, 0, 8)?;
-        if !matches!(file_type.as_str(), "MPLS0100" | "MPLS0200" | "MPLS0240" | "MPLS0300") {
-            return Err(BdError::UnknownFileType(file_type));
+    fn walk(&mut self, data: &[u8], has_clip_info: &dyn Fn(&str) -> bool) -> Result<(), BdError> {
+        self.file_type = ascii(data, 0, 8)?;
+        if !matches!(self.file_type.as_str(), "MPLS0100" | "MPLS0200" | "MPLS0240" | "MPLS0300") {
+            return Err(BdError::UnknownFileType(self.file_type.clone()));
         }
 
         let playlist_offset = usize::try_from(u32_be(data, 8)?).unwrap_or(usize::MAX);
@@ -86,19 +143,11 @@ impl TsPlaylistFile {
 
         // misc flags at 0x38; MVC_Base_view_R_flag is bit 4.
         let misc_flags = byte(data, 0x38)?;
-        let mvc_base_view_r = (misc_flags & 0x10) != 0;
+        self.mvc_base_view_r = (misc_flags & 0x10) != 0;
 
         // PlayList: length (4) + reserved (2) + item count (2) + sub-item count (2).
         let item_count = u16_be(data, playlist_offset.saturating_add(6))?;
         let mut pos = playlist_offset.saturating_add(10);
-
-        let mut stream_clips: Vec<TsStreamClip> = Vec::new();
-        let mut chapter_clips: Vec<usize> = Vec::new();
-        // Stream-Number-table entries, each with its play item's length, queued
-        // for the duplicate-PID resolution after the loop — the rule needs the
-        // finished playlist length, unknowable mid-parse.
-        let mut pending_streams: Vec<(f64, TsStream)> = Vec::new();
-        let mut angle_count: i32 = 0;
 
         for _ in 0..item_count {
             let item_start = pos;
@@ -108,15 +157,21 @@ impl TsPlaylistFile {
             // extension: `FMTS` clips live in `*.FMTS`, everything else in
             // `*.M2TS` (libbluray navigation.c `_fill_clip`).
             let codec_id = ascii(data, item_start.saturating_add(7), 4)?;
+            // `BDInfo` looks the clip information up right after the item
+            // name and type, before it reads the rest of the item header.
+            let clip_info = format!("{item_name}.CLPI");
+            if !has_clip_info(&clip_info) {
+                return Err(BdError::MissingClipFile(clip_info));
+            }
             let flags = byte(data, item_start.saturating_add(12))?;
             let is_multiangle = (flags.wrapping_shr(4) & 0x01) != 0;
             let time_in = read_time(data, item_start.saturating_add(14))?;
             let time_out = read_time(data, item_start.saturating_add(18))?;
 
             // Build the main clip; relative_time_in is the playlist length so
-            // far, while relative_length waits for the finished total after
-            // the loop.
-            let relative_time_in = total_length(&stream_clips);
+            // far, while relative_length waits for the finished total in
+            // `finish`.
+            let relative_time_in = total_length(&self.stream_clips);
             let length = time_out - time_in;
             let relative_time_out = relative_time_in + length;
             let clip = TsStreamClip {
@@ -128,9 +183,9 @@ impl TsPlaylistFile {
                 relative_time_out,
                 ..TsStreamClip::default()
             };
-            let main_index = stream_clips.len();
-            stream_clips.push(clip);
-            chapter_clips.push(main_index);
+            let main_index = self.stream_clips.len();
+            self.stream_clips.push(clip);
+            self.chapter_clips.push(main_index);
 
             // The fixed item header runs to item_start + 34 (after the 12-byte
             // skip past the out-time); the angle table, if any, follows.
@@ -146,7 +201,7 @@ impl TsPlaylistFile {
                     let angle_name = ascii(data, pos_item, 5)?;
                     let angle_codec = ascii(data, pos_item.saturating_add(5), 4)?;
                     pos_item = pos_item.saturating_add(10);
-                    stream_clips.push(TsStreamClip {
+                    self.stream_clips.push(TsStreamClip {
                         angle_index: i32::from(angle.wrapping_add(1)),
                         name: format!("{angle_name}{}", clip_extension(&angle_codec)),
                         time_in,
@@ -160,7 +215,7 @@ impl TsPlaylistFile {
                 // The playlist's angle count is the running maximum of the
                 // per-item extra-angle counts.
                 let extra_angles = i32::from(angles.saturating_sub(1));
-                angle_count = angle_count.max(extra_angles);
+                self.angle_count = self.angle_count.max(extra_angles);
             }
 
             // Stream-Number table: stream-info length (2) + reserved (2) + 8 count
@@ -180,13 +235,13 @@ impl TsPlaylistFile {
             pos = pos_item.saturating_add(16);
 
             for _ in 0..count_video {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
             }
             for _ in 0..count_audio {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
             }
             for _ in 0..count_presentation {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
             }
             // PiP-PG entries sit in-line in the PG section, before the IG
             // entries (libbluray `_parse_stream_table`), and register like
@@ -195,18 +250,18 @@ impl TsPlaylistFile {
             // the PiP-PG entries instead; see `DIFFERENCES.md`, "Secondary and
             // picture-in-picture stream declarations".
             for _ in 0..count_pip {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
             }
             for _ in 0..count_interactive {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
             }
             for _ in 0..count_secondary_audio {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
                 // One comb-info block: the primary-audio refs.
                 pos = skip_comb_info(data, pos)?;
             }
             for _ in 0..count_secondary_video {
-                pos = add_playlist_stream(data, pos, &mut pending_streams, length)?;
+                pos = add_playlist_stream(data, pos, &mut self.pending_streams, length)?;
                 // Two comb-info blocks: the secondary-audio refs, then the
                 // PiP-PG refs.
                 pos = skip_comb_info(data, pos)?;
@@ -217,32 +272,8 @@ impl TsPlaylistFile {
             pos = item_start.saturating_add(item_length).saturating_add(2);
         }
 
-        // relative_length is each clip's share of the finished playlist, so it
-        // and the duplicate-PID rule it gates resolve only now that every play
-        // item's length is summed. Classic BDInfo divides by the running total
-        // before the clip is appended (`TSPlaylistFile.Scan`), so its
-        // first clip divides by zero into `+Infinity` and always overwrites —
-        // see DIFFERENCES.md. Angle clips keep the default `0.0`, as in
-        // classic. An unseen PID is always inserted; a duplicate overwrites
-        // only when its clip's share exceeds `0.01`.
-        let final_total = total_length(&stream_clips);
-        for clip in &mut stream_clips {
-            if clip.angle_index == 0 {
-                clip.relative_length = clip.length / final_total;
-            }
-        }
-        let mut playlist_streams: BTreeMap<u16, TsStream> = BTreeMap::new();
-        for (length, stream) in pending_streams {
-            // The map is keyed by the raw wire PID; read the stream's typed
-            // PID back out.
-            let pid = stream.base().pid.get();
-            if !playlist_streams.contains_key(&pid) || length / final_total > 0.01 {
-                playlist_streams.insert(pid, stream);
-            }
-        }
-
         // PlayListMark: 4-byte length, then a u16 count, then 14-byte entries.
-        let mut chapters: Vec<f64> = Vec::new();
+        let final_total = total_length(&self.stream_clips);
         let mut chap_pos = chapters_offset.saturating_add(4);
         let chapter_count = u16_be(data, chap_pos)?;
         chap_pos = chap_pos.saturating_add(2);
@@ -254,34 +285,64 @@ impl TsPlaylistFile {
                 // `chapter_clips` maps the file index to a clip slot; an
                 // out-of-range index (a corrupt mark) folds to `None` and the
                 // mark is skipped rather than failing the whole playlist.
-                if let Some(clip) =
-                    chapter_clips.get(stream_file_index).and_then(|&i| stream_clips.get_mut(i))
+                if let Some(clip) = self
+                    .chapter_clips
+                    .get(stream_file_index)
+                    .and_then(|&i| self.stream_clips.get_mut(i))
                 {
                     let relative_seconds = chapter_seconds - clip.time_in + clip.relative_time_in;
                     if final_total - relative_seconds > 1.0 {
                         clip.chapters.push(chapter_seconds);
-                        chapters.push(relative_seconds);
+                        self.chapters.push(relative_seconds);
                     }
                 }
             }
             // Other chapter-mark types are ignored.
             chap_pos = chap_pos.saturating_add(14);
         }
+        Ok(())
+    }
 
-        Ok(Self {
-            file_type,
+    /// The playlist named `name` built from what the walk read.
+    fn finish(mut self, name: &str) -> TsPlaylistFile {
+        // relative_length is each clip's share of the finished playlist, so it
+        // and the duplicate-PID rule it gates resolve only once every play
+        // item's length is summed. Classic BDInfo divides by the running total
+        // before the clip is appended (`TSPlaylistFile.Scan`), so its
+        // first clip divides by zero into `+Infinity` and always overwrites —
+        // see DIFFERENCES.md. Angle clips keep the default `0.0`, as in
+        // classic. An unseen PID is always inserted; a duplicate overwrites
+        // only when its clip's share exceeds `0.01`.
+        let final_total = total_length(&self.stream_clips);
+        for clip in &mut self.stream_clips {
+            if clip.angle_index == 0 {
+                clip.relative_length = clip.length / final_total;
+            }
+        }
+        let mut playlist_streams: BTreeMap<u16, TsStream> = BTreeMap::new();
+        for (length, stream) in self.pending_streams {
+            // The map is keyed by the raw wire PID; read the stream's typed
+            // PID back out.
+            let pid = stream.base().pid.get();
+            if !playlist_streams.contains_key(&pid) || length / final_total > 0.01 {
+                playlist_streams.insert(pid, stream);
+            }
+        }
+
+        TsPlaylistFile {
+            file_type: self.file_type,
             name: name.to_ascii_uppercase(),
-            mvc_base_view_r,
-            chapters,
+            mvc_base_view_r: self.mvc_base_view_r,
+            chapters: self.chapters,
             playlist_streams,
             // `streams`/`angle_streams` are filled by the disc-level scan, not the
             // parse — empty here, which makes the demux's per-stream bitrate writes
             // a no-op until a reference clip resolves.
             streams: BTreeMap::new(),
             angle_streams: Vec::new(),
-            stream_clips,
-            angle_count,
-        })
+            stream_clips: self.stream_clips,
+            angle_count: self.angle_count,
+        }
     }
 }
 
@@ -929,6 +990,100 @@ mod tests {
         }
     }
 
+    /// Two play items — `00000` (40 s, video 0x1011 at 1080p) then `00017`
+    /// (20 s, video 0x1011 at 576i) — with a chapter mark on each; returned
+    /// with the offset at which the second item begins.
+    fn two_items() -> (Vec<u8>, usize) {
+        let hd = pl_stream(1, 0x1011, 0x1B, [0x62, 0x30, 0, 0]);
+        let sd = pl_stream(1, 0x1011, 0x1B, [0x24, 0x20, 0, 0]);
+        let first = build_item("00000", 0, 1_800_000, None, [1, 0, 0, 0, 0, 0, 0], &hd);
+        let second = build_item("00017", 0, 900_000, None, [1, 0, 0, 0, 0, 0, 0], &sd);
+        // `build_mpls` puts the PlayList at 0x3C, its items after a 10-byte header.
+        let second_at = 0x46_usize.wrapping_add(first.len());
+        let marks = [chapter_entry(1, 0, 0), chapter_entry(1, 1, 0)];
+        (build_mpls(0, &[first, second], &marks), second_at)
+    }
+
+    /// The value and failure text of a parse of `data` that must fail.
+    fn failed(
+        data: &[u8],
+        has_clip_info: &dyn Fn(&str) -> bool,
+    ) -> (Option<TsPlaylistFile>, String) {
+        let partial = TsPlaylistFile::scan_partial("p.mpls", data, has_clip_info)
+            .expect_err("the parse fails");
+        (partial.value.map(|file| *file), partial.error.to_string())
+    }
+
+    /// The video format of `file`'s declared PID 0x1011.
+    fn format_of_0x1011(file: &TsPlaylistFile) -> Option<TsVideoFormat> {
+        match file.playlist_streams.get(&0x1011) {
+            Some(TsStream::Video(video)) => Some(video.video_format()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_parse_cut_before_a_play_item_keeps_the_items_before_it() {
+        let (full, second_at) = two_items();
+        let (value, error) = failed(full.get(..second_at).unwrap(), &|_| true);
+        assert_eq!(error, "unexpected end of input");
+        let file = value.expect("the first item was read");
+        assert_eq!(file.file_type, "MPLS0300");
+        assert_eq!(file.name, "P.MPLS");
+        let names: Vec<&str> = file.stream_clips.iter().map(|clip| clip.name.as_str()).collect();
+        assert_eq!(names, ["00000.M2TS"]);
+        // The share is of the kept clips alone: 40 s of 40 s.
+        assert_eq!(file.stream_clips.first().unwrap().relative_length.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat1080p));
+        assert_eq!(file.chapters, Vec::<f64>::new()); // the marks were never reached
+    }
+
+    #[test]
+    fn a_parse_cut_inside_a_play_item_keeps_that_items_clip() {
+        // `BDInfo` appends the clip once its in/out times are read, before the
+        // Stream-Number table; a cut in that table keeps the clip but none of
+        // the item's entries, so PID 0x1011 keeps the first item's coding.
+        let (full, second_at) = two_items();
+        let (value, _) = failed(full.get(..second_at.wrapping_add(40)).unwrap(), &|_| true);
+        let file = value.expect("both items' clips were read");
+        assert_eq!(file.stream_clips.len(), 2);
+        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat1080p));
+    }
+
+    #[test]
+    fn a_play_item_without_clip_info_stops_the_parse_before_its_clip() {
+        let (full, _) = two_items();
+        let (value, error) = failed(&full, &|clip_info| clip_info == "00000.CLPI");
+        assert_eq!(error, "referenced missing clip file: 00017.CLPI");
+        let file = value.expect("the first item was read");
+        assert_eq!(file.stream_clips.len(), 1);
+        assert_eq!(file.chapters, Vec::<f64>::new());
+    }
+
+    #[test]
+    fn a_parse_cut_in_the_chapter_marks_keeps_the_marks_before_it() {
+        // The second 14-byte mark loses everything after its first byte.
+        let (full, _) = two_items();
+        let (value, _) = failed(full.get(..full.len().wrapping_sub(13)).unwrap(), &|_| true);
+        let file = value.expect("every item was read");
+        assert_eq!(file.stream_clips.len(), 2);
+        assert_eq!(file.chapters, vec![0.0]);
+        // Both items were read, so the second's coding replaces the first's.
+        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat576i));
+    }
+
+    #[test]
+    fn a_parse_that_reads_no_clip_hands_back_nothing() {
+        let (mut bad, _) = two_items();
+        bad.splice(0..8, *b"MPLSXXXX");
+        let (value, error) = failed(&bad, &|_| true);
+        assert_eq!(error, "unknown file type: MPLSXXXX");
+        assert_eq!(value, None);
+        let (full, _) = two_items();
+        let (value, _) = failed(&full, &|_| false);
+        assert_eq!(value, None);
+    }
+
     #[test]
     fn scan_rejects_short_headers() {
         let eof = "unexpected end of input";
@@ -940,6 +1095,19 @@ mod tests {
         #[test]
         fn scan_never_panics_on_arbitrary_input(data in any::<Vec<u8>>()) {
             drop(TsPlaylistFile::scan("fuzz.mpls", &data));
+        }
+
+        #[test]
+        fn a_partial_parse_never_panics_and_keeps_only_read_clips(
+            data in any::<Vec<u8>>(),
+            known in any::<bool>(),
+        ) {
+            // A kept partial always holds a clip; one with none comes back `None`.
+            if let Err(partial) = TsPlaylistFile::scan_partial("fuzz.mpls", &data, &|_| known)
+                && let Some(file) = partial.value
+            {
+                assert_ne!(file.stream_clips.len(), 0);
+            }
         }
 
         #[test]

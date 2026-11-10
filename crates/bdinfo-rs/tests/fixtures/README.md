@@ -4,7 +4,8 @@ Tiny BD-ROM discs the end-to-end tests in [`../cli.rs`](../cli.rs) scan with the
 binary. `BigBuckBunny` is a **real** encode and owns the report's byte contract: its
 report is compared byte-for-byte against a committed golden, on a native runner for
 every architecture we release. `MultiPlaylist` is **synthetic** and owns disc *shape* —
-several playlists over several clips — with no golden of its own.
+several playlists over several clips; its one golden is the report of the disc damaged by
+an injected read failure.
 
 | Path | What it is |
 | --- | --- |
@@ -15,11 +16,12 @@ several playlists over several clips — with no golden of its own.
 | `golden/iso.txt` | the exact report the `.iso` scan must produce |
 | `golden/folder-no-stream-diagnostics.txt` | the folder report under `--no-stream-diagnostics` |
 | `golden/folder-no-quick-summary.txt` | the folder report under `--no-quick-summary` |
+| `golden/damaged-multiplaylist.txt` | the `MultiPlaylist` report with `00011.m2ts` unreadable from byte 5,242,880, each `WARNING:` reason replaced by `<reason>` |
 
 `folder.txt` and `iso.txt` are identical except the `Disc Label:` line — which also pins
 the documented "a folder takes its directory name, an `.iso` reads the real UDF volume
 label" behaviour. The other two are `folder.txt` minus exactly one optional section each,
-which is what pins that the two switches subtract and never reword. All four carry the
+which is what pins that the two switches subtract and never reword. All five carry the
 report's locked **CRLF** byte contract; `.gitattributes` keeps them (`-text`) and the disc
 bytes (`binary`) verbatim across platforms.
 
@@ -107,10 +109,9 @@ end-to-end, not just the `-m 00000` direct selection.
 
 ## Regenerating the goldens
 
-If the locked report format deliberately changes, re-pin **all four** goldens by scanning
-the committed discs. `MultiPlaylist` has no golden and needs nothing here. Each scan
-writes `BDINFO.{label}.txt` into `$tmp`, so run them one at a time and copy the result
-before the next overwrites it:
+If the locked report format deliberately changes, re-pin **all five** goldens. Scan the
+committed discs for the four `BigBuckBunny` ones. Each scan writes `BDINFO.{label}.txt`
+into `$tmp`, so run them one at a time and copy the result before the next overwrites it:
 
 ```pwsh
 bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny     $tmp
@@ -125,3 +126,13 @@ bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny $tmp --no-stream
 bdinfo-rs -m 00000 crates/bdinfo-rs/tests/fixtures/BigBuckBunny $tmp --no-quick-summary
 # copy $tmp/BDINFO.BigBuckBunny.txt -> golden/folder-no-quick-summary.txt
 ```
+
+No command-line run can inject the read failure, so `damaged-multiplaylist.txt` is
+re-pinned from the core test that renders it,
+`the_damaged_disc_report_matches_the_golden_the_browser_pins_too` in
+`crates/bdinfo-rs-core/src/bdrom/disc.rs`. Run it with
+`cargo nextest run -p bdinfo-rs-core -E 'test(the_damaged_disc_report)'`; on a mismatch
+its assertion prints the rendered report as the left-hand value. Write that text to the
+golden with its `\r\n` escapes as CRLF line endings and `\t` as a tab, and rerun the test.
+The browser fault harness (`crates/bdinfo-rs-wasm/web/test/faults.node.mjs`) compares the
+same file, so run it too.
