@@ -97,8 +97,8 @@ pub struct Structural {
     /// the classic report with zero (unmeasured) bitrates: the pre-scan "View
     /// Report", exactly as `BDInfo` shows it before the bitrate scan.
     pub bdrom: BdRom,
-    /// The detected-feature labels (`Ultra HD`, `BD-Java`, …) in the info
-    /// box's fixed order ([`detected_features`]) — its `Detected Features`
+    /// The detected-feature labels (`Ultra HD`, `BD+ Copy Protection`, …) in
+    /// the original `BDInfo` app's order — the info box's `Detected Features`
     /// line.
     pub features: Vec<String>,
     /// Any failures recorded while reading the structure (a corrupt playlist,
