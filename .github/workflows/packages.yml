@@ -28,11 +28,12 @@ name: packages
 #
 # Secrets required (configure before the first release, or the jobs fail):
 #   WINGET_TOKEN       - classic PAT (public_repo + workflow) on the bot account that forked
-#                        winget-pkgs. `workflow` is required: komac syncs the fork before
-#                        submitting, and that CreateRef is rejected without it once upstream
-#                        winget-pkgs has changed .github/workflows past the fork's last sync.
-#                        Reads still work, so `komac list-versions` passes and only the
-#                        submit fails.
+#                        winget-pkgs. `workflow` is required by `komac sync-fork`, which
+#                        the winget job runs before it submits: upstream changes its
+#                        .github/workflows files, and merging those into the fork is
+#                        refused without the scope. Reads work either way, so
+#                        `komac list-versions` passes and only the sync or the submit
+#                        fails.
 #   AUR_SSH_KEY        - private SSH key whose public half is on the aur.archlinux.org account
 #   CLOUDSMITH_API_KEY - Cloudsmith API key (used by the linux-packages job)
 #
@@ -167,6 +168,13 @@ jobs:
           if printf '%s\n' "$versions" | sed 's/[[:space:]]//g' | grep -qxF "$ver"; then
             echo "agentjp.bdinfo-rs ${ver} already in winget-pkgs — skipping submit"
           else
+            # Bring the bot's fork level with microsoft/winget-pkgs first. komac
+            # creates the submission branch in the fork at upstream's head commit
+            # and does not sync the fork itself; with the fork 68,000 commits behind
+            # (2026-11-10, never synced since it was forked) GitHub answered that
+            # CreateRef with "Ref cannot be created", and the same submit passed
+            # once the fork was level. winget-fork-sync.yml also runs this daily.
+            komac sync-fork
             # Both windows-msvc .zip archives (x64 + arm64); komac reads the arch from
             # each. --submit opens the version-bump PR against microsoft/winget-pkgs.
             komac update agentjp.bdinfo-rs \

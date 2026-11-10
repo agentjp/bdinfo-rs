@@ -1,0 +1,58 @@
+name: winget fork sync
+
+# Keeps the bot account's fork of microsoft/winget-pkgs level with upstream.
+#
+# komac submits a new package version by creating a branch in that fork at
+# upstream's head commit, and it does not sync the fork first. A fork left
+# behind fails that step: on 2026-11-10 the fork was 68,000 commits behind
+# (never synced since it was forked) and GitHub answered the branch creation
+# with "Ref cannot be created"; the same submit passed once the fork was level.
+#
+# The two submit paths (packages.yml's winget job, and
+# .github/scripts/publish-gui-winget.ps1 for gui-publish.yml) run the same
+# `komac sync-fork` right before they submit. This daily run is the early
+# warning: it exercises WINGET_TOKEN and the pinned komac between releases, so
+# an expired token or a sync that upstream has broken turns this run red on an
+# ordinary day instead of failing a release.
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget-fork-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync the winget-pkgs fork
+    runs-on: ubuntu-latest
+    environment: release # WINGET_TOKEN is an env secret on `release`
+    steps:
+      # Only for .github/pins.env below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: pins
+        uses: $/.github/actions/pins
+
+      # The pinned release binary over curl, as in packages.yml's winget job.
+      - name: Install komac
+        env:
+          KOMAC_VERSION: ${{ steps.pins.outputs.KOMAC }}
+        run: |
+          url="https://github.com/russellbanks/Komac/releases/download/v${KOMAC_VERSION}/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$url" -o komac.tar.gz
+          tar -xzf komac.tar.gz komac
+          sudo install -m755 komac /usr/local/bin/komac
+          komac --version
+
+      - name: Merge upstream into the fork
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: komac sync-fork
