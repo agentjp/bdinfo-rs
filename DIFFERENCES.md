@@ -60,6 +60,7 @@ actually see on a normal disc.
 | [Damaged metadata](#damaged-metadata) | Only on damaged media — playlists recovered from `BDMV/BACKUP` or kept past a missing angle file | Discs with a corrupt or missing `.mpls` or `.clpi` |
 | [An unreadable `.ssif` falls back to the base view](#an-unreadable-ssif-falls-back-to-the-base-view) | Only on damaged media — the clip is measured in 2D instead of lost | 3D discs whose `STREAM/SSIF` file will not open |
 | [Angle block layout](#angle-block-layout) | **Yes** — the per-angle bitrate unit and line breaks | Multi-angle playlists |
+| [Playlist banner](#playlist-banner) | Only against BDInfo 0.8 — a stray `"` and `\` on the two banner lines | Every report; matches BDInfo 0.7.5.6 |
 | [Disc label of a non-UDF Windows drive root](#disc-label-of-a-non-udf-windows-drive-root) | **Yes** — `Disc Label:` and the report file name | A disc folder copied to the root of a USB stick, external disk or mapped share on Windows |
 
 ---
@@ -688,6 +689,23 @@ BDInfo 0.7.5.6 lays the block out differently again — a blank line before each
 rest of its report follows.
 
 <sub>Source: `crates/bdinfo-rs-core/src/report/text.rs` (`playlist_report`).</sub>
+
+### Playlist banner
+
+Each playlist section opens with its name between two rows of twenty asterisks. BDInfo 0.8
+starts both rows with a double quote and ends them with a backslash
+(`ReportWindowViewModel`, and `FormReport` in its Windows Forms twin); bdinfo-rs prints the
+bare rows of BDInfo 0.7.5.6, which the Go port prints too:
+
+```diff
+-"********************\
++********************
+ PLAYLIST: 00800.MPLS
+-"********************\
++********************
+```
+
+<sub>Source: `crates/bdinfo-rs-core/src/report/text.rs` (`playlist_block`).</sub>
 
 ### Disc label of a non-UDF Windows drive root
 
