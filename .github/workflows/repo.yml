@@ -273,11 +273,15 @@ jobs:
           # they're pinned, not maintainable link surface — exclude them.
           # Accept 429 so an external host's rate-limit can't fail the gate;
           # fail:true turns any broken link into a failure.
+          # ffmpeg.org timed out from GitHub-hosted runners in 5 of the 9 daily
+          # sweeps of 2026-11-01..09 while answering 200 from outside them, so
+          # it is excluded rather than left to fail unrelated runs.
           args: >-
             --cache
             --max-cache-age 1d
             --no-progress
             --accept 200..=299,429
+            --exclude ^https://ffmpeg\.org/
             --exclude-path Cargo.lock
             --exclude-path fuzz/corpus
             --exclude-path crates/bdinfo-rs/tests/fixtures/golden
