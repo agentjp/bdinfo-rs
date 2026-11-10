@@ -161,12 +161,21 @@ fn disc_info(bdrom: &BdRom, protection: &str, extras: &[&str], forums: bool) -> 
 /// The conditional scan-warnings block: one `WARNING:` heading plus a
 /// tab-separated `file⇥reason` line per recorded failure. Empty on a clean
 /// scan.
+///
+/// The file is upper-cased as `BDInfo` prints its upper-cased
+/// `TSStreamFile.Name`; [`ScanError::file`] keeps the on-disc spelling. An
+/// `.iso` sector failure's `<file> @ byte <n>` upper-cases the file part only.
+/// `BDInfo`'s stack-trace line after each entry is not reproduced.
 fn warnings(errors: &[ScanError]) -> String {
     let mut out = String::new();
     if !errors.is_empty() {
         out.push_str("WARNING: File errors were encountered during scan:\r\n");
         for error in errors {
-            let _ = write!(out, "\r\n{}\t{}\r\n", error.file, error.reason);
+            let file = match error.file.rsplit_once(" @ byte ") {
+                Some((name, offset)) => format!("{} @ byte {offset}", name.to_ascii_uppercase()),
+                None => error.file.to_ascii_uppercase(),
+            };
+            let _ = write!(out, "\r\n{file}\t{}\r\n", error.reason);
         }
     }
     out
@@ -1264,6 +1273,32 @@ Subtitle:       English / 19.12 kbps
             rendered
                 .contains(format!("\r\n00001.M2TS\t{}\r\n", BdError::StructureNotFound).as_str())
         );
+    }
+
+    #[test]
+    fn the_warning_block_upper_cases_the_file_and_keeps_an_iso_offset() {
+        let error = |file: &str, stage| ScanError {
+            file: file.to_owned(),
+            stage,
+            reason: BdError::UnexpectedEof,
+        };
+        let errors = [
+            error("00012.m2ts", ScanStage::StreamFile),
+            error("BDMV/Stream", ScanStage::Discovery),
+            error("00013.m2ts @ byte 6144", ScanStage::SectorRead),
+        ];
+        let block = super::warnings(&errors);
+        let eof = BdError::UnexpectedEof;
+        assert_eq!(
+            block,
+            format!(
+                "WARNING: File errors were encountered during scan:\r\n\
+                 \r\n00012.M2TS\t{eof}\r\n\
+                 \r\nBDMV/STREAM\t{eof}\r\n\
+                 \r\n00013.M2TS @ byte 6144\t{eof}\r\n"
+            )
+        );
+        assert_eq!(errors.first().map(|e| e.file.as_str()), Some("00012.m2ts"));
     }
 
     #[test]

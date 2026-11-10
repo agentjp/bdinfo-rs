@@ -18,3 +18,8 @@ https://(ai\.)?github\.com/agentjp/bdinfo-rs/compare/v
 # cannot verify it regardless of publication -- a permanent exclusion, like other
 # bot-walled hosts, NOT the earlier "404 until first release" reason.
 https://www\.npmjs\.com/package/@bdinfo-rs/wasm
+
+# ffmpeg.org timed out from GitHub-hosted runners in 5 of the 9 daily sweeps of
+# 2026-11-01..09 while answering 200 from outside them -- a runner-side block,
+# not a dead link, so it is excluded rather than left to fail unrelated runs.
+^https://ffmpeg\.org/

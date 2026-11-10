@@ -36,7 +36,7 @@ use super::mpls::TsPlaylistFile;
 use super::order::{self, PlaylistFilter};
 use super::shortfall::{self, ShortStreamFile};
 use crate::discovery::{BdFileKind, BdmvDir};
-use crate::error::{BdError, ScanError, ScanStage};
+use crate::error::{BdError, PartialParse, ScanError, ScanStage};
 use crate::index;
 use crate::primitives::Pid;
 use crate::stream::{TsAudioMode, TsFrameRate, TsStream, TsStreamType, TsVideoStream};
@@ -832,6 +832,35 @@ impl Sink<'_> {
         }
         self.absorb(stage, file, fallback, Err(reason))
     }
+
+    /// Unwraps one `*.mpls`/`*.clpi` parse, keeping what a failed parse read
+    /// and recovering from `BDMV/BACKUP` only when it read nothing.
+    ///
+    /// The first of these that exists wins: the primary's full parse; the
+    /// primary's partial result (the clips or streams read before its failure,
+    /// as `BDInfo` keeps them); the `backup` copy, when it parses in full; else
+    /// `None`. A backup that also fails part-way is not used. A failed primary
+    /// is recorded against `file`/`stage` whichever stands in for it, so the
+    /// report's `WARNING` block names it. Strict mode propagates the primary's
+    /// failure and never reads the backup.
+    fn absorb_parse<T>(
+        &mut self,
+        stage: ScanStage,
+        file: &str,
+        primary: Result<T, PartialParse<T>>,
+        backup: impl FnOnce() -> Option<Result<T, BdError>>,
+    ) -> Result<Option<T>, BdError> {
+        let PartialParse { value, error } = match primary {
+            Ok(value) => return Ok(Some(value)),
+            Err(partial) => partial,
+        };
+        if self.errors.is_none() {
+            return Err(error);
+        }
+        let kept = value.map(|partial| *partial).or_else(|| backup().and_then(Result::ok));
+        self.record(stage, file, error);
+        Ok(kept)
+    }
 }
 
 /// Per-clip facts the reference-clip selection needs: the resolved clip-info and
@@ -1017,12 +1046,15 @@ impl BdRom {
     ///
     /// A corrupt/unreadable clip-information file, playlist, or stream file (and
     /// any failed disc-level metadata read) is recorded as a [`ScanError`] and the
-    /// scan continues over the readable rest; the affected playlist (or flag) is
-    /// simply absent (or its default) in the returned [`BdRom`] — except a stream
-    /// file whose packet scan failed partway, which keeps its partial demux state
-    /// by default ([`ScanOptions::keep_partial`], which takes effect here and
-    /// nowhere else). On healthy media the result is identical to
-    /// [`open`](Self::open) with an empty error list.
+    /// scan continues over the readable rest, keeping what the damaged file
+    /// yielded, as `BDInfo` does: a playlist keeps the clips read before its
+    /// failure (it is absent only when there are none), a clip-information file
+    /// keeps the streams read before its failure (possibly none), and a failed
+    /// disc-level flag takes its default. A stream file whose packet scan failed
+    /// partway keeps its partial demux state by default
+    /// ([`ScanOptions::keep_partial`], which takes effect here and nowhere
+    /// else). On healthy media the result is identical to [`open`](Self::open)
+    /// with an empty error list.
     ///
     /// `root`, `mode`, `scan_files` and `observers` are [`open`](Self::open)'s,
     /// passed through unchanged.
@@ -1126,7 +1158,7 @@ impl BdRom {
             build_file_maps(stream.as_deref(), ssif.as_deref(), &*clipinf, &backup_clipinf, sink)?;
 
         // --- parse playlists, sorted by name (ordinal) ---------------------
-        let mut parsed = parse_playlists(&*playlist, &backup_playlist, sink)?;
+        let mut parsed = parse_playlists(&*playlist, &clip_files, &backup_playlist, sink)?;
 
         // --- the per-stream-file packet scans (streams level only) ---------
         // `Metadata` reads no packets; `Codecs`/`Full` both run the quick codec
@@ -1154,7 +1186,7 @@ impl BdRom {
         let mut playlists = Vec::new();
         let mut is_50hz = false;
         for playlist in &parsed {
-            let summary = build_summary(
+            let (summary, hz) = build_summary(
                 playlist,
                 &clip_files,
                 &stream_files,
@@ -1163,12 +1195,8 @@ impl BdRom {
                 &measured,
                 is_3d,
             );
-            if let Some((summary, hz)) =
-                sink.absorb(ScanStage::Playlist, &playlist.name, None, summary.map(Some))?
-            {
-                is_50hz = is_50hz || hz;
-                playlists.push(summary);
-            }
+            is_50hz = is_50hz || hz;
+            playlists.push(summary);
         }
 
         Ok(Self {
@@ -1582,8 +1610,10 @@ fn file_sizes(dir: Option<&dyn BdDir>, kind: BdFileKind) -> Result<BTreeMap<Stri
 
 /// Scans every `*.clpi` in `clipinf` into a map keyed by upper-cased name. In
 /// strict mode a malformed clip file propagates its [`BdError`]; in resilient
-/// mode it is recorded and skipped, and the playlists that reference it degrade
-/// accordingly.
+/// mode it is recorded and still registered — with the streams read before the
+/// failure, or none ([`TsStreamClipFile::unparsed`]) — as `BDInfo` registers
+/// every clip-information file on the disc, so the playlists that reference it
+/// keep that clip.
 fn scan_clip_files(
     clipinf: &dyn BdDir,
     backup: &BackupFiles,
@@ -1598,23 +1628,27 @@ fn scan_clip_files(
     )?;
     for file in files {
         let name = file.name();
-        let scan = read_file(&*file).and_then(|bytes| TsStreamClipFile::scan(name, &bytes));
-        let recovered =
-            sink.absorb_with_backup(ScanStage::ClipInfo, name, None, scan.map(Some), {
-                || recover_backup(backup, name, |n, b| TsStreamClipFile::scan(n, b).map(Some))
-            })?;
-        if let Some(parsed) = recovered {
-            map.insert(name.to_ascii_uppercase(), parsed);
-        }
+        let primary = read_file(&*file)
+            .map_err(|error| PartialParse { value: None, error })
+            .and_then(|bytes| TsStreamClipFile::scan_partial(name, &bytes));
+        let parsed = sink
+            .absorb_parse(ScanStage::ClipInfo, name, primary, || {
+                recover_backup(backup, name, TsStreamClipFile::scan)
+            })?
+            .unwrap_or_else(|| TsStreamClipFile::unparsed(name));
+        map.insert(name.to_ascii_uppercase(), parsed);
     }
     Ok(map)
 }
 
-/// Parses every `*.mpls` under `playlist_dir`, sorted by upper-cased name. In
-/// strict mode a malformed playlist propagates its [`BdError`]; in resilient
-/// mode it is recorded and skipped.
+/// Parses every `*.mpls` under `playlist_dir`, sorted by upper-cased name,
+/// resolving each play item's clip against `clip_files` as the parse runs. In
+/// strict mode a malformed playlist, or one naming a `*.clpi` the disc lacks,
+/// propagates its [`BdError`]; in resilient mode it is recorded and kept with
+/// the clips read before the failure, or skipped when there are none.
 fn parse_playlists(
     playlist_dir: &dyn BdDir,
+    clip_files: &BTreeMap<String, TsStreamClipFile>,
     backup: &BackupFiles,
     sink: &mut Sink<'_>,
 ) -> Result<Vec<TsPlaylistFile>, BdError> {
@@ -1625,14 +1659,18 @@ fn parse_playlists(
         vfs::find_files(playlist_dir, BdFileKind::Playlist).map_err(BdError::from),
     )?;
     playlist_handles.sort_by_key(|f| f.name().to_ascii_uppercase());
+    let has_clip_info = |clip_info: &str| clip_files.contains_key(clip_info);
+    let parse =
+        |name: &str, bytes: &[u8]| TsPlaylistFile::scan_partial(name, bytes, &has_clip_info);
     let mut parsed = Vec::new();
     for handle in &playlist_handles {
         let name = handle.name();
-        let scan = read_file(&**handle).and_then(|bytes| TsPlaylistFile::scan(name, &bytes));
-        let recovered =
-            sink.absorb_with_backup(ScanStage::Playlist, name, None, scan.map(Some), {
-                || recover_backup(backup, name, |n, b| TsPlaylistFile::scan(n, b).map(Some))
-            })?;
+        let primary = read_file(&**handle)
+            .map_err(|error| PartialParse { value: None, error })
+            .and_then(|bytes| parse(name, &bytes));
+        let recovered = sink.absorb_parse(ScanStage::Playlist, name, primary, || {
+            recover_backup(backup, name, |n, b| parse(n, b).map_err(|partial| partial.error))
+        })?;
         if let Some(playlist) = recovered {
             parsed.push(playlist);
         }
@@ -1796,11 +1834,9 @@ fn run_measurement_scan(
     // back-fills the scanned detail it would have merged here (see
     // `TsStreamFile::backfill_detail`).
     for playlist in parsed.iter_mut() {
-        if let Ok(metas) =
-            collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &quick)
-        {
-            resolve_playlist_streams(playlist, &metas, skip_quick);
-        }
+        let metas =
+            collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &quick);
+        resolve_playlist_streams(playlist, &metas, skip_quick);
     }
     // Discard the partial byte/packet tallies the bounded quick pass left in the
     // clips (it read only a sliver of each file); the full pass re-accumulates
@@ -1830,9 +1866,13 @@ fn run_measurement_scan(
     // this every subtitle row would present an empty description.
     for playlist in parsed.iter_mut() {
         if skip_quick
-            && let Ok(metas) =
-                collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, &full)
-            && let Some(reference) = select_reference(&metas)
+            && let Some(reference) = select_reference(&collect_clip_metas(
+                playlist,
+                clip_files,
+                stream_files,
+                interleaved_files,
+                &full,
+            ))
         {
             remove_mvc_placeholder(playlist, reference);
         }
@@ -1863,25 +1903,21 @@ fn remove_mvc_placeholder(playlist: &mut TsPlaylistFile, reference: &ClipMeta<'_
 }
 
 /// Builds the reference-clip selection candidates for `playlist` — one
-/// [`ClipMeta`] per clip, angle clips included (an angle clip without clip
-/// info is left out; the main clips still resolve the playlist).
-///
-/// # Errors
-/// [`BdError::MissingClipFile`] if a main (angle-0) clip has no `*.clpi`.
+/// [`ClipMeta`] per clip, angle clips included. A clip without clip info is
+/// left out: [`parse_playlists`] stops a playlist at the first main (angle-0)
+/// clip the disc has no `*.clpi` for, so only an angle clip can lack one, and
+/// the main clips still resolve the playlist.
 fn collect_clip_metas<'a>(
     playlist: &TsPlaylistFile,
     clip_files: &'a BTreeMap<String, TsStreamClipFile>,
     stream_files: &BTreeMap<String, u64>,
     interleaved_files: &BTreeMap<String, u64>,
     scanned: &'a BTreeMap<String, TsStreamFile>,
-) -> Result<Vec<ClipMeta<'a>>, BdError> {
+) -> Vec<ClipMeta<'a>> {
     let mut clips: Vec<ClipMeta<'a>> = Vec::new();
     for clip in &playlist.stream_clips {
         let stem = clip_stem(&clip.name);
         let Some(clip_file) = clip_files.get(&format!("{stem}.CLPI")) else {
-            if clip.angle_index == 0 {
-                return Err(BdError::MissingClipFile(format!("{stem}.CLPI")));
-            }
             continue;
         };
         clips.push(ClipMeta {
@@ -1894,7 +1930,7 @@ fn collect_clip_metas<'a>(
             interleaved_file_present: interleaved_files.contains_key(&format!("{stem}.SSIF")),
         });
     }
-    Ok(clips)
+    clips
 }
 
 /// The dependent-view (MVC) video PID of an interleaved 3D source. The clip
@@ -2086,9 +2122,6 @@ fn build_clip_summaries(
 /// disc `is_50hz` (its reference clip carrying a 25/50 fps video stream) — the
 /// cross-clip resolution over the scanned clip files. `is_3d` is the disc flag
 /// that turns on the video rows' eye labels ([`build_sorted_streams`]).
-///
-/// # Errors
-/// [`BdError::MissingClipFile`] if a main (angle-0) clip has no `*.clpi`.
 fn build_summary(
     playlist: &TsPlaylistFile,
     clip_files: &BTreeMap<String, TsStreamClipFile>,
@@ -2097,8 +2130,8 @@ fn build_summary(
     scanned: &BTreeMap<String, TsStreamFile>,
     measured: &BTreeMap<String, TsStreamFile>,
     is_3d: bool,
-) -> Result<(PlaylistSummary, bool), BdError> {
-    let metas = collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, scanned)?;
+) -> (PlaylistSummary, bool) {
+    let metas = collect_clip_metas(playlist, clip_files, stream_files, interleaved_files, scanned);
 
     let mut file_size: u64 = 0;
     let mut interleaved_file_size: u64 = 0;
@@ -2138,7 +2171,7 @@ fn build_summary(
     );
 
     let chapters = build_chapter_summaries(playlist, &streams, measured, total_length);
-    Ok((
+    (
         PlaylistSummary {
             name: playlist.name.clone(),
             total_length,
@@ -2153,7 +2186,7 @@ fn build_summary(
             chapters,
         },
         is_50hz,
-    ))
+    )
 }
 
 /// Walks `playlist`'s chapter marks against the measured per-frame video
@@ -6719,7 +6752,7 @@ INCLUDES FORUMS REPORT FOR:
 
 WARNING: File errors were encountered during scan:
 
-00000.m2ts<TAB>io error: read failed
+00000.M2TS<TAB>io error: read failed
 
 ********************
 PLAYLIST: 00000.MPLS
@@ -7884,11 +7917,11 @@ Total Bitrate:  0.00 Mbps
     }
 
     #[test]
-    fn open_resilient_keeps_other_playlists_on_a_corrupt_clip_file() {
+    fn a_clip_file_failing_before_its_first_stream_stays_registered_without_streams() {
         // Playlist 00001 references the corrupt 00001.clpi; playlist 00000 is
-        // healthy. The strict scan aborts everything; the resilient scan emits
-        // 00000.MPLS and records both the clip-info parse failure and the playlist
-        // that lost its clip.
+        // healthy. The strict scan aborts everything; the resilient scan records
+        // the clip-info failure and, as `BDInfo` registers every clip-info file
+        // on the disc, keeps 00001.MPLS with its clip and no stream rows.
         let good_clip = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
         let disc = TempDisc::build(
             &[],
@@ -7904,16 +7937,122 @@ Total Bitrate:  0.00 Mbps
         let report = open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
             .expect("resilient scan continues");
         let names: Vec<&str> = report.bdrom.playlists.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["00000.MPLS"]); // the readable rest is emitted
-        assert_eq!(report.errors.len(), 2);
+        assert_eq!(names, vec!["00000.MPLS", "00001.MPLS"]);
+        let damaged = report.bdrom.playlists.get(1).expect("the damaged clip's playlist");
+        assert_eq!(clip_names(damaged), ["00001.M2TS"]);
+        assert_eq!(row_pids(damaged), Vec::<u16>::new());
+        assert_eq!(report.errors.len(), 1);
         let clip_err = report.errors.first().expect("clip error");
         assert_eq!(clip_err.stage, ScanStage::ClipInfo);
         assert_eq!(clip_err.file, "00001.clpi");
         assert_eq!(clip_err.reason.to_string(), "unknown file type: XXXX0100");
-        let playlist_err = report.errors.get(1).expect("playlist error");
-        assert_eq!(playlist_err.stage, ScanStage::Playlist);
-        assert_eq!(playlist_err.file, "00001.MPLS");
-        assert_eq!(playlist_err.reason.to_string(), "referenced missing clip file: 00001.CLPI");
+    }
+
+    /// `playlist`'s clip names, in sequence.
+    fn clip_names(playlist: &PlaylistSummary) -> Vec<&str> {
+        playlist.clips.iter().map(|clip| clip.name.as_str()).collect()
+    }
+
+    /// `playlist`'s stream-row PIDs, in report order.
+    fn row_pids(playlist: &PlaylistSummary) -> Vec<u16> {
+        playlist.streams.iter().map(|row| row.pid.get()).collect()
+    }
+
+    /// A `*.mpls` of two play items, `00000` (40 s) then `00017` (20 s), each
+    /// declaring video PID 0x1011 and carrying one chapter mark; returned with
+    /// the offset at which the second item begins.
+    fn two_item_mpls() -> (Vec<u8>, usize) {
+        let video = pl_stream(1, 0x1011, 0x1B, [0x62, 0x30, 0, 0]);
+        let counts = [1, 0, 0, 0, 0, 0, 0];
+        let first = build_item_codec("00000", *b"M2TS", 0, 1_800_000, None, counts, &video);
+        let second = build_item_codec("00017", *b"M2TS", 0, 900_000, None, counts, &video);
+        // `build_mpls` puts the PlayList at 0x3C, its items after a 10-byte header.
+        let second_at = 0x46_usize.wrapping_add(first.len());
+        let marks = [chapter_entry(1, 0, 0), chapter_entry(1, 1, 0)];
+        (build_mpls(0, &[first, second], &marks), second_at)
+    }
+
+    /// A one-program `*.clpi` declaring video 0x1011 then audio 0x1100, its
+    /// `ProgramInfo` block (and the file) ending three bytes into the audio
+    /// entry — inside the entry, past its PID and length byte.
+    fn clpi_cut_in_the_second_entry() -> Vec<u8> {
+        let mut bytes =
+            clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0]), (0x1100, 0x81, [0x61, b'e', b'n', b'g'])]);
+        // The block starts at 20: reserved + count (2), program header (8),
+        // then 8-byte entries, so the audio entry starts at 38.
+        bytes.truncate(41);
+        bytes.splice(16..20, 21_u32.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn a_playlist_cut_after_its_first_play_item_keeps_that_clip_and_no_chapters() {
+        let (full, second_at) = two_item_mpls();
+        let cut = full.get(..second_at.wrapping_add(4)).expect("inside the second item").to_vec();
+        let video = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", cut),
+                ("BDMV/CLIPINF/00000.clpi", video.clone()),
+                ("BDMV/CLIPINF/00017.clpi", video),
+            ],
+        );
+        assert!(disc.open().is_err(), "the strict scan aborts on the cut playlist");
+
+        let report = open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
+            .expect("resilient scan continues");
+        let playlist = report.bdrom.playlists.first().expect("the cut playlist is kept");
+        assert_eq!(clip_names(playlist), ["00000.M2TS"]);
+        assert_eq!(playlist.total_length.to_bits(), 40.0_f64.to_bits());
+        assert_eq!(playlist.chapter_count, 0);
+        assert_eq!(row_pids(playlist), [0x1011]);
+        assert_eq!(report.errors.len(), 1);
+        let err = report.errors.first().expect("playlist error");
+        assert_eq!((err.stage, err.file.as_str()), (ScanStage::Playlist, "00000.mpls"));
+        assert_eq!(err.reason.to_string(), "unexpected end of input");
+    }
+
+    #[test]
+    fn a_clip_file_cut_inside_its_second_stream_keeps_the_first() {
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00000.clpi", clpi_cut_in_the_second_entry()),
+            ],
+        );
+        assert!(disc.open().is_err(), "the strict scan aborts on the cut clip file");
+
+        let report = open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
+            .expect("resilient scan continues");
+        let playlist = report.bdrom.playlists.first().expect("the playlist is kept");
+        assert_eq!(row_pids(playlist), [0x1011]);
+        assert_eq!(report.errors.len(), 1);
+        let err = report.errors.first().expect("clip error");
+        assert_eq!((err.stage, err.file.as_str()), (ScanStage::ClipInfo, "00000.clpi"));
+        assert_eq!(err.reason.to_string(), "unexpected end of input");
+    }
+
+    #[test]
+    fn a_play_item_without_clip_info_ends_the_playlist_before_it() {
+        let (full, _) = two_item_mpls();
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", full),
+                ("BDMV/CLIPINF/00000.clpi", clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])])),
+            ],
+        );
+        let report = open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata)
+            .expect("resilient scan continues");
+        let playlist = report.bdrom.playlists.first().expect("the playlist is kept");
+        assert_eq!(clip_names(playlist), ["00000.M2TS"]);
+        assert_eq!(playlist.chapter_count, 0);
+        assert_eq!(report.errors.len(), 1);
+        let err = report.errors.first().expect("playlist error");
+        assert_eq!((err.stage, err.file.as_str()), (ScanStage::Playlist, "00000.mpls"));
+        assert_eq!(err.reason.to_string(), "referenced missing clip file: 00017.CLPI");
     }
 
     #[test]
@@ -8338,6 +8477,70 @@ Total Bitrate:  0.00 Mbps
                 ("BDMV/PLAYLIST/00000.mpls", b"XXXXjunk".to_vec()),
                 ("BDMV/BACKUP/PLAYLIST/00001.mpls", mpls("00001", 0, 4_500_000, &[])),
                 ("BDMV/CLIPINF/00000.clpi", clip),
+            ],
+        );
+        let report =
+            open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata).expect("scans");
+        assert_eq!(report.bdrom.playlists, Vec::<PlaylistSummary>::new());
+        assert_eq!(report.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_partial_primary_playlist_beats_a_full_backup() {
+        let (full, second_at) = two_item_mpls();
+        let cut = full.get(..second_at).expect("the first item alone").to_vec();
+        let video = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", cut),
+                ("BDMV/BACKUP/PLAYLIST/00000.mpls", full),
+                ("BDMV/CLIPINF/00000.clpi", video.clone()),
+                ("BDMV/CLIPINF/00017.clpi", video),
+            ],
+        );
+        let report =
+            open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata).expect("scans");
+        let playlist = report.bdrom.playlists.first().expect("the playlist is kept");
+        assert_eq!(clip_names(playlist), ["00000.M2TS"]); // the primary's one clip
+        assert_eq!(report.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_partial_primary_clip_file_beats_a_full_backup() {
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", mpls("00000", 0, 4_500_000, &[])),
+                ("BDMV/CLIPINF/00000.clpi", clpi_cut_in_the_second_entry()),
+                (
+                    "BDMV/BACKUP/CLIPINF/00000.clpi",
+                    clpi(&[
+                        (0x1011, 0x1B, [0x62, 0x30, 0, 0]),
+                        (0x1100, 0x81, [0x61, b'e', b'n', b'g']),
+                    ]),
+                ),
+            ],
+        );
+        let report =
+            open_resilient(&FsDir::new(disc.root.clone()), ScanMode::Metadata).expect("scans");
+        let playlist = report.bdrom.playlists.first().expect("the playlist is kept");
+        assert_eq!(row_pids(playlist), [0x1011]); // the primary's one stream
+        assert_eq!(report.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_backup_that_also_fails_part_way_recovers_nothing() {
+        let (full, second_at) = two_item_mpls();
+        let cut = full.get(..second_at).expect("the first item alone").to_vec();
+        let video = clpi(&[(0x1011, 0x1B, [0x62, 0x30, 0, 0])]);
+        let disc = TempDisc::build(
+            &[],
+            &[
+                ("BDMV/PLAYLIST/00000.mpls", b"XXXXjunk".to_vec()),
+                ("BDMV/BACKUP/PLAYLIST/00000.mpls", cut),
+                ("BDMV/CLIPINF/00000.clpi", video.clone()),
+                ("BDMV/CLIPINF/00017.clpi", video),
             ],
         );
         let report =

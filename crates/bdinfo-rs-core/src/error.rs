@@ -72,6 +72,21 @@ pub enum BdError {
     ScanCancelled,
 }
 
+/// A metadata parse that failed part-way: the failure, and the value assembled
+/// from what was read before it.
+///
+/// `value` is `None` when nothing usable was read — a playlist with no play
+/// item, a clip-information file with no stream. `BDInfo` fills its playlist
+/// and clip objects in place and keeps them when a throw interrupts the parse;
+/// this is how the parsers hand the same half-built object back. The value is
+/// boxed so the `Err` arm of a parse result stays pointer-sized.
+pub(crate) struct PartialParse<T> {
+    /// What the parse built before `error`.
+    pub(crate) value: Option<Box<T>>,
+    /// The failure that stopped the parse.
+    pub(crate) error: BdError,
+}
+
 /// Where in a resilient disc scan a per-file failure occurred — the discriminant
 /// of a [`ScanError`].
 ///
