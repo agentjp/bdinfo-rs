@@ -405,10 +405,12 @@ async function main() {
 
   // What a browser user is shown for that same damaged scan: the demo page
   // renders `disc.errors` through its own formatter (src/format.ts), one line
-  // per recorded failure. Each line must be the report's own `WARNING:` line
+  // per recorded failure. Each line must carry the report's own `WARNING:` line
   // with the stage in front — the page and the report saying the same thing
   // about the same failure, which is what makes the strip trustworthy on a
-  // listing that renders no report at all.
+  // listing that renders no report at all. The one difference is the file's
+  // spelling: the page keeps the recorded on-disc name, the report upper-cases
+  // it as BDInfo does.
   const damagedLines = subsetDisc.errors.map(errorLine);
   const warningLines = reports
     .get("twoClips/defectiveOnly")
@@ -417,10 +419,11 @@ async function main() {
   if (damagedLines.length !== 2) {
     failures.push(`the damaged subset scan recorded ${damagedLines.length} error(s), not 2`);
   }
-  const rendered = damagedLines.every(
-    (line, index) =>
-      line === `${subsetDisc.errors[index].stage} ${warningLines[index]?.replace("\t", ": ")}`,
-  );
+  const rendered = damagedLines.every((line, index) => {
+    const { file, stage } = subsetDisc.errors[index];
+    const [warningFile, reason] = (warningLines[index] ?? "").split("\t");
+    return warningFile === file.toUpperCase() && line === `${stage} ${file}: ${reason}`;
+  });
   if (!rendered) {
     failures.push(
       `the page's error lines are not the report's: ${JSON.stringify(damagedLines)} against ` +
