@@ -1014,12 +1014,20 @@ mod tests {
         (partial.value.map(|file| *file), partial.error.to_string())
     }
 
-    /// The video format of `file`'s declared PID 0x1011.
-    fn format_of_0x1011(file: &TsPlaylistFile) -> Option<TsVideoFormat> {
-        match file.playlist_streams.get(&0x1011) {
-            Some(TsStream::Video(video)) => Some(video.video_format()),
-            _ => None,
+    /// The declared AVC stream PID 0x1011 of [`two_items`]: the first item's
+    /// 1080p / 24 coding when `first`, else the second item's 576i / 29.97.
+    fn declared_0x1011(first: bool) -> TsStream {
+        let mut video = TsVideoStream::default();
+        if first {
+            video.set_video_format(TsVideoFormat::Videoformat1080p);
+            video.set_frame_rate(TsFrameRate::Framerate24);
+        } else {
+            video.set_video_format(TsVideoFormat::Videoformat576i);
+            video.set_frame_rate(TsFrameRate::Framerate29_97);
         }
+        video.base.pid = Pid::new(0x1011);
+        video.base.stream_type = TsStreamType::AvcVideo;
+        TsStream::Video(video)
     }
 
     #[test]
@@ -1034,7 +1042,7 @@ mod tests {
         assert_eq!(names, ["00000.M2TS"]);
         // The share is of the kept clips alone: 40 s of 40 s.
         assert_eq!(file.stream_clips.first().unwrap().relative_length.to_bits(), 1.0_f64.to_bits());
-        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat1080p));
+        assert_eq!(file.playlist_streams.get(&0x1011), Some(&declared_0x1011(true)));
         assert_eq!(file.chapters, Vec::<f64>::new()); // the marks were never reached
     }
 
@@ -1047,7 +1055,7 @@ mod tests {
         let (value, _) = failed(full.get(..second_at.wrapping_add(40)).unwrap(), &|_| true);
         let file = value.expect("both items' clips were read");
         assert_eq!(file.stream_clips.len(), 2);
-        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat1080p));
+        assert_eq!(file.playlist_streams.get(&0x1011), Some(&declared_0x1011(true)));
     }
 
     #[test]
@@ -1069,7 +1077,7 @@ mod tests {
         assert_eq!(file.stream_clips.len(), 2);
         assert_eq!(file.chapters, vec![0.0]);
         // Both items were read, so the second's coding replaces the first's.
-        assert_eq!(format_of_0x1011(&file), Some(TsVideoFormat::Videoformat576i));
+        assert_eq!(file.playlist_streams.get(&0x1011), Some(&declared_0x1011(false)));
     }
 
     #[test]
