@@ -236,6 +236,12 @@ if (-not $packageExists) {
 
 $komac = Install-Komac
 $manifests = Build-Manifests $komac
+# Bring the bot's fork level with microsoft/winget-pkgs before submitting:
+# komac creates the submission branch in the fork at upstream's head commit and
+# does not sync the fork itself (packages.yml's winget job records what a stale
+# fork does to that step).
+& $komac sync-fork | Write-Host
+if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac sync-fork failed' }
 & $komac submit $manifests.Leaf --yes | Write-Host
 if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac submit failed' }
 Write-Host "submitted $packageId $Version to winget-pkgs"
