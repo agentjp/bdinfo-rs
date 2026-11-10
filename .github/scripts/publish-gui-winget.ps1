@@ -25,13 +25,13 @@
 # The submitted manifest must OMIT `Scope`: the per-user MSI registers its
 # ARP entry in HKLM, winget derives installed scope from the hive alone, and
 # a declared `user` scope would fail every upgrade with "installer scope does
-# not match" (winget-cli #3011). komac 2.16.0 derives `Scope: user` from that
-# same MSI install context and `update` has no flag to omit it, so both modes
-# render locally with `--dry-run`, strip the Scope line, and hold the result
-# to the assertions (no Scope / InstallerType wix / ProductCode present /
-# both architectures); publishing submits the stripped tree via
-# `komac submit`, never `update --submit` (which would re-render and
-# re-inject the field).
+# not match" (winget-cli #3011). komac (2.16.0 through 2.17.2) derives
+# `Scope: user` from that same MSI install context and `update` has no flag to
+# omit it, so both modes render locally with `update --exit --output`, strip
+# the Scope line, and hold the result to the assertions (no Scope /
+# InstallerType wix / ProductCode present / both architectures); publishing
+# submits the stripped tree via `komac submit`, never `update --submit` (which
+# would re-render and re-inject the field).
 #
 #   -Mode prepare  validate without submitting: the rendered + stripped +
 #                  asserted manifests land in -Payload. Package not in
@@ -154,17 +154,23 @@ function Install-Komac {
     return $komac
 }
 
-# Renders the manifests with `komac update --dry-run`, strips the Scope line
-# komac injects (see the header), and holds the result to the assertions.
+# Renders the manifests with `komac update --exit --output`, strips the Scope
+# line komac injects (see the header), and holds the result to the assertions.
 # Returns the output tree root and the directory holding the manifest files;
 # everything komac and the review print is routed through Write-Host so the
 # returned object stays the function's only output.
+#
+# `--exit` (komac 2.17.2 and later) is the one flag that writes the manifests
+# without submitting: it answers komac's submit prompt with Exit, after the
+# write. `--dry-run` prints the manifests and returns before the write, so it
+# leaves --output empty. `--skip-pr-check` keeps komac from prompting about an
+# open submission, which the state probe above has already looked for.
 function Build-Manifests([string] $komac) {
     $outDir = Join-Path ([System.IO.Path]::GetTempPath()) "komac-manifests-$PID"
-    & $komac update $packageId --version $Version --dry-run --output $outDir --urls @msiUrls | Write-Host
-    if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac update --dry-run failed' }
+    & $komac update $packageId --version $Version --exit --skip-pr-check --output $outDir --urls @msiUrls | Write-Host
+    if ($LASTEXITCODE -ne 0) { Stop-Leg 'komac update --exit failed' }
 
-    $installer = @(Get-ChildItem -Recurse $outDir -Filter '*.installer.yaml')
+    $installer = @(Get-ChildItem -Recurse $outDir -Filter '*.installer.yaml' -ErrorAction SilentlyContinue)
     if ($installer.Count -ne 1) { Stop-Leg "expected exactly one installer manifest, found $($installer.Count)" }
     $manifest = (Get-Content -LiteralPath $installer[0].FullName -Raw) -replace '(?m)^\s*Scope:[^\r\n]*\r?\n?', ''
     Set-Content -LiteralPath $installer[0].FullName -Value $manifest -NoNewline

@@ -32,7 +32,7 @@ name: gui-publish
 #             expected assets + SHA256SUMS, every byte matches, every asset's
 #             attestation verifies; resolves the channel matrix.
 #   prepare   fail-fast matrix: each leg builds + validates its payload
-#             (komac --dry-run manifests, the rendered cask, the PKGBUILD in
+#             (locally rendered komac manifests, the rendered cask, the PKGBUILD in
 #             an Arch container, package-metadata assertions) and uploads it
 #             as a workflow artifact. Nothing has been pushed anywhere when
 #             this phase fails.
@@ -196,7 +196,7 @@ jobs:
           name: gui-publish-sums
           path: sums
 
-      - name: winget — komac --dry-run manifests + manifest assertions
+      - name: winget — komac manifests rendered locally + manifest assertions
         if: matrix.channel == 'winget'
         shell: pwsh
         env:
