@@ -222,8 +222,8 @@ jobs:
           persist-credentials: false
 
       # Staged OUTSIDE the checkout's tracked paths: `assets/` exists in the
-      # repo (the README screenshot), and merging downloads into it put a 13th
-      # file under the exactly-12 completeness check.
+      # repo (the README screenshot), and merging downloads into it put an extra
+      # file under the exact-count completeness check.
       - name: Download every packaged artifact
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -236,9 +236,11 @@ jobs:
         run: |
           expected="
           bdinfo-rs-gui-x86_64.AppImage
+          bdinfo-rs-gui-x86_64.AppImage.zsync
           bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb
           bdinfo-rs-gui-x86_64-unknown-linux-gnu.rpm
           bdinfo-rs-gui-aarch64.AppImage
+          bdinfo-rs-gui-aarch64.AppImage.zsync
           bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb
           bdinfo-rs-gui-aarch64-unknown-linux-gnu.rpm
           bdinfo-rs-gui-x86_64-pc-windows-msvc.zip
@@ -254,8 +256,8 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
           count="$(ls -1 | wc -l)"
-          if [ "$count" -ne 12 ]; then
-            echo "::error::expected exactly 12 artifacts, found $count:"; ls -1
+          if [ "$count" -ne 14 ]; then
+            echo "::error::expected exactly 14 artifacts, found $count:"; ls -1
             exit 1
           fi
           sha256sum -- * > SHA256SUMS

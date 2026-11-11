@@ -31,6 +31,13 @@ on:
       # The wasm crate is a thin shim over bdinfo-rs-core (renderer, codecs,
       # MPLS/CLPI/M2TS) — a core change alters the demo's output, so redeploy on it.
       - crates/bdinfo-rs-core/**
+  # A finished GUI release: the site also serves the update control files of
+  # the newest GUI AppImages (see the "Stage" step), so it has to follow each
+  # release. The job's `if:` narrows this to a successful run that a gui-v*
+  # tag push started — gui-release.yml's dry-run dispatches publish nothing.
+  workflow_run:
+    workflows: [gui-release]
+    types: [completed]
 
 permissions:
   contents: read
@@ -47,8 +54,13 @@ jobs:
     # (not repo secrets), so only a deploy from master can read them. The push trigger
     # is master-only (github.ref = master), matched by the environment's `master` branch
     # rule; a workflow_dispatch from any other branch is intentionally locked out of the
-    # production Pages token. No tag rule — there is no tag trigger here.
+    # production Pages token. No tag rule — there is no tag trigger here; a
+    # workflow_run executes on the default branch, which the rule admits.
     environment: pages
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,6 +92,40 @@ jobs:
           Copy-Item -Recurse pkg $site/pkg
           Get-ChildItem -Recurse $site | ForEach-Object { $_.FullName }
 
+      # The GUI AppImages embed `zsync|https://bdinfo.hyperslop.dev/gui/<name>.zsync`
+      # as their update information (.github/scripts/gui-package-linux.ps1 has
+      # the reason a GitHub-release form cannot be used). An update tool reads
+      # the control file at that never-changing URL, and the file itself names
+      # the release asset to download. So every deploy — a GUI release, or a
+      # demo change, since Direct Upload replaces the whole site — copies the
+      # control files of the newest GUI release into site/gui/. A release from
+      # before the control files existed (up to 5.0.0) has none, and the
+      # directory is then left out.
+      - name: Stage the newest GUI release's AppImage update control files
+        id: zsync
+        working-directory: crates/bdinfo-rs-wasm/web
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # The releases API lists newest first.
+          $tag = gh api "repos/$env:GH_REPO/releases?per_page=100" --jq '[.[] | select(.draft | not) | select(.tag_name | startswith("gui-v"))][0].tag_name'
+          if ($LASTEXITCODE -ne 0 -or -not $tag -or $tag -eq 'null') { throw 'could not find the newest gui-v* release' }
+          $names = @(gh release view $tag --json assets --jq '.assets[].name | select(endswith(".AppImage.zsync"))')
+          if ($LASTEXITCODE -ne 0) { throw "could not list the assets of $tag" }
+          if (-not $names.Count) {
+            Write-Host "$tag carries no .zsync control files - nothing to stage"
+            "tag=" | Add-Content -Path $env:GITHUB_OUTPUT
+            exit 0
+          }
+          New-Item -ItemType Directory -Force site/gui | Out-Null
+          gh release download $tag --pattern '*.AppImage.zsync' --dir site/gui
+          if ($LASTEXITCODE -ne 0) { throw "could not download the control files of $tag" }
+          Get-ChildItem site/gui | ForEach-Object { Write-Host "staged $($_.Name) from $tag" }
+          "tag=$tag" | Add-Content -Path $env:GITHUB_OUTPUT
       # Pages Direct Upload of the prebuilt site/. wrangler reads the token +
       # account id from the env below. --branch=master makes this the production
       # deployment (the project's production branch must be `master`).
@@ -90,3 +136,31 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           WRANGLER: ${{ steps.pins.outputs.WRANGLER }}
         run: npx --yes "wrangler@$WRANGLER" pages deploy site --project-name=bdinfo-rs --branch=master
+
+      # The update address is only as good as what the site answers at it: a
+      # deploy that silently dropped or kept a stale control file would leave
+      # every installed AppImage updating to an old version, or to nothing.
+      # So read each one back from the public URL and compare it byte for byte
+      # with the file staged from the release, retrying while the deployment
+      # propagates.
+      - name: Verify the served update control files
+        if: steps.zsync.outputs.tag != ''
+        working-directory: crates/bdinfo-rs-wasm/web
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in Get-ChildItem site/gui -Filter '*.AppImage.zsync') {
+            $url = "https://bdinfo.hyperslop.dev/gui/$($file.Name)"
+            $want = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
+            $ok = $false
+            foreach ($attempt in 1..12) {
+              $tmp = New-TemporaryFile
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $tmp.FullName
+                if ((Get-FileHash -Algorithm SHA256 -LiteralPath $tmp.FullName).Hash -eq $want) { $ok = $true; break }
+              } catch { Write-Host "attempt ${attempt}: $($_.Exception.Message)" }
+              Start-Sleep -Seconds 10
+            }
+            if (-not $ok) { throw "$url does not serve the control file staged from the release" }
+            Write-Host "ok  $url"
+          }

@@ -28,8 +28,8 @@ name: gui-publish
 # All-or-nothing: publishing starts only after EVERY selected channel's
 # payload has validated. Three sequential phases:
 #
-#   verify    the release exists, is immutable, carries exactly the 12
-#             expected assets + SHA256SUMS, every byte matches, every asset's
+#   verify    the release exists, is immutable, carries exactly the assets
+#             its version published + SHA256SUMS, every byte matches, every asset's
 #             attestation verifies; resolves the channel matrix.
 #   prepare   fail-fast matrix: each leg builds + validates its payload
 #             (locally rendered komac manifests, the rendered cask, the PKGBUILD in

@@ -19,7 +19,8 @@
 
 [CmdletBinding()]
 param(
-    # The crate version (informational; the deb/rpm read Cargo.toml).
+    # The crate version: names the release the .zsync control file points at
+    # (the deb/rpm read Cargo.toml).
     [Parameter(Mandatory)] [string] $Version,
     # The target triple the binary was built for — names the artifacts and
     # picks the appimagetool arch.
@@ -227,8 +228,30 @@ $appImage = Join-Path $out "bdinfo-rs-gui-$arch.AppImage"
 # --appimage-extract-and-run: the tool itself needs no FUSE on the runner. It
 # downloads the static type2 runtime to embed (AppImage/type2-runtime's
 # `continuous` release — upstream publishes no versioned runtime tags).
+#
+# -u embeds the update information: where an update tool (AppImageUpdate, Gear
+# Lever) finds the .zsync control file of the newest version. The AppImage
+# spec's `gh-releases-zsync|…|latest` form follows the repository's "latest"
+# release, which here is always the CLI release and carries no AppImage, so
+# the `zsync|<URL that never changes>` form is used instead. deploy-pages.yml
+# publishes the newest GUI release's control files at these URLs.
+$zsyncName = "bdinfo-rs-gui-$arch.AppImage.zsync"
 $env:ARCH = $arch
-& $tool --appimage-extract-and-run $appDir $appImage
+& $tool --appimage-extract-and-run -u "zsync|https://bdinfo.hyperslop.dev/gui/$zsyncName" $appDir $appImage
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: appimagetool'; exit 1 }
 Remove-Item -Recurse -Force (Split-Path $appDir)
 Write-Host "packaged $appImage"
+
+# ── AppImage: the .zsync control file ────────────────────────────────────────
+# Block checksums of the finished AppImage plus the URL to fetch its bytes
+# from. appimagetool writes one of its own into the working directory when
+# zsyncmake is installed, with a URL relative to wherever the control file is
+# served; that one is discarded, because the control file is served from the
+# project site while the AppImage stays on the GitHub release. This one names
+# the release asset by its absolute URL (zsync2's makeUrlAbsolute takes an
+# absolute URL as it stands).
+Remove-Item -Force -ErrorAction SilentlyContinue $zsyncName
+$zsync = Join-Path $out $zsyncName
+& zsyncmake -u "https://github.com/agentjp/bdinfo-rs/releases/download/gui-v$Version/bdinfo-rs-gui-$arch.AppImage" -o $zsync $appImage
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zsync)) { Write-Host 'FAILED: zsyncmake (the gui-package action installs the zsync package)'; exit 1 }
+Write-Host "packaged $zsync"

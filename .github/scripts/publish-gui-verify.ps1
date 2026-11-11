@@ -2,8 +2,8 @@
 # Phase-1 gate of gui-publish.yml: prove the gui-v* release is complete and
 # untampered BEFORE any channel work starts, and resolve the channel matrix.
 # In order: the tag is a stable gui-vX.Y.Z, the release exists and is not a
-# draft, its asset set is EXACTLY the 12 packages gui-release.yml publishes
-# plus SHA256SUMS, every downloaded byte matches SHA256SUMS, and every asset
+# draft, its asset set is EXACTLY the packages gui-release.yml published for
+# that version plus SHA256SUMS, every downloaded byte matches SHA256SUMS, and every asset
 # (SHA256SUMS included) carries a verifiable Sigstore build-provenance
 # attestation. Downloads land in -OutDir so the workflow can publish
 # SHA256SUMS as the artifact the prepare legs re-check their own downloads
@@ -50,16 +50,18 @@ if (-not $release.immutable) {
     Stop-Leg "release $Tag is not immutable - its assets could change after this verification, so no channel may publish from it"
 }
 
-# The exact asset contract gui-release.yml publishes: 12 packages +
+# The exact asset contract gui-release.yml publishes: the packages below +
 # SHA256SUMS, nothing else. Names must match both ways.
 #
 # The contract is the one the RELEASE was published under, not only today's:
 # this script always runs from the default branch, against releases whose
 # assets can never be renamed, and a re-dispatch for an older release (a
 # rejected winget submission, the prepare-only rehearsal before a tag) has to
-# keep passing. Releases up to 5.0.0 named the AppImage by target triple;
-# later ones name it by architecture alone (gui-package-linux.ps1).
-$appImageSuffix = if ([version] $version -le [version] '5.0.0') { '-unknown-linux-gnu' } else { '' }
+# keep passing. Releases up to 5.0.0 named the AppImage by target triple and
+# carried 12 packages; later ones name it by architecture alone and add its
+# .zsync update control file, 14 in all (gui-package-linux.ps1).
+$legacy = [version] $version -le [version] '5.0.0'
+$appImageSuffix = if ($legacy) { '-unknown-linux-gnu' } else { '' }
 $packages = @(
     "bdinfo-rs-gui-x86_64$appImageSuffix.AppImage"
     "bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb"
@@ -74,6 +76,9 @@ $packages = @(
     "bdinfo-rs-gui-x86_64-apple-darwin.dmg"
     "bdinfo-rs-gui-aarch64-apple-darwin.dmg"
 )
+if (-not $legacy) {
+    $packages += 'bdinfo-rs-gui-x86_64.AppImage.zsync', 'bdinfo-rs-gui-aarch64.AppImage.zsync'
+}
 $expected = @($packages + 'SHA256SUMS')
 $actual = @($release.assets.name)
 $diff = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
@@ -86,13 +91,13 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 gh release download $Tag --repo $repo --dir $OutDir
 if ($LASTEXITCODE -ne 0) { Stop-Leg "gh release download $Tag failed" }
 
-# Every SHA256SUMS line must name one of the 12 packages (-Strict), cover all
-# 12, and match the downloaded bytes. This is the run's only reading of the file
+# Every SHA256SUMS line must name one of the packages (-Strict), cover all
+# of them, and match the downloaded bytes. This is the run's only reading of the file
 # that proves it well-formed; the prepare legs look names up in the copy this
 # job publishes as an artifact.
 $sums = Get-Sha256Sums -Path (Join-Path $OutDir 'SHA256SUMS') -Strict
 $sumDiff = @(Compare-Object -ReferenceObject $packages -DifferenceObject @($sums.Keys))
-if ($sumDiff.Count) { Stop-Leg 'SHA256SUMS does not cover exactly the 12 packages' }
+if ($sumDiff.Count) { Stop-Leg "SHA256SUMS does not cover exactly the $($packages.Count) packages" }
 foreach ($name in $packages) {
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $OutDir $name)).Hash.ToLowerInvariant()
     if ($hash -ne $sums[$name]) { Stop-Leg "checksum mismatch for $name (SHA256SUMS $($sums[$name]), downloaded $hash)" }
@@ -124,4 +129,4 @@ Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
 # enumerates the elements, and -AsArray re-wraps a lone survivor so a
 # single-channel dispatch still yields a JSON array.
 Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "channels=$($selected | ConvertTo-Json -Compress -AsArray)"
-Write-Host "verified release $Tag (version $version): 12 packages + SHA256SUMS, checksums + attestations ok; channels: $($selected -join ', ')"
+Write-Host "verified release $Tag (version $version): $($packages.Count) packages + SHA256SUMS, checksums + attestations ok; channels: $($selected -join ', ')"

@@ -375,7 +375,8 @@ yay -S bdinfo-rs-gui-bin    # or any AUR helper
   installed — no desktop entry, no icon.
 - **Requires** — glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later). The windowing
   libraries are bundled; the C library and the graphics drivers come from the host.
-- **Updates** — download the next release's AppImage and replace the file.
+- **Updates** — the AppImage carries update information, so AppImageUpdate, Gear Lever and similar
+  tools can update it in place; or download the next release's AppImage and replace the file.
 - **Uninstall** — delete the file (and `~/.config/bdinfo-rs` for the settings).
 
 ## From crates.io / source
