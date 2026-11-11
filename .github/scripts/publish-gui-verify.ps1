@@ -52,11 +52,19 @@ if (-not $release.immutable) {
 
 # The exact asset contract gui-release.yml publishes: 12 packages +
 # SHA256SUMS, nothing else. Names must match both ways.
+#
+# The contract is the one the RELEASE was published under, not only today's:
+# this script always runs from the default branch, against releases whose
+# assets can never be renamed, and a re-dispatch for an older release (a
+# rejected winget submission, the prepare-only rehearsal before a tag) has to
+# keep passing. Releases up to 5.0.0 named the AppImage by target triple;
+# later ones name it by architecture alone (gui-package-linux.ps1).
+$appImageSuffix = if ([version] $version -le [version] '5.0.0') { '-unknown-linux-gnu' } else { '' }
 $packages = @(
-    "bdinfo-rs-gui-x86_64-unknown-linux-gnu.AppImage"
+    "bdinfo-rs-gui-x86_64$appImageSuffix.AppImage"
     "bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb"
     "bdinfo-rs-gui-x86_64-unknown-linux-gnu.rpm"
-    "bdinfo-rs-gui-aarch64-unknown-linux-gnu.AppImage"
+    "bdinfo-rs-gui-aarch64$appImageSuffix.AppImage"
     "bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb"
     "bdinfo-rs-gui-aarch64-unknown-linux-gnu.rpm"
     "bdinfo-rs-gui-x86_64-pc-windows-msvc.zip"

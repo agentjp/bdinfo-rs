@@ -212,7 +212,8 @@ switch ($Kind) {
         }
 
         # ── AppImage: the four spec-mandated root entries ────────────────────
-        $appImage = Join-Path $dir "bdinfo-rs-gui-$Triple.AppImage"
+        # The AppImage is named by architecture alone (gui-package-linux.ps1).
+        $appImage = Join-Path $dir "bdinfo-rs-gui-$(($Triple -split '-')[0]).AppImage"
         Assert (Test-Path $appImage) 'AppImage exists'
         $work = Join-Path ([System.IO.Path]::GetTempPath()) "gui-appimage-check-$PID"
         New-Item -ItemType Directory -Force $work | Out-Null

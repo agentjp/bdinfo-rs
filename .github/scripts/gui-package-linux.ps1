@@ -1,6 +1,7 @@
 #!/usr/bin/env pwsh
 # Packages the built GUI binary for Linux: the AppImage, the .deb, and the .rpm
-# (the Sniffnet posture — no tarball), all named by target triple. Runs on a
+# (the Sniffnet posture — no tarball). The deb and the rpm are named by target
+# triple; the AppImage by architecture alone (see where it is built). Runs on a
 # native runner per arch with the release binary already at
 # crates/bdinfo-rs-gui/target/release/bdinfo-rs-gui (the deb/rpm metadata's
 # asset paths and their $auto/auto-req scans assume it). Shared by the gui.yml
@@ -219,7 +220,10 @@ if (-not (Test-Path $tool)) {
     & chmod +x $tool
     if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: chmod appimagetool'; exit 1 }
 }
-$appImage = Join-Path $out "bdinfo-rs-gui-$Triple.AppImage"
+# Named by architecture, not by target triple: every AppImage is for Linux, so
+# the AppImage project's naming rule (and the AppImageHub catalog test, which
+# warns on it) keeps "linux" out of the file name.
+$appImage = Join-Path $out "bdinfo-rs-gui-$arch.AppImage"
 # --appimage-extract-and-run: the tool itself needs no FUSE on the runner. It
 # downloads the static type2 runtime to embed (AppImage/type2-runtime's
 # `continuous` release — upstream publishes no versioned runtime tags).

@@ -179,7 +179,9 @@ switch ($Kind) {
         Assert (-not (Test-Path '/usr/bin/bdinfo-rs-gui')) 'removal deletes the binary'
 
         # ── AppImage: the runtime boots the binary without extraction ────────
-        $appImage = Join-Path $dir "bdinfo-rs-gui-$Triple.AppImage"
+        # The AppImage is named by architecture alone (gui-package-linux.ps1).
+        $appImageName = "bdinfo-rs-gui-$(($Triple -split '-')[0]).AppImage"
+        $appImage = Join-Path $dir $appImageName
         & chmod +x $appImage
         $outFile = Join-Path ([System.IO.Path]::GetTempPath()) "gui-smoke-appimage-$PID.txt"
         $p = Start-Process -FilePath $appImage -ArgumentList '--appimage-extract-and-run', '--version' `
@@ -224,7 +226,7 @@ echo '--- application output ---'
 cat /tmp/app.log
 exit 1
 '@
-        & docker run --rm -e "APPIMAGE=bdinfo-rs-gui-$Triple.AppImage" -v "${dir}:/artifacts:ro" "ubuntu:$release" bash -c $launch
+        & docker run --rm -e "APPIMAGE=$appImageName" -v "${dir}:/artifacts:ro" "ubuntu:$release" bash -c $launch
         Assert ($LASTEXITCODE -eq 0) "AppImage opens a window in a bare ubuntu:$release container (exit $LASTEXITCODE)"
     }
 

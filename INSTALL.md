@@ -259,8 +259,8 @@ Release artifacts, per platform:
 | Windows arm64 | `bdinfo-rs-gui-aarch64-pc-windows-msvc.msi` · `bdinfo-rs-gui-aarch64-pc-windows-msvc.zip` |
 | macOS Intel | `bdinfo-rs-gui-x86_64-apple-darwin.dmg` |
 | macOS Apple Silicon | `bdinfo-rs-gui-aarch64-apple-darwin.dmg` |
-| Linux x64 | `bdinfo-rs-gui-x86_64-unknown-linux-gnu.AppImage` · `.deb` · `.rpm` |
-| Linux arm64 | `bdinfo-rs-gui-aarch64-unknown-linux-gnu.AppImage` · `.deb` · `.rpm` |
+| Linux x64 | `bdinfo-rs-gui-x86_64.AppImage` · `bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb` · `.rpm` |
+| Linux arm64 | `bdinfo-rs-gui-aarch64.AppImage` · `bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb` · `.rpm` |
 
 ## WinGet (Windows)
 
@@ -371,8 +371,10 @@ yay -S bdinfo-rs-gui-bin    # or any AUR helper
 
 ## AppImage (Linux)
 
-- **Where it goes** — a single self-contained file; put it anywhere, `chmod +x` it, run it.
-  Nothing else is installed — no desktop entry, no icon.
+- **Where it goes** — a single file; put it anywhere, `chmod +x` it, run it. Nothing else is
+  installed — no desktop entry, no icon.
+- **Requires** — glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later). The windowing
+  libraries are bundled; the C library and the graphics drivers come from the host.
 - **Updates** — download the next release's AppImage and replace the file.
 - **Uninstall** — delete the file (and `~/.config/bdinfo-rs` for the settings).
 
