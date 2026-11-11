@@ -74,14 +74,15 @@ runs:
     # gui-package-linux.ps1 copies into the AppImage: the windowing libraries
     # the binary dlopens, and binutils for the objdump that walks their
     # dependencies. The script fails naming any library it needs that is
-    # missing here.
+    # missing here. Last, zsync for the zsyncmake that writes the AppImage's
+    # update control file.
     - name: Install the Linux packaging validators and bundled libraries
       if: inputs.kind == 'linux'
       shell: bash
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends desktop-file-utils appstream-util rpm \
-          binutils libxkbcommon-x11-0 libxcursor1 libxi6 libwayland-egl1
+          binutils libxkbcommon-x11-0 libxcursor1 libxi6 libwayland-egl1 zsync
 
     - id: pins
       if: inputs.kind == 'linux' && inputs.install-packagers == 'true'

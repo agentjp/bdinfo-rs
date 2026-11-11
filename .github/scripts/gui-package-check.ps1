@@ -243,6 +243,33 @@ switch ($Kind) {
                 (Get-Content -Raw $appRun) -match 'LD_LIBRARY_PATH="\$HERE/usr/lib') 'AppRun is the usr/lib launcher script'
             Assert (Test-Path (Join-Path $root 'usr/lib/libxkbcommon-x11.so.0')) 'AppImage bundles libxkbcommon-x11.so.0'
             Assert (Test-Path (Join-Path $root 'usr/share/doc/libxkbcommon-x11-0/copyright')) 'AppImage carries the libxkbcommon-x11-0 copyright'
+
+            # ── AppImage: update information + its .zsync control file ───────
+            # The embedded string is what an update tool reads; the control
+            # file is what it then fetches. The header fields asserted here
+            # are the ones a stale or mismatched control file gets wrong: the
+            # byte length and SHA-1 of this very AppImage, and an absolute URL
+            # on this repository's gui-v* release (gui-package-linux.ps1 has
+            # the reason it is absolute).
+            $arch = ($Triple -split '-')[0]
+            $zsyncName = "bdinfo-rs-gui-$arch.AppImage.zsync"
+            $info = ((& $appImage --appimage-updateinformation) | Out-String).Trim()
+            Assert ($info -eq "zsync|https://bdinfo.hyperslop.dev/gui/$zsyncName") "AppImage embeds the zsync update information (got '$info')"
+            $zsync = Join-Path $dir $zsyncName
+            Assert (Test-Path $zsync) "$zsyncName exists"
+            if (Test-Path $zsync) {
+                # The header is text up to the first blank line; block checksums follow.
+                $text = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($zsync))
+                $header = @{}
+                foreach ($line in ($text.Substring(0, $text.IndexOf("`n`n")) -split "`n")) {
+                    $key, $value = $line -split ': ', 2
+                    $header[$key] = $value
+                }
+                $sha1 = (Get-FileHash -Algorithm SHA1 -LiteralPath $appImage).Hash.ToLowerInvariant()
+                Assert ($header['SHA-1'] -eq $sha1) "the .zsync SHA-1 is this AppImage's (header $($header['SHA-1']), file $sha1)"
+                Assert ($header['Length'] -eq "$((Get-Item -LiteralPath $appImage).Length)") "the .zsync Length is this AppImage's (header $($header['Length']))"
+                Assert ($header['URL'] -match "^https://github\.com/agentjp/bdinfo-rs/releases/download/gui-v\d+\.\d+\.\d+/bdinfo-rs-gui-$arch\.AppImage$") "the .zsync URL is the absolute release asset URL (got '$($header['URL'])')"
+            }
         }
         finally { Pop-Location }
         Remove-Item -Recurse -Force $work
