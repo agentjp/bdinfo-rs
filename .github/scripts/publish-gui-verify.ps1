@@ -53,10 +53,10 @@ if (-not $release.immutable) {
 # The exact asset contract gui-release.yml publishes: 12 packages +
 # SHA256SUMS, nothing else. Names must match both ways.
 $packages = @(
-    "bdinfo-rs-gui-x86_64-unknown-linux-gnu.AppImage"
+    "bdinfo-rs-gui-x86_64.AppImage"
     "bdinfo-rs-gui-x86_64-unknown-linux-gnu.deb"
     "bdinfo-rs-gui-x86_64-unknown-linux-gnu.rpm"
-    "bdinfo-rs-gui-aarch64-unknown-linux-gnu.AppImage"
+    "bdinfo-rs-gui-aarch64.AppImage"
     "bdinfo-rs-gui-aarch64-unknown-linux-gnu.deb"
     "bdinfo-rs-gui-aarch64-unknown-linux-gnu.rpm"
     "bdinfo-rs-gui-x86_64-pc-windows-msvc.zip"
