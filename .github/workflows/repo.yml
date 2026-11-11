@@ -170,7 +170,7 @@ jobs:
         uses: $/.github/actions/pins
 
       - name: Install taplo (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: taplo-cli@${{ steps.pins.outputs.TAPLO_CLI }}
           fallback: none
@@ -205,7 +205,7 @@ jobs:
           persist-credentials: false
 
       - name: Install zizmor (prebuilt, no from-source compile)
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: zizmor
           fallback: none
@@ -237,7 +237,7 @@ jobs:
           persist-credentials: false
 
       - name: Install typos
-        uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: typos
           fallback: none
