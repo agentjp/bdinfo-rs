@@ -1,0 +1,122 @@
+name: gui-update-info
+
+# Publishes the GUI AppImages' .zsync update control files to the
+# `appimage-update` branch after a GUI release.
+#
+# Each GUI AppImage embeds
+# `zsync|https://raw.githubusercontent.com/agentjp/bdinfo-rs/appimage-update/<name>.AppImage.zsync`
+# as its update information (.github/scripts/gui-package-linux.ps1 has the
+# reason for that address). An update tool reads the control file there, and
+# the file names the release asset to download. So after every GUI release
+# the two control files of that release replace the ones on the branch.
+#
+#   workflow_run       after a successful gui-release run that a gui-v* TAG
+#                      push started: publishes that release's control files.
+#   workflow_dispatch  with `tag`: the same for a named release (a re-run
+#                      after a failure; the script changes nothing when the
+#                      branch already holds the files).
+#                      with `run-id`: the REHEARSAL. Takes the control files a
+#                      gui-release dry run built and publishes them to another
+#                      branch, so the commit and the read-back run before any
+#                      release exists. It refuses the production branch: a dry
+#                      run's files name a release that may not exist.
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] runs only after our own tag-triggered gui-release; runs the default branch's script on that release's attested assets, never PR code
+    workflows: [gui-release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The gui-v* release to publish the control files of, e.g. gui-v5.1.0
+        required: false
+        type: string
+      run-id:
+        description: REHEARSAL — a gui-release dry run to take the control files from (needs a non-production branch)
+        required: false
+        type: string
+      branch:
+        description: Branch to publish to
+        required: true
+        default: appimage-update
+        type: string
+
+permissions:
+  contents: read
+
+# One run at a time: two publishes racing on the same branch could leave the
+# older release's file as the last commit.
+concurrency:
+  group: gui-update-info
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish the AppImage update control files
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    permissions:
+      contents: write # commit the control files to the update branch
+      actions: read # the rehearsal downloads a dry run's artifacts
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the control files
+        id: fetch
+        shell: pwsh
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RUN_ID: ${{ inputs.run-id }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $production = 'appimage-update'
+          if ($env:EVENT -eq 'workflow_dispatch') {
+            $tag = $env:INPUT_TAG; $runId = $env:INPUT_RUN_ID; $branch = $env:INPUT_BRANCH
+          } else {
+            $tag = $env:RUN_TAG; $runId = ''; $branch = $production
+          }
+          if ([bool] $tag -eq [bool] $runId) { throw 'give exactly one of tag and run-id' }
+          New-Item -ItemType Directory -Force control | Out-Null
+          if ($runId) {
+            if ($runId -notmatch '^\d+$') { throw "'$runId' is not a run id" }
+            if ($branch -eq $production) { throw "a rehearsal from a dry run must not publish to $production; name another branch" }
+            gh run download $runId --repo $env:GITHUB_REPOSITORY --pattern 'gui-release-*-unknown-linux-gnu' --dir control
+            if ($LASTEXITCODE -ne 0) { throw "could not download the Linux artifacts of run $runId" }
+          } else {
+            if ($tag -notmatch '^gui-v\d+\.\d+\.\d+$') { throw "'$tag' is not a gui-vX.Y.Z tag" }
+            $names = @(gh release view $tag --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[].name | select(endswith(".AppImage.zsync"))')
+            if ($LASTEXITCODE -ne 0) { throw "could not list the assets of $tag" }
+            if (-not $names.Count) {
+              # A release from before the control files existed (up to 5.0.0).
+              Write-Host "::notice::$tag carries no .zsync control files - nothing to publish."
+              "publish=false" | Add-Content -Path $env:GITHUB_OUTPUT
+              exit 0
+            }
+            gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern '*.AppImage.zsync' --dir control
+            if ($LASTEXITCODE -ne 0) { throw "could not download the control files of $tag" }
+          }
+          "publish=true" | Add-Content -Path $env:GITHUB_OUTPUT
+          "tag=$tag" | Add-Content -Path $env:GITHUB_OUTPUT
+          "branch=$branch" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Publish and read back
+        if: steps.fetch.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          TAG: ${{ steps.fetch.outputs.tag }}
+          BRANCH: ${{ steps.fetch.outputs.branch }}
+        run: |
+          $extra = @{}
+          if ($env:TAG) { $extra['Tag'] = $env:TAG }
+          ./.github/scripts/publish-gui-update-info.ps1 -Dir control -Branch $env:BRANCH @extra
