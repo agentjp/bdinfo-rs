@@ -254,7 +254,7 @@ switch ($Kind) {
             $arch = ($Triple -split '-')[0]
             $zsyncName = "bdinfo-rs-gui-$arch.AppImage.zsync"
             $info = ((& $appImage --appimage-updateinformation) | Out-String).Trim()
-            Assert ($info -eq "zsync|https://bdinfo.hyperslop.dev/gui/$zsyncName") "AppImage embeds the zsync update information (got '$info')"
+            Assert ($info -eq "zsync|https://raw.githubusercontent.com/agentjp/bdinfo-rs/appimage-update/$zsyncName") "AppImage embeds the zsync update information (got '$info')"
             $zsync = Join-Path $dir $zsyncName
             Assert (Test-Path $zsync) "$zsyncName exists"
             if (Test-Path $zsync) {

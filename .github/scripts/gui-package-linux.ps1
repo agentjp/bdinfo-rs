@@ -233,11 +233,18 @@ $appImage = Join-Path $out "bdinfo-rs-gui-$arch.AppImage"
 # Lever) finds the .zsync control file of the newest version. The AppImage
 # spec's `gh-releases-zsync|…|latest` form follows the repository's "latest"
 # release, which here is always the CLI release and carries no AppImage, so
-# the `zsync|<URL that never changes>` form is used instead. deploy-pages.yml
-# publishes the newest GUI release's control files at these URLs.
+# the `zsync|<URL that never changes>` form is used instead.
+#
+# The URL is a file on this repository's `appimage-update` branch, which
+# gui-update-info.yml rewrites at every GUI release. A released AppImage can
+# never be edited, so every copy keeps asking the embedded address for as long
+# as it is used: the address must not depend on anything that can go away
+# while the AppImage download itself still works. That download is a release
+# asset of this repository, so a file in this repository adds no second thing
+# to keep alive, where a project website or its domain would.
 $zsyncName = "bdinfo-rs-gui-$arch.AppImage.zsync"
 $env:ARCH = $arch
-& $tool --appimage-extract-and-run -u "zsync|https://bdinfo.hyperslop.dev/gui/$zsyncName" $appDir $appImage
+& $tool --appimage-extract-and-run -u "zsync|https://raw.githubusercontent.com/agentjp/bdinfo-rs/appimage-update/$zsyncName" $appDir $appImage
 if ($LASTEXITCODE -ne 0) { Write-Host 'FAILED: appimagetool'; exit 1 }
 Remove-Item -Recurse -Force (Split-Path $appDir)
 Write-Host "packaged $appImage"
@@ -247,7 +254,7 @@ Write-Host "packaged $appImage"
 # from. appimagetool writes one of its own into the working directory when
 # zsyncmake is installed, with a URL relative to wherever the control file is
 # served; that one is discarded, because the control file is served from the
-# project site while the AppImage stays on the GitHub release. This one names
+# `appimage-update` branch while the AppImage stays on the GitHub release. This one names
 # the release asset by its absolute URL (zsync2's makeUrlAbsolute takes an
 # absolute URL as it stands).
 Remove-Item -Force -ErrorAction SilentlyContinue $zsyncName
