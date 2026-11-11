@@ -35,7 +35,7 @@ on:
   # the newest GUI AppImages (see the "Stage" step), so it has to follow each
   # release. The job's `if:` narrows this to a successful run that a gui-v*
   # tag push started — gui-release.yml's dry-run dispatches publish nothing.
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] runs only after our own tag-triggered gui-release; builds the default branch, never PR code
     workflows: [gui-release]
     types: [completed]
 
